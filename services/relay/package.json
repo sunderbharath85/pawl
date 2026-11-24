@@ -1,0 +1,24 @@
+{
+  "name": "@krypto/relay",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p tsconfig.bun.json",
+    "test": "bun test",
+    "dev": "wrangler dev",
+    "smoke": "bun run scripts/smoke.ts"
+  },
+  "dependencies": {
+    "@krypto/protocol": "workspace:*",
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261124.1",
+    "typescript": "^5.9.0",
+    "wrangler": "^4.167.0"
+  },
+  "description": "Krypto relay: Cloudflare Worker + Durable Object mailboxes routing end-to-end encrypted envelopes"
+}

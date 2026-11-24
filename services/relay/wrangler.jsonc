@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "krypto-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-20",
+  "durable_objects": {
+    "bindings": [{ "name": "MAILBOX", "class_name": "Mailbox" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Mailbox"] }],
+  // Connects per client IP, per Cloudflare location (approximate). namespace_id must be unique in your account.
+  "ratelimits": [{ "name": "CONNECT_LIMIT", "namespace_id": "47800", "simple": { "limit": 30, "period": 60 } }],
+  // Secrets (never in this file):
+  //   RELAY_ACCESS_KEY  required: base64url of 32 random bytes (`wrangler secret put RELAY_ACCESS_KEY`)
+  //   EXPO_ACCESS_TOKEN optional: enhanced Expo push security
+  // Var RELAY_OPEN = "1" serves without an access key. Not recommended: anyone could create mailboxes on your bill.
+  // Request URLs carry device public keys and the access key, so no request logging of any kind:
+  "observability": { "enabled": false, "logs": { "enabled": false, "invocation_logs": false } },
+  "logpush": false,
+  "dev": { "ip": "127.0.0.1", "port": 8787 }
+}

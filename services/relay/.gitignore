@@ -1,0 +1,4 @@
+# Local secrets for `wrangler dev` (RELAY_ACCESS_KEY). Never commit.
+.dev.vars
+.dev.vars.*
+.wrangler/
