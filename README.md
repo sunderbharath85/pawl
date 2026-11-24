@@ -2,6 +2,8 @@
 
 Named dog pets that watch and drive your coding agents over ACP ([Agent Client Protocol](https://agentclientprotocol.com/)).
 
+**Website:** https://sunderbharath85.github.io/pawl/ · **Download:** [latest release](https://github.com/sunderbharath85/pawl/releases)
+
 ![The desktop strip: named dogs nap, Juniper barks for an approval, and the Laptop's dogs visit](docs/screenshots/pet-strip.png)
 
 *The desktop strip, which sits along the bottom of your screen (shown here on a plain background). Each agent's dog has a name. Juniper needs an approval for `bun test`; the dogs tagged "· Laptop" belong to another paired machine.*
