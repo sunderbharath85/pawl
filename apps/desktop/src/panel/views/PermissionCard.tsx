@@ -9,6 +9,7 @@ import {
   shortPath,
   timeAgo,
 } from "../../lib/format";
+import { petFor } from "../../lib/machine";
 import { usePanel } from "../context";
 import { PetAvatar } from "../PetAvatar";
 
@@ -35,7 +36,7 @@ interface Props {
 export function PermissionCard({ req, compact = false, highlight = false }: Props) {
   const { client, state, navigate, toast, now } = usePanel();
   const [busy, setBusy] = useState<string | null>(null);
-  const pet = Object.values(state.pets).find((p) => p.agentId === req.agentId);
+  const pet = petFor(Object.values(state.pets), req.machineId, req.agentId);
   const session = state.sessions[req.sessionId];
   const kind = req.toolCall.kind ?? "other";
   const options = [...req.options].sort((a, b) => OPTION_ORDER[a.kind] - OPTION_ORDER[b.kind]);
@@ -62,7 +63,7 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
         <div className="perm-title">
           <div className="perm-who">
             <strong>{pet?.name ?? "Your pet"}</strong> fetched a request from{" "}
-            <strong>{agentName(state.agents, req.agentId)}</strong>
+            <strong>{agentName(state.agents, req.agentId, req.machineId)}</strong>
             <span className="muted"> · {timeAgo(req.createdAt, now)}</span>
           </div>
           <div className="perm-what">

@@ -2,8 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type { HubEvent } from "@krypto/protocol";
 import { buildTranscript } from "./transcript";
 
-let nextId = 1;
-const ev = (type: HubEvent["type"], payload: unknown): HubEvent => ({ id: nextId++, sessionId: "s1", type, payload, ts: 1000 + nextId });
+const MID = "abc123def456";
+let nextSeq = 1;
+const ev = (type: HubEvent["type"], payload: unknown): HubEvent => {
+  const seq = nextSeq++;
+  return { id: `${MID}:${seq}`, seq, machineId: MID, sessionId: `${MID}:s1`, type, payload, ts: 1000 + seq };
+};
 
 describe("buildTranscript", () => {
   test("concatenates consecutive chunks and splits on other events", () => {
@@ -43,6 +47,14 @@ describe("buildTranscript", () => {
     ]);
     expect(items.map((i) => i.kind)).toEqual(["agent", "plan"]);
     expect(items[1].kind === "plan" && items[1].entries).toHaveLength(2);
+  });
+
+  test("row keys derive from global event ids and stay unique", () => {
+    const first = ev("user_message", { text: "a" });
+    const items = buildTranscript([first, ev("agent_message_chunk", { text: "b" }), ev("stop", { stopReason: "end_turn" })]);
+    expect(items[0]?.key).toBe(`u${first.id}`);
+    expect(items[0]?.key).toContain(`${MID}:`);
+    expect(new Set(items.map((i) => i.key)).size).toBe(items.length);
   });
 
   test("ignores malformed payloads", () => {

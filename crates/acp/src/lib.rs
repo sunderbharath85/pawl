@@ -43,7 +43,7 @@ mod spawn;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use krypto_protocol::{Agent, AgentId, HistorySession, Session, SessionId};
+use krypto_protocol::{Agent, AgentId, HistorySession, MachineId, Session, SessionId};
 
 /// Events emitted by the host to the hub.
 #[derive(Debug, Clone)]
@@ -78,8 +78,17 @@ impl std::fmt::Debug for AcpHost {
 }
 
 impl AcpHost {
-    pub fn new(events: tokio::sync::mpsc::UnboundedSender<HostEvent>) -> Self {
-        Self { inner: Arc::new(host::Inner::new(events)) }
+    /// `machine_id`: this hub's machine. Every Session / HistorySession / PermissionRequest the
+    /// host builds carries it, and permission request ids are global
+    /// (`global_id(machine_id, uuid)`). Session ids passed in (`hub_session_id`) are already
+    /// global and used verbatim. Agents of another machine are refused.
+    pub fn new(machine_id: MachineId, events: tokio::sync::mpsc::UnboundedSender<HostEvent>) -> Self {
+        Self { inner: Arc::new(host::Inner::new(machine_id, events)) }
+    }
+
+    /// The machine this host runs agents for.
+    pub fn machine_id(&self) -> &str {
+        self.inner.machine_id()
     }
 
     /// Spawn (or reuse) the agent process, `initialize`, `session/new`. If `prompt` is Some, send it (non-blocking).
@@ -136,9 +145,9 @@ fn assert_public_api_is_send_sync() {
     fn check<T: Send + Sync + Clone + 'static>() {}
     check::<AcpHost>();
     fn fut<F: std::future::Future + Send>(_: F) {}
-    let host = AcpHost::new(tokio::sync::mpsc::unbounded_channel().0);
+    let host = AcpHost::new("abcdef012345".into(), tokio::sync::mpsc::unbounded_channel().0);
     let agent: Agent = serde_json::from_value(serde_json::json!({
-        "id": "a", "name": "a", "command": ["a"], "installed": true, "source": "custom"
+        "id": "a", "machineId": "abcdef012345", "name": "a", "command": ["a"], "installed": true, "source": "custom"
     }))
     .unwrap();
     fut(host.start_session(&agent, PathBuf::new(), String::new(), None));

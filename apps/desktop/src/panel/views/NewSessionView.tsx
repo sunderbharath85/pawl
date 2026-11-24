@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Agent } from "@krypto/protocol";
 import { errorText, shortPath } from "../../lib/format";
+import { petFor } from "../../lib/machine";
 import { isTauri } from "../../lib/native";
 import { useSettings } from "../../lib/settings";
 import { usePanel } from "../context";
@@ -23,7 +24,7 @@ export function NewSessionView() {
 
   const selected: Agent | undefined =
     agents.find((a) => a.id === agentId && a.installed) ?? agents.find((a) => a.installed);
-  const pet = Object.values(state.pets).find((p) => p.agentId === selected?.id);
+  const pet = selected ? petFor(Object.values(state.pets), selected.machineId, selected.id) : undefined;
 
   const browse = async () => {
     if (!isTauri) {
@@ -92,7 +93,7 @@ export function NewSessionView() {
           ) : (
             <div className="agent-grid">
               {agents.map((a) => {
-                const p = Object.values(state.pets).find((x) => x.agentId === a.id);
+                const p = petFor(Object.values(state.pets), a.machineId, a.id);
                 const isSel = selected?.id === a.id;
                 return (
                   <button
@@ -106,7 +107,10 @@ export function NewSessionView() {
                     <PetAvatar species={p?.species ?? "dog"} activity={isSel ? "happy" : "idle"} size={44} />
                     <span className="agent-card-text">
                       <strong>{a.name}</strong>
-                      <span>{a.installed ? (a.description ?? a.version ?? a.id) : "Not installed"}</span>
+                      <span>
+                        {p ? `${p.name} · ` : ""}
+                        {a.installed ? (a.description ?? a.version ?? a.id) : "Not installed"}
+                      </span>
                     </span>
                   </button>
                 );

@@ -9,11 +9,15 @@
 //!   prompt (Info; one nudge per turn, ignored once older than [`STALE_DONE_MS`]).
 //!
 //! State is pruned every tick, so resolved requests and resumed sessions are forgotten.
+//!
+//! Only this machine's sessions and requests are nudged (the owning hub nudges; peers get the
+//! notification through the event stream), so mirrored remote sessions passed in are skipped.
 
 use std::collections::{HashMap, HashSet};
 
 use krypto_protocol::{
-    HubNotification, NotificationLevel, PermissionRequest, Session, SessionSource, SessionStatus, UnixMs,
+    global_id, HubNotification, MachineId, NotificationLevel, PermissionRequest, Session, SessionSource,
+    SessionStatus, UnixMs,
 };
 
 use crate::util::{basename, fmt_duration, prettify_agent_id, truncate};
@@ -47,28 +51,37 @@ struct Nudged {
 #[derive(Debug, Clone)]
 pub struct Watchdog {
     cfg: WatchdogConfig,
+    machine_id: MachineId,
     nudged: HashMap<String, Nudged>,
 }
 
 impl Watchdog {
-    pub fn new(cfg: WatchdogConfig) -> Self {
-        Self { cfg, nudged: HashMap::new() }
+    /// `machine_id`: this hub's machine; stamped on (and prefixed to the id of) every notification.
+    pub fn new(cfg: WatchdogConfig, machine_id: MachineId) -> Self {
+        Self { cfg, machine_id, nudged: HashMap::new() }
     }
 
     pub fn config(&self) -> WatchdogConfig {
         self.cfg
     }
 
+    pub fn machine_id(&self) -> &str {
+        &self.machine_id
+    }
+
     /// Call periodically (e.g. every 15-30 s). Returns the nudges to emit now.
     pub fn tick(&mut self, sessions: &[Session], pending: &[PermissionRequest], now: UnixMs) -> Vec<HubNotification> {
         let threshold = self.cfg.waiting_nudge_after_ms.max(0);
-        let by_id: HashMap<&str, &Session> = sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+        let me = self.machine_id.clone();
+        let sessions: Vec<&Session> = sessions.iter().filter(|s| s.machine_id == me).collect();
+        let pending: Vec<&PermissionRequest> = pending.iter().filter(|r| r.machine_id == me).collect();
+        let by_id: HashMap<&str, &Session> = sessions.iter().map(|s| (s.id.as_str(), *s)).collect();
         let pending_sessions: HashSet<&str> = pending.iter().map(|r| r.session_id.as_str()).collect();
         let mut live: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
 
         // 1. Pending permission requests (owned sessions).
-        let mut reqs: Vec<&PermissionRequest> = pending.iter().collect();
+        let mut reqs = pending;
         reqs.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.request_id.cmp(&b.request_id)));
         for req in reqs {
             let session = by_id.get(req.session_id.as_str()).copied();
@@ -82,11 +95,11 @@ impl Watchdog {
                 continue;
             }
             if let Some(count) = self.due(&key, now, true) {
-                out.push(permission_nudge(req, session, waited, count, &key, now));
+                out.push(permission_nudge(&me, req, session, waited, count, &key, now));
             }
         }
 
-        let mut ordered: Vec<&Session> = sessions.iter().filter(|s| s.ended_at.is_none()).collect();
+        let mut ordered: Vec<&Session> = sessions.into_iter().filter(|s| s.ended_at.is_none()).collect();
         ordered.sort_by(|a, b| a.last_event_at.cmp(&b.last_event_at).then_with(|| a.id.cmp(&b.id)));
         for s in ordered {
             let waited = now - s.last_event_at;
@@ -99,7 +112,7 @@ impl Watchdog {
                         continue;
                     }
                     if let Some(count) = self.due(&key, now, true) {
-                        out.push(external_wait_nudge(s, waited, count, &key, now));
+                        out.push(external_wait_nudge(&me, s, waited, count, &key, now));
                     }
                 }
                 // 3. Turn finished, waiting for the next prompt: one nudge per turn.
@@ -113,7 +126,7 @@ impl Watchdog {
                         continue;
                     }
                     if let Some(count) = self.due(&key, now, false) {
-                        out.push(done_nudge(s, waited, count, &key, now));
+                        out.push(done_nudge(&me, s, waited, count, &key, now));
                     }
                 }
                 _ => {}
@@ -144,6 +157,7 @@ impl Watchdog {
 
 #[allow(clippy::too_many_arguments)]
 fn notification(
+    machine_id: &str,
     key: &str,
     count: u32,
     level: NotificationLevel,
@@ -154,7 +168,8 @@ fn notification(
     now: UnixMs,
 ) -> HubNotification {
     HubNotification {
-        id: format!("watchdog:{key}:{count}"),
+        id: global_id(machine_id, format!("watchdog:{key}:{count}")),
+        machine_id: machine_id.to_string(),
         level,
         title,
         body,
@@ -165,6 +180,7 @@ fn notification(
 }
 
 fn permission_nudge(
+    machine_id: &str,
     req: &PermissionRequest,
     session: Option<&Session>,
     waited: i64,
@@ -185,6 +201,7 @@ fn permission_nudge(
     let still = if count > 1 { "Still waiting" } else { "Waiting" };
     let body = format!("{still} {} for your OK{place}: {what}. Woof!", fmt_duration(waited));
     notification(
+        machine_id,
         key,
         count,
         NotificationLevel::Alert,
@@ -196,7 +213,7 @@ fn permission_nudge(
     )
 }
 
-fn external_wait_nudge(s: &Session, waited: i64, count: u32, key: &str, now: UnixMs) -> HubNotification {
+fn external_wait_nudge(machine_id: &str, s: &Session, waited: i64, count: u32, key: &str, now: UnixMs) -> HubNotification {
     let agent = prettify_agent_id(&s.agent_id);
     let where_ = match s.source {
         SessionSource::VscodeHook => " Approve it in VS Code.",
@@ -209,17 +226,17 @@ fn external_wait_nudge(s: &Session, waited: i64, count: u32, key: &str, now: Uni
         basename(&s.cwd),
         fmt_duration(waited)
     );
-    notification(key, count, NotificationLevel::Alert, format!("{agent} needs your OK"), body, Some(&s.id), &s.agent_id, now)
+    notification(machine_id, key, count, NotificationLevel::Alert, format!("{agent} needs your OK"), body, Some(&s.id), &s.agent_id, now)
 }
 
-fn done_nudge(s: &Session, waited: i64, count: u32, key: &str, now: UnixMs) -> HubNotification {
+fn done_nudge(machine_id: &str, s: &Session, waited: i64, count: u32, key: &str, now: UnixMs) -> HubNotification {
     let agent = prettify_agent_id(&s.agent_id);
     let body = format!(
         "Finished its turn in {} {} ago and is ready for the next task. *wags tail*",
         basename(&s.cwd),
         fmt_duration(waited)
     );
-    notification(key, count, NotificationLevel::Info, format!("{agent} is waiting for you"), body, Some(&s.id), &s.agent_id, now)
+    notification(machine_id, key, count, NotificationLevel::Info, format!("{agent} is waiting for you"), body, Some(&s.id), &s.agent_id, now)
 }
 
 #[cfg(test)]
@@ -228,10 +245,13 @@ mod tests {
     use krypto_protocol::{PermissionOption, PermissionOptionKind, ToolCallPayload};
 
     const MIN: i64 = 60_000;
+    const ME: &str = "abcdef012345";
+    const PEER: &str = "zz9988776655";
 
     fn session(id: &str, status: SessionStatus, last: i64, source: SessionSource) -> Session {
         Session {
             id: id.into(),
+            machine_id: ME.into(),
             agent_id: "codex".into(),
             acp_session_id: None,
             external_id: None,
@@ -248,6 +268,7 @@ mod tests {
     fn request(id: &str, session_id: &str, created: i64) -> PermissionRequest {
         PermissionRequest {
             request_id: id.into(),
+            machine_id: ME.into(),
             session_id: session_id.into(),
             agent_id: "codex".into(),
             tool_call: ToolCallPayload {
@@ -265,7 +286,7 @@ mod tests {
     }
 
     fn dog() -> Watchdog {
-        Watchdog::new(WatchdogConfig { waiting_nudge_after_ms: 5 * MIN, repeat_every_ms: 10 * MIN })
+        Watchdog::new(WatchdogConfig { waiting_nudge_after_ms: 5 * MIN, repeat_every_ms: 10 * MIN }, ME.into())
     }
 
     #[test]
@@ -278,6 +299,8 @@ mod tests {
         assert_eq!(n.len(), 1);
         assert_eq!(n[0].level, NotificationLevel::Alert);
         assert_eq!(n[0].session_id.as_deref(), Some("s1"));
+        assert_eq!(n[0].machine_id, ME);
+        assert_eq!(krypto_protocol::parse_global_id(&n[0].id).map(|(m, _)| m), Some(ME), "{}", n[0].id);
         assert!(n[0].body.contains("Run cargo test"), "{}", n[0].body);
         assert!(n[0].body.contains("ai-pet"));
         // Deduped until the repeat interval passes.
@@ -291,7 +314,7 @@ mod tests {
 
     #[test]
     fn no_repeat_when_disabled_and_state_pruned() {
-        let mut w = Watchdog::new(WatchdogConfig { waiting_nudge_after_ms: MIN, repeat_every_ms: 0 });
+        let mut w = Watchdog::new(WatchdogConfig { waiting_nudge_after_ms: MIN, repeat_every_ms: 0 }, ME.into());
         let s = vec![session("s1", SessionStatus::WaitingPermission, 0, SessionSource::Owned)];
         let p = vec![request("r1", "s1", 0)];
         assert_eq!(w.tick(&s, &p, 2 * MIN).len(), 1);
@@ -344,5 +367,22 @@ mod tests {
         let working = session("s2", SessionStatus::Working, 0, SessionSource::Owned);
         let out = w.tick(&[ended, working], &[request("r1", "s1", 0)], 60 * MIN);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn other_machines_sessions_are_not_nudged() {
+        let mut w = dog();
+        let mut remote = session("s9", SessionStatus::WaitingPermission, 0, SessionSource::Owned);
+        remote.machine_id = PEER.into();
+        let mut remote_done = session("s8", SessionStatus::Done, 0, SessionSource::CliHook);
+        remote_done.machine_id = PEER.into();
+        let mut req = request("r9", "s9", 0);
+        req.machine_id = PEER.into();
+        assert!(w.tick(&[remote.clone(), remote_done], &[req], 60 * MIN).is_empty());
+        // The same shapes on this machine are nudged.
+        let local = session("s1", SessionStatus::WaitingPermission, 0, SessionSource::Owned);
+        let out = w.tick(&[remote, local], &[request("r1", "s1", 0)], 60 * MIN);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].session_id.as_deref(), Some("s1"));
     }
 }

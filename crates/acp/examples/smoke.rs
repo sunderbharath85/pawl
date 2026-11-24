@@ -84,8 +84,11 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let args = parse_args();
+    // The smoke run has no hub identity; use a fixed placeholder machine id.
+    let machine_id = "smoke0000000".to_string();
     let agent = Agent {
         id: "smoke".into(),
+        machine_id: machine_id.clone(),
         name: "smoke".into(),
         command: args.command.clone(),
         env: None,
@@ -98,8 +101,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let host = AcpHost::new(tx);
-    let hub_session_id = uuid::Uuid::new_v4().to_string();
+    let host = AcpHost::new(machine_id.clone(), tx);
+    let hub_session_id = krypto_protocol::global_id(&machine_id, uuid::Uuid::new_v4());
     eprintln!("starting {:?} in {}", args.command, args.cwd.display());
     let session = host.start_session(&agent, args.cwd.clone(), hub_session_id.clone(), Some(args.prompt.clone())).await?;
     eprintln!("session {} (acp {:?}) status {:?}", session.id, session.acp_session_id, session.status);

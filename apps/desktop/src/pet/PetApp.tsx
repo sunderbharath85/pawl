@@ -71,6 +71,7 @@ export function PetApp() {
             views={views}
             width={width}
             petSize={settings.petSize}
+            showNames={settings.showPetNames}
             sprites={sprites}
             onApprove={(requestId) => guard(client.approve(requestId))}
             onDeny={(requestId) => guard(client.deny(requestId))}

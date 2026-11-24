@@ -73,6 +73,93 @@ body.panel-body {
   min-height: 0;
 }
 
+/* ---------- this machine (panel header) ---------- */
+.machine-tag {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: var(--ink-2);
+  background: transparent;
+  border: 1.5px dashed var(--line-strong);
+  border-radius: var(--radius-s);
+  padding: 6px 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.machine-tag:hover,
+.machine-tag.is-active {
+  background: var(--card);
+  border-style: solid;
+}
+.machine-tag:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.machine-tag-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  line-height: 1.2;
+}
+.machine-tag-label {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.machine-tag-name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.machine-tag-os {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  background: var(--paper-3);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+/* ---------- settings: this machine ---------- */
+.machine-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.machine-name-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.machine-name-row .input {
+  flex: 1;
+  min-width: 0;
+}
+.input.is-invalid {
+  border-color: var(--berry);
+}
+.input.is-invalid:focus {
+  box-shadow: 0 0 0 4px var(--berry-soft);
+}
+.field-error {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--berry);
+}
+
 .hero {
   appearance: none;
   display: flex;

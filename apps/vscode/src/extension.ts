@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import type { WebviewToHost } from "./shared/messages";
+import { sessionBackfill } from "./host/backfill";
 import { Commands } from "./host/commands";
 import { HubConnection } from "./host/connection";
 import { EditedFilesWatcher } from "./host/editedFiles";
@@ -58,6 +59,8 @@ const WEBVIEW_COMMANDS = {
   changeSpecies: "krypto.changeSpecies",
   reconnect: "krypto.reconnect",
   openPanel: "krypto.openPetPanel",
+  renameMachine: "krypto.renameMachine",
+  renamePet: "krypto.renamePet",
 } as const;
 
 async function handleWebviewMessage(msg: WebviewToHost, hub: HubConnection): Promise<void> {
@@ -81,8 +84,9 @@ async function handleWebviewMessage(msg: WebviewToHost, hub: HubConnection): Pro
       if (msg.text.trim()) await hub.api.chat(msg.text.trim(), msg.petId);
       return;
     case "loadEvents":
-      // HubClient merges fetched events into HubState.events; the next state push carries them over.
-      await hub.api.getEvents(msg.sessionId);
+      // First open: latest window; afterwards catch up from the newest held `seq`. HubClient merges
+      // fetched events into HubState.events (deduped by global id); the next state push carries them over.
+      await sessionBackfill.sync(hub.api, msg.sessionId);
       return;
     case "openFile": {
       const uri = toFileUri(msg.path, msg.cwd);

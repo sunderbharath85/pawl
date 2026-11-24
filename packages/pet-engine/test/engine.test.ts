@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { HubEvent, Pet, PermissionRequest, Session } from "@krypto/protocol";
+import { globalId, type HubEvent, type Machine, type Pet, type PermissionRequest, type Session } from "@krypto/protocol";
 import {
   activityForEvent,
   derivePetViews,
@@ -15,17 +15,23 @@ import {
   type DerivePetViewsInput,
 } from "../src/index";
 
-let nextId = 1;
-function ev(type: HubEvent["type"], payload: unknown = {}, ts = 1000, sessionId = "s1"): HubEvent {
-  return { id: nextId++, sessionId, type, payload, ts };
+/** This machine and a paired one (12 chars [a-z0-9]). */
+const MID = "winpc0000001";
+const MID2 = "macmini00002";
+
+let nextSeq = 1;
+function ev(type: HubEvent["type"], payload: unknown = {}, ts = 1000, sessionId = "s1", machineId = MID): HubEvent {
+  const seq = nextSeq++;
+  return { id: globalId(machineId, seq), seq, machineId, sessionId, type, payload, ts };
 }
 function session(over: Partial<Session> = {}): Session {
-  return { id: "s1", agentId: "claude-code", cwd: "/r", source: "owned", status: "idle", startedAt: 0, lastEventAt: 1000, ...over };
+  return { id: "s1", machineId: MID, agentId: "claude-code", cwd: "/r", source: "owned", status: "idle", startedAt: 0, lastEventAt: 1000, ...over };
 }
-const pet: Pet = { id: "p1", agentId: "claude-code", species: "dog", skin: "default", name: "Biscuit", personality: "", mood: 70, xp: 0 };
+const pet: Pet = { id: "p1", machineId: MID, agentId: "claude-code", species: "dog", skin: "default", name: "Biscuit", personality: "", mood: 70, xp: 0 };
 function perm(over: Partial<PermissionRequest> = {}): PermissionRequest {
   return {
     requestId: "r1",
+    machineId: MID,
     sessionId: "s1",
     agentId: "claude-code",
     toolCall: { toolCallId: "t", title: "Run npm test", kind: "execute" },
@@ -187,6 +193,90 @@ describe("derivePetViews", () => {
     const a = derivePetViews(input({ sessions: [s], lastEvents: { s1: stop }, now: 1100 }))[0]!;
     const b = derivePetViews(input({ sessions: [s], lastEvents: { s1: stop }, now: 4000 }))[0]!;
     expect(a.bubble!.text).toBe(b.bubble!.text);
+  });
+});
+
+describe("derivePetViews across machines", () => {
+  // Same agent id ("claude-code") on two machines: global ids differ, pets must never mix.
+  const here: Pet = { ...pet, id: globalId(MID, "pet-claude-code"), name: "Biscuit" };
+  const there: Pet = { ...pet, id: globalId(MID2, "pet-claude-code"), machineId: MID2, name: "Pepper" };
+  const hereSession = session({ id: globalId(MID, "s1"), status: "working", lastEventAt: 900 });
+  const thereSession = session({ id: globalId(MID2, "s1"), machineId: MID2, status: "thinking", lastEventAt: 950 });
+  const machines: Record<string, Machine> = {
+    [MID]: { id: MID, name: "Windows PC", os: "windows", lastSeen: 1, online: true },
+    [MID2]: { id: MID2, name: "Mac mini", os: "macos", lastSeen: 1, online: true },
+  };
+  const both = (over: Partial<DerivePetViewsInput> = {}) => input({ pets: [here, there], machines, ...over });
+
+  test("views carry machineId and machineName", () => {
+    const [a, b] = derivePetViews(both());
+    expect(a).toMatchObject({ petId: here.id, machineId: MID, machineName: "Windows PC", name: "Biscuit" });
+    expect(b).toMatchObject({ petId: there.id, machineId: MID2, machineName: "Mac mini", name: "Pepper" });
+  });
+
+  test("machineName is undefined without (or outside) the machines map", () => {
+    const [a] = derivePetViews(input({ pets: [here] }));
+    expect(a!.machineId).toBe(MID);
+    expect(a!.machineName).toBeUndefined();
+    const [b] = derivePetViews(input({ pets: [there], machines: { [MID]: machines[MID]! } }));
+    expect(b!.machineName).toBeUndefined();
+  });
+
+  test("each pet follows only its own machine's session", () => {
+    const [a, b] = derivePetViews(both({ sessions: [hereSession, thereSession] }));
+    expect(a).toMatchObject({ activity: "working", sessionId: hereSession.id });
+    expect(b).toMatchObject({ activity: "thinking", sessionId: thereSession.id });
+  });
+
+  test("a session on the other machine does not wake this machine's pet", () => {
+    const [a, b] = derivePetViews(both({ sessions: [thereSession] }));
+    expect(a!.activity).toBe("napping");
+    expect(a!.sessionId).toBeUndefined();
+    expect(b!.activity).toBe("thinking");
+  });
+
+  test("a pending request goes to the pet on the request's machine only", () => {
+    const req = perm({ requestId: globalId(MID2, "r1"), machineId: MID2, sessionId: thereSession.id });
+    const [a, b] = derivePetViews(both({ sessions: [hereSession, thereSession], pending: [req] }));
+    expect(a!.activity).toBe("working");
+    expect(a!.bubble).toBeUndefined();
+    expect(b).toMatchObject({ activity: "alert", sessionId: thereSession.id });
+    expect(b!.bubble).toMatchObject({ kind: "permission", requestId: req.requestId });
+  });
+
+  test("a pending request matches by (machineId, agentId) even before its session is known", () => {
+    const req = perm({ requestId: globalId(MID2, "r1"), machineId: MID2, sessionId: globalId(MID2, "unknown") });
+    const [a, b] = derivePetViews(both({ pending: [req] }));
+    expect(a!.activity).toBe("napping");
+    expect(b!.activity).toBe("alert");
+  });
+
+  test("pending requests on both machines are counted per pet", () => {
+    const mine = perm({ requestId: globalId(MID, "r1"), sessionId: hereSession.id, createdAt: 10 });
+    const theirs1 = perm({ requestId: globalId(MID2, "r1"), machineId: MID2, sessionId: thereSession.id, createdAt: 5 });
+    const theirs2 = perm({ requestId: globalId(MID2, "r2"), machineId: MID2, sessionId: thereSession.id, createdAt: 6 });
+    const [a, b] = derivePetViews(both({ sessions: [hereSession, thereSession], pending: [theirs2, mine, theirs1] }));
+    expect(a!.bubble!.requestId).toBe(mine.requestId);
+    expect(a!.bubble!.text).not.toContain("more");
+    expect(b!.bubble!.requestId).toBe(theirs1.requestId);
+    expect(b!.bubble!.text).toContain("+1 more");
+  });
+
+  test("last events are looked up by global session id", () => {
+    const plan = ev("plan", { entries: [] }, 960, thereSession.id, MID2);
+    const [a, b] = derivePetViews(both({ sessions: [hereSession, thereSession], lastEvents: { [thereSession.id]: plan } }));
+    expect(a!.activity).toBe("working");
+    expect(b!.activity).toBe("planning");
+  });
+
+  test("decay timers are tracked per machine", () => {
+    const done = session({ id: globalId(MID2, "s1"), machineId: MID2, status: "done", lastEventAt: 1000 });
+    const stop = ev("stop", { stopReason: "end_turn" }, 1000, done.id, MID2);
+    const at = both({ sessions: [done], lastEvents: { [done.id]: stop }, now: 1500 });
+    const [a, b] = derivePetViews(at);
+    expect(a!.activity).toBe("napping");
+    expect(b!.activity).toBe("happy");
+    expect(nextPetViewChange(at)).toBe(1000 + HAPPY_DECAY_MS);
   });
 });
 

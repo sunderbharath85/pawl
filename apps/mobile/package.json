@@ -10,7 +10,7 @@
     "ios": "bun run copy-pets && expo start --ios",
     "copy-pets": "bun scripts/copy-pets.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test test",
+    "test": "bun test --pass-with-no-tests ./test",
     "doctor": "expo-doctor"
   },
   "dependencies": {

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Agent, Session, SessionStatus } from "@krypto/protocol";
+import { agentFor } from "../shared/machine";
 
 export function nonce(): string {
   return randomBytes(18).toString("base64").replace(/[^A-Za-z0-9]/g, "");
@@ -28,12 +29,13 @@ export function isOpen(s: Session): boolean {
   return !s.endedAt;
 }
 
-export function agentName(agents: readonly Agent[], agentId: string): string {
-  return agents.find((a) => a.id === agentId)?.name ?? agentId;
+/** Display name of agent `agentId` on `machineId` (agents are per machine; ids repeat across machines). */
+export function agentName(agents: readonly Agent[], agentId: string, machineId?: string): string {
+  return agentFor(agents, agentId, machineId)?.name ?? agentId;
 }
 
 export function sessionLabel(s: Session, agents: readonly Agent[]): string {
-  const name = agentName(agents, s.agentId);
+  const name = agentName(agents, s.agentId, s.machineId);
   const where = s.title?.trim() || path.basename(s.cwd) || s.cwd;
   return `${name} · ${where}`;
 }

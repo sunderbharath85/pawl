@@ -11,6 +11,7 @@ use krypto_protocol::{
 use serde_json::Value;
 
 use super::voice::Voice;
+use super::machines::MachineNames;
 use crate::util::{agent_name, ago, basename, one_line, plural, truncate};
 
 const DAY_MS: i64 = 86_400_000;
@@ -36,7 +37,7 @@ pub(crate) struct SessionFacts {
 /// Events of one session, oldest first.
 pub(crate) fn session_events<'a>(session_id: &str, events: &'a [HubEvent]) -> Vec<&'a HubEvent> {
     let mut v: Vec<&HubEvent> = events.iter().filter(|e| e.session_id == session_id).collect();
-    v.sort_by_key(|e| (e.ts, e.id));
+    v.sort_by_key(|e| (e.ts, e.seq));
     v
 }
 
@@ -224,16 +225,18 @@ pub(crate) fn short_status(session: &Session, facts: &SessionFacts, pending: &[P
     }
 }
 
-/// Deterministic summary of one session (no voice decoration).
+/// Deterministic summary of one session (no voice decoration). Names the session's machine
+/// once more than one machine is known ("Codex on Mac mini in krypto ...").
 pub(crate) fn deterministic_summary(
     session: &Session,
     facts: &SessionFacts,
     agents: &[Agent],
     pending: &[PermissionRequest],
+    machines: &MachineNames,
     now: UnixMs,
 ) -> String {
     let agent = agent_name(&session.agent_id, agents);
-    let mut out = format!("{agent} in {}", basename(&session.cwd));
+    let mut out = format!("{agent}{} in {}", machines.on(&session.machine_id), basename(&session.cwd));
     if let Some(t) = session.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         out.push_str(&format!(" (“{}”)", truncate(&one_line(t), 48)));
     }
@@ -406,12 +409,14 @@ fn report_state(s: &Session, now: UnixMs) -> String {
     }
 }
 
-/// Deterministic end-of-day report for sessions active in the last 24 h.
+/// Deterministic end-of-day report for sessions active in the last 24 h, across every machine
+/// in `sessions` (lines name the machine once more than one is known).
 /// `voice` adds the pet's sound to the header.
 pub(crate) fn daily_report_text(
     sessions: &[Session],
     events: &[HubEvent],
     agents: &[Agent],
+    machines: &MachineNames,
     voice: Option<(&Voice, u64)>,
     now: UnixMs,
 ) -> String {
@@ -432,7 +437,7 @@ pub(crate) fn daily_report_text(
         per.entry(e.session_id.as_str()).or_default().push(e);
     }
     for v in per.values_mut() {
-        v.sort_by_key(|e| (e.ts, e.id));
+        v.sort_by_key(|e| (e.ts, e.seq));
     }
     let empty: Vec<&HubEvent> = Vec::new();
     let all_facts: Vec<SessionFacts> = todays.iter().map(|s| facts(per.get(s.id.as_str()).unwrap_or(&empty))).collect();
@@ -443,8 +448,11 @@ pub(crate) fn daily_report_text(
     let errors: usize = all_facts.iter().map(|f| f.errors).sum::<usize>()
         + todays.iter().zip(&all_facts).filter(|(s, f)| s.status == SessionStatus::Error && f.errors == 0).count();
 
+    let machine_set: BTreeSet<&str> = todays.iter().map(|s| s.machine_id.as_str()).collect();
+    let on_machines =
+        if machines.is_multi() && machine_set.len() > 1 { format!(" on {}", plural(machine_set.len(), "machine")) } else { String::new() };
     let mut out = format!(
-        "{sound}Daily report: {} across {} in {} ({}, {}, {}).",
+        "{sound}Daily report: {} across {} in {}{on_machines} ({}, {}, {}).",
         plural(todays.len(), "session"),
         plural(agent_set.len(), "agent"),
         plural(repo_set.len(), "repo"),
@@ -454,7 +462,13 @@ pub(crate) fn daily_report_text(
     );
     const MAX_LINES: usize = 10;
     for (s, f) in todays.iter().zip(&all_facts).take(MAX_LINES) {
-        let mut line = format!("\n• {} · {}: {}", agent_name(&s.agent_id, agents), basename(&s.cwd), report_state(s, now));
+        let mut line = format!(
+            "\n• {}{} · {}: {}",
+            agent_name(&s.agent_id, agents),
+            machines.on(&s.machine_id),
+            basename(&s.cwd),
+            report_state(s, now)
+        );
         if f.tool_calls > 0 {
             line.push_str(&format!(", {}", plural(f.tool_calls, "tool")));
         }
@@ -471,7 +485,7 @@ pub(crate) fn daily_report_text(
         .filter(|s| s.ended_at.is_none() && matches!(s.status, SessionStatus::WaitingPermission | SessionStatus::Error))
         .map(|s| {
             let why = if s.status == SessionStatus::Error { "error" } else { "waiting for approval" };
-            format!("{} in {} ({why})", agent_name(&s.agent_id, agents), basename(&s.cwd))
+            format!("{}{} in {} ({why})", agent_name(&s.agent_id, agents), machines.on(&s.machine_id), basename(&s.cwd))
         })
         .collect();
     if !needs.is_empty() {
@@ -486,13 +500,28 @@ mod tests {
     use krypto_protocol::SessionSource;
     use serde_json::json;
 
-    fn ev(id: i64, kind: EventType, payload: Value) -> HubEvent {
-        HubEvent { id, session_id: "s1".into(), kind, payload, ts: id }
+    const M: &str = "abcdef012345";
+
+    fn hub_event(seq: i64, session_id: &str, kind: EventType, payload: Value, ts: i64) -> HubEvent {
+        HubEvent {
+            id: krypto_protocol::global_id(M, seq),
+            seq,
+            machine_id: M.into(),
+            session_id: session_id.into(),
+            kind,
+            payload,
+            ts,
+        }
+    }
+
+    fn ev(seq: i64, kind: EventType, payload: Value) -> HubEvent {
+        hub_event(seq, "s1", kind, payload, seq)
     }
 
     fn sess(status: SessionStatus) -> Session {
         Session {
             id: "s1".into(),
+            machine_id: M.into(),
             agent_id: "codex".into(),
             acp_session_id: None,
             external_id: None,
@@ -524,7 +553,7 @@ mod tests {
         assert_eq!(f.last_tool.as_deref(), Some("Run cargo test"));
         assert_eq!(f.last_message.as_deref(), Some("Running the tests now."));
         assert_eq!(f.plan, Some((1, 2, Some("fix failures".into()))));
-        let s = deterministic_summary(&sess(SessionStatus::Working), &f, &[], &[], 10);
+        let s = deterministic_summary(&sess(SessionStatus::Working), &f, &[], &[], &MachineNames::default(), 10);
         assert!(s.starts_with("Codex in krypto (“Fix tests”) is working on: Run cargo test."), "{s}");
         assert!(s.contains("Plan: 1/2 done, next: fix failures."), "{s}");
         let digest = event_digest(&refs, 10);
@@ -547,13 +576,37 @@ mod tests {
         old.id = "s0".into();
         old.last_event_at = now - 3 * DAY_MS;
         let events = vec![
-            HubEvent { id: 1, session_id: "s1".into(), kind: EventType::ToolCall, payload: json!({"toolCallId": "x"}), ts: now - 2000 },
-            HubEvent { id: 2, session_id: "s2".into(), kind: EventType::RequestPermission, payload: json!({"toolCall": {"title": "rm"}}), ts: now - 600 },
+            hub_event(1, "s1", EventType::ToolCall, json!({"toolCallId": "x"}), now - 2000),
+            hub_event(2, "s2", EventType::RequestPermission, json!({"toolCall": {"title": "rm"}}), now - 600),
         ];
-        let r = daily_report_text(&[a, b, old], &events, &[], None, now);
+        let all = [a, b, old];
+        let r = daily_report_text(&all, &events, &[], &MachineNames::from_sessions(&all), None, now);
         assert!(r.starts_with("Daily report: 2 sessions across 2 agents in 2 repos (1 tool call, 1 approval request, 0 errors)."), "{r}");
         assert!(r.contains("• Claude Code · web: waiting for you"), "{r}");
         assert!(r.contains("Needs you: Claude Code in web (waiting for approval)."), "{r}");
-        assert!(daily_report_text(&[], &[], &[], None, now).starts_with("Quiet day"));
+        assert!(!r.contains(" on "), "one machine: never named: {r}");
+        assert!(daily_report_text(&[], &[], &[], &MachineNames::default(), None, now).starts_with("Quiet day"));
+    }
+
+    #[test]
+    fn summaries_name_the_machine_when_several_are_known() {
+        let now = 10 * DAY_MS;
+        let mut a = sess(SessionStatus::Working);
+        a.last_event_at = now - 1000;
+        let mut b = sess(SessionStatus::WaitingPermission);
+        b.id = "s2".into();
+        b.machine_id = "zz9988776655".into();
+        b.last_event_at = now - 500;
+        let all = [a.clone(), b.clone()];
+        let names = MachineNames::from_sessions(&all);
+        let s = deterministic_summary(&b, &SessionFacts::default(), &[], &[], &names, now);
+        assert!(s.starts_with("Codex on zz9988776655 in krypto"), "{s}");
+        let r = daily_report_text(&all, &[], &[], &names, None, now);
+        assert!(r.contains("in 1 repo on 2 machines"), "{r}");
+        assert!(r.contains("• Codex on abcdef012345 · krypto: working"), "{r}");
+        assert!(r.contains("Needs you: Codex on zz9988776655 in krypto (waiting for approval)."), "{r}");
+        // A single machine is never named.
+        let one = MachineNames::from_sessions(std::slice::from_ref(&a));
+        assert!(deterministic_summary(&a, &SessionFacts::default(), &[], &[], &one, now).starts_with("Codex in krypto"));
     }
 }

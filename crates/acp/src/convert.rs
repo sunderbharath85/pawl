@@ -170,8 +170,9 @@ pub(crate) fn parse_timestamp_ms(s: &str) -> Option<pp::UnixMs> {
     chrono::DateTime::parse_from_rfc3339(s.trim()).ok().map(|d| d.timestamp_millis())
 }
 
-pub(crate) fn history_session(agent_id: &str, info: &acp::SessionInfo) -> pp::HistorySession {
+pub(crate) fn history_session(machine_id: &str, agent_id: &str, info: &acp::SessionInfo) -> pp::HistorySession {
     pp::HistorySession {
+        machine_id: machine_id.to_string(),
         agent_id: agent_id.to_string(),
         acp_session_id: info.session_id.to_string(),
         cwd: info.cwd.to_string_lossy().into_owned(),

@@ -12,7 +12,9 @@ async fn main() -> anyhow::Result<()> {
         .map(std::path::PathBuf::from)
         .or_else(krypto_protocol::data_dir)
         .ok_or_else(|| anyhow::anyhow!("no cache dir"))?;
-    let agents = discover(&DiscoveryConfig { cache_dir, custom_agents: vec![], offline }).await?;
+    // The example has no hub identity; stamp a fixed placeholder machine id.
+    let machine_id = "example00000".to_string();
+    let agents = discover(&DiscoveryConfig { machine_id, cache_dir, custom_agents: vec![], offline }).await?;
     println!("{}", serde_json::to_string_pretty(&agents)?);
     Ok(())
 }

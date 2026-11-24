@@ -3,7 +3,7 @@
 // crates/protocol/src/lib.rs and must stay byte-compatible (camelCase fields,
 // snake_case `type` tags). Change both together.
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const HUB_DEFAULT_PORT = 47800;
 export const HUB_HOST = "127.0.0.1";
 /** Folder name under the OS data dir (Win %APPDATA%, mac ~/Library/Application Support, linux ~/.local/share). */
@@ -18,6 +18,40 @@ export type PetId = string;
 export type RequestId = string;
 export type UnixMs = number;
 
+// ---------- machines (one hub per machine) ----------
+/** Random, generated once per hub, stored in the data dir. 12 chars of [a-z0-9]; never contains ":". */
+export type MachineId = string;
+export const MACHINE_ID_RE = /^[a-z0-9]{12}$/;
+
+export type MachineOs = "windows" | "macos" | "linux" | "other";
+
+export interface Machine {
+  id: MachineId;
+  /** Display name, e.g. "Mac mini", "Windows PC". Defaults to the OS host name. */
+  name: string;
+  os: MachineOs;
+  lastSeen: UnixMs;
+  online: boolean;
+  hubVersion?: string;
+}
+
+/**
+ * Global ids: `${machineId}:${localId}` for agents' sessions, pets, permission requests,
+ * chat messages and notifications; `${machineId}:${seq}` for events.
+ * Every id on the wire is global. Treat ids as opaque strings; use parseGlobalId only for routing.
+ */
+export function globalId(machineId: MachineId, localId: string | number): string {
+  return `${machineId}:${localId}`;
+}
+
+export function parseGlobalId(id: string): { machineId: MachineId; localId: string } | null {
+  const i = id.indexOf(":");
+  if (i <= 0) return null;
+  const machineId = id.slice(0, i);
+  const localId = id.slice(i + 1);
+  return MACHINE_ID_RE.test(machineId) && localId.length > 0 ? { machineId, localId } : null;
+}
+
 // ---------- agents ----------
 export interface AgentCapabilities {
   loadSession: boolean;
@@ -29,6 +63,8 @@ export interface AgentCapabilities {
 
 export interface Agent {
   id: AgentId;
+  /** The machine this agent is installed on (agents are per machine). */
+  machineId: MachineId;
   name: string;
   /** argv used to launch the ACP server over stdio, e.g. ["npx","-y","@agentclientprotocol/claude-agent-acp"] */
   command: string[];
@@ -53,7 +89,10 @@ export type SessionStatus =
   | "error";
 
 export interface Session {
+  /** Global: `${machineId}:${localId}`. */
   id: SessionId;
+  /** Owning machine: the only source of truth for this session. */
+  machineId: MachineId;
   agentId: AgentId;
   /** ACP-side session id (owned/resumed sessions). */
   acpSessionId?: string;
@@ -70,6 +109,7 @@ export interface Session {
 
 /** Past session from ACP `session/list`. */
 export interface HistorySession {
+  machineId: MachineId;
   agentId: AgentId;
   acpSessionId: string;
   cwd: string;
@@ -162,8 +202,11 @@ export interface PermissionResolvedPayload {
 }
 
 export interface HubEvent {
-  /** Monotonic SQLite rowid. */
-  id: number;
+  /** Global: `${machineId}:${seq}`. */
+  id: string;
+  /** Monotonic per-machine sequence (SQLite rowid). Cursor for get_events.sinceSeq. */
+  seq: number;
+  machineId: MachineId;
   sessionId: SessionId;
   type: EventType;
   payload: unknown;
@@ -184,7 +227,9 @@ export interface PermissionOption {
 }
 
 export interface PermissionRequest {
+  /** Global: `${machineId}:${localId}`. */
   requestId: RequestId;
+  machineId: MachineId;
   sessionId: SessionId;
   agentId: AgentId;
   toolCall: ToolCallPayload;
@@ -226,7 +271,9 @@ export type Species = "dog" | "cat" | "bird" | "robot";
 export const DEFAULT_SPECIES: Species = "dog";
 
 export interface Pet {
+  /** Global: `${machineId}:${localId}`. One pet per agent per machine. */
   id: PetId;
+  machineId: MachineId;
   agentId: AgentId;
   species: Species;
   skin: string; // "default" unless chosen
@@ -238,6 +285,7 @@ export interface Pet {
 
 export interface ChatMessage {
   id: string;
+  machineId: MachineId;
   petId?: PetId;
   role: "user" | "pet";
   text: string;
@@ -248,6 +296,7 @@ export interface ChatMessage {
 export type NotificationLevel = "info" | "success" | "warning" | "alert";
 export interface HubNotification {
   id: string;
+  machineId: MachineId;
   level: NotificationLevel;
   title: string;
   body: string;
@@ -266,7 +315,7 @@ export type ClientMsg =
   | { type: "hello"; id: string; client: ClientKind; clientVersion: string; token: string }
   | { type: "list_agents"; id: string; refresh?: boolean }
   | { type: "list_sessions"; id: string; includeEnded?: boolean }
-  | { type: "get_events"; id: string; sessionId: SessionId; sinceId?: number; limit?: number }
+  | { type: "get_events"; id: string; sessionId: SessionId; sinceSeq?: number; limit?: number }
   | { type: "start_session"; id: string; agentId: AgentId; cwd: string; prompt?: string }
   | { type: "prompt"; id: string; sessionId: SessionId; text: string }
   | { type: "cancel"; id: string; sessionId: SessionId }
@@ -276,7 +325,9 @@ export type ClientMsg =
   | { type: "resume_session"; id: string; agentId: AgentId; acpSessionId: string; cwd: string }
   | { type: "chat"; id: string; petId?: PetId; text: string }
   | { type: "update_pet"; id: string; petId: PetId; patch: Partial<Pick<Pet, "species" | "name" | "skin" | "personality">> }
-  | { type: "set_rules"; id: string; rules: Rule[] };
+  | { type: "set_rules"; id: string; rules: Rule[] }
+  /** Rename this hub's machine (only the local machine for now). */
+  | { type: "update_machine"; id: string; machineId: MachineId; name: string };
 
 export type ClientMsgType = ClientMsg["type"];
 
@@ -295,12 +346,17 @@ export interface AckResults {
   chat: { message: ChatMessage }; // the stored user message; pet reply arrives as `chat` ServerMsg
   update_pet: { pet: Pet };
   set_rules: { rules: Rule[] };
+  update_machine: { machine: Machine };
 }
 
 // ---------- hub -> client ----------
 export interface Welcome {
   protocolVersion: number;
   hubVersion: string;
+  /** The machine this hub runs on. */
+  machine: Machine;
+  /** Every known machine, including this one (peers arrive in migration step 2). */
+  machines: Machine[];
   agents: Agent[];
   sessions: Session[];
   pets: Pet[];
@@ -322,6 +378,7 @@ export type ServerMsg =
   | { type: "permission_resolved"; requestId: RequestId; sessionId: SessionId; outcome: PermissionOutcome; by: ResolvedBy }
   | { type: "pet"; pet: Pet }
   | { type: "chat"; message: ChatMessage }
-  | { type: "notification"; notification: HubNotification };
+  | { type: "notification"; notification: HubNotification }
+  | { type: "machine"; machine: Machine };
 
 export type ServerMsgType = ServerMsg["type"];

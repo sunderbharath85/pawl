@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } fro
 import { derivePetViews, lastSignificantEvents, type PetView } from "@krypto/pet-engine";
 import { PetStage } from "@krypto/pet-engine/react";
 import { DEFAULT_SPECIES, type Session } from "@krypto/protocol";
+import { machineDisplayName, machineSummary } from "../shared/machine";
 import type { ConnInfo, HostToWebview, SpritesInfo, WebviewHubState } from "../shared/messages";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ApprovalCard, ChatPanel, ConnBanner, SessionDetail, SessionList, Toasts, type Toast } from "./parts";
@@ -9,6 +10,7 @@ import { loadPersisted, post, savePersisted, type PersistedState } from "./vscod
 
 const EMPTY_STATE: WebviewHubState = {
   status: "disconnected",
+  machines: {},
   agents: [],
   sessions: {},
   pets: {},
@@ -21,6 +23,7 @@ const EMPTY_STATE: WebviewHubState = {
 /** Shown while offline or before any pet exists: the default dog, asleep in its bed. */
 const SLEEPY_DOG: PetView = {
   petId: "__krypto-placeholder",
+  machineId: "",
   agentId: "",
   species: DEFAULT_SPECIES,
   name: "Pet",
@@ -118,13 +121,13 @@ export function App() {
   const views: PetView[] = useMemo(() => {
     if (!connected) return [SLEEPY_DOG];
     try {
-      const derived = derivePetViews({ pets, sessions, pending, lastEvents, now });
+      const derived = derivePetViews({ pets, sessions, pending, lastEvents, machines: hub.machines, now });
       return derived.length > 0 ? derived : [SLEEPY_DOG];
     } catch (err) {
       console.error("[krypto] derivePetViews failed", err);
       return [SLEEPY_DOG];
     }
-  }, [connected, pets, sessions, pending, lastEvents, now]);
+  }, [connected, pets, sessions, pending, lastEvents, hub.machines, now]);
 
   const selected: Session | undefined = persisted.selectedSessionId ? hub.sessions[persisted.selectedSessionId] : undefined;
 
@@ -138,7 +141,9 @@ export function App() {
       const view = views.find((v) => v.petId === petId);
       const target =
         (view?.sessionId && hub.sessions[view.sessionId]) ||
-        sessions.filter((s) => s.agentId === pet.agentId).sort((a, b) => b.lastEventAt - a.lastEventAt)[0];
+        sessions
+          .filter((s) => s.machineId === pet.machineId && s.agentId === pet.agentId)
+          .sort((a, b) => b.lastEventAt - a.lastEventAt)[0];
       if (target) update({ tab: "sessions", selectedSessionId: target.id });
       else update({ tab: "chat", chatPetId: petId });
     },
@@ -148,6 +153,22 @@ export function App() {
   return (
     <div className={`app mode-${mode}`}>
       <Toasts toasts={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
+      <header className="machine-bar" title={machineSummary(hub.machine)}>
+        <svg className="machine-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <rect x="1.5" y="2.5" width="13" height="8.5" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+          <path d="M5.5 14h5M8 11v3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        </svg>
+        <span className="machine-name">{machineDisplayName(hub.machine)}</span>
+        <span className="spacer" />
+        <button
+          className="link small"
+          disabled={!connected || !hub.machine}
+          title="Rename this machine"
+          onClick={() => post({ type: "command", command: "renameMachine" })}
+        >
+          Rename
+        </button>
+      </header>
       <ConnBanner conn={conn} />
 
       <div className="stage" ref={stageRef}>
@@ -156,7 +177,7 @@ export function App() {
             views={views}
             width={stageWidth}
             sprites={sprites}
-            showNames={pets.length > 1}
+            showNames
             petSize={mode === "panel" ? 112 : 84}
             onApprove={(requestId) => post({ type: "approve", requestId })}
             onDeny={(requestId) => post({ type: "deny", requestId })}
@@ -177,6 +198,7 @@ export function App() {
               request={req}
               session={hub.sessions[req.sessionId]}
               agents={hub.agents}
+              pets={pets}
               now={now}
             />
           ))}
@@ -255,6 +277,9 @@ export function App() {
       </main>
 
       <footer className="footer">
+        <button className="link" disabled={!connected || pets.length === 0} onClick={() => post({ type: "command", command: "renamePet" })}>
+          Rename pet
+        </button>
         <button className="link" disabled={!connected || pets.length === 0} onClick={() => post({ type: "command", command: "changeSpecies" })}>
           Change species
         </button>

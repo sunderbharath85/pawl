@@ -8,6 +8,7 @@
 
 mod intent;
 mod llm;
+mod machines;
 mod summary;
 mod voice;
 
@@ -16,8 +17,8 @@ use std::collections::HashSet;
 use std::fmt;
 
 use krypto_protocol::{
-    now_ms, Agent, AgentId, HubEvent, PermissionOptionKind, PermissionRequest, Pet, RequestId, Session, SessionId,
-    SessionSource, SessionStatus, UnixMs,
+    now_ms, Agent, AgentId, HubEvent, Machine, MachineOs, PermissionOptionKind, PermissionRequest, Pet, RequestId,
+    Session, SessionId, SessionSource, SessionStatus, UnixMs,
 };
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +26,7 @@ use crate::growth;
 use crate::util::{agent_handle, agent_name, ago, basename, fnv1a, path_key, plural, truncate};
 use intent::{AgentCatalog, AgentRef, CommandIntent, Intent, Pick, RepoIndex, RepoRef, Talk};
 use llm::Llm;
+use machines::MachineNames;
 use voice::Voice;
 
 /// Default Anthropic model for chatter and summaries.
@@ -82,13 +84,40 @@ impl BrainConfig {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BrainContext {
+    /// The machine this hub runs on (where new sessions start).
+    pub machine: Machine,
+    /// Every known machine, including this one (may be empty: then only `machine` is known).
+    /// Used to name machines in replies once more than one is known.
+    pub machines: Vec<Machine>,
     pub agents: Vec<Agent>,
     pub sessions: Vec<Session>,
     pub recent_events: Vec<HubEvent>,
     pub pending: Vec<PermissionRequest>,
     pub pet: Option<Pet>,
+}
+
+impl Default for BrainContext {
+    /// An empty context on an unnamed local machine (tests, tools). Hubs pass their real `Machine`.
+    fn default() -> Self {
+        Self {
+            machine: Machine {
+                id: String::new(),
+                name: "This machine".into(),
+                os: MachineOs::current(),
+                last_seen: 0,
+                online: true,
+                hub_version: None,
+            },
+            machines: Vec::new(),
+            agents: Vec::new(),
+            sessions: Vec::new(),
+            recent_events: Vec::new(),
+            pending: Vec::new(),
+            pet: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +188,12 @@ fn distinct_cwds<'a>(sessions: impl Iterator<Item = &'a Session>) -> Vec<String>
     v.into_iter().filter(|s| seen.insert(path_key(&s.cwd))).map(|s| s.cwd.clone()).collect()
 }
 
+/// True if `machine_id` is this hub's machine (an unset id on either side counts as local).
+/// Only local agents can be started and only local sessions prompted (cwds are local paths).
+fn is_local(ctx: &BrainContext, machine_id: &str) -> bool {
+    ctx.machine.id.is_empty() || machine_id.is_empty() || machine_id == ctx.machine.id
+}
+
 impl Brain {
     pub fn new(cfg: BrainConfig) -> Self {
         let llm = Llm::from_config(&cfg);
@@ -185,7 +220,9 @@ impl Brain {
         let voice = Voice::for_pet(ctx.pet.as_ref());
         let seed = fnv1a(text);
         let catalog = AgentCatalog::build(&ctx.agents, &ctx.sessions);
-        let repos = RepoIndex::build(&ctx.sessions);
+        // Repo names resolve to local paths only: sessions start on this machine.
+        let local: Vec<Session> = ctx.sessions.iter().filter(|s| is_local(ctx, &s.machine_id)).cloned().collect();
+        let repos = RepoIndex::build(&local);
         let intent = intent::parse(text, &catalog, &repos, ctx.pet.as_ref().map(|p| p.name.as_str()));
         tracing::debug!(?intent, "brain: parsed intent");
         let now = now_ms();
@@ -195,7 +232,8 @@ impl Brain {
             Intent::Command(cmd) => command(ctx, &voice, seed, &repos, cmd),
             Intent::Status { agent } => self.status(ctx, &voice, seed, agent, now).await,
             Intent::DailyReport => {
-                say(self.daily_inner(&ctx.sessions, &ctx.recent_events, &ctx.agents, &voice, seed, now).await)
+                let machines = MachineNames::from_ctx(ctx);
+                say(self.daily_inner(&ctx.sessions, &ctx.recent_events, &ctx.agents, &machines, &voice, seed, now).await)
             }
             Intent::SmallTalk => say(self.small_talk(text, ctx, &voice, seed, now).await),
         };
@@ -204,13 +242,16 @@ impl Brain {
 
     /// Short summary of one session (LLM-worded if configured, else deterministic).
     pub async fn summarize_session(&self, session: &Session, events: &[HubEvent]) -> anyhow::Result<String> {
-        Ok(self.summarize_inner(session, events, &[], &[], &Voice::default(), false, now_ms()).await)
+        let machines = MachineNames::default();
+        Ok(self.summarize_inner(session, events, &[], &[], &machines, &Voice::default(), false, now_ms()).await)
     }
 
-    /// End-of-day report of sessions active in the last 24 h.
+    /// End-of-day report of sessions active in the last 24 h (lines name the machine, by id,
+    /// when the sessions span several machines).
     pub async fn daily_report(&self, sessions: &[Session], events: &[HubEvent]) -> anyhow::Result<String> {
         let voice = Voice::default();
-        Ok(self.daily_inner(sessions, events, &[], &voice, fnv1a("daily"), now_ms()).await)
+        let machines = MachineNames::from_sessions(sessions);
+        Ok(self.daily_inner(sessions, events, &[], &machines, &voice, fnv1a("daily"), now_ms()).await)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -220,16 +261,17 @@ impl Brain {
         events: &[HubEvent],
         agents: &[Agent],
         pending: &[PermissionRequest],
+        machines: &MachineNames,
         voice: &Voice,
         decorate: bool,
         now: UnixMs,
     ) -> String {
         let evs = summary::session_events(&session.id, events);
         let facts = summary::facts(&evs);
-        let det = summary::deterministic_summary(session, &facts, agents, pending, now);
+        let det = summary::deterministic_summary(session, &facts, agents, pending, machines, now);
         if let Some(llm) = &self.llm {
             let digest = summary::event_digest(&evs, DIGEST_LINES);
-            let agent = agent_name(&session.agent_id, agents);
+            let agent = format!("{}{}", agent_name(&session.agent_id, agents), machines.on(&session.machine_id));
             let user = format!(
                 "<context>\nFacts: {det}\nRecent events (oldest first):\n{}\n</context>\n\n\
                  In 1-2 short sentences, tell the user what {agent} is doing right now. \
@@ -250,17 +292,19 @@ impl Brain {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn daily_inner(
         &self,
         sessions: &[Session],
         events: &[HubEvent],
         agents: &[Agent],
+        machines: &MachineNames,
         voice: &Voice,
         seed: u64,
         now: UnixMs,
     ) -> String {
         if let Some(llm) = &self.llm {
-            let plain = summary::daily_report_text(sessions, events, agents, None, now);
+            let plain = summary::daily_report_text(sessions, events, agents, machines, None, now);
             if !plain.starts_with("Quiet day") {
                 let user = format!(
                     "<context>\n{plain}\n</context>\n\nWrite a 1-2 sentence, in-character wrap-up of today's agent work: \
@@ -272,7 +316,7 @@ impl Brain {
                 }
             }
         }
-        summary::daily_report_text(sessions, events, agents, Some((voice, seed)), now)
+        summary::daily_report_text(sessions, events, agents, machines, Some((voice, seed)), now)
     }
 
     async fn status(&self, ctx: &BrainContext, voice: &Voice, seed: u64, agent: Option<AgentRef>, now: UnixMs) -> BrainReply {
@@ -289,13 +333,15 @@ impl Brain {
 
     async fn agent_status(&self, ctx: &BrainContext, voice: &Voice, seed: u64, id: &str, now: UnixMs) -> String {
         let name = agent_name(id, &ctx.agents);
+        let machines = MachineNames::from_ctx(ctx);
         let mut live: Vec<&Session> = ctx.sessions.iter().filter(|s| s.agent_id == id && s.ended_at.is_none()).collect();
         live.sort_by_key(|s| (status_rank(s.status), Reverse(s.last_event_at)));
         let Some(primary) = live.first().copied() else {
             return match ctx.sessions.iter().filter(|s| s.agent_id == id).max_by_key(|s| s.last_event_at) {
                 Some(last) => format!(
-                    "{} {name} is resting. Last seen in {} {}.",
+                    "{} {name}{} is resting. Last seen in {} {}.",
                     voice.sleepy(seed),
+                    machines.on(&last.machine_id),
                     basename(&last.cwd),
                     ago(last.last_event_at, now)
                 ),
@@ -306,13 +352,14 @@ impl Brain {
                 ),
             };
         };
-        let mut text =
-            self.summarize_inner(primary, &ctx.recent_events, &ctx.agents, &ctx.pending, voice, true, now).await;
+        let mut text = self
+            .summarize_inner(primary, &ctx.recent_events, &ctx.agents, &ctx.pending, &machines, voice, true, now)
+            .await;
         if live.len() > 1 {
             let others: Vec<String> = live[1..]
                 .iter()
                 .take(4)
-                .map(|s| format!("{} ({})", basename(&s.cwd), status_word(s.status)))
+                .map(|s| format!("{}{} ({})", basename(&s.cwd), machines.on(&s.machine_id), status_word(s.status)))
                 .collect();
             text.push_str(&format!(" Also: {}.", others.join(", ")));
         }
@@ -365,14 +412,16 @@ fn help_text(voice: &Voice, seed: u64, repos: &RepoIndex) -> String {
 
 /// Overview of live sessions. `full` lists them; otherwise one line.
 fn overview(ctx: &BrainContext, voice: &Voice, seed: u64, now: UnixMs, full: bool) -> String {
+    let machines = MachineNames::from_ctx(ctx);
     let mut live: Vec<&Session> = ctx.sessions.iter().filter(|s| s.ended_at.is_none()).collect();
     live.sort_by_key(|s| (status_rank(s.status), Reverse(s.last_event_at)));
     if live.is_empty() {
         let mut t = format!("{} All quiet: no agents are working right now.", voice.sleepy(seed));
         if let Some(last) = ctx.sessions.iter().max_by_key(|s| s.last_event_at) {
             t.push_str(&format!(
-                " Last activity: {} in {} {}.",
+                " Last activity: {}{} in {} {}.",
                 agent_name(&last.agent_id, &ctx.agents),
+                machines.on(&last.machine_id),
                 basename(&last.cwd),
                 ago(last.last_event_at, now)
             ));
@@ -394,8 +443,9 @@ fn overview(ctx: &BrainContext, voice: &Voice, seed: u64, now: UnixMs, full: boo
         let evs = summary::session_events(&s.id, &ctx.recent_events);
         let f = summary::facts(&evs);
         t.push_str(&format!(
-            "\n• {} · {}: {}",
+            "\n• {}{} · {}: {}",
             agent_name(&s.agent_id, &ctx.agents),
+            machines.on(&s.machine_id),
             basename(&s.cwd),
             summary::short_status(s, &f, &ctx.pending, now)
         ));
@@ -412,6 +462,7 @@ fn overview(ctx: &BrainContext, voice: &Voice, seed: u64, now: UnixMs, full: boo
 
 /// Plain fact sheet for the LLM.
 fn overview_plain(ctx: &BrainContext, now: UnixMs) -> String {
+    let machines = MachineNames::from_ctx(ctx);
     let mut live: Vec<&Session> = ctx.sessions.iter().filter(|s| s.ended_at.is_none()).collect();
     live.sort_by_key(|s| (status_rank(s.status), Reverse(s.last_event_at)));
     if live.is_empty() {
@@ -423,8 +474,9 @@ fn overview_plain(ctx: &BrainContext, now: UnixMs) -> String {
             let evs = summary::session_events(&s.id, &ctx.recent_events);
             let f = summary::facts(&evs);
             format!(
-                "- {} in {}: {}",
+                "- {}{} in {}: {}",
                 agent_name(&s.agent_id, &ctx.agents),
+                machines.on(&s.machine_id),
                 basename(&s.cwd),
                 summary::short_status(s, &f, &ctx.pending, now)
             )
@@ -471,6 +523,7 @@ fn strip_lead(s: &str) -> &str {
 }
 
 fn pending_list(pending: &[&PermissionRequest], ctx: &BrainContext) -> String {
+    let machines = MachineNames::from_ctx(ctx);
     pending
         .iter()
         .enumerate()
@@ -482,7 +535,13 @@ fn pending_list(pending: &[&PermissionRequest], ctx: &BrainContext) -> String {
                 .find(|s| s.id == r.session_id)
                 .map(|s| format!(" ({})", basename(&s.cwd)))
                 .unwrap_or_default();
-            format!("\n{}. {}: {}{repo}", i + 1, agent_name(&r.agent_id, &ctx.agents), summary::tool_label(&r.tool_call))
+            format!(
+                "\n{}. {}{}: {}{repo}",
+                i + 1,
+                agent_name(&r.agent_id, &ctx.agents),
+                machines.on(&r.machine_id),
+                summary::tool_label(&r.tool_call)
+            )
         })
         .collect()
 }
@@ -555,7 +614,8 @@ fn resolve_request(
             }
         }
     };
-    let name = agent_name(&chosen.agent_id, &ctx.agents);
+    let name =
+        format!("{}{}", agent_name(&chosen.agent_id, &ctx.agents), MachineNames::from_ctx(ctx).on(&chosen.machine_id));
     let what = summary::tool_label(&chosen.tool_call);
     let request_id = chosen.request_id.clone();
     if approve {
@@ -593,11 +653,13 @@ fn resolve_request(
     }
 }
 
+/// The only plausible cwd for a new or prompted session, from this machine's sessions.
 fn default_cwd(ctx: &BrainContext, agent_id: &str) -> Option<String> {
+    let local = || ctx.sessions.iter().filter(|s| is_local(ctx, &s.machine_id));
     let sets: [Vec<String>; 3] = [
-        distinct_cwds(ctx.sessions.iter().filter(|s| s.agent_id == agent_id && s.ended_at.is_none())),
-        distinct_cwds(ctx.sessions.iter().filter(|s| s.agent_id == agent_id)),
-        distinct_cwds(ctx.sessions.iter().filter(|s| s.ended_at.is_none())),
+        distinct_cwds(local().filter(|s| s.agent_id == agent_id && s.ended_at.is_none())),
+        distinct_cwds(local().filter(|s| s.agent_id == agent_id)),
+        distinct_cwds(local().filter(|s| s.ended_at.is_none())),
     ];
     for set in sets {
         match set.len() {
@@ -626,12 +688,22 @@ fn command(ctx: &BrainContext, voice: &Voice, seed: u64, repos: &RepoIndex, cmd:
     };
     let name = agent_name(&agent_id, &ctx.agents);
     let handle = agent_handle(&agent_id, &ctx.agents);
-    let Some(agent) = ctx.agents.iter().find(|a| a.id == agent_id) else {
+    let machines = MachineNames::from_ctx(ctx);
+    // Sessions start on this machine: prefer the local agent with that id.
+    let Some(agent) = ctx.agents.iter().filter(|a| a.id == agent_id).min_by_key(|a| !is_local(ctx, &a.machine_id)) else {
         return say(format!(
             "{} I only see {name} through its hooks, so I can't drive it from here. Ask it in its own app!",
             voice.sad(seed)
         ));
     };
+    if !is_local(ctx, &agent.machine_id) {
+        let there = machines.label(&agent.machine_id).unwrap_or_else(|| agent.machine_id.clone());
+        return say(format!(
+            "{} {name} lives on {there}, and I can only start agents on this machine for now.",
+            voice.sad(seed)
+        ));
+    }
+    let here = machines.on(&agent.machine_id);
     if !agent.installed {
         return say(format!("{} {name} isn't installed yet, so I can't start it.{}", voice.sad(seed), known_names()));
     }
@@ -669,6 +741,7 @@ fn command(ctx: &BrainContext, voice: &Voice, seed: u64, repos: &RepoIndex, cmd:
             .iter()
             .filter(|s| {
                 s.agent_id == agent_id
+                    && is_local(ctx, &s.machine_id)
                     && s.source == SessionSource::Owned
                     && s.ended_at.is_none()
                     && s.status != SessionStatus::Error
@@ -687,7 +760,12 @@ fn command(ctx: &BrainContext, voice: &Voice, seed: u64, repos: &RepoIndex, cmd:
                 ));
             }
             return BrainReply {
-                text: format!("{} Telling {name} in {repo}: “{}” {}", voice.sound(seed), truncate(&task, 120), voice.working(seed)),
+                text: format!(
+                    "{} Telling {name}{here} in {repo}: “{}” {}",
+                    voice.sound(seed),
+                    truncate(&task, 120),
+                    voice.working(seed)
+                ),
                 action: Some(BrainAction::Prompt { session_id: s.id.clone(), text: task }),
             };
         }
@@ -696,9 +774,14 @@ fn command(ctx: &BrainContext, voice: &Voice, seed: u64, repos: &RepoIndex, cmd:
         }
     }
     let text = if task.is_empty() {
-        format!("{} Starting {name} in {repo}. {}", voice.sound(seed), voice.happy(seed))
+        format!("{} Starting {name}{here} in {repo}. {}", voice.sound(seed), voice.happy(seed))
     } else {
-        format!("{} Fetching {name}! New session in {repo}: “{}” {}", voice.sound(seed), truncate(&task, 120), voice.happy(seed))
+        format!(
+            "{} Fetching {name}{here}! New session in {repo}: “{}” {}",
+            voice.sound(seed),
+            truncate(&task, 120),
+            voice.happy(seed)
+        )
     };
     BrainReply { text, action: Some(BrainAction::StartSession { agent_id, cwd, prompt: task }) }
 }

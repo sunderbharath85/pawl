@@ -12,6 +12,7 @@ import {
   type SessionStatus,
   type ToolLocation,
 } from "@krypto/protocol";
+import { agentFor, petFor } from "../shared/machine";
 import type { ConnInfo } from "../shared/messages";
 import { buildTranscript, type TranscriptItem } from "./transcript";
 import { post } from "./vscodeApi";
@@ -33,13 +34,15 @@ function relativeTime(ts: number, now: number): string {
   return `${Math.round(h / 24)}d ago`;
 }
 
-function agentName(agents: Agent[], id: string): string {
-  return agents.find((a) => a.id === id)?.name ?? id;
+function agentName(agents: Agent[], id: string, machineId?: string): string {
+  return agentFor(agents, id, machineId)?.name ?? id;
 }
 
-function petEmoji(pets: Pet[], agentId: string): string {
-  const pet = pets.find((p) => p.agentId === agentId);
-  return SPECIES_META[pet?.species ?? DEFAULT_SPECIES].emoji;
+/** "🐕 Biscuit" for the pet watching this (machine, agent), else just the default emoji. */
+function petLabel(pets: Pet[], owner: { machineId: string; agentId: string }): string {
+  const pet = petFor(pets, owner.machineId, owner.agentId);
+  const emoji = SPECIES_META[pet?.species ?? DEFAULT_SPECIES].emoji;
+  return pet ? `${emoji} ${pet.name}` : emoji;
 }
 
 const STATUS_LABEL: Record<SessionStatus, string> = {
@@ -147,11 +150,13 @@ export function ApprovalCard({
   request,
   session,
   agents,
+  pets,
   now,
 }: {
   request: PermissionRequest;
   session?: Session;
   agents: Agent[];
+  pets: Pet[];
   now: number;
 }) {
   const [busy, setBusy] = useState(false);
@@ -170,7 +175,7 @@ export function ApprovalCard({
       <div className="card-head">
         <span className={`kind kind-${request.toolCall.kind ?? "other"}`}>{request.toolCall.kind ?? "tool"}</span>
         <span className="muted">
-          {agentName(agents, request.agentId)}
+          {petLabel(pets, request)} · {agentName(agents, request.agentId, request.machineId)}
           {session ? ` · ${basename(session.cwd)}` : ""} · {relativeTime(request.createdAt, now)}
         </span>
       </div>
@@ -248,7 +253,7 @@ export function SessionList({
               <StatusDot status={s.status} ended={!!s.endedAt} />
               <span className="row-main">
                 <span className="row-title">
-                  {petEmoji(pets, s.agentId)} {agentName(agents, s.agentId)}
+                  {petLabel(pets, s)} · {agentName(agents, s.agentId, s.machineId)}
                   <span className="muted"> · {s.title?.trim() || basename(s.cwd)}</span>
                 </span>
                 <span className="row-sub muted">
@@ -340,14 +345,12 @@ export function SessionDetail({
   const items = useMemo(() => buildTranscript(events), [events]);
   const scroller = useRef<HTMLDivElement | null>(null);
   const stick = useRef(true);
-  const requested = useRef<string | null>(null);
 
-  // Backfill the log once per session when we have nothing (or only live tail) locally.
+  // Ask the host to backfill whenever this session is shown while connected (and again after a
+  // reconnect). The host loads the latest window the first time, then catches up by `seq`.
   useEffect(() => {
-    if (!connected || requested.current === session.id) return;
-    requested.current = session.id;
-    if (events.length < 20) post({ type: "loadEvents", sessionId: session.id });
-  }, [connected, session.id, events.length]);
+    if (connected) post({ type: "loadEvents", sessionId: session.id });
+  }, [connected, session.id]);
 
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -366,7 +369,7 @@ export function SessionDetail({
         <StatusDot status={session.status} ended={!!session.endedAt} />
         <div className="detail-title">
           <div>
-            {petEmoji(pets, session.agentId)} {agentName(agents, session.agentId)}{" "}
+            {petLabel(pets, session)} · {agentName(agents, session.agentId, session.machineId)}{" "}
             <span className="muted">· {session.endedAt ? "ended" : STATUS_LABEL[session.status]}</span>
           </div>
           <div className="muted small" title={session.cwd}>
@@ -496,7 +499,7 @@ export function ChatPanel({
             <option value="">any pet</option>
             {pets.map((p) => (
               <option key={p.id} value={p.id}>
-                {SPECIES_META[p.species].emoji} {p.name} ({agentName(agents, p.agentId)})
+                {SPECIES_META[p.species].emoji} {p.name} ({agentName(agents, p.agentId, p.machineId)})
               </option>
             ))}
           </select>

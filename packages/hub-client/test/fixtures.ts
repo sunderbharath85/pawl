@@ -1,20 +1,41 @@
-import type { Agent, HubEvent, Pet, PermissionRequest, Session, Welcome } from "@krypto/protocol";
+import { globalId, type Agent, type HubEvent, type Machine, type Pet, type PermissionRequest, type Session, type Welcome } from "@krypto/protocol";
 
-export const agent: Agent = { id: "claude-code", name: "Claude Code", command: ["npx", "x"], installed: true, source: "registry" };
+/** This hub's machine id (12 chars [a-z0-9]). */
+export const MID = "winpc0000001";
+/** A paired machine (arrives in migration step 2; reducers must already handle it). */
+export const MID2 = "macmini00002";
+
+export const machine: Machine = { id: MID, name: "Windows PC", os: "windows", lastSeen: 1, online: true, hubVersion: "0.1.0" };
+export const machine2: Machine = { id: MID2, name: "Mac mini", os: "macos", lastSeen: 1, online: false };
+
+export const agent: Agent = { id: "claude-code", machineId: MID, name: "Claude Code", command: ["npx", "x"], installed: true, source: "registry" };
 
 export function session(id: string, over: Partial<Session> = {}): Session {
-  return { id, agentId: "claude-code", cwd: "/repo", source: "owned", status: "idle", startedAt: 1, lastEventAt: 1, ...over };
+  return { id, machineId: MID, agentId: "claude-code", cwd: "/repo", source: "owned", status: "idle", startedAt: 1, lastEventAt: 1, ...over };
 }
 
-export function event(id: number, sessionId = "s1", over: Partial<HubEvent> = {}): HubEvent {
-  return { id, sessionId, type: "agent_thought_chunk", payload: { text: "hm" }, ts: id * 10, ...over };
+/** Event with global id `${machineId}:${seq}`. */
+export function event(seq: number, sessionId = "s1", over: Partial<HubEvent> = {}): HubEvent {
+  const machineId = over.machineId ?? MID;
+  return { id: globalId(machineId, seq), seq, machineId, sessionId, type: "agent_thought_chunk", payload: { text: "hm" }, ts: seq * 10, ...over };
 }
 
-export const pet: Pet = { id: "p1", agentId: "claude-code", species: "dog", skin: "default", name: "Biscuit", personality: "goofy", mood: 70, xp: 0 };
+export const pet: Pet = {
+  id: "p1",
+  machineId: MID,
+  agentId: "claude-code",
+  species: "dog",
+  skin: "default",
+  name: "Biscuit",
+  personality: "goofy",
+  mood: 70,
+  xp: 0,
+};
 
 export function permission(requestId: string, over: Partial<PermissionRequest> = {}): PermissionRequest {
   return {
     requestId,
+    machineId: MID,
     sessionId: "s1",
     agentId: "claude-code",
     toolCall: { toolCallId: "t1", title: "Run tests", kind: "execute" },
@@ -29,8 +50,10 @@ export function permission(requestId: string, over: Partial<PermissionRequest> =
 }
 
 export const welcome: Welcome = {
-  protocolVersion: 1,
+  protocolVersion: 2,
   hubVersion: "0.1.0",
+  machine,
+  machines: [machine],
   agents: [agent],
   sessions: [session("s1")],
   pets: [pet],

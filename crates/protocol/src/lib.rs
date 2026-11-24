@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const HUB_DEFAULT_PORT: u16 = 47800;
 pub const HUB_HOST: &str = "127.0.0.1";
 pub const HUB_DATA_DIR_NAME: &str = "krypto";
@@ -16,6 +16,58 @@ pub type SessionId = String;
 pub type PetId = String;
 pub type RequestId = String;
 pub type UnixMs = i64;
+
+// ---------- machines (one hub per machine) ----------
+/// Random, generated once per hub, stored in the data dir. 12 chars of [a-z0-9]; never contains ':'.
+pub type MachineId = String;
+
+pub fn is_valid_machine_id(id: &str) -> bool {
+    id.len() == 12 && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineOs {
+    Windows,
+    Macos,
+    Linux,
+    Other,
+}
+
+impl MachineOs {
+    pub fn current() -> Self {
+        match std::env::consts::OS {
+            "windows" => MachineOs::Windows,
+            "macos" => MachineOs::Macos,
+            "linux" => MachineOs::Linux,
+            _ => MachineOs::Other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Machine {
+    pub id: MachineId,
+    /// Display name, e.g. "Mac mini". Defaults to the OS host name.
+    pub name: String,
+    pub os: MachineOs,
+    pub last_seen: UnixMs,
+    pub online: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_version: Option<String>,
+}
+
+/// Global id `${machine_id}:${local_id}`. Every id on the wire is global.
+pub fn global_id(machine_id: &str, local_id: impl std::fmt::Display) -> String {
+    format!("{machine_id}:{local_id}")
+}
+
+/// Split a global id into (machine_id, local_id); None if it is not a valid global id.
+pub fn parse_global_id(id: &str) -> Option<(&str, &str)> {
+    let (m, l) = id.split_once(':')?;
+    (is_valid_machine_id(m) && !l.is_empty()).then_some((m, l))
+}
 
 pub fn now_ms() -> UnixMs {
     std::time::SystemTime::now()
@@ -51,6 +103,8 @@ pub enum AgentSource {
 #[serde(rename_all = "camelCase")]
 pub struct Agent {
     pub id: AgentId,
+    /// The machine this agent is installed on.
+    pub machine_id: MachineId,
     pub name: String,
     pub command: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,7 +145,10 @@ pub enum SessionStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
+    /// Global `${machine_id}:${local_id}`.
     pub id: SessionId,
+    /// Owning machine: the only source of truth for this session.
+    pub machine_id: MachineId,
     pub agent_id: AgentId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_session_id: Option<String>,
@@ -111,6 +168,7 @@ pub struct Session {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistorySession {
+    pub machine_id: MachineId,
     pub agent_id: AgentId,
     pub acp_session_id: String,
     pub cwd: String,
@@ -307,7 +365,11 @@ pub struct PermissionResolvedPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HubEvent {
-    pub id: i64,
+    /// Global `${machine_id}:${seq}`.
+    pub id: String,
+    /// Monotonic per-machine sequence (SQLite rowid); cursor for GetEvents.since_seq.
+    pub seq: i64,
+    pub machine_id: MachineId,
     pub session_id: SessionId,
     #[serde(rename = "type")]
     pub kind: EventType,
@@ -336,7 +398,9 @@ pub struct PermissionOption {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionRequest {
+    /// Global `${machine_id}:${local_id}`.
     pub request_id: RequestId,
+    pub machine_id: MachineId,
     pub session_id: SessionId,
     pub agent_id: AgentId,
     pub tool_call: ToolCallPayload,
@@ -403,7 +467,9 @@ pub enum Species {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Pet {
+    /// Global `${machine_id}:${local_id}`. One pet per agent per machine.
     pub id: PetId,
+    pub machine_id: MachineId,
     pub agent_id: AgentId,
     pub species: Species,
     pub skin: String,
@@ -437,6 +503,7 @@ pub enum ChatRole {
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
     pub id: String,
+    pub machine_id: MachineId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pet_id: Option<PetId>,
     pub role: ChatRole,
@@ -459,6 +526,7 @@ pub enum NotificationLevel {
 #[serde(rename_all = "camelCase")]
 pub struct HubNotification {
     pub id: String,
+    pub machine_id: MachineId,
     pub level: NotificationLevel,
     pub title: String,
     pub body: String,
@@ -485,7 +553,7 @@ pub enum ClientMsg {
     Hello { id: String, client: ClientKind, client_version: String, token: String },
     ListAgents { id: String, #[serde(default)] refresh: Option<bool> },
     ListSessions { id: String, #[serde(default)] include_ended: Option<bool> },
-    GetEvents { id: String, session_id: SessionId, #[serde(default)] since_id: Option<i64>, #[serde(default)] limit: Option<u32> },
+    GetEvents { id: String, session_id: SessionId, #[serde(default)] since_seq: Option<i64>, #[serde(default)] limit: Option<u32> },
     StartSession { id: String, agent_id: AgentId, cwd: String, #[serde(default)] prompt: Option<String> },
     Prompt { id: String, session_id: SessionId, text: String },
     Cancel { id: String, session_id: SessionId },
@@ -495,6 +563,8 @@ pub enum ClientMsg {
     Chat { id: String, #[serde(default)] pet_id: Option<PetId>, text: String },
     UpdatePet { id: String, pet_id: PetId, patch: PetPatch },
     SetRules { id: String, rules: Vec<Rule> },
+    /// Rename this hub's machine (local machine only for now).
+    UpdateMachine { id: String, machine_id: MachineId, name: String },
 }
 
 impl ClientMsg {
@@ -512,7 +582,8 @@ impl ClientMsg {
             | ClientMsg::ResumeSession { id, .. }
             | ClientMsg::Chat { id, .. }
             | ClientMsg::UpdatePet { id, .. }
-            | ClientMsg::SetRules { id, .. } => id,
+            | ClientMsg::SetRules { id, .. }
+            | ClientMsg::UpdateMachine { id, .. } => id,
         }
     }
 }
@@ -523,6 +594,10 @@ impl ClientMsg {
 pub struct Welcome {
     pub protocol_version: u32,
     pub hub_version: String,
+    /// The machine this hub runs on.
+    pub machine: Machine,
+    /// Every known machine, including this one.
+    pub machines: Vec<Machine>,
     pub agents: Vec<Agent>,
     pub sessions: Vec<Session>,
     pub pets: Vec<Pet>,
@@ -549,6 +624,7 @@ pub enum ServerMsg {
     Pet { pet: Pet },
     Chat { message: ChatMessage },
     Notification { notification: HubNotification },
+    Machine { machine: Machine },
 }
 
 impl ServerMsg {
@@ -563,6 +639,18 @@ impl ServerMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_ids() {
+        assert_eq!(global_id("abcdef012345", 7), "abcdef012345:7");
+        assert_eq!(parse_global_id("abcdef012345:s-1"), Some(("abcdef012345", "s-1")));
+        assert_eq!(parse_global_id("ABCDEF012345:x"), None);
+        assert_eq!(parse_global_id("short:x"), None);
+        assert_eq!(parse_global_id("abcdef012345:"), None);
+        assert_eq!(parse_global_id("no-colon"), None);
+        let m = ClientMsg::UpdateMachine { id: "1".into(), machine_id: "abcdef012345".into(), name: "Mac mini".into() };
+        assert_eq!(serde_json::to_value(&m).unwrap(), serde_json::json!({"type":"update_machine","id":"1","machineId":"abcdef012345","name":"Mac mini"}));
+    }
 
     #[test]
     fn client_msg_wire_shape() {
@@ -587,7 +675,7 @@ mod tests {
             v,
             serde_json::json!({"type":"permission_resolved","requestId":"r","sessionId":"s","outcome":{"kind":"selected","optionId":"o"},"by":"rule"})
         );
-        let e = HubEvent { id: 1, session_id: "s".into(), kind: EventType::ToolCall, payload: Value::Null, ts: 0 };
+        let e = HubEvent { id: "abcdef012345:1".into(), seq: 1, machine_id: "abcdef012345".into(), session_id: "s".into(), kind: EventType::ToolCall, payload: Value::Null, ts: 0 };
         assert_eq!(serde_json::to_value(&e).unwrap()["type"], "tool_call");
         let r = Rule { id: "x".into(), matcher: RuleMatch { tool_kind: Some(ToolKind::Read), ..Default::default() }, action: RuleAction::AutoAllow };
         assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({"id":"x","match":{"toolKind":"read"},"action":"auto_allow"}));

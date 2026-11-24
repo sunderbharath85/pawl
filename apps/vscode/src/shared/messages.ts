@@ -42,7 +42,9 @@ export type WebviewCommand =
   | "installHooks"
   | "changeSpecies"
   | "reconnect"
-  | "openPanel";
+  | "openPanel"
+  | "renameMachine"
+  | "renamePet";
 
 export type WebviewToHost =
   | { type: "ready" }

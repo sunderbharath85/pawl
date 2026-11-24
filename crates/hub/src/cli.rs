@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use futures::{SinkExt, StreamExt};
 use krypto_discovery::hooks::HookTarget;
 use krypto_protocol::{
-    Agent, ClientKind, ClientMsg, EventType, HubEvent, PermissionOptionKind, PermissionOutcome,
+    Agent, ClientKind, ClientMsg, EventType, HubEvent, Machine, MachineOs, PermissionOptionKind, PermissionOutcome,
     PermissionRequest, PlanPayload, ResolvedBy, ServerMsg, Session, ToolCallPayload, Welcome,
 };
 use serde_json::Value;
@@ -20,6 +20,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::config::{self, HubConfig, HubEndpoint, Paths};
 use crate::core::{self as hubcore, Actor, Hub, HubOptions};
+use crate::machine::{self, MachineIdentity};
 use crate::{logging, server, HUB_VERSION};
 
 #[derive(Parser, Debug)]
@@ -88,6 +89,15 @@ pub enum Command {
     },
     /// Print the hub bearer token (created if missing)
     Token,
+    /// Show this machine's id and name, or rename it with --name
+    Machine {
+        /// New display name, e.g. "Windows PC" (1-40 characters)
+        #[arg(long)]
+        name: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +132,7 @@ pub async fn run() -> ExitCode {
         Command::Start { agent, cwd, prompt, local } => run_start(paths, cli.port, agent, cwd, prompt, local).await,
         Command::InstallHooks { target, apply, repo } => run_install_hooks(target, apply, repo),
         Command::Token => run_token(&paths),
+        Command::Machine { name, json } => run_machine(&paths, cli.port, name, json).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -160,9 +171,11 @@ async fn run_serve(paths: Paths, port_flag: Option<u16>) -> Result<()> {
     let _log = logging::init(Some(&paths.log), "info", "info");
     let cfg = HubConfig::load_or_init(&paths)?;
     let token = config::load_or_create_token(&paths)?;
+    let machine = machine::load_or_create(&paths)?;
     let port = config::serve_port(port_flag, &cfg);
     tracing::info!("data dir {}", paths.data_dir.display());
-    let hub = Hub::start(HubOptions { paths, config: cfg, token, background: true }).await?;
+    tracing::info!("machine {} ({:?})", machine.id, machine.name);
+    let hub = Hub::start(HubOptions { paths, config: cfg, token, machine, background: true }).await?;
     let result = server::serve(hub.clone(), port, shutdown_signal()).await;
     hub.shutdown().await;
     result
@@ -172,6 +185,69 @@ async fn run_serve(paths: Paths, port_flag: Option<u16>) -> Result<()> {
 
 fn run_token(paths: &Paths) -> Result<()> {
     println!("{}", config::load_or_create_token(paths)?);
+    Ok(())
+}
+
+// ---------------------------------------------------------------- machine
+
+/// `krypto machine [--name ...]`: through the running hub when it serves this data dir (it saves
+/// machine.toml and broadcasts `machine` to its clients), else straight on machine.toml.
+async fn run_machine(paths: &Paths, port_flag: Option<u16>, name: Option<String>, as_json: bool) -> Result<()> {
+    // Validate up front: the hub only answers a bad name with the bare code "invalid"; the CLI
+    // prints the reason instead.
+    let name = name.map(|n| machine::validate_name(&n)).transpose().map_err(|e| anyhow!("{e}"))?;
+    let local = machine::load(paths)?;
+    let remote = match RemoteHub::connect(paths, port_flag).await? {
+        Some(hub) if local.as_ref().is_none_or(|l| l.id == hub.welcome.machine.id) => Some(hub),
+        Some(hub) => {
+            eprintln!(
+                "[hub] the hub at {} is machine {}, not this data dir's {}; using machine.toml directly",
+                hub.url,
+                hub.welcome.machine.id,
+                local.as_ref().map_or("?", |l| l.id.as_str())
+            );
+            None
+        }
+        None => None,
+    };
+    let renamed = name.is_some();
+    let (machine, hub_running) = match (remote, name) {
+        (Some(hub), Some(name)) => {
+            let machine_id = hub.welcome.machine.id.clone();
+            let mut conn = Conn::Remote(Box::new(hub));
+            let v = conn.request(ClientMsg::UpdateMachine { id: rid(), machine_id, name }).await?;
+            let m: Machine = serde_json::from_value(v.get("machine").cloned().unwrap_or_default()).context("parse machine")?;
+            (m, true)
+        }
+        (Some(hub), None) => (hub.welcome.machine.clone(), true),
+        (None, name) => {
+            let mut ident: MachineIdentity = match local {
+                Some(l) => l,
+                None => machine::load_or_create(paths)?,
+            };
+            if let Some(name) = name {
+                ident.name = name;
+                machine::save(paths, &ident)?;
+            }
+            (ident.to_machine(false, krypto_protocol::now_ms()), false)
+        }
+    };
+    if renamed {
+        let how = if hub_running { "the running hub saved it and told its clients" } else { "saved to machine.toml" };
+        eprintln!("renamed this machine to {:?} ({how})", machine.name);
+    }
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&machine)?);
+        return Ok(());
+    }
+    println!("id:    {}", machine.id);
+    println!("name:  {}", machine.name);
+    println!("os:    {}", enum_label(&machine.os));
+    match (hub_running, machine.hub_version.as_deref()) {
+        (true, Some(v)) => println!("hub:   running (v{v})"),
+        (true, None) => println!("hub:   running"),
+        (false, _) => println!("hub:   not running"),
+    }
     Ok(())
 }
 
@@ -285,10 +361,15 @@ impl RemoteHub {
     }
 }
 
+/// Placeholder until the hub's `hello` ack arrives.
 fn empty_welcome() -> Welcome {
+    let machine =
+        Machine { id: String::new(), name: String::new(), os: MachineOs::current(), last_seen: 0, online: false, hub_version: None };
     Welcome {
         protocol_version: krypto_protocol::PROTOCOL_VERSION,
         hub_version: String::new(),
+        machine,
+        machines: vec![],
         agents: vec![],
         sessions: vec![],
         pets: vec![],
@@ -358,7 +439,8 @@ async fn run_agents(paths: &Paths, port_flag: Option<u16>, refresh: bool, as_jso
         None => {
             let cfg = HubConfig::load(paths)?;
             paths.ensure()?;
-            hubcore::discover_agents(paths, &cfg, refresh).await?
+            let machine = machine::load_or_create(paths)?;
+            hubcore::discover_agents(paths, &cfg, &machine.id, refresh).await?
         }
     };
     if as_json {
@@ -396,7 +478,8 @@ async fn run_sessions(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
             if !paths.db.exists() {
                 Vec::new()
             } else {
-                let store = crate::store::Store::open(&paths.db)?;
+                let machine = machine::load_or_create(paths)?;
+                let store = crate::store::Store::open(&paths.db, &machine.id)?;
                 store.run(|s| s.recent_sessions(50)).await?
             }
         }
@@ -453,8 +536,10 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     }
 }
 
+/// First 8 characters of the local part of a global id (`machine:local`), else of the id itself.
 fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
+    let local = krypto_protocol::parse_global_id(id).map_or(id, |(_, l)| l);
+    local.chars().take(8).collect()
 }
 
 fn enum_label<T: serde::Serialize>(v: &T) -> String {
@@ -530,7 +615,8 @@ async fn run_start(
             eprintln!("[hub] no hub running; driving the agent in-process (events are still logged to hub.db)");
             let cfg = HubConfig::load(&paths)?;
             let token = config::load_or_create_token(&paths)?;
-            let hub = Hub::start(HubOptions { paths: paths.clone(), config: cfg, token, background: false }).await?;
+            let machine = machine::load_or_create(&paths)?;
+            let hub = Hub::start(HubOptions { paths: paths.clone(), config: cfg, token, machine, background: false }).await?;
             local_hub = Some(hub.clone());
             Conn::local(hub)
         }
@@ -829,8 +915,9 @@ mod tests {
 
     fn req() -> PermissionRequest {
         PermissionRequest {
-            request_id: "r".into(),
-            session_id: "s".into(),
+            request_id: "abcdef012345:r".into(),
+            machine_id: "abcdef012345".into(),
+            session_id: "abcdef012345:s".into(),
             agent_id: "codex".into(),
             tool_call: ToolCallPayload { tool_call_id: "t".into(), ..Default::default() },
             options: vec![
@@ -864,12 +951,50 @@ mod tests {
         assert!(matches!(c.command, Command::InstallHooks { target: HookTargetArg::CopilotVscode, apply: true, .. }));
         let c = Cli::try_parse_from(["krypto", "--port", "48000", "serve"]).unwrap();
         assert_eq!(c.port, Some(48000));
+        let c = Cli::try_parse_from(["krypto", "machine", "--name", "Windows PC"]).unwrap();
+        assert!(matches!(c.command, Command::Machine { name: Some(ref n), json: false } if n == "Windows PC"));
+        let c = Cli::try_parse_from(["krypto", "machine", "--json"]).unwrap();
+        assert!(matches!(c.command, Command::Machine { name: None, json: true }));
+    }
+
+    #[test]
+    fn short_ids_use_the_local_part() {
+        assert_eq!(short_id("abcdef012345:0f1e2d3c-4b5a-6978"), "0f1e2d3c");
+        assert_eq!(short_id("legacy-session-id"), "legacy-s");
+        assert_eq!(short_id("abcdef012345:ab"), "ab");
+    }
+
+    /// `krypto machine` without a hub works on machine.toml directly (scratch data dir; the port is
+    /// one nothing listens on, and there is no token, so no hub is ever contacted).
+    #[tokio::test]
+    async fn machine_command_without_a_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::in_dir(dir.path());
+        if std::env::var(config::ENV_TOKEN).is_ok() {
+            return; // an env token could reach a real hub; never touch it from tests
+        }
+        run_machine(&paths, Some(9), None, true).await.unwrap();
+        let first = machine::load(&paths).unwrap().expect("created");
+        run_machine(&paths, Some(9), Some("  Windows PC ".into()), false).await.unwrap();
+        let renamed = machine::load(&paths).unwrap().unwrap();
+        assert_eq!(renamed, MachineIdentity { id: first.id.clone(), name: "Windows PC".into() });
+        let err = run_machine(&paths, Some(9), Some(" ".into()), false).await.unwrap_err();
+        assert_eq!(format!("{err:#}"), "machine name must be 1-40 characters (got 0)");
+        assert_eq!(machine::load(&paths).unwrap().unwrap(), renamed, "a rejected name changes nothing");
     }
 
     #[test]
     fn prompt_echo_printed_once() {
         let mut p = Printer::new("codex");
-        let ev = |kind: EventType, text: &str| HubEvent { id: 0, session_id: "s".into(), kind, payload: serde_json::json!({ "text": text }), ts: 0 };
+        let ev = |kind: EventType, text: &str| HubEvent {
+            id: "abcdef012345:1".into(),
+            seq: 1,
+            machine_id: "abcdef012345".into(),
+            session_id: "abcdef012345:s".into(),
+            kind,
+            payload: serde_json::json!({ "text": text }),
+            ts: 0,
+        };
         assert_eq!(p.user_line("run tests").as_deref(), Some("you: run tests"));
         assert_eq!(p.user_line("run tests "), None, "agent replay of the same prompt is suppressed");
         p.event(&ev(EventType::AgentMessageChunk, "ok"));

@@ -5,7 +5,7 @@
 //! enriched by their registry entries), then every other registry agent in registry order,
 //! then custom agents (a custom agent with an existing id replaces that entry).
 
-use krypto_protocol::{Agent, AgentSource};
+use krypto_protocol::{Agent, AgentSource, MachineId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,6 +29,8 @@ pub struct CustomAgent {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DiscoveryConfig {
+    /// This hub's machine; stamped on every discovered `Agent`.
+    pub machine_id: MachineId,
     /// Holds `registry-cache.json` and `agents/<registry-id>/<version>/` binary installs.
     pub cache_dir: PathBuf,
     pub custom_agents: Vec<CustomAgent>,
@@ -193,7 +195,7 @@ pub fn build_agents(reg: &[RegistryAgent], cfg: &DiscoveryConfig, env: &HostEnv)
             tracing::warn!(id = %c.id, "custom agent without id/command ignored");
             continue;
         }
-        let agent = custom_agent(c, env);
+        let agent = custom_agent(c, &cfg.machine_id, env);
         match out.iter_mut().find(|a| a.id == c.id) {
             Some(slot) => *slot = agent,
             None => out.push(agent),
@@ -202,7 +204,7 @@ pub fn build_agents(reg: &[RegistryAgent], cfg: &DiscoveryConfig, env: &HostEnv)
     out
 }
 
-fn custom_agent(c: &CustomAgent, env: &HostEnv) -> Agent {
+fn custom_agent(c: &CustomAgent, machine_id: &str, env: &HostEnv) -> Agent {
     let mut command = c.command.clone();
     let resolved = env.which(&command[0]);
     let installed = resolved.is_some();
@@ -211,6 +213,7 @@ fn custom_agent(c: &CustomAgent, env: &HostEnv) -> Agent {
     }
     Agent {
         id: c.id.clone(),
+        machine_id: machine_id.to_string(),
         name: if c.name.trim().is_empty() { c.id.clone() } else { c.name.clone() },
         command,
         env: c.env.clone().filter(|e| !e.is_empty()),
@@ -266,6 +269,7 @@ fn cached_binary(cfg: &DiscoveryConfig, id: &str, version: Option<&str>, cmd: &s
 fn resolve(e: &RegistryAgent, builtin: Option<&BuiltinAgent>, cfg: &DiscoveryConfig, env: &HostEnv, platforms: &[String]) -> Agent {
     let mut agent = Agent {
         id: e.id.clone(),
+        machine_id: cfg.machine_id.clone(),
         name: e.name.clone(),
         command: Vec::new(),
         env: None,
@@ -434,6 +438,7 @@ mod tests {
         let amp = fake_exe(&amp_dir, if cfg!(windows) { "amp-acp.exe" } else { "amp-acp" });
 
         let cfg = DiscoveryConfig {
+            machine_id: "abcdef012345".into(),
             cache_dir,
             custom_agents: vec![
                 CustomAgent { id: "my-agent".into(), name: "Mine".into(), command: vec![path_str(&goose), "serve".into()], env: None },
@@ -447,6 +452,7 @@ mod tests {
 
         let ids: Vec<_> = agents.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["claude-code", "codex", "gemini", "copilot", "goose", "amp-acp", "auggie", "fast-agent", "my-agent"]);
+        assert!(agents.iter().all(|a| a.machine_id == "abcdef012345"), "every agent carries cfg.machine_id");
         assert!(!ids.contains(&"claude-acp") && !ids.contains(&"codex-acp"), "aliases folded into built-ins");
 
         let claude = by("claude-code");
@@ -507,12 +513,13 @@ mod tests {
             &registry::RegistryCache { fetched_at: 0, etag: None, source_url: None, registry: registry_doc() },
         )
         .unwrap();
-        let cfg = DiscoveryConfig { cache_dir: dir.path().to_path_buf(), custom_agents: vec![], offline: true };
+        let cfg = DiscoveryConfig { machine_id: "m0m0m0m0m0m0".into(), cache_dir: dir.path().to_path_buf(), custom_agents: vec![], offline: true };
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let agents = rt.block_on(discover(&cfg)).unwrap();
         for id in ["claude-code", "codex", "gemini", "copilot", "goose", "auggie"] {
             assert!(agents.iter().any(|a| a.id == id), "{id}");
         }
         assert!(agents.iter().all(|a| !a.command.is_empty()));
+        assert!(agents.iter().all(|a| a.machine_id == "m0m0m0m0m0m0"));
     }
 }

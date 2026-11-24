@@ -7,6 +7,8 @@ export interface DesktopSettings {
   notifyHub: boolean;
   /** Pet sprite size on the strip, px. */
   petSize: number;
+  /** Name label under each pet on the strip (on by default: every pet has a name). */
+  showPetNames: boolean;
   lastCwd: string;
   lastAgentId: string;
 }
@@ -18,6 +20,7 @@ export const DEFAULT_SETTINGS: DesktopSettings = {
   notifyTurns: true,
   notifyHub: true,
   petSize: 112,
+  showPetNames: true,
   lastCwd: "",
   lastAgentId: "",
 };

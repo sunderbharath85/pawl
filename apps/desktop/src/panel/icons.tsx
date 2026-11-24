@@ -112,3 +112,11 @@ export const Trash = (p: P) => (
     <path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l1 12.5h9l1-12.5" />
   </svg>
 );
+
+export const Monitor = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="3" y="4" width="18" height="12" rx="2" />
+    <path d="M8.5 20h7" />
+    <path d="M12 16v4" />
+  </svg>
+);

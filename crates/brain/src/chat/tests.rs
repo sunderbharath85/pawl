@@ -4,9 +4,12 @@ use krypto_protocol::{
 };
 use serde_json::json;
 
+const ME: &str = "abcdef012345";
+
 fn agent(id: &str, name: &str, installed: bool) -> Agent {
     Agent {
         id: id.into(),
+        machine_id: ME.into(),
         name: name.into(),
         command: vec!["x".into()],
         env: None,
@@ -23,6 +26,7 @@ fn session(id: &str, agent: &str, cwd: &str, source: SessionSource, status: Sess
     let now = now_ms();
     Session {
         id: id.into(),
+        machine_id: ME.into(),
         agent_id: agent.into(),
         acp_session_id: None,
         external_id: None,
@@ -36,14 +40,23 @@ fn session(id: &str, agent: &str, cwd: &str, source: SessionSource, status: Sess
     }
 }
 
-fn event(id: i64, session: &str, kind: EventType, payload: serde_json::Value) -> HubEvent {
-    HubEvent { id, session_id: session.into(), kind, payload, ts: now_ms() - 100_000 + id }
+fn event(seq: i64, session: &str, kind: EventType, payload: serde_json::Value) -> HubEvent {
+    HubEvent {
+        id: krypto_protocol::global_id(ME, seq),
+        seq,
+        machine_id: ME.into(),
+        session_id: session.into(),
+        kind,
+        payload,
+        ts: now_ms() - 100_000 + seq,
+    }
 }
 
 fn request(id: &str, session: &str, agent: &str, title: &str, created: i64) -> PermissionRequest {
     let opt = |id: &str, kind| PermissionOption { option_id: id.into(), name: id.into(), kind };
     PermissionRequest {
         request_id: id.into(),
+        machine_id: ME.into(),
         session_id: session.into(),
         agent_id: agent.into(),
         tool_call: ToolCallPayload {
@@ -62,8 +75,14 @@ fn request(id: &str, session: &str, agent: &str, title: &str, created: i64) -> P
     }
 }
 
+fn machine(id: &str, name: &str) -> Machine {
+    Machine { id: id.into(), name: name.into(), os: MachineOs::Windows, last_seen: now_ms(), online: true, hub_version: None }
+}
+
 fn ctx() -> BrainContext {
     BrainContext {
+        machine: machine(ME, "Windows PC"),
+        machines: vec![machine(ME, "Windows PC")],
         agents: vec![
             agent("claude-code", "Claude Code", true),
             agent("codex", "Codex", true),
@@ -261,7 +280,8 @@ async fn help_report_and_small_talk_are_deterministic_without_model() {
 async fn pet_species_and_name_shape_the_voice() {
     let mut c = ctx();
     c.pet = Some(Pet {
-        id: "pet-codex".into(),
+        id: "abcdef012345:pet-codex".into(),
+        machine_id: ME.into(),
         agent_id: "codex".into(),
         species: Species::Cat,
         skin: "default".into(),
@@ -338,4 +358,98 @@ fn action_wire_shape() {
     );
     let cfg: BrainConfig = serde_json::from_value(json!({"model": "claude-haiku-5-5"})).unwrap();
     assert_eq!(cfg, BrainConfig::default());
+}
+
+const PEER: &str = "zz9988776655";
+
+/// `ctx()` plus a paired Mac mini running Claude Code in `web` and offering Goose.
+fn two_machine_ctx() -> BrainContext {
+    let mut c = ctx();
+    c.machines.push(machine(PEER, "Mac mini"));
+    let mut mac = session("s-mac", "claude-code", "/Users/me/web", SessionSource::Owned, SessionStatus::WaitingPermission);
+    mac.machine_id = PEER.into();
+    c.sessions.push(mac);
+    let mut req = request(&format!("{PEER}:r1"), "s-mac", "claude-code", "rm -rf build", now_ms() - 30_000);
+    req.machine_id = PEER.into();
+    c.pending.push(req);
+    let mut goose = agent("goose", "Goose", true);
+    goose.machine_id = PEER.into();
+    c.agents.push(goose);
+    c
+}
+
+#[tokio::test]
+async fn single_machine_replies_never_name_the_machine() {
+    let c = ctx();
+    for q in ["What's Claude doing?", "status", "daily report", "hello"] {
+        let r = ask(q, &c).await;
+        assert!(!r.text.contains("Windows PC"), "{q}: {}", r.text);
+    }
+}
+
+#[tokio::test]
+async fn status_names_machines_when_several_are_known() {
+    let c = two_machine_ctx();
+    let r = ask("status", &c).await;
+    assert!(r.text.contains("• Claude Code on Mac mini · web: waiting for your OK: rm -rf build"), "{}", r.text);
+    assert!(r.text.contains("• Claude Code on Windows PC · ai-pet: working: Run cargo build"), "{}", r.text);
+
+    let r = ask("What's Claude doing?", &c).await;
+    assert_eq!(r.action, None);
+    // The session waiting for approval is reported first, on its machine.
+    assert!(r.text.contains("Claude Code on Mac mini in web is waiting for your OK to: rm -rf build."), "{}", r.text);
+    assert!(r.text.contains("Also: ai-pet on Windows PC (working)."), "{}", r.text);
+
+    let r = ask("daily report", &c).await;
+    assert!(r.text.contains("on 2 machines"), "{}", r.text);
+    assert!(r.text.contains("Claude Code on Mac mini in web (waiting for approval)"), "{}", r.text);
+
+    // Approvals name the machine too (the request id stays the owner's global id).
+    let r = ask("approve", &c).await;
+    assert!(r.text.contains("Claude Code on Mac mini can go ahead"), "{}", r.text);
+    assert_eq!(
+        r.action,
+        Some(BrainAction::ResolvePermission { request_id: format!("{PEER}:r1"), option_id: Some("allow-once".into()) })
+    );
+}
+
+#[tokio::test]
+async fn machine_names_also_come_from_ids_alone() {
+    // A mirrored session from an unnamed machine still flips replies to multi-machine mode.
+    let mut c = ctx();
+    c.machines.clear();
+    let mut remote = session("s-x", "codex", "/srv/api", SessionSource::Owned, SessionStatus::Working);
+    remote.machine_id = PEER.into();
+    c.sessions.push(remote);
+    let r = ask("status", &c).await;
+    assert!(r.text.contains("• Codex on zz9988776655 · api: working"), "{}", r.text);
+    assert!(r.text.contains("• Claude Code on Windows PC · ai-pet"), "{}", r.text);
+}
+
+#[tokio::test]
+async fn commands_only_target_this_machine() {
+    let c = two_machine_ctx();
+    // Goose exists only on the Mac: it cannot be started from here (yet).
+    let r = ask("tell goose to run the tests in E:\\workspace\\ai-pet", &c).await;
+    assert_eq!(r.action, None);
+    assert!(r.text.contains("Goose lives on Mac mini"), "{}", r.text);
+    // Repos seen only on another machine are not local paths.
+    let r = ask("tell codex to run the tests in repo web", &c).await;
+    assert_eq!(r.action, None);
+    assert!(r.text.contains("“web”"), "{}", r.text);
+    // Remote sessions are never prompted; a local start names this machine.
+    let mut c = two_machine_ctx();
+    let mut idle = session("s-mac-codex", "codex", "E:\\workspace\\ai-pet", SessionSource::Owned, SessionStatus::Done);
+    idle.machine_id = PEER.into();
+    c.sessions.push(idle);
+    let r = ask("tell codex to run the tests in repo ai-pet", &c).await;
+    assert_eq!(
+        r.action,
+        Some(BrainAction::StartSession {
+            agent_id: "codex".into(),
+            cwd: "E:\\workspace\\ai-pet".into(),
+            prompt: "run the tests".into(),
+        })
+    );
+    assert!(r.text.contains("Codex on Windows PC"), "{}", r.text);
 }

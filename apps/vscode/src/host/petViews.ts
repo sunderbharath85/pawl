@@ -31,6 +31,7 @@ export function petViewsOf(state: HubState, now = Date.now()): PetView[] {
       sessions: Object.values(state.sessions),
       pending: Object.values(state.pending),
       lastEvents: lastSignificantEvents(state.events),
+      machines: state.machines,
       now,
     });
   } catch {

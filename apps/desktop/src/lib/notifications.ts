@@ -7,6 +7,7 @@ import type { StopPayload } from "@krypto/protocol";
 import { isTauri } from "./native";
 import { readSettings } from "./settings";
 import { agentName, permissionSummary, sessionTitle } from "./format";
+import { petFor } from "./machine";
 
 let permission: Promise<boolean> | null = null;
 
@@ -50,15 +51,13 @@ export async function notify(title: string, body: string): Promise<void> {
 export function attachNotifications(client: HubClient): () => void {
   void ensurePermission();
 
-  const petFor = (agentId: string) => Object.values(client.getState().pets).find((p) => p.agentId === agentId);
-
   const offPermission = client.onMessage("permission_request", ({ request }) => {
     if (!readSettings().notifyPermissions || !once(`perm:${request.requestId}`)) return;
     const state = client.getState();
-    const pet = petFor(request.agentId);
+    const pet = petFor(Object.values(state.pets), request.machineId, request.agentId);
     const sound = SPECIES_META[pet?.species ?? "dog"]?.sound ?? "Woof!";
     const who = pet?.name ?? "Your pet";
-    void notify(`${sound} ${who} needs you`, `${agentName(state.agents, request.agentId)} wants to: ${permissionSummary(request)}`);
+    void notify(`${sound} ${who} needs you`, `${agentName(state.agents, request.agentId, request.machineId)} wants to: ${permissionSummary(request)}`);
   });
 
   const offEvent = client.onMessage("event", ({ event }) => {
@@ -67,7 +66,9 @@ export function attachNotifications(client: HubClient): () => void {
     const session = state.sessions[event.sessionId];
     // Hook-fed sessions announce themselves through hub `notification` messages instead.
     if (!session || session.source !== "owned") return;
-    const name = agentName(state.agents, session.agentId);
+    const agent = agentName(state.agents, session.agentId, session.machineId);
+    const pet = petFor(Object.values(state.pets), session.machineId, session.agentId);
+    const name = pet ? `${pet.name} (${agent})` : agent;
     if (event.type === "stop") {
       const reason = (event.payload as Partial<StopPayload> | null)?.stopReason;
       if (reason === "cancelled" || !once(`stop:${event.id}`)) return;

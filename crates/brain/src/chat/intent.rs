@@ -804,6 +804,7 @@ mod tests {
     fn agent(id: &str, name: &str) -> Agent {
         Agent {
             id: id.into(),
+            machine_id: "abcdef012345".into(),
             name: name.into(),
             command: vec![],
             env: None,
@@ -819,6 +820,7 @@ mod tests {
     fn session(id: &str, agent: &str, cwd: &str) -> Session {
         Session {
             id: id.into(),
+            machine_id: "abcdef012345".into(),
             agent_id: agent.into(),
             acp_session_id: None,
             external_id: None,

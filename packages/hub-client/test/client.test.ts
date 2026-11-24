@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { HubClient, HubRequestError, pickPermissionOption, type HubClientOptions } from "../src/index";
-import { event, FakeSocket, permission, session, tick, welcome } from "./fixtures";
+import { HubClient, HubRequestError, MACHINE_NAME_MAX, normalizeMachineName, pickPermissionOption, type HubClientOptions } from "../src/index";
+import { event, FakeSocket, machine, machine2, MID, MID2, permission, session, tick, welcome } from "./fixtures";
 
 function makeClient(over: Partial<HubClientOptions> = {}): HubClient {
   return new HubClient({
@@ -197,10 +197,11 @@ describe("requests", () => {
     const ws = FakeSocket.last();
     ws.handshake();
     const p = c.getEvents("s1", 2);
-    expect(ws.lastSent()).toMatchObject({ type: "get_events", sessionId: "s1", sinceId: 2 });
+    expect(ws.lastSent()).toMatchObject({ type: "get_events", sessionId: "s1", sinceSeq: 2 });
+    expect(ws.lastSent()).not.toHaveProperty("sinceId");
     ws.receive({ type: "ack", id: ws.lastSent().id, ok: true, result: { events: [event(3), event(4)] } });
-    expect((await p).map((e) => e.id)).toEqual([3, 4]);
-    expect(c.getState().events.s1!.map((e) => e.id)).toEqual([3, 4]);
+    expect((await p).map((e) => e.seq)).toEqual([3, 4]);
+    expect(c.getState().events.s1!.map((e) => e.id)).toEqual([`${MID}:3`, `${MID}:4`]);
   });
 });
 
@@ -352,5 +353,103 @@ describe("reconnect", () => {
     } finally {
       g.WebSocket = saved;
     }
+  });
+});
+
+describe("machine identity", () => {
+  test("welcome exposes this hub's machine; `machine` messages update state and fire listeners", () => {
+    const c = client();
+    c.connect();
+    const ws = FakeSocket.last();
+    ws.handshake();
+    expect(c.getState().machine).toEqual(machine);
+    expect(c.getState().machines[MID]).toEqual(machine);
+    const seen: string[] = [];
+    c.onMessage("machine", (m) => seen.push(m.machine.name));
+    ws.receive({ type: "machine", machine: machine2 });
+    ws.receive({ type: "machine", machine: { ...machine, name: "Gaming PC" } });
+    expect(seen).toEqual(["Mac mini", "Gaming PC"]);
+    expect(c.getState().machine?.name).toBe("Gaming PC");
+    expect(Object.keys(c.getState().machines).sort()).toEqual([MID, MID2].sort());
+  });
+
+  test("updateMachine sends the local machine id with a trimmed name and folds the ack", async () => {
+    const c = client();
+    c.connect();
+    const ws = FakeSocket.last();
+    ws.handshake();
+    const p = c.updateMachine("  Windows Desk  ");
+    await tick();
+    const sent = ws.lastSent();
+    expect(sent).toMatchObject({ type: "update_machine", machineId: MID, name: "Windows Desk" });
+    ws.receive({ type: "ack", id: sent.id, ok: true, result: { machine: { ...machine, name: "Windows Desk" } } });
+    expect((await p).name).toBe("Windows Desk");
+    expect(c.getState().machine?.name).toBe("Windows Desk");
+  });
+
+  test("updateMachine called while connecting waits for the welcome", async () => {
+    const c = client();
+    c.connect();
+    const ws = FakeSocket.last();
+    const p = c.updateMachine("Desk");
+    await tick();
+    expect(ws.sent.filter((m) => m.type === "update_machine")).toHaveLength(0);
+    ws.handshake();
+    await tick();
+    const sent = ws.lastSent();
+    expect(sent).toMatchObject({ type: "update_machine", machineId: MID, name: "Desk" });
+    ws.receive({ type: "ack", id: sent.id, ok: true, result: { machine: { ...machine, name: "Desk" } } });
+    expect((await p).name).toBe("Desk");
+  });
+
+  test("updateMachine surfaces hub errors (e.g. not_owner)", async () => {
+    const c = client();
+    c.connect();
+    const ws = FakeSocket.last();
+    ws.handshake();
+    const p = c.updateMachine("Desk");
+    await tick();
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: false, error: "not_owner" });
+    await expect(p).rejects.toMatchObject({ code: "not_owner", requestType: "update_machine" });
+  });
+
+  test("updateMachine rejects invalid names locally without sending", async () => {
+    const c = client();
+    c.connect();
+    const ws = FakeSocket.last();
+    ws.handshake();
+    const before = ws.sent.length;
+    await expect(c.updateMachine("   ")).rejects.toMatchObject({ code: "invalid" });
+    await expect(c.updateMachine("x".repeat(MACHINE_NAME_MAX + 1))).rejects.toBeInstanceOf(HubRequestError);
+    expect(ws.sent.length).toBe(before);
+  });
+
+  test("updateMachine rejects when not connected, on a pre-v2 hub, or when closed while waiting", async () => {
+    const idle = client();
+    await expect(idle.updateMachine("Desk")).rejects.toMatchObject({ code: "closed" });
+
+    const legacy = client();
+    legacy.connect();
+    FakeSocket.last().handshake({ ...welcome, machine: undefined, machines: undefined } as never);
+    await expect(legacy.updateMachine("Desk")).rejects.toMatchObject({ code: "no_machine" });
+
+    const waiting = client();
+    waiting.connect();
+    const p = waiting.updateMachine("Desk");
+    waiting.close();
+    await expect(p).rejects.toMatchObject({ code: "closed" });
+  });
+
+  test("updateMachine times out if the welcome never arrives", async () => {
+    const c = client({ requestTimeoutMs: 30, reconnect: false });
+    c.connect();
+    await expect(c.updateMachine("Desk")).rejects.toMatchObject({ code: "timeout" });
+  });
+
+  test("normalizeMachineName trims and bounds by code points", () => {
+    expect(normalizeMachineName("  Mac mini ")).toBe("Mac mini");
+    expect(normalizeMachineName("")).toBeNull();
+    expect(normalizeMachineName("🐶".repeat(MACHINE_NAME_MAX))).toBe("🐶".repeat(MACHINE_NAME_MAX));
+    expect(normalizeMachineName("a".repeat(MACHINE_NAME_MAX + 1))).toBeNull();
   });
 });

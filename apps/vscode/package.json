@@ -75,6 +75,12 @@
         "icon": "$(symbol-color)"
       },
       {
+        "command": "krypto.renamePet",
+        "title": "Rename Pet",
+        "category": "Krypto",
+        "icon": "$(edit)"
+      },
+      {
         "command": "krypto.installHooks",
         "title": "Install Agent Hooks",
         "category": "Krypto"
@@ -90,6 +96,12 @@
         "title": "Reconnect to Hub",
         "category": "Krypto",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "krypto.renameMachine",
+        "title": "Rename This Machine",
+        "category": "Krypto",
+        "icon": "$(device-desktop)"
       }
     ],
     "viewsContainers": {
@@ -125,6 +137,11 @@
           "group": "navigation@2"
         },
         {
+          "command": "krypto.renamePet",
+          "when": "view == krypto.petView",
+          "group": "1_pet@0"
+        },
+        {
           "command": "krypto.changeSpecies",
           "when": "view == krypto.petView",
           "group": "1_pet@1"
@@ -138,6 +155,11 @@
           "command": "krypto.reconnect",
           "when": "view == krypto.petView",
           "group": "1_pet@3"
+        },
+        {
+          "command": "krypto.renameMachine",
+          "when": "view == krypto.petView",
+          "group": "1_pet@4"
         }
       ],
       "commandPalette": [

@@ -4,7 +4,7 @@
 //! the pet happy and earn xp; errors, refusals and failed tools make it droop.
 
 use krypto_protocol::{
-    Agent, EventType, HookPayload, PermissionResolvedPayload, Pet, ResolvedBy, Species, StopPayload,
+    global_id, Agent, EventType, HookPayload, PermissionResolvedPayload, Pet, ResolvedBy, Species, StopPayload,
     StopReason, ToolCallStatus,
 };
 use serde_json::Value;
@@ -19,29 +19,84 @@ pub const DEFAULT_PERSONALITY: &str =
 /// XP needed per level.
 pub const XP_PER_LEVEL: u32 = 100;
 
-const DOG_NAMES: &[&str] = &[
+pub const DOG_NAMES: &[&str] = &[
     "Biscuit", "Pixel", "Rusty", "Mochi", "Nugget", "Waffles", "Ziggy", "Pepper", "Scout", "Bento",
-    "Cookie", "Tofu", "Patch", "Dash", "Kernel", "Byte",
+    "Cookie", "Tofu", "Patch", "Dash", "Kernel", "Byte", "Pickles", "Noodle", "Maple", "Juniper",
+    "Pretzel", "Clover", "Sprocket", "Toffee", "Bagel", "Widget", "Ramen", "Hazel", "Gizmo", "Sushi",
+    "Taco", "Ollie",
 ];
 
-/// Stable pet id for an agent (one pet per agent).
-pub fn pet_id_for(agent_id: &str) -> String {
-    format!("pet-{agent_id}")
+/// Stable global pet id for an agent on a machine (one pet per agent per machine):
+/// `${machine_id}:pet-${agent_id}`.
+pub fn pet_id_for(machine_id: &str, agent_id: &str) -> String {
+    global_id(machine_id, format!("pet-{agent_id}"))
 }
 
-/// Fun default name, seeded by the agent id so it is stable across restarts.
-pub fn default_name(agent_id: &str) -> String {
-    DOG_NAMES[(fnv1a(agent_id) % DOG_NAMES.len() as u64) as usize].to_string()
+/// Fun default name, seeded by `machine_id + "/" + agent_id` so it is stable across restarts and
+/// differs between machines. Names in `taken` (case-insensitive, surrounding whitespace ignored)
+/// are skipped by walking the list from the seeded slot; once every name is taken, the walk
+/// repeats with numbered variants ("Biscuit II", "Biscuit III", ...).
+pub fn default_name(machine_id: &str, agent_id: &str, taken: &[String]) -> String {
+    let taken: std::collections::HashSet<String> = taken.iter().map(|n| name_key(n)).collect();
+    let n = DOG_NAMES.len();
+    let start = (fnv1a(&format!("{machine_id}/{agent_id}")) % n as u64) as usize;
+    // Each tier offers `n` fresh names and `taken` is finite, so tier `taken.len() / n + 1` at the
+    // latest has a free one; the loop bound is just that guarantee.
+    let mut tier = 1;
+    loop {
+        for i in 0..n {
+            let base = DOG_NAMES[(start + i) % n];
+            let name = if tier == 1 { base.to_string() } else { format!("{base} {}", roman(tier)) };
+            if !taken.contains(&name_key(&name)) {
+                return name;
+            }
+        }
+        tier += 1;
+    }
 }
 
-/// species Dog, fun default name, mood 70, xp 0.
-pub fn default_pet(agent: &Agent) -> Pet {
+fn name_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+/// Upper-case Roman numeral for `n >= 1` (name tiers: 2 -> "II").
+fn roman(mut n: usize) -> String {
+    const TABLE: &[(usize, &str)] = &[
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    let mut out = String::new();
+    for &(v, s) in TABLE {
+        while n >= v {
+            out.push_str(s);
+            n -= v;
+        }
+    }
+    out
+}
+
+/// species Dog, fun default name, mood 70, xp 0. Id `${machine_id}:pet-${agent_id}`.
+/// `taken_names`: names of every known pet on every machine, so paired machines never show two
+/// pets with the same name.
+pub fn default_pet(agent: &Agent, taken_names: &[String]) -> Pet {
     Pet {
-        id: pet_id_for(&agent.id),
+        id: pet_id_for(&agent.machine_id, &agent.id),
+        machine_id: agent.machine_id.clone(),
         agent_id: agent.id.clone(),
         species: Species::Dog,
         skin: DEFAULT_SKIN.to_string(),
-        name: default_name(&agent.id),
+        name: default_name(&agent.machine_id, &agent.id, taken_names),
         personality: DEFAULT_PERSONALITY.to_string(),
         mood: DEFAULT_MOOD,
         xp: 0,
@@ -134,9 +189,18 @@ mod tests {
     use krypto_protocol::{AgentSource, HookSource, PermissionOutcome};
     use serde_json::json;
 
+    const M1: &str = "abcdef012345";
+    const M2: &str = "zz9988776655";
+    const AGENTS: [&str; 6] = ["codex", "claude-code", "gemini", "copilot", "goose", "auggie"];
+
     fn agent(id: &str) -> Agent {
+        agent_on(M1, id)
+    }
+
+    fn agent_on(machine_id: &str, id: &str) -> Agent {
         Agent {
             id: id.into(),
+            machine_id: machine_id.into(),
             name: id.into(),
             command: vec![],
             env: None,
@@ -151,26 +215,78 @@ mod tests {
 
     #[test]
     fn default_pet_is_a_dog_with_stable_name() {
-        let p = default_pet(&agent("codex"));
+        let p = default_pet(&agent("codex"), &[]);
         assert_eq!(p.species, Species::Dog);
         assert_eq!(p.mood, 70);
         assert_eq!(p.xp, 0);
         assert_eq!(p.agent_id, "codex");
-        assert_eq!(p.id, "pet-codex");
+        assert_eq!(p.machine_id, M1);
+        assert_eq!(p.id, "abcdef012345:pet-codex");
+        assert_eq!(krypto_protocol::parse_global_id(&p.id), Some((M1, "pet-codex")));
         assert_eq!(p.skin, "default");
         assert!(DOG_NAMES.contains(&p.name.as_str()));
-        assert_eq!(p.name, default_pet(&agent("codex")).name);
-        // Different agents usually get different names (seeded by id).
-        let names: std::collections::BTreeSet<String> = ["codex", "claude-code", "gemini", "copilot", "goose"]
-            .iter()
-            .map(|id| default_name(id))
-            .collect();
+        assert_eq!(p, default_pet(&agent("codex"), &[]), "deterministic");
+        // Different agents usually get different names (seeded by machine + id).
+        let names: std::collections::BTreeSet<String> = AGENTS.iter().map(|id| default_name(M1, id, &[])).collect();
         assert!(names.len() >= 3);
     }
 
     #[test]
+    fn same_agent_on_two_machines_gets_different_names() {
+        // The machine id alone changes the seed for most agents...
+        let differ = AGENTS.iter().filter(|id| default_name(M1, id, &[]) != default_name(M2, id, &[])).count();
+        assert!(differ >= 4, "machine id should change the seed ({differ}/6 differ)");
+        // ...and with the roster of known names (what the hub passes) they never collide.
+        for id in AGENTS {
+            let first = default_pet(&agent_on(M1, id), &[]);
+            let second = default_pet(&agent_on(M2, id), std::slice::from_ref(&first.name));
+            assert_ne!(first.name, second.name, "{id}");
+            assert_ne!(first.id, second.id, "{id}");
+            assert_eq!(second.machine_id, M2);
+            assert_eq!(second.id, format!("{M2}:pet-{id}"));
+        }
+        // A whole roster across both machines stays unique.
+        let mut taken: Vec<String> = Vec::new();
+        for m in [M1, M2] {
+            for id in AGENTS {
+                let p = default_pet(&agent_on(m, id), &taken);
+                assert!(!taken.iter().any(|t| t.eq_ignore_ascii_case(&p.name)), "{} reused", p.name);
+                taken.push(p.name);
+            }
+        }
+    }
+
+    #[test]
+    fn taken_names_are_skipped_case_insensitively() {
+        let seeded = default_name(M1, "codex", &[]);
+        let next = default_name(M1, "codex", &[seeded.to_uppercase()]);
+        assert_ne!(next, seeded);
+        // Walks the list in order from the seeded slot.
+        let i = DOG_NAMES.iter().position(|n| *n == seeded).unwrap();
+        assert_eq!(next, DOG_NAMES[(i + 1) % DOG_NAMES.len()]);
+        assert_eq!(default_name(M1, "codex", &[format!("  {}  ", seeded.to_lowercase())]), next);
+        // Unrelated taken names do not move the pick.
+        assert_eq!(default_name(M1, "codex", &["Nobody".into()]), seeded);
+    }
+
+    #[test]
+    fn exhausted_list_falls_back_to_numbered_names() {
+        let mut taken: Vec<String> = DOG_NAMES.iter().map(|n| n.to_string()).collect();
+        let seeded = default_name(M1, "codex", &[]);
+        let second = default_name(M1, "codex", &taken);
+        assert_eq!(second, format!("{seeded} II"));
+        taken.push(second.to_lowercase());
+        let i = DOG_NAMES.iter().position(|n| *n == seeded).unwrap();
+        assert_eq!(default_name(M1, "codex", &taken), format!("{} II", DOG_NAMES[(i + 1) % DOG_NAMES.len()]));
+        taken.extend(DOG_NAMES.iter().map(|n| format!("{n} II")));
+        assert_eq!(default_name(M1, "codex", &taken), format!("{seeded} III"));
+        assert_eq!(roman(4), "IV");
+        assert_eq!(roman(14), "XIV");
+    }
+
+    #[test]
     fn events_change_mood_and_xp() {
-        let mut p = default_pet(&agent("codex"));
+        let mut p = default_pet(&agent("codex"), &[]);
         assert!(on_event(&mut p, EventType::Stop, &json!({"stopReason": "end_turn"})));
         assert_eq!((p.mood, p.xp), (75, 10));
         assert!(on_event(&mut p, EventType::Error, &json!({"message": "boom"})));
@@ -203,7 +319,7 @@ mod tests {
 
     #[test]
     fn mood_and_xp_are_clamped() {
-        let mut p = default_pet(&agent("codex"));
+        let mut p = default_pet(&agent("codex"), &[]);
         for _ in 0..50 {
             on_event(&mut p, EventType::Stop, &json!({"stopReason": "end_turn"}));
         }

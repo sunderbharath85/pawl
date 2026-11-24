@@ -47,7 +47,7 @@ another owner's files.
 - Hub binds **only** `127.0.0.1:47800` (override `KRYPTO_HUB_URL` / `--port`).
 - Data dir: `krypto_protocol::data_dir()` = `dirs::data_dir()/krypto`
   (Windows `%APPDATA%\krypto`, macOS `~/Library/Application Support/krypto`,
-  Linux `~/.local/share/krypto`). Contains `hub.db` (SQLite), `token`,
+  Linux `~/.local/share/krypto`). Contains `machine.toml` (`id`, `name`: this machine's identity; never edit `id`), `hub.db` (SQLite), `token`,
   `config.toml`, `registry-cache.json`.
 - `token`: 32 random bytes hex, created by the hub on first start. Clients read it
   (env `KRYPTO_HUB_TOKEN` overrides).
@@ -294,3 +294,61 @@ Both packages: `"type":"module"`, `main`/`types`/`exports` point at `src/*.ts(x)
   back to the built-in SVG character. Export `type SpriteManifest` and `loadSpriteManifest(baseUrl): Promise<SpriteManifest|null>`.
 - Desktop serves `assets/pets` as static files (Vite `publicDir` copy or a copy step) at `/pets/`; VS Code copies
   to `dist/media/pets/` and passes a `webview.asWebviewUri` base. Missing assets must never break rendering.
+
+---
+
+## Step 1 — Machine identity (PLAN.md migration step 1) — protocol v2
+
+Protocol already updated by the orchestrator (`packages/protocol/src/index.ts`, `crates/protocol/src/lib.rs`, PROTOCOL_VERSION = 2):
+`Machine {id,name,os,lastSeen,online,hubVersion?}`, `MachineId` (12 chars `[a-z0-9]`), `globalId()/parseGlobalId()`
+(Rust `global_id/parse_global_id/is_valid_machine_id`, `MachineOs::current()`), `machineId` on Agent, Session,
+HistorySession, HubEvent, PermissionRequest, Pet, ChatMessage, HubNotification. `HubEvent.id` is now the global
+string `${machineId}:${seq}` and `HubEvent.seq` the numeric cursor; `get_events.sinceId` -> `sinceSeq`.
+New `ClientMsg update_machine{machineId,name}` -> `ack{machine}`; new `ServerMsg machine{machine}`;
+`Welcome.machine` (this hub) + `Welcome.machines` (all known, incl. self).
+
+Rules: **every id on the wire is global** (`${machineId}:${localId}`). Hubs store global ids directly
+(no boundary translation). A ClientMsg that names an id whose machine prefix is not this hub's ->
+`ack{ok:false,error:"not_owner"}` for now (step 4 routes it). Legacy un-prefixed ids -> `"not_found"`.
+
+### Rust API changes (sde-libs implements; sde-hubcore codes against them)
+```rust
+// krypto-acp
+impl AcpHost { pub fn new(machine_id: MachineId, events: UnboundedSender<HostEvent>) -> Self; }
+// every Session / HistorySession / PermissionRequest / HubEvent payload it builds carries machine_id;
+// request ids are global: global_id(machine_id, uuid). hub_session_id passed in is already global.
+
+// krypto-discovery
+pub struct DiscoveryConfig { pub machine_id: MachineId, /* existing fields */ }  // Agent.machine_id = cfg.machine_id
+// hooks::NormalizedHook unchanged (hub assigns machine ids)
+
+// krypto-brain
+pub fn growth::default_pet(agent: &Agent, taken_names: &[String]) -> Pet;
+//   id = global_id(&agent.machine_id, format!("pet-{}", agent.id)) (deterministic, one per agent per machine)
+//   name seeded by fnv1a(machine_id + "/" + agent_id); skip names in taken_names (case-insensitive) — pass the
+//   names of every known pet on every machine so paired machines never show two "Biscuit"s.
+impl Watchdog { pub fn new(cfg: WatchdogConfig, machine_id: MachineId) -> Self; }   // notifications carry machine_id
+// chat: BrainContext gains `machine: Machine`; replies/ChatMessages carry machine_id. Status replies name the
+//   machine when more than one machine is known ("Claude on Mac mini is working on ...").
+```
+
+### Hub (sde-hubcore)
+- `data_dir/machine.toml` `{ id, name }`: id generated once (12 chars `[a-z0-9]` from a CSPRNG), name defaults
+  to the host name (Windows `COMPUTERNAME`, macOS `scutil --get ComputerName`, Linux `/etc/hostname`, else "This machine").
+  No new dependencies.
+- CLI: `krypto machine` (print id/name/os), `krypto machine --name "Windows PC"` (works with or without a running hub;
+  a running hub broadcasts `ServerMsg::Machine`).
+- Store migration (schema v2): add `machine_id` columns; rewrite existing ids to global form; events keep rowid as seq.
+- Welcome: `machine` + `machines` (`[self]` for now, online=true, lastSeen=now).
+- `update_machine` only for the local machine id (else `not_owner`); trims, 1–40 chars.
+
+### Clients
+- hub-client (fe-core): `HubState.machine?: Machine`, `HubState.machines: Record<MachineId, Machine>`; handles
+  `machine` msgs; events stored per session keyed by global id, cursor = `seq`; `getEvents(sessionId, sinceSeq?, limit?)`;
+  `HubClient.updateMachine(name): Promise<Machine>` (local machine).
+- pet-engine (fe-core): `PetView` gains `machineId` and `machineName?`; derivePetViews input gains
+  `machines?: Record<MachineId, Machine>`; pets match sessions/pending by `(machineId, agentId)`; `PetStage.showNames`
+  defaults to **true**; name label shows `name` (visitors area comes in step 3).
+- desktop/vscode (fe-apps): show pet names by default; show the machine name (panel header / status-bar tooltip);
+  desktop Settings + VS Code command "Krypto: Rename This Machine" call `updateMachine`; use `seq` cursors.
+- mobile: frozen; only keep `bunx tsc --noEmit` green against protocol v2 (fe-core does the minimal type fixes).

@@ -1,9 +1,12 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
+import { MACHINE_NAME_MAX, normalizeMachineName } from "@krypto/hub-client";
 import { SPECIES_META } from "@krypto/pet-engine";
-import type { Agent, PermissionRequest, Pet, Session, Species } from "@krypto/protocol";
+import type { Agent, Machine, PermissionRequest, Pet, Session, Species } from "@krypto/protocol";
 import { HubOfflineError, type HubConnection } from "./connection";
 import { installHooks, startHub, type HookTargetId } from "./hubProcess";
+import { OS_LABEL, petFor, renameErrorText } from "../shared/machine";
+import { checkPetName, petRenameErrorText } from "../shared/petNames";
 import type { PetWebviews } from "./petView";
 import { agentName, errorMessage, isBusy, isInWorkspace, isOpen, relativeTime, sessionLabel } from "./util";
 
@@ -39,9 +42,11 @@ export class Commands {
       reg("krypto.showPet", (sessionId?: string) => this.showPet(sessionId)),
       reg("krypto.openPetPanel", () => this.views.openPanel()),
       reg("krypto.changeSpecies", (petId?: string, species?: Species) => this.changeSpecies(petId, species)),
+      reg("krypto.renamePet", (petId?: string, name?: string) => this.renamePet(petId, name)),
       reg("krypto.installHooks", (target?: HookTargetId) => installHooks(this.log, target)),
       reg("krypto.startHub", () => startHub(this.hub, this.log)),
       reg("krypto.reconnect", () => this.hub.restart()),
+      reg("krypto.renameMachine", (name?: string) => this.renameMachine(name)),
     ];
   }
 
@@ -116,11 +121,13 @@ export class Commands {
     });
     const pets = Object.values(this.hub.state.pets);
     const items: Array<vscode.QuickPickItem & { agent: Agent }> = agents.map((agent) => {
-      const pet = pets.find((p) => p.agentId === agent.id);
+      const pet = petFor(pets, agent.machineId, agent.id);
       return {
         agent,
         label: `${pet ? SPECIES_META[pet.species].emoji + " " : ""}${agent.name}`,
-        description: [agent.version, agent.installed ? undefined : "not installed (will try npx)"].filter(Boolean).join(" · "),
+        description: [pet ? `${pet.name} watches` : undefined, agent.version, agent.installed ? undefined : "not installed (will try npx)"]
+          .filter(Boolean)
+          .join(" · "),
         detail: agent.description,
       };
     });
@@ -217,7 +224,10 @@ export class Commands {
         : await this.pickSession("Krypto: Cancel Session", (s) => s.source === "owned" && isBusy(s), "nothing to cancel — no busy sessions.");
     if (!session) return;
     await api.cancel(session.id);
-    void vscode.window.setStatusBarMessage(`Krypto: cancelled ${agentName(this.hub.state.agents, session.agentId)}`, 3000);
+    void vscode.window.setStatusBarMessage(
+      `Krypto: cancelled ${agentName(this.hub.state.agents, session.agentId, session.machineId)}`,
+      3000,
+    );
   }
 
   // ---------------- approvals ----------------
@@ -237,7 +247,7 @@ export class Commands {
       else {
         const items: RequestItem[] = pending.map((request) => ({
           request,
-          label: `${agentName(state.agents, request.agentId)}: ${request.toolCall.title || request.toolCall.kind || "tool call"}`,
+          label: `${agentName(state.agents, request.agentId, request.machineId)}: ${request.toolCall.title || request.toolCall.kind || "tool call"}`,
           description: relativeTime(request.createdAt),
           detail: request.toolCall.locations?.map((l) => l.path).join(", "),
         }));
@@ -254,33 +264,101 @@ export class Commands {
     else await api.deny(req.requestId);
   }
 
+  // ---------------- machine ----------------
+
+  /** Rename this hub's machine (input box unless `name` is given, e.g. from a keybinding's args). */
+  async renameMachine(name?: string): Promise<void> {
+    const api = this.hub.api;
+    const machine = this.hub.state.machine;
+    if (!machine) throw new Error("the hub has not introduced this machine yet; try again in a moment");
+    let next = typeof name === "string" ? name : undefined;
+    if (next === undefined) {
+      next = await vscode.window.showInputBox({
+        title: "Krypto: Rename This Machine",
+        prompt: `Shown above this machine's pets on every paired screen. ${OS_LABEL[machine.os] ?? machine.os} · id ${machine.id}`,
+        value: machine.name,
+        valueSelection: [0, machine.name.length],
+        placeHolder: "e.g. Windows PC",
+        ignoreFocusOut: true,
+        validateInput: (v) => (normalizeMachineName(v) === null ? `Use 1–${MACHINE_NAME_MAX} characters.` : null),
+      });
+      if (next === undefined) return; // Esc
+    }
+    const trimmed = normalizeMachineName(next);
+    if (trimmed === null) throw new Error(`the machine name must be 1–${MACHINE_NAME_MAX} characters`);
+    if (trimmed === machine.name) return;
+    let updated: Machine;
+    try {
+      updated = await api.updateMachine(trimmed);
+    } catch (err) {
+      throw new Error(renameErrorText(err));
+    }
+    this.log.info(`renamed machine ${updated.id} to "${updated.name}"`);
+    void vscode.window.setStatusBarMessage(`Krypto: this machine is now “${updated.name}”`, 4000);
+  }
+
   // ---------------- pets ----------------
+
+  /** `petId` if known, else the only pet, else a quick pick. Undefined when there is none / Esc. */
+  private async pickPet(title: string, petId?: string): Promise<Pet | undefined> {
+    const state = this.hub.state;
+    const known = typeof petId === "string" && petId ? state.pets[petId] : undefined;
+    if (known) return known;
+    const pets = Object.values(state.pets).sort((a, b) => a.name.localeCompare(b.name));
+    if (pets.length === 0) {
+      void vscode.window.showInformationMessage("Krypto: no pets yet — each agent gets one when the hub discovers it.");
+      return undefined;
+    }
+    if (pets.length === 1) return pets[0];
+    const pick = await vscode.window.showQuickPick(
+      pets.map((p) => ({
+        pet: p,
+        label: `${SPECIES_META[p.species].emoji} ${p.name}`,
+        description: agentName(state.agents, p.agentId, p.machineId),
+      })),
+      { title, placeHolder: "Which pet?" },
+    );
+    return pick?.pet;
+  }
+
+  /** Rename a pet (input box unless `name` is given). Names are unique across every known pet. */
+  async renamePet(petId?: string, name?: string): Promise<void> {
+    const api = this.hub.api;
+    const pet = await this.pickPet("Krypto: Rename Pet", petId);
+    if (!pet) return;
+    const others = () => Object.values(this.hub.state.pets);
+    let next = typeof name === "string" ? name : undefined;
+    if (next === undefined) {
+      next = await vscode.window.showInputBox({
+        title: `Krypto: Rename ${pet.name}`,
+        prompt: `Watches ${agentName(this.hub.state.agents, pet.agentId, pet.machineId)}. Shown above the pet everywhere.`,
+        value: pet.name,
+        valueSelection: [0, pet.name.length],
+        ignoreFocusOut: true,
+        validateInput: (v) => {
+          if (v.trim() === pet.name) return null;
+          const check = checkPetName(v, pet.id, others());
+          return check.ok ? null : check.error;
+        },
+      });
+      if (next === undefined) return; // Esc
+    }
+    if (next.trim() === pet.name) return;
+    const check = checkPetName(next, pet.id, others());
+    if (!check.ok) throw new Error(check.error);
+    let updated: Pet;
+    try {
+      updated = await api.updatePet(pet.id, { name: check.name });
+    } catch (err) {
+      throw new Error(petRenameErrorText(err, check.name) ?? errorMessage(err));
+    }
+    void vscode.window.setStatusBarMessage(`Krypto: ${SPECIES_META[updated.species].emoji} ${pet.name} is now ${updated.name}`, 4000);
+  }
 
   async changeSpecies(petId?: string, species?: Species): Promise<void> {
     const api = this.hub.api;
-    const state = this.hub.state;
-    const pets = Object.values(state.pets);
-    let pet: Pet | undefined = typeof petId === "string" && petId ? state.pets[petId] : undefined;
-    if (!pet) {
-      if (pets.length === 0) {
-        void vscode.window.showInformationMessage("Krypto: no pets yet — each agent gets one when the hub discovers it.");
-        return;
-      }
-      if (pets.length === 1) pet = pets[0];
-      else {
-        const pick = await vscode.window.showQuickPick(
-          pets.map((p) => ({
-            pet: p,
-            label: `${SPECIES_META[p.species].emoji} ${p.name}`,
-            description: agentName(state.agents, p.agentId),
-          })),
-          { title: "Krypto: Change Pet Species", placeHolder: "Which pet?" },
-        );
-        pet = pick?.pet;
-      }
-    }
-    if (!pet) return;
-    const chosen = pet;
+    const chosen = await this.pickPet("Krypto: Change Pet Species", petId);
+    if (!chosen) return;
     let next = species && species in SPECIES_META ? species : undefined;
     if (!next) {
       const pick = await vscode.window.showQuickPick(

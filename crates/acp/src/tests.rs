@@ -37,8 +37,11 @@ impl Drop for TempDir {
     }
 }
 
+/// The machine every test host runs on.
+const ME: &str = "abcdef012345";
+
 fn test_agent() -> pp::Agent {
-    j(json!({"id": "fake", "name": "Fake", "command": ["fake-agent"], "installed": true, "source": "custom"}))
+    j(json!({"id": "fake", "machineId": ME, "name": "Fake", "command": ["fake-agent"], "installed": true, "source": "custom"}))
 }
 
 async fn run_turn(
@@ -176,7 +179,7 @@ struct Setup {
 
 async fn setup(tmp: &TempDir) -> Setup {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let host = AcpHost::new(tx);
+    let host = AcpHost::new(ME.into(), tx);
     let (client_side, agent_side) = Channel::duplex();
     let closed = Arc::new(std::sync::Mutex::new(Vec::new()));
     let agent = tokio::spawn(fake_agent(agent_side, tmp.root(), tmp.0.join("outside.txt"), closed.clone()));
@@ -236,6 +239,7 @@ async fn full_turn_with_permission_and_fs() {
 
     let session = host.start_session(&test_agent(), tmp.root(), "hub-1".into(), Some("work".into())).await.unwrap();
     assert_eq!(session.id, "hub-1");
+    assert_eq!(session.machine_id, ME);
     assert_eq!(session.acp_session_id.as_deref(), Some("sess-1"));
     assert_eq!(session.source, pp::SessionSource::Owned);
     assert_eq!(session.title.as_deref(), Some("work"));
@@ -244,6 +248,12 @@ async fn full_turn_with_permission_and_fs() {
     let Some(HostEvent::PermissionRequest(req)) = evs.last() else { unreachable!() };
     assert_eq!(req.session_id, "hub-1");
     assert_eq!(req.agent_id, "fake");
+    assert_eq!(req.machine_id, ME);
+    // Request ids are global: `${machine_id}:${uuid}`.
+    let (m, local) = pp::parse_global_id(&req.request_id).expect("global request id");
+    assert_eq!(m, ME);
+    assert!(uuid::Uuid::parse_str(local).is_ok(), "{}", req.request_id);
+    assert!(evs.iter().all(|e| !matches!(e, HostEvent::Session(s) if s.machine_id != ME)));
     // The permission's toolCall only carried an id; kind/title come from the earlier tool_call.
     assert_eq!(req.tool_call.kind, Some(pp::ToolKind::Edit));
     assert_eq!(req.tool_call.title.as_deref(), Some("Write note"));
@@ -321,6 +331,7 @@ async fn cancel_history_resume_and_process_exit() {
     let history = host.list_history(&test_agent(), Some(tmp.root())).await.unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].acp_session_id, "old-1");
+    assert_eq!(history[0].machine_id, ME);
     assert_eq!(history[0].title.as_deref(), Some("Old work"));
     assert_eq!(history[0].updated_at, Some(1_767_225_600_000));
     // No cwd: reuses the live connection for the agent.
@@ -328,6 +339,7 @@ async fn cancel_history_resume_and_process_exit() {
 
     let resumed = host.resume_session(&test_agent(), "old-1".into(), tmp.root(), "hub-2".into()).await.unwrap();
     assert_eq!(resumed.acp_session_id.as_deref(), Some("old-1"));
+    assert_eq!(resumed.machine_id, ME);
     let evs = collect_until(&mut rx, |e| is_event(e, pp::EventType::UserMessage)).await;
     let upsert = evs.iter().position(|e| matches!(e, HostEvent::Session(s) if s.id == "hub-2")).expect("hub-2 upsert");
     assert!(upsert < evs.len() - 1, "session upsert is emitted before the replayed history");
@@ -355,11 +367,29 @@ async fn cancel_history_resume_and_process_exit() {
 }
 
 #[test]
+fn other_machines_agents_are_refused() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let host = AcpHost::new(ME.into(), tx);
+        assert_eq!(host.machine_id(), ME);
+        let mut remote = test_agent();
+        remote.machine_id = "zz9988776655".into();
+        let here = std::env::current_dir().unwrap();
+        let err = host.start_session(&remote, here.clone(), "h".into(), None).await.unwrap_err();
+        assert!(err.to_string().contains("belongs to machine `zz9988776655`"), "{err:#}");
+        assert!(host.list_history(&remote, None).await.is_err());
+        assert!(host.resume_session(&remote, "x".into(), here, "h2".into()).await.is_err());
+        assert!(rx.try_recv().is_err(), "nothing was spawned or emitted");
+    });
+}
+
+#[test]
 fn unknown_cwd_is_rejected() {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     rt.block_on(async {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let host = AcpHost::new(tx);
+        let host = AcpHost::new(ME.into(), tx);
         let missing = Path::new("definitely/not/a/real/dir/xyz");
         let err = host.start_session(&test_agent(), missing.to_path_buf(), "h".into(), None).await.unwrap_err();
         assert!(err.to_string().contains("invalid session cwd"), "{err:#}");
@@ -413,11 +443,11 @@ async fn real_subprocess_agent() {
     let script = tmp.0.join("agent.js");
     std::fs::write(&script, NODE_AGENT).unwrap();
     let agent: pp::Agent = j(json!({
-        "id": "node-agent", "name": "Node", "command": ["node", script.to_string_lossy()],
+        "id": "node-agent", "machineId": ME, "name": "Node", "command": ["node", script.to_string_lossy()],
         "installed": true, "source": "custom"
     }));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let host = AcpHost::new(tx);
+    let host = AcpHost::new(ME.into(), tx);
 
     let s = host.start_session(&agent, tmp.root(), "p1".into(), Some("hello".into())).await.unwrap();
     assert_eq!(s.acp_session_id.as_deref(), Some("node-1"));
@@ -454,15 +484,15 @@ async fn real_subprocess_agent() {
 async fn non_acp_program_fails_initialize() {
     let tmp = TempDir::new();
     let agent: pp::Agent = j(json!({
-        "id": "not-acp", "name": "cargo", "command": ["cargo", "--version"], "installed": true, "source": "custom"
+        "id": "not-acp", "machineId": ME, "name": "cargo", "command": ["cargo", "--version"], "installed": true, "source": "custom"
     }));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let host = AcpHost::new(tx);
+    let host = AcpHost::new(ME.into(), tx);
     let err = host.start_session(&agent, tmp.root(), "x".into(), None).await.unwrap_err();
     assert!(err.to_string().contains("initialize failed"), "{err:#}");
 
     let missing: pp::Agent = j(json!({
-        "id": "missing", "name": "missing", "command": ["no-such-agent-binary-xyz"], "installed": false, "source": "custom"
+        "id": "missing", "machineId": ME, "name": "missing", "command": ["no-such-agent-binary-xyz"], "installed": false, "source": "custom"
     }));
     let err = host.start_session(&missing, tmp.root(), "y".into(), None).await.unwrap_err();
     assert!(err.to_string().contains("could not find agent executable"), "{err:#}");
@@ -526,11 +556,11 @@ async fn closing_last_session_kills_process_tree() {
     let script = tmp.0.join("agent.js");
     std::fs::write(&script, NODE_AGENT).unwrap();
     let agent: pp::Agent = j(json!({
-        "id": "node-tree", "name": "Node", "command": ["node", script.to_string_lossy()],
+        "id": "node-tree", "machineId": ME, "name": "Node", "command": ["node", script.to_string_lossy()],
         "installed": true, "source": "custom"
     }));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let host = AcpHost::new(tx);
+    let host = AcpHost::new(ME.into(), tx);
     host.start_session(&agent, tmp.root(), "t1".into(), Some("spawn".into())).await.unwrap();
     let evs = collect_until(&mut rx, |e| is_event(e, pp::EventType::Stop)).await;
     let text = events_of(&evs, pp::EventType::AgentMessageChunk)[0]["text"].as_str().unwrap().to_string();

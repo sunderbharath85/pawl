@@ -105,7 +105,7 @@ export function HomeView() {
                     <span className={`dot tone-${STATUS_META[s.status].tone}`} />
                     <span className="mini-title">{sessionTitle(s, state.agents)}</span>
                     <span className="muted">
-                      {agentName(state.agents, s.agentId)} · {SOURCE_LABEL[s.source]} · {timeAgo(s.lastEventAt, now)}
+                      {agentName(state.agents, s.agentId, s.machineId)} · {SOURCE_LABEL[s.source]} · {timeAgo(s.lastEventAt, now)}
                     </span>
                   </button>
                 </li>

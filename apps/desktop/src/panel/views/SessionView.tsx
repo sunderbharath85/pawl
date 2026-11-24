@@ -12,6 +12,7 @@ import {
   shortPath,
   timeAgo,
 } from "../../lib/format";
+import { sessionBackfill } from "../../lib/backfill";
 import { usePanel } from "../context";
 import { buildFeed, STOP_LABEL, type FeedItem } from "../feed";
 import * as I from "../icons";
@@ -25,17 +26,20 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const session = state.sessions[sessionId];
   const events = state.events[sessionId] ?? EMPTY;
   const feed = useMemo(() => buildFeed(events), [events]);
-  const pet = views.find((v) => v.sessionId === sessionId) ?? views.find((v) => v.agentId === session?.agentId);
+  const pet =
+    views.find((v) => v.sessionId === sessionId) ??
+    views.find((v) => v.machineId === session?.machineId && v.agentId === session?.agentId);
   const pending = Object.values(state.pending).filter((p) => p.sessionId === sessionId);
   const [loading, setLoading] = useState(false);
 
-  // Backfill history once per session (merged into state.events by the client).
+  // Backfill on open and catch up after every reconnect, using `seq` as the cursor
+  // (fetched events are merged into state.events by the client, deduped by global id).
   useEffect(() => {
     if (meta.phase !== "connected") return;
     let alive = true;
     setLoading(true);
-    client
-      .getEvents(sessionId, undefined, 500)
+    sessionBackfill
+      .sync(client, sessionId)
       .catch((err) => alive && toast(`Could not load events: ${errorText(err)}`, "error"))
       .finally(() => alive && setLoading(false));
     return () => {
@@ -76,7 +80,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
             <span className={`status-pill tone-${status.tone}`}>
               <span className={`dot tone-${status.tone}`} /> {status.label}
             </span>
-            <span className="chip">{agentName(state.agents, session.agentId)}</span>
+            <span className="chip">{agentName(state.agents, session.agentId, session.machineId)}</span>
             <span className="chip chip-soft">{SOURCE_LABEL[session.source]}</span>
             <span className="chip chip-soft mono" title={session.cwd}>
               <I.Folder size={13} /> {shortPath(session.cwd || "~", 3)}

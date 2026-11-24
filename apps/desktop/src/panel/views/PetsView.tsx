@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { SPECIES_META } from "@krypto/pet-engine";
 import type { Pet, Species } from "@krypto/protocol";
 import { agentName, errorText } from "../../lib/format";
+import { checkPetName, petRenameErrorText } from "../../lib/petNames";
 import { usePanel } from "../context";
 import { ACTIVITY_LABEL, PetAvatar } from "../PetAvatar";
 
@@ -40,8 +41,15 @@ function PetCard({ pet, focused }: { pet: Pet; focused: boolean }) {
   const [species, setSpecies] = useState<Species>(pet.species);
   const [personality, setPersonality] = useState(pet.personality);
   const [saving, setSaving] = useState(false);
+  /** Hub rejection of the last save (name_taken / invalid), shown under the name field. */
+  const [nameError, setNameError] = useState<string | null>(null);
   const ref = useRef<HTMLElement>(null);
   const view = views.find((v) => v.petId === pet.id);
+  // Names are unique across every known pet (all machines); check as the user types.
+  const nameCheck = name.trim() === pet.name ? null : checkPetName(name, pet.id, Object.values(state.pets));
+  const liveNameError = nameCheck && !nameCheck.ok ? nameCheck.error : null;
+  const shownNameError = nameError ?? liveNameError;
+  const nameErrorId = `pet-name-error-${pet.id}`;
 
   // Follow server-side changes (another client renamed the pet) when not editing.
   const dirty = name !== pet.name || species !== pet.species || personality !== pet.personality;
@@ -58,17 +66,24 @@ function PetCard({ pet, focused }: { pet: Pet; focused: boolean }) {
   }, [focused]);
 
   const save = async () => {
-    if (!dirty || !name.trim()) return;
+    if (!dirty || saving) return;
+    if (nameCheck && !nameCheck.ok) {
+      setNameError(nameCheck.error);
+      return;
+    }
     setSaving(true);
+    setNameError(null);
+    const patch: Partial<Pick<Pet, "species" | "name" | "personality">> = {};
+    if (nameCheck?.ok) patch.name = nameCheck.name;
+    if (species !== pet.species) patch.species = species;
+    if (personality !== pet.personality) patch.personality = personality;
     try {
-      const patch: Partial<Pick<Pet, "species" | "name" | "personality">> = {};
-      if (name.trim() !== pet.name) patch.name = name.trim();
-      if (species !== pet.species) patch.species = species;
-      if (personality !== pet.personality) patch.personality = personality;
-      await client.updatePet(pet.id, patch);
-      toast(`${name.trim()} says ${SPECIES_META[species].sound}`);
+      const updated = await client.updatePet(pet.id, patch);
+      toast(`${updated.name} says ${SPECIES_META[updated.species].sound}`);
     } catch (err) {
-      toast(errorText(err), "error");
+      const friendly = patch.name !== undefined ? petRenameErrorText(err, patch.name) : undefined;
+      if (friendly) setNameError(friendly);
+      else toast(errorText(err), "error");
     } finally {
       setSaving(false);
     }
@@ -80,14 +95,26 @@ function PetCard({ pet, focused }: { pet: Pet; focused: boolean }) {
         <PetAvatar species={species} activity={species !== pet.species ? "happy" : (view?.activity ?? "idle")} size={120} />
       </div>
       <div className="pet-card-body">
-        <div className="pet-card-agent">Watches {agentName(state.agents, pet.agentId)}</div>
+        <div className="pet-card-agent">Watches {agentName(state.agents, pet.agentId, pet.machineId)}</div>
         <input
-          className="input pet-name-input"
+          className={`input pet-name-input${shownNameError ? " is-invalid" : ""}`}
           value={name}
-          maxLength={40}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => {
+            setName(e.target.value);
+            setNameError(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) void save();
+          }}
           aria-label="Pet name"
+          aria-invalid={shownNameError ? true : undefined}
+          aria-describedby={shownNameError ? nameErrorId : undefined}
         />
+        {shownNameError && (
+          <span className="field-error" id={nameErrorId} role="alert">
+            {shownNameError}
+          </span>
+        )}
         <div className="species-picker" role="radiogroup" aria-label="Species">
           {SPECIES.map((s) => (
             <button
@@ -126,7 +153,7 @@ function PetCard({ pet, focused }: { pet: Pet; focused: boolean }) {
           <div className="muted">{view ? ACTIVITY_LABEL[view.activity] : ""}</div>
         </div>
         <div className="form-actions">
-          <button className="pill pill-primary" disabled={!dirty || saving || !name.trim()} onClick={() => void save()}>
+          <button className="pill pill-primary" disabled={!dirty || saving || !!liveNameError} onClick={() => void save()}>
             {saving ? "Saving…" : "Save"}
           </button>
           {dirty && (
@@ -136,6 +163,7 @@ function PetCard({ pet, focused }: { pet: Pet; focused: boolean }) {
                 setName(pet.name);
                 setSpecies(pet.species);
                 setPersonality(pet.personality);
+                setNameError(null);
               }}
             >
               Reset

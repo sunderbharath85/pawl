@@ -6,6 +6,8 @@ import type {
   ClientMsg,
   HubEvent,
   HubNotification,
+  Machine,
+  MachineId,
   Pet,
   PermissionRequest,
   Rule,
@@ -26,10 +28,17 @@ export interface HubState {
   pets: Record<string, Pet>;
   pending: Record<string, PermissionRequest>;
   rules: Rule[];
-  /** Per session, ordered by event id ascending, capped (default last 500). */
+  /**
+   * Per session id (global). Each list is deduped by the event's global `id` and ordered by `seq`
+   * ascending (the hub's cursor), capped (default last 500).
+   */
   events: Record<string, HubEvent[]>;
   chat: ChatMessage[];
   notifications: HubNotification[];
+  /** The machine this hub runs on (from the hello `Welcome`; kept across reconnects). */
+  machine?: Machine | undefined;
+  /** Every known machine by id, including this hub's own (peers arrive in migration step 2). */
+  machines: Record<MachineId, Machine>;
   /** From the hello `Welcome`, once connected at least once. */
   hubVersion?: string | undefined;
   /** Last connection/handshake error, cleared on successful hello. */
@@ -62,6 +71,7 @@ export function initialHubState(): HubState {
     events: {},
     chat: [],
     notifications: [],
+    machines: {},
   };
 }
 
@@ -76,8 +86,14 @@ function capTail<T>(items: T[], cap: number): T[] {
   return items.length > cap ? items.slice(items.length - cap) : items;
 }
 
+/** Event order: `seq` ascending (per-machine cursor), then global id for a stable total order. */
+function compareEvents(a: HubEvent, b: HubEvent): number {
+  if (a.seq !== b.seq) return a.seq - b.seq;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
 /**
- * Merge `incoming` events into an id-ascending list: dedupes by id (incoming wins),
+ * Merge `incoming` events into a `seq`-ascending list: dedupes by global `id` (incoming wins),
  * keeps ascending order, caps to the newest `cap`.
  */
 export function mergeEvents(existing: readonly HubEvent[] | undefined, incoming: readonly HubEvent[], cap: number): HubEvent[] {
@@ -87,13 +103,30 @@ export function mergeEvents(existing: readonly HubEvent[] | undefined, incoming:
   if (incoming.length === 1) {
     const ev = incoming[0]!;
     const last = base[base.length - 1];
-    if (!last || ev.id > last.id) return capTail([...base, ev], cap);
+    if (!last || compareEvents(ev, last) > 0) {
+      if (!base.some((e) => e.id === ev.id)) return capTail([...base, ev], cap);
+    }
   }
-  const map = new Map<number, HubEvent>();
+  const map = new Map<string, HubEvent>();
   for (const ev of base) map.set(ev.id, ev);
   for (const ev of incoming) map.set(ev.id, ev);
-  const merged = [...map.values()].sort((a, b) => a.id - b.id);
+  const merged = [...map.values()].sort(compareEvents);
   return capTail(merged, cap);
+}
+
+/** Highest `seq` held for a session (the `sinceSeq` cursor for `getEvents`), or undefined if none. */
+export function latestEventSeq(state: Pick<HubState, "events">, sessionId: string): number | undefined {
+  const list = state.events[sessionId];
+  return list && list.length > 0 ? list[list.length - 1]!.seq : undefined;
+}
+
+/** Insert or replace a machine; also refreshes `state.machine` when it is this hub's own. */
+export function upsertMachine(state: HubState, machine: Machine): HubState {
+  return {
+    ...state,
+    machines: { ...state.machines, [machine.id]: machine },
+    machine: state.machine && state.machine.id === machine.id ? machine : state.machine,
+  };
 }
 
 function upsertById<T extends { id: string }>(items: readonly T[], item: T, cap: number): T[] {
@@ -122,10 +155,16 @@ function upsertChat(chat: readonly ChatMessage[], msg: ChatMessage, cap: number)
 /** Apply the hello `Welcome` snapshot. Events/chat/notifications are kept (they are incremental). */
 export function applyWelcome(state: HubState, welcome: Welcome): HubState {
   const pets = byKey(welcome.pets ?? [], (p) => p.id);
+  // `machines` is the hub's full snapshot; make sure our own machine is in it either way.
+  const machines = byKey(welcome.machines ?? [], (m) => m.id);
+  const machine = welcome.machine ?? state.machine;
+  if (welcome.machine) machines[welcome.machine.id] = welcome.machine;
   return {
     ...state,
     status: "connected",
     hubVersion: welcome.hubVersion,
+    machine,
+    machines,
     lastError: undefined,
     agents: welcome.agents ?? [],
     sessions: byKey(welcome.sessions ?? [], (s) => s.id),
@@ -164,6 +203,8 @@ export function reduceServerMsg(state: HubState, msg: ServerMsg, limits: StateLi
       return { ...state, chat: upsertChat(state.chat, msg.message, limits.chatCap) };
     case "notification":
       return { ...state, notifications: upsertById(state.notifications, msg.notification, limits.notificationCap) };
+    case "machine":
+      return upsertMachine(state, msg.machine);
     default: {
       // Unknown message type from a newer hub: ignore.
       const _exhaustive: never = msg;
@@ -234,6 +275,10 @@ export function applyAck(
     case "set_rules": {
       const rules = (result as Partial<AckResults["set_rules"]> | undefined)?.rules;
       return rules ? { ...state, rules } : state;
+    }
+    case "update_machine": {
+      const machine = (result as Partial<AckResults["update_machine"]> | undefined)?.machine;
+      return machine ? upsertMachine(state, machine) : state;
     }
     default:
       return state;

@@ -4,7 +4,7 @@ Named dog pets that watch and drive your coding agents over ACP (Agent Client Pr
 
 - Whiteboard: https://claude.ai/artifact/E8zVPktys5q8qKw5AjmjtB
 - Last updated: 2026-11-23
-- Status: v1 single-machine code exists (see **Status**). The **Migration path** at the end is a proposal and has not been approved yet. No v2 code changes until it is.
+- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto, step 1 (machine identity). Next: step 2 (pairing + LAN presence).
 
 ## Decisions
 
@@ -221,12 +221,12 @@ ai-pet/                  # repo folder (name kept after the Krypto rename)
 | Phone app | Scaffold + relay/crypto/pairing libs only. Frozen for the redesign |
 | Relay | Not started. Held for the redesign |
 
-## Migration path (PROPOSED — awaiting approval)
+## Migration path (approved 2026-11-23)
 
 Each step can ship and be tested on its own.
 
-0. **Baseline.** `git init` and a first commit of the v1 tree. Run every gate. Do one live smoke run of `krypto agents` and `krypto start claude-code` on the Windows PC. Also enforce the rules hard floor: execute, delete and fetch are never auto-allowed, and `set_rules` rejects rules that try.
-1. **Machine identity (one hub, no networking).**
+0. ✅ **Baseline.** (done 2026-11-23) `git init` and a first commit of the v1 tree. Run every gate. Do one live smoke run of `krypto agents` and `krypto start claude-code` on the Windows PC. Also enforce the rules hard floor: execute, delete and fetch are never auto-allowed, and `set_rules` rejects rules that try.
+1. ✅ **Machine identity (one hub, no networking).** (done 2026-11-23; protocol v2)
    - Add `Machine` and `machineId` to the protocol (TS + Rust) on Session, Event, Pet, PermissionRequest, Notification and Chat.
    - Make wire ids global. Run a store migration that adds `machine_id` and backfills the local machine.
    - Add `krypto machine [--name "Windows PC"]`.

@@ -24,7 +24,7 @@ export interface PetStageProps {
   wander?: boolean | undefined;
   /** Walk speed in px/s. Default petSize × 0.45. */
   walkSpeed?: number | undefined;
-  /** Show a name tag under each pet. Default false. */
+  /** Show a name tag under each pet. Default true (every pet has a name). */
   showNames?: boolean | undefined;
   /** Max bubble width in px. Default 240 (clamped to the strip). */
   bubbleMaxWidth?: number | undefined;
@@ -57,7 +57,7 @@ export function PetStage(props: PetStageProps): JSX.Element {
     sprites,
     wander = true,
     walkSpeed,
-    showNames = false,
+    showNames = true,
     bubbleMaxWidth = 240,
     className,
     style,

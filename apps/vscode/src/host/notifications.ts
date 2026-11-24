@@ -10,6 +10,7 @@ import {
   type ErrorPayload,
 } from "@krypto/protocol";
 import type { HubConnection } from "./connection";
+import { petFor } from "../shared/machine";
 import { agentName, errorMessage, isInWorkspace } from "./util";
 
 type NotifyLevel = "all" | "permissions" | "off";
@@ -72,11 +73,11 @@ export class Notifier implements vscode.Disposable {
     return inWorkspace || vscode.window.state.focused;
   }
 
-  private who(agentId: string): string {
+  private who(machineId: string, agentId: string): string {
     const state = this.hub.state;
-    const pet = Object.values(state.pets).find((p) => p.agentId === agentId);
+    const pet = petFor(Object.values(state.pets), machineId, agentId);
     const emoji = SPECIES_META[pet?.species ?? DEFAULT_SPECIES].emoji;
-    const agent = agentName(state.agents, agentId);
+    const agent = agentName(state.agents, agentId, machineId);
     return pet ? `${emoji} ${pet.name} (${agent})` : `${emoji} ${agent}`;
   }
 
@@ -89,7 +90,7 @@ export class Notifier implements vscode.Disposable {
     this.shownRequests.add(req.requestId);
     this.markRecent(req.sessionId, "perm");
 
-    const text = `${this.who(req.agentId)} needs your OK: ${describePermission(req)}`;
+    const text = `${this.who(req.machineId, req.agentId)} needs your OK: ${describePermission(req)}`;
     void vscode.window.showWarningMessage(text, "Approve", "Deny", "Show").then(async (pick) => {
       this.shownRequests.delete(req.requestId);
       if (!pick) return;
@@ -121,7 +122,7 @@ export class Notifier implements vscode.Disposable {
     const session = this.hub.state.sessions[e.sessionId];
     if (!session || session.source !== "owned") return; // hook sessions are covered by hub notifications
     if (!this.relevant(e.sessionId)) return;
-    const who = this.who(session.agentId);
+    const who = this.who(session.machineId, session.agentId);
     const title = session.title?.trim();
 
     if (e.type === "error") {

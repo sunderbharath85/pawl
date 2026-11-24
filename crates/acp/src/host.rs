@@ -46,6 +46,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 // State
 
 pub(crate) struct Inner {
+    /// This hub's machine: stamped on every Session / HistorySession / PermissionRequest
+    /// and the prefix of every permission request id.
+    machine_id: pp::MachineId,
     events: mpsc::UnboundedSender<HostEvent>,
     /// Connection key (agent + cwd + command) -> slot. The async mutex
     /// serializes spawning so concurrent callers share one process.
@@ -206,8 +209,9 @@ fn describe_exit(agent_id: &str, status: Option<ExitStatus>, err: Option<&sdk::E
 }
 
 impl Inner {
-    pub(crate) fn new(events: mpsc::UnboundedSender<HostEvent>) -> Self {
+    pub(crate) fn new(machine_id: pp::MachineId, events: mpsc::UnboundedSender<HostEvent>) -> Self {
         Self {
+            machine_id,
             events,
             conns: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
@@ -215,6 +219,24 @@ impl Inner {
             next_conn_id: AtomicU64::new(1),
             shutting_down: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn machine_id(&self) -> &str {
+        &self.machine_id
+    }
+
+    /// A hub never runs another machine's agents. An empty `machine_id` (hand-built agent) is
+    /// treated as local.
+    fn ensure_local_agent(&self, agent: &pp::Agent) -> anyhow::Result<()> {
+        if !agent.machine_id.is_empty() && agent.machine_id != self.machine_id {
+            bail!(
+                "agent `{}` belongs to machine `{}`, not this machine (`{}`)",
+                agent.id,
+                agent.machine_id,
+                self.machine_id
+            );
+        }
+        Ok(())
     }
 
     fn emit(&self, ev: HostEvent) {
@@ -335,6 +357,7 @@ impl Inner {
             st: Mutex::new(SessionState {
                 session: pp::Session {
                     id: hub_id.clone(),
+                    machine_id: self.machine_id.clone(),
                     agent_id: agent_id.to_string(),
                     acp_session_id: Some(acp_id.clone()),
                     external_id: None,
@@ -433,7 +456,7 @@ impl Inner {
             merged
         };
         let options: Vec<pp::PermissionOption> = req.options.iter().map(convert::permission_option).collect();
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_id = pp::global_id(&self.machine_id, uuid::Uuid::new_v4());
         let (tx, rx) = oneshot::channel();
         lock(&self.permissions).insert(
             request_id.clone(),
@@ -442,6 +465,7 @@ impl Inner {
 
         let request = pp::PermissionRequest {
             request_id: request_id.clone(),
+            machine_id: self.machine_id.clone(),
             session_id: entry.hub_id.clone(),
             agent_id: conn.agent_id.clone(),
             tool_call,
@@ -946,6 +970,7 @@ impl Inner {
         hub_id: pp::SessionId,
         prompt: Option<String>,
     ) -> anyhow::Result<pp::Session> {
+        self.ensure_local_agent(agent)?;
         self.ensure_new_hub_id(&hub_id)?;
         let (cwd_abs, root) = prepare_cwd(&cwd)?;
         let (conn, _open) = self.get_or_spawn(agent, &cwd_abs).await?;
@@ -1065,6 +1090,7 @@ impl Inner {
     }
 
     pub(crate) async fn list_history(self: &Arc<Self>, agent: &pp::Agent, cwd: Option<PathBuf>) -> anyhow::Result<Vec<pp::HistorySession>> {
+        self.ensure_local_agent(agent)?;
         if agent.capabilities.as_ref().is_some_and(|c| !c.list_sessions) {
             return Ok(vec![]);
         }
@@ -1096,7 +1122,7 @@ impl Inner {
                 .await
                 .map_err(|_| anyhow!("session/list timed out after {}s", LIST_TIMEOUT.as_secs()))?
                 .map_err(|e| self.request_error(&conn, "session/list", e))?;
-            out.extend(resp.sessions.iter().map(|s| convert::history_session(&agent.id, s)));
+            out.extend(resp.sessions.iter().map(|s| convert::history_session(&self.machine_id, &agent.id, s)));
             match resp.next_cursor {
                 Some(c) if !c.is_empty() && out.len() < MAX_HISTORY && cursor.as_ref() != Some(&c) => cursor = Some(c),
                 _ => break,
@@ -1114,6 +1140,7 @@ impl Inner {
         cwd: PathBuf,
         hub_id: pp::SessionId,
     ) -> anyhow::Result<pp::Session> {
+        self.ensure_local_agent(agent)?;
         self.ensure_new_hub_id(&hub_id)?;
         if let Some(c) = &agent.capabilities {
             if !c.resume_session && !c.load_session {

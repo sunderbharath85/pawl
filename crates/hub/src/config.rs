@@ -30,6 +30,8 @@ pub struct Paths {
     pub db: PathBuf,
     pub token: PathBuf,
     pub config: PathBuf,
+    /// `machine.toml`: this machine's id + name (see [`crate::machine`]).
+    pub machine: PathBuf,
     pub log: PathBuf,
     pub registry_cache: PathBuf,
 }
@@ -41,6 +43,7 @@ impl Paths {
             db: data_dir.join(DB_FILE),
             token: data_dir.join(HUB_TOKEN_FILE),
             config: data_dir.join(CONFIG_FILE),
+            machine: data_dir.join(crate::machine::MACHINE_FILE),
             log: data_dir.join(LOG_FILE),
             registry_cache: data_dir.join(REGISTRY_CACHE_FILE),
             data_dir,
@@ -257,8 +260,9 @@ impl HubConfig {
         Ok(Some(h * 60 + m))
     }
 
-    pub fn discovery_config(&self, paths: &Paths) -> DiscoveryConfig {
+    pub fn discovery_config(&self, paths: &Paths, machine_id: &str) -> DiscoveryConfig {
         DiscoveryConfig {
+            machine_id: machine_id.to_string(),
             cache_dir: paths.data_dir.clone(),
             custom_agents: self.custom_agents.clone(),
             offline: self.offline,

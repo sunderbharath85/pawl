@@ -13,16 +13,18 @@ use krypto_acp::HostEvent;
 use krypto_brain::chat::{Brain, BrainAction, BrainContext, BrainReply};
 use krypto_brain::watchdog::Watchdog;
 use krypto_protocol::{
-    Agent, AgentCapabilities, AgentId, AgentSource, ChatMessage, ChatRole, ClientKind, ClientMsg, ErrorPayload,
-    EventType, HistorySession, HookSource, HubEvent, HubNotification, NotificationLevel, PermissionOptionKind, PermissionOutcome,
-    PermissionRequest, PermissionResolvedPayload, Pet, PetId, PetPatch, RequestId, ResolvedBy, Rule, RuleAction,
-    ServerMsg, Session, SessionId, SessionSource, SessionStatus, StopPayload, UnixMs, Welcome, PROTOCOL_VERSION,
+    global_id, is_valid_machine_id, parse_global_id, Agent, AgentCapabilities, AgentId, AgentSource, ChatMessage,
+    ChatRole, ClientKind, ClientMsg, ErrorPayload, EventType, HistorySession, HookSource, HubEvent, HubNotification,
+    Machine, MachineId, NotificationLevel, PermissionOptionKind, PermissionOutcome, PermissionRequest,
+    PermissionResolvedPayload, Pet, PetId, PetPatch, RequestId, ResolvedBy, Rule, RuleAction, ServerMsg, Session,
+    SessionId, SessionSource, SessionStatus, StopPayload, UnixMs, Welcome, PROTOCOL_VERSION,
 };
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::bus::Bus;
 use crate::config::{HubConfig, Paths};
+use crate::machine::{self, MachineIdentity};
 use crate::notify;
 use crate::store::{AuditEntry, AuditOutcome, Store};
 use host::Host;
@@ -38,6 +40,33 @@ const MAX_CHAT_CHARS: usize = 4000;
 const PET_FLUSH_EVERY: Duration = Duration::from_secs(2);
 const SETTING_DAILY_REPORT: &str = "daily_report_date";
 const HOOK_ALERT_DEDUPE_MS: i64 = 10_000;
+/// Longest pet name, in characters (after trimming).
+pub const MAX_PET_NAME_CHARS: usize = 40;
+
+/// Machine-readable ack errors: when one is anywhere in a request's error chain, the `ack` error is
+/// exactly this code (clients switch on it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AckCode {
+    /// The id belongs to another machine (step 4 will route it to its owner).
+    #[error("not_owner")]
+    NotOwner,
+    /// Unknown id, or a legacy id without a machine prefix.
+    #[error("not_found")]
+    NotFound,
+    /// Malformed input (e.g. a machine name outside 1-40 characters).
+    #[error("invalid")]
+    Invalid,
+    /// Another known pet already has this name (names are unique, case-insensitively).
+    #[error("name_taken")]
+    NameTaken,
+}
+
+impl AckCode {
+    /// The code in `e`'s chain, if any.
+    pub fn find(e: &anyhow::Error) -> Option<AckCode> {
+        e.chain().find_map(|c| c.downcast_ref::<AckCode>().copied())
+    }
+}
 
 /// Who asked for something (recorded in the audit log).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +107,8 @@ pub struct HubOptions {
     pub paths: Paths,
     pub config: HubConfig,
     pub token: String,
+    /// This machine (`machine.toml`, see [`machine::load_or_create`]).
+    pub machine: MachineIdentity,
     /// Daemon mode: run initial discovery, the watchdog and the daily report.
     /// In-process CLI use (`krypto start` without a running hub) passes false.
     pub background: bool,
@@ -85,6 +116,8 @@ pub struct HubOptions {
 
 #[derive(Default)]
 struct State {
+    /// This hub's machine.
+    machine_id: MachineId,
     agents: Vec<Agent>,
     sessions: HashMap<SessionId, Session>,
     /// (agentId, externalId) -> hub session id, for hook-tracked sessions.
@@ -104,12 +137,13 @@ impl State {
         }
     }
 
-    fn pet_for_agent_mut(&mut self, agent_id: &str) -> Option<&mut Pet> {
-        self.pets.values_mut().find(|p| p.agent_id == agent_id)
+    /// The pet of `agent_id` on `machine_id` (one per agent per machine).
+    fn pet_for_mut(&mut self, machine_id: &str, agent_id: &str) -> Option<&mut Pet> {
+        self.pets.values_mut().find(|p| p.machine_id == machine_id && p.agent_id == agent_id)
     }
 
-    fn pet_for_agent(&self, agent_id: &str) -> Option<&Pet> {
-        self.pets.values().find(|p| p.agent_id == agent_id)
+    fn pet_for(&self, machine_id: &str, agent_id: &str) -> Option<&Pet> {
+        self.pets.values().find(|p| p.machine_id == machine_id && p.agent_id == agent_id)
     }
 
     fn agent_name(&self, agent_id: &str) -> String {
@@ -151,6 +185,12 @@ struct Inner {
     paths: Paths,
     config: HubConfig,
     token: String,
+    /// This hub's machine id (never changes while the hub runs).
+    machine_id: MachineId,
+    /// This machine's identity as last saved to machine.toml.
+    machine: Mutex<MachineIdentity>,
+    /// Serializes machine.toml writes.
+    machine_write: tokio::sync::Mutex<()>,
     store: Store,
     bus: Bus,
     host: Host,
@@ -175,18 +215,27 @@ impl Hub {
     pub async fn start(opts: HubOptions) -> Result<Hub> {
         opts.paths.ensure()?;
         let db = opts.paths.db.clone();
-        let store = tokio::task::spawn_blocking(move || Store::open(&db)).await.context("open store")??;
+        let mid = opts.machine.id.clone();
+        let store = tokio::task::spawn_blocking(move || Store::open(&db, &mid)).await.context("open store")??;
         let (tx, rx) = mpsc::unbounded_channel();
-        let hub = Self::build(opts, store, Host::acp(tx)).await?;
+        let host = Host::acp(store.machine_id().to_string(), tx);
+        let hub = Self::build(opts, store, host).await?;
         tokio::spawn(hub.clone().host_loop(rx));
         Ok(hub)
     }
 
     async fn build(opts: HubOptions, store: Store, host: Host) -> Result<Hub> {
-        let HubOptions { paths, config, token, background } = opts;
+        let HubOptions { paths, config, token, machine, background } = opts;
+        if !is_valid_machine_id(&machine.id) {
+            bail!("invalid machine id {:?}", machine.id);
+        }
+        if store.machine_id() != machine.id {
+            bail!("store belongs to machine {:?}, not {:?}", store.machine_id(), machine.id);
+        }
+        let machine_id = machine.id.clone();
         let now = krypto_protocol::now_ms();
         let retention_days = config.event_retention_days;
-        let (agents, mut sessions, pets, db_rules) = store
+        let (agents, mut sessions, mut pets, db_rules) = store
             .run(move |s| {
                 if retention_days > 0 {
                     let n = s.prune_events_before(now - retention_days as i64 * DAY_MS)?;
@@ -218,6 +267,23 @@ impl Hub {
                 .await?;
         }
 
+        // v1 hubs picked pet names without checking for collisions; names are unique now.
+        let renamed: Vec<Pet> = dedupe_pet_names(&mut pets, &machine_id).into_iter().map(|i| pets[i].clone()).collect();
+        if !renamed.is_empty() {
+            for p in &renamed {
+                tracing::info!("pet {} ({}) renamed to {:?}: its name was already taken", p.id, p.agent_id, p.name);
+            }
+            let r2 = renamed.clone();
+            store
+                .run(move |s| {
+                    for p in &r2 {
+                        s.upsert_pet(p)?;
+                    }
+                    Ok(())
+                })
+                .await?;
+        }
+
         // Security floor: rules that fail validation never reach the engine.
         let (rules_source, loaded) = match (db_rules, config.rules.clone()) {
             (Some(r), _) => ("hub.db", r),
@@ -230,6 +296,7 @@ impl Hub {
             let list = dropped.iter().map(|(id, why)| format!("{id:?} ({why})")).collect::<Vec<_>>().join("; ");
             tracing::warn!("ignoring {} invalid permission rule(s) from {rules_source}: {list}", dropped.len());
             startup_notices.push(notify::make(
+                &machine_id,
                 NotificationLevel::Warning,
                 "Unsafe permission rules ignored",
                 format!("Dropped {} rule(s) from {rules_source}: {list}", dropped.len()),
@@ -237,7 +304,7 @@ impl Hub {
                 None,
             ));
         }
-        let mut state = State { agents, rules, ..Default::default() };
+        let mut state = State { machine_id: machine_id.clone(), agents, rules, ..Default::default() };
         for s in sessions {
             state.index_session(&s);
             state.sessions.insert(s.id.clone(), s);
@@ -250,10 +317,13 @@ impl Hub {
         let hub = Hub {
             inner: Arc::new(Inner {
                 brain: Brain::new(config.brain.to_brain_config()),
-                watchdog: Mutex::new(Watchdog::new(config.watchdog.to_watchdog_config())),
+                watchdog: Mutex::new(Watchdog::new(config.watchdog.to_watchdog_config(), machine_id.clone())),
                 paths,
                 config,
                 token,
+                machine_id,
+                machine: Mutex::new(machine),
+                machine_write: tokio::sync::Mutex::new(()),
                 store,
                 bus: Bus::default(),
                 host,
@@ -265,6 +335,9 @@ impl Hub {
         };
         for notification in startup_notices {
             hub.inner.bus.send(ServerMsg::Notification { notification });
+        }
+        for pet in renamed {
+            hub.inner.bus.send(ServerMsg::Pet { pet });
         }
 
         tokio::spawn(hub.clone().pet_flush_loop());
@@ -307,6 +380,31 @@ impl Hub {
         &self.inner.store
     }
 
+    /// This hub's machine id.
+    pub fn machine_id(&self) -> &str {
+        &self.inner.machine_id
+    }
+
+    /// This machine, as reported to clients right now (online, lastSeen = now).
+    pub fn machine(&self) -> Machine {
+        self.inner.machine.lock().unwrap_or_else(|p| p.into_inner()).local_machine()
+    }
+
+    /// Every known machine, this one first. Only this one until pairing lands (PLAN step 2).
+    pub fn machines(&self) -> Vec<Machine> {
+        vec![self.machine()]
+    }
+
+    /// Ok if `id` is a global id owned by this machine; else `not_owner` (another machine's prefix)
+    /// or `not_found` (no valid prefix).
+    fn check_owned(&self, id: &str) -> Result<()> {
+        match parse_global_id(id) {
+            Some((m, _)) if m == self.inner.machine_id => Ok(()),
+            Some(_) => Err(AckCode::NotOwner.into()),
+            None => Err(AckCode::NotFound.into()),
+        }
+    }
+
     fn st(&self) -> MutexGuard<'_, State> {
         self.inner.state.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -338,10 +436,14 @@ impl Hub {
 
     pub fn welcome(&self) -> Welcome {
         let now = krypto_protocol::now_ms();
+        let machine = self.machine();
+        let machines = self.machines();
         let st = self.st();
         Welcome {
             protocol_version: PROTOCOL_VERSION,
             hub_version: crate::HUB_VERSION.to_string(),
+            machine,
+            machines,
             agents: st.agents.clone(),
             sessions: st.sessions_sorted(|s| {
                 s.ended_at.is_none() || now - s.last_event_at.max(s.ended_at.unwrap_or(0)) <= WELCOME_ENDED_WINDOW_MS
@@ -370,7 +472,10 @@ impl Hub {
         let id = msg.id().to_string();
         match self.dispatch(msg, actor).await {
             Ok(v) => ServerMsg::ack_ok(id, v),
-            Err(e) => ServerMsg::ack_err(id, format!("{e:#}")),
+            Err(e) => match AckCode::find(&e) {
+                Some(code) => ServerMsg::ack_err(id, code.to_string()),
+                None => ServerMsg::ack_err(id, format!("{e:#}")),
+            },
         }
     }
 
@@ -384,8 +489,8 @@ impl Hub {
             ClientMsg::ListSessions { include_ended, .. } => {
                 json!({ "sessions": self.list_sessions(include_ended.unwrap_or(false)).await? })
             }
-            ClientMsg::GetEvents { session_id, since_id, limit, .. } => {
-                json!({ "events": self.events(&session_id, since_id, limit).await? })
+            ClientMsg::GetEvents { session_id, since_seq, limit, .. } => {
+                json!({ "events": self.events(&session_id, since_seq, limit).await? })
             }
             ClientMsg::StartSession { agent_id, cwd, prompt, .. } => {
                 json!({ "session": self.start_session(&agent_id, &cwd, prompt).await? })
@@ -411,6 +516,9 @@ impl Hub {
             ClientMsg::Chat { pet_id, text, .. } => json!({ "message": self.chat(pet_id, text, actor).await? }),
             ClientMsg::UpdatePet { pet_id, patch, .. } => json!({ "pet": self.update_pet(&pet_id, patch).await? }),
             ClientMsg::SetRules { rules, .. } => json!({ "rules": self.set_rules(rules).await? }),
+            ClientMsg::UpdateMachine { machine_id, name, .. } => {
+                json!({ "machine": self.update_machine(&machine_id, &name).await? })
+            }
         })
     }
 
@@ -433,17 +541,28 @@ impl Hub {
         Ok(stored)
     }
 
-    pub async fn events(&self, session_id: &str, since_id: Option<i64>, limit: Option<u32>) -> Result<Vec<HubEvent>> {
+    /// Events of one of this machine's sessions; `since_seq` is the `HubEvent.seq` cursor.
+    pub async fn events(&self, session_id: &str, since_seq: Option<i64>, limit: Option<u32>) -> Result<Vec<HubEvent>> {
+        self.check_owned(session_id)?;
         let limit = limit.unwrap_or(DEFAULT_EVENTS_LIMIT).clamp(1, MAX_EVENTS_LIMIT);
         let sid = session_id.to_string();
-        self.inner.store.run(move |s| s.events(&sid, since_id, limit)).await
+        let cached = self.st().sessions.contains_key(session_id);
+        self.inner
+            .store
+            .run(move |s| {
+                if !cached && !s.session_exists(&sid)? {
+                    return Err(AckCode::NotFound.into());
+                }
+                s.events(&sid, since_seq, limit)
+            })
+            .await
     }
 
     /// Start an owned ACP session. `prompt` (if any) is logged and sent right after `session/new`.
     pub async fn start_session(&self, agent_id: &str, cwd: &str, prompt: Option<String>) -> Result<Session> {
         let agent = self.find_agent(agent_id).await?;
         let cwd = resolve_cwd(cwd)?;
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = self.new_id();
         self.ensure_pet(&agent.id).await;
         let started = self
             .inner
@@ -460,8 +579,14 @@ impl Hub {
         Ok(self.session(&session.id).unwrap_or(session))
     }
 
+    /// A fresh global id on this machine.
+    fn new_id(&self) -> String {
+        global_id(&self.inner.machine_id, uuid::Uuid::new_v4())
+    }
+
     fn owned_open_session(&self, session_id: &str) -> Result<Session> {
-        let s = self.session(session_id).ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        self.check_owned(session_id)?;
+        let s = self.session(session_id).ok_or(AckCode::NotFound)?;
         if s.source != SessionSource::Owned {
             bail!(
                 "session {session_id} is tracked through {} hooks; prompt it from its own app",
@@ -531,7 +656,7 @@ impl Hub {
         }
         let agent = self.find_agent(agent_id).await?;
         let cwd = resolve_cwd(cwd)?;
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = self.new_id();
         self.ensure_pet(&agent.id).await;
         let resumed = self
             .inner
@@ -560,15 +685,27 @@ impl Hub {
             }
             Ok(v.to_string())
         }
+        self.check_owned(pet_id)?;
         let pet = {
             let mut st = self.st();
-            let pet = st.pets.get_mut(pet_id).ok_or_else(|| anyhow!("unknown pet {pet_id}"))?;
+            let name = match &patch.name {
+                Some(n) => {
+                    let n = validate_pet_name(n)?;
+                    let key = name_key(&n);
+                    if st.pets.values().any(|p| p.id != pet_id && name_key(&p.name) == key) {
+                        return Err(AckCode::NameTaken.into());
+                    }
+                    Some(n)
+                }
+                None => None,
+            };
+            let pet = st.pets.get_mut(pet_id).ok_or(AckCode::NotFound)?;
             let mut next = pet.clone();
             if let Some(sp) = patch.species {
                 next.species = sp;
             }
-            if let Some(n) = &patch.name {
-                next.name = clean("name", n, 40, false)?;
+            if let Some(n) = name {
+                next.name = n;
             }
             if let Some(s) = &patch.skin {
                 next.skin = clean("skin", s, 40, false)?;
@@ -621,13 +758,34 @@ impl Hub {
         Ok(rules)
     }
 
+    /// Rename this machine: validate (trimmed, 1-40 chars), persist machine.toml, broadcast
+    /// `machine`. A malformed machine id is `invalid`; another machine's id is `not_owner`.
+    pub async fn update_machine(&self, machine_id: &str, name: &str) -> Result<Machine> {
+        if !is_valid_machine_id(machine_id) {
+            return Err(AckCode::Invalid.into());
+        }
+        if machine_id != self.inner.machine_id {
+            return Err(AckCode::NotOwner.into());
+        }
+        let name = machine::validate_name(name)?;
+        let _write = self.inner.machine_write.lock().await;
+        let next = MachineIdentity { id: self.inner.machine_id.clone(), name };
+        let (paths, saved) = (self.inner.paths.clone(), next.clone());
+        tokio::task::spawn_blocking(move || machine::save(&paths, &saved)).await.context("save machine.toml")??;
+        *self.inner.machine.lock().unwrap_or_else(|p| p.into_inner()) = next;
+        let machine = self.machine();
+        tracing::info!("machine renamed to {:?}", machine.name);
+        self.inner.bus.send(ServerMsg::Machine { machine: machine.clone() });
+        Ok(machine)
+    }
+
     // ------------------------------------------------------------ agents
 
     /// Re-run discovery (`force` bypasses the 24h registry cache), keep known capabilities,
     /// persist, broadcast `agents`, and give every installed agent its pet.
     pub async fn refresh_agents(&self, force: bool) -> Result<Vec<Agent>> {
         let _guard = self.inner.discovery.lock().await;
-        let mut found = discover_agents(&self.inner.paths, &self.inner.config, force).await?;
+        let mut found = discover_agents(&self.inner.paths, &self.inner.config, &self.inner.machine_id, force).await?;
         let agents = {
             let mut st = self.st();
             for a in found.iter_mut() {
@@ -677,18 +835,24 @@ impl Hub {
 
     // ------------------------------------------------------------ pets
 
-    /// Every agent with activity gets a dog (krypto_brain::growth::default_pet).
+    /// Every agent with activity gets a dog (krypto_brain::growth::default_pet), named so it never
+    /// repeats the name of any pet this hub knows.
     async fn ensure_pet(&self, agent_id: &str) {
+        let mid = self.inner.machine_id.clone();
         let created = {
             let mut st = self.st();
-            if st.pet_for_agent(agent_id).is_some() {
+            if st.pet_for(&mid, agent_id).is_some() {
                 None
             } else {
-                let agent = st.agents.iter().find(|a| a.id == agent_id).cloned().unwrap_or_else(|| placeholder_agent(agent_id));
-                let mut pet = krypto_brain::growth::default_pet(&agent);
+                let mut agent =
+                    st.agents.iter().find(|a| a.id == agent_id).cloned().unwrap_or_else(|| placeholder_agent(agent_id, &mid));
+                agent.machine_id = mid.clone();
+                let taken: Vec<String> = st.pets.values().map(|p| p.name.clone()).collect();
+                let mut pet = krypto_brain::growth::default_pet(&agent, &taken);
                 pet.agent_id = agent_id.to_string();
-                if pet.id.trim().is_empty() || st.pets.contains_key(&pet.id) {
-                    pet.id = format!("pet-{}", uuid::Uuid::new_v4());
+                pet.machine_id = mid.clone();
+                if parse_global_id(&pet.id).is_none_or(|(m, _)| m != mid) || st.pets.contains_key(&pet.id) {
+                    pet.id = global_id(&mid, format!("pet-{}", uuid::Uuid::new_v4()));
                 }
                 st.pets.insert(pet.id.clone(), pet.clone());
                 Some(pet)
@@ -788,12 +952,12 @@ impl Hub {
         let event = self.inner.store.run(move |s| s.insert_event(&sid, kind, &p, ts)).await?;
         {
             let mut st = self.st();
-            let agent_id = st.sessions.get_mut(session_id).map(|s| {
+            let owner = st.sessions.get_mut(session_id).map(|s| {
                 s.last_event_at = s.last_event_at.max(ts);
-                s.agent_id.clone()
+                (s.machine_id.clone(), s.agent_id.clone())
             });
-            if let Some(agent_id) = agent_id {
-                if let Some(pet) = st.pet_for_agent_mut(&agent_id) {
+            if let Some((machine_id, agent_id)) = owner {
+                if let Some(pet) = st.pet_for_mut(&machine_id, &agent_id) {
                     if krypto_brain::growth::on_event(pet, kind, &payload) {
                         let id = pet.id.clone();
                         st.dirty_pets.insert(id);
@@ -923,21 +1087,17 @@ impl Hub {
         self.inner.bus.send(ServerMsg::PermissionRequest { request: req.clone() });
         let (agent_name, pet_name) = {
             let st = self.st();
-            (st.agent_name(&req.agent_id), st.pet_for_agent(&req.agent_id).map(|p| p.name.clone()))
+            (st.agent_name(&req.agent_id), st.pet_for(&req.machine_id, &req.agent_id).map(|p| p.name.clone()))
         };
-        let title = req.tool_call.title.clone().unwrap_or_else(|| "a tool call".to_string());
-        let notification = notify::for_permission(&agent_name, pet_name.as_deref(), &title, &req.session_id, &req.agent_id);
+        let notification = notify::for_permission(&agent_name, pet_name.as_deref(), &req);
         self.inner.bus.send(ServerMsg::Notification { notification });
     }
 
     /// Answer a pending permission request (user, chat or rule). Audited either way.
     pub async fn resolve_permission(&self, request_id: &str, option_id: Option<String>, by: ResolvedBy, actor: &Actor) -> Result<()> {
+        self.check_owned(request_id)?;
         // Take it out first so two clients answering at once cannot both resolve it.
-        let req = self
-            .st()
-            .pending
-            .remove(request_id)
-            .ok_or_else(|| anyhow!("no pending permission request {request_id}"))?;
+        let req = self.st().pending.remove(request_id).ok_or(AckCode::NotFound)?;
         let option_kind = match &option_id {
             Some(o) => match req.options.iter().find(|x| &x.option_id == o) {
                 Some(x) => Some(x.kind),
@@ -1026,6 +1186,7 @@ impl Hub {
         let entry = AuditEntry {
             id: 0,
             ts: krypto_protocol::now_ms(),
+            machine_id: req.machine_id.clone(),
             request_id: req.request_id.clone(),
             session_id: req.session_id.clone(),
             agent_id: req.agent_id.clone(),
@@ -1062,7 +1223,8 @@ impl Hub {
             let key = (n.agent_id.clone(), n.external_session_id.clone());
             let existing = st.by_external.get(&key).and_then(|id| st.sessions.get(id)).cloned();
             let mut s = existing.unwrap_or_else(|| Session {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: global_id(&st.machine_id, uuid::Uuid::new_v4()),
+                machine_id: st.machine_id.clone(),
                 agent_id: n.agent_id.clone(),
                 acp_session_id: None,
                 external_id: Some(n.external_session_id.clone()),
@@ -1113,7 +1275,8 @@ impl Hub {
                 last.is_some_and(|t| now - t < HOOK_ALERT_DEDUPE_MS)
             };
             if !duplicate {
-                let notification = notify::make(level, title, body, Some(session.id.clone()), Some(session.agent_id.clone()));
+                let notification =
+                    notify::make(&session.machine_id, level, title, body, Some(session.id.clone()), Some(session.agent_id.clone()));
                 self.inner.bus.send(ServerMsg::Notification { notification });
             }
         }
@@ -1132,11 +1295,15 @@ impl Hub {
             bail!("chat text is longer than {MAX_CHAT_CHARS} characters");
         }
         let pet = match &pet_id {
-            Some(id) => Some(self.st().pets.get(id).cloned().ok_or_else(|| anyhow!("unknown pet {id}"))?),
+            Some(id) => {
+                self.check_owned(id)?;
+                Some(self.st().pets.get(id).cloned().ok_or(AckCode::NotFound)?)
+            }
             None => self.default_chat_pet(),
         };
         let msg = ChatMessage {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: self.new_id(),
+            machine_id: self.inner.machine_id.clone(),
             pet_id: pet.as_ref().map(|p| p.id.clone()),
             role: ChatRole::User,
             text,
@@ -1158,7 +1325,7 @@ impl Hub {
         let active = st.sessions_sorted(|s| s.ended_at.is_none());
         active
             .iter()
-            .find_map(|s| st.pet_for_agent(&s.agent_id).cloned())
+            .find_map(|s| st.pet_for(&s.machine_id, &s.agent_id).cloned())
             .or_else(|| st.sorted_pets().into_iter().next())
     }
 
@@ -1179,13 +1346,13 @@ impl Hub {
             .run(|s| {
                 let mut v = s.recent_events(200, true)?;
                 v.extend(s.recent_events(200, false)?);
-                v.sort_by_key(|e| e.id);
-                v.dedup_by_key(|e| e.id);
+                v.sort_by_key(|e| e.seq);
+                v.dedup_by_key(|e| e.seq);
                 Ok(v)
             })
             .await
             .unwrap_or_default();
-        BrainContext { agents, sessions, recent_events, pending, pet }
+        BrainContext { machine: self.machine(), machines: self.machines(), agents, sessions, recent_events, pending, pet }
     }
 
     async fn chat_reply(&self, user: ChatMessage, pet: Option<Pet>, actor: Actor) {
@@ -1206,7 +1373,8 @@ impl Hub {
             }
         }
         let msg = ChatMessage {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: self.new_id(),
+            machine_id: self.inner.machine_id.clone(),
             pet_id: pet.map(|p| p.id),
             role: ChatRole::Pet,
             text,
@@ -1399,11 +1567,19 @@ impl Hub {
                 fallback_report(&sessions)
             }
         };
-        let notification = notify::make(NotificationLevel::Info, "Daily report", notify::truncate(&text, 1000), None, None);
+        let notification = notify::make(
+            &self.inner.machine_id,
+            NotificationLevel::Info,
+            "Daily report",
+            notify::truncate(&text, 1000),
+            None,
+            None,
+        );
         self.inner.bus.send(ServerMsg::Notification { notification });
         let pet = self.default_chat_pet();
         let msg = ChatMessage {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: self.new_id(),
+            machine_id: self.inner.machine_id.clone(),
             pet_id: pet.map(|p| p.id),
             role: ChatRole::Pet,
             text,
@@ -1449,6 +1625,45 @@ pub fn sanitize_rules(rules: Vec<Rule>) -> (Vec<Rule>, Vec<(String, String)>) {
     (kept, dropped)
 }
 
+/// Comparison key for pet names: trimmed, case-insensitive.
+fn name_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+/// Trimmed pet name, 1..=40 characters; else `invalid`.
+pub fn validate_pet_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    let len = name.chars().count();
+    if len == 0 || len > MAX_PET_NAME_CHARS || name.chars().any(char::is_control) {
+        return Err(anyhow::Error::new(AckCode::Invalid)
+            .context(format!("pet name must be 1-{MAX_PET_NAME_CHARS} characters without control characters")));
+    }
+    Ok(name.to_string())
+}
+
+/// Make pet names unique (trimmed, case-insensitive). `pets` is oldest first: the oldest pet keeps a
+/// name, later duplicates (and blank names) of this machine's pets get
+/// `growth::default_name(machine, agent, taken)`. Other machines' pets are never renamed here (their
+/// owner names them), so their names are reserved first. Returns the indices of renamed pets.
+pub fn dedupe_pet_names(pets: &mut [Pet], local_machine_id: &str) -> Vec<usize> {
+    let mut taken: Vec<String> = pets.iter().map(|p| p.name.clone()).collect();
+    let mut kept: HashSet<String> =
+        pets.iter().filter(|p| p.machine_id != local_machine_id).map(|p| name_key(&p.name)).collect();
+    let mut renamed = Vec::new();
+    for (i, pet) in pets.iter_mut().enumerate().filter(|(_, p)| p.machine_id == local_machine_id) {
+        let key = name_key(&pet.name);
+        if !key.is_empty() && kept.insert(key) {
+            continue;
+        }
+        let name = krypto_brain::growth::default_name(&pet.machine_id, &pet.agent_id, &taken);
+        kept.insert(name_key(&name));
+        taken.push(name.clone());
+        pet.name = name;
+        renamed.push(i);
+    }
+    renamed
+}
+
 fn fallback_report(sessions: &[Session]) -> String {
     if sessions.is_empty() {
         return "Quiet day: no agent sessions in the last 24 hours. *naps*".to_string();
@@ -1468,8 +1683,8 @@ fn fallback_report(sessions: &[Session]) -> String {
 
 /// Discovery with an optional cache bypass: the 24h registry cache is moved aside so the registry is
 /// fetched again, and restored if that fetch did not produce a new cache.
-pub async fn discover_agents(paths: &Paths, cfg: &HubConfig, force: bool) -> Result<Vec<Agent>> {
-    let dcfg = cfg.discovery_config(paths);
+pub async fn discover_agents(paths: &Paths, cfg: &HubConfig, machine_id: &str, force: bool) -> Result<Vec<Agent>> {
+    let dcfg = cfg.discovery_config(paths, machine_id);
     if !force || cfg.offline {
         return krypto_discovery::discover(&dcfg).await;
     }
@@ -1514,9 +1729,10 @@ fn dirs_home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn placeholder_agent(agent_id: &str) -> Agent {
+fn placeholder_agent(agent_id: &str, machine_id: &str) -> Agent {
     Agent {
         id: agent_id.to_string(),
+        machine_id: machine_id.to_string(),
         name: pretty_agent_name(agent_id),
         command: Vec::new(),
         env: None,

@@ -2,10 +2,13 @@
 //! `notification` messages on the bus; clients decide how to surface them.
 
 use krypto_protocol::{
-    AgentId, HubNotification, NotificationLevel, Session, SessionId, StopPayload, StopReason,
+    global_id, AgentId, HubNotification, NotificationLevel, PermissionRequest, Session, SessionId, StopPayload,
+    StopReason,
 };
 
+/// A notification of `machine_id` (its id is global: `machine:uuid`).
 pub fn make(
+    machine_id: &str,
     level: NotificationLevel,
     title: impl Into<String>,
     body: impl Into<String>,
@@ -13,7 +16,8 @@ pub fn make(
     agent_id: Option<AgentId>,
 ) -> HubNotification {
     HubNotification {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: global_id(machine_id, uuid::Uuid::new_v4()),
+        machine_id: machine_id.to_string(),
         level,
         title: title.into(),
         body: body.into(),
@@ -52,11 +56,12 @@ pub fn for_stop(agent_name: &str, session: &Session, stop: &StopPayload) -> Opti
         StopReason::MaxTokens => (NotificationLevel::Warning, format!("{agent_name} hit the token limit")),
         StopReason::MaxTurnRequests => (NotificationLevel::Warning, format!("{agent_name} hit the turn limit")),
     };
-    Some(make(level, title, label, Some(session.id.clone()), Some(session.agent_id.clone())))
+    Some(make(&session.machine_id, level, title, label, Some(session.id.clone()), Some(session.agent_id.clone())))
 }
 
 pub fn for_error(agent_name: &str, session: &Session, message: &str) -> HubNotification {
     make(
+        &session.machine_id,
         NotificationLevel::Alert,
         format!("{agent_name} hit an error"),
         format!("{}: {}", session_label(session), truncate(message, 200)),
@@ -65,17 +70,19 @@ pub fn for_error(agent_name: &str, session: &Session, message: &str) -> HubNotif
     )
 }
 
-pub fn for_permission(agent_name: &str, pet_name: Option<&str>, title: &str, session_id: &str, agent_id: &str) -> HubNotification {
+pub fn for_permission(agent_name: &str, pet_name: Option<&str>, req: &PermissionRequest) -> HubNotification {
     let who = match pet_name {
         Some(p) => format!("{p} ({agent_name})"),
         None => agent_name.to_string(),
     };
+    let title = req.tool_call.title.as_deref().unwrap_or("a tool call");
     make(
+        &req.machine_id,
         NotificationLevel::Alert,
         format!("{who} needs your OK"),
         truncate(title, 200),
-        Some(session_id.to_string()),
-        Some(agent_id.to_string()),
+        Some(req.session_id.clone()),
+        Some(req.agent_id.clone()),
     )
 }
 
@@ -87,7 +94,8 @@ mod tests {
     #[test]
     fn labels() {
         let mut s = Session {
-            id: "s".into(),
+            id: "abcdef012345:s".into(),
+            machine_id: "abcdef012345".into(),
             agent_id: "codex".into(),
             acp_session_id: None,
             external_id: None,
@@ -105,6 +113,9 @@ mod tests {
         assert_eq!(truncate("abcdef", 4), "abc…");
         let n = for_stop("Codex", &s, &StopPayload { stop_reason: StopReason::EndTurn }).unwrap();
         assert_eq!(n.level, NotificationLevel::Success);
+        assert_eq!(n.machine_id, "abcdef012345");
+        assert_eq!(krypto_protocol::parse_global_id(&n.id).map(|(m, _)| m), Some("abcdef012345"));
+        assert_eq!(n.session_id.as_deref(), Some("abcdef012345:s"));
         assert!(for_stop("Codex", &s, &StopPayload { stop_reason: StopReason::Cancelled }).is_none());
     }
 }

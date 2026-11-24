@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod core;
 pub mod logging;
+pub mod machine;
 pub mod notify;
 pub mod server;
 pub mod store;

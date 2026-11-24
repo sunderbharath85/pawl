@@ -14,8 +14,10 @@ use tauri::{
 
 pub const PET_LABEL: &str = "pet";
 pub const PANEL_LABEL: &str = "panel";
-/// Strip height in logical px.
-pub const STRIP_HEIGHT: f64 = 220.0;
+/// Strip height in logical px. Fits the largest pet size (168) plus the stage's bubble
+/// room (88) and name tag (18): pets show their names by default. The strip is transparent
+/// and click-through outside the reported hit-rects, so the extra height costs nothing.
+pub const STRIP_HEIGHT: f64 = 280.0;
 const POLL_EVERY: Duration = Duration::from_millis(50);
 /// Re-check monitor geometry every N polls (~2 s) to follow taskbar/resolution changes.
 const REANCHOR_EVERY: u64 = 40;

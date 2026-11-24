@@ -70,7 +70,7 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
               {SPECIES_META[pet?.species ?? "dog"].sound} I'm {pet?.name ?? "your pet"}.
             </h3>
             <p>
-              {realPet ? `I keep an eye on ${agentName(state.agents, realPet.agentId)}.` : "I keep an eye on your agents."} Try one of
+              {realPet ? `I keep an eye on ${agentName(state.agents, realPet.agentId, realPet.machineId)}.` : "I keep an eye on your agents."} Try one of
               these:
             </p>
           </div>

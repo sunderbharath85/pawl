@@ -1,5 +1,16 @@
 // Pure derivation of what every pet is doing right now. Time-driven decays use `now` only (no timers).
-import type { ErrorPayload, HubEvent, Pet, PermissionRequest, Session, SessionStatus, Species, ToolCallPayload } from "@krypto/protocol";
+import type {
+  ErrorPayload,
+  HubEvent,
+  Machine,
+  MachineId,
+  Pet,
+  PermissionRequest,
+  Session,
+  SessionStatus,
+  Species,
+  ToolCallPayload,
+} from "@krypto/protocol";
 import { activityForEvent, activityForStatus, HAPPY_DECAY_MS, NAP_AFTER_MS, SAD_DECAY_MS, type PetActivity } from "./activity";
 import { hashString, petLine } from "./lines";
 
@@ -10,7 +21,12 @@ export interface PetBubbleData {
 }
 
 export interface PetView {
+  /** Global pet id (`${machineId}:${localId}`). */
   petId: string;
+  /** Machine the pet (and its agent) lives on. */
+  machineId: MachineId;
+  /** Display name of that machine, when `machines` was given and knows it. */
+  machineName?: string | undefined;
   agentId: string;
   species: Species;
   name: string;
@@ -32,6 +48,8 @@ export interface DerivePetViewsInput {
   /** Latest event per session id (e.g. hub-client `lastEventsBySession` or `lastSignificantEvents`). */
   lastEvents: Record<string, HubEvent | undefined>;
   now: number;
+  /** Known machines by id (hub-client `state.machines`); used for `PetView.machineName`. */
+  machines?: Record<MachineId, Machine> | undefined;
 }
 
 const BUSY: ReadonlySet<SessionStatus> = new Set<SessionStatus>(["thinking", "working", "waiting_permission"]);
@@ -92,10 +110,17 @@ interface Derived {
   nextAt: number | null;
 }
 
+/** True when `x` belongs to the same (machine, agent) pair as `pet`. Agent ids repeat across machines. */
+function sameOwner(pet: Pick<Pet, "machineId" | "agentId">, x: { machineId: MachineId; agentId: string }): boolean {
+  return x.machineId === pet.machineId && x.agentId === pet.agentId;
+}
+
 function derivePet(pet: Pet, input: DerivePetViewsInput, seedBase: number): Derived {
   const { now } = input;
   const base = {
     petId: pet.id,
+    machineId: pet.machineId,
+    machineName: input.machines?.[pet.machineId]?.name,
     agentId: pet.agentId,
     species: pet.species,
     name: pet.name,
@@ -104,12 +129,13 @@ function derivePet(pet: Pet, input: DerivePetViewsInput, seedBase: number): Deri
   };
   const seed = (t: number) => seedBase + Math.floor(t / 1000);
 
-  const agentSessions = input.sessions.filter((s) => s.agentId === pet.agentId);
+  // Pets match by (machineId, agentId): two machines' "claude-code" pets never share sessions.
+  const agentSessions = input.sessions.filter((s) => sameOwner(pet, s));
   const sessionIds = new Set(agentSessions.map((s) => s.id));
 
   // 1. Pending permission → alert with an Approve/Deny bubble (oldest first).
   const myPending = input.pending
-    .filter((p) => p.agentId === pet.agentId || sessionIds.has(p.sessionId))
+    .filter((p) => sameOwner(pet, p) || sessionIds.has(p.sessionId))
     .sort((a, b) => a.createdAt - b.createdAt);
   const req = myPending[0];
   if (req) {

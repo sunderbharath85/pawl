@@ -3,6 +3,8 @@
 export {
   HubClient,
   HubRequestError,
+  MACHINE_NAME_MAX,
+  normalizeMachineName,
   pickPermissionOption,
   type HubClientOptions,
 } from "./client";
@@ -12,8 +14,10 @@ export {
   DEFAULT_LIMITS,
   initialHubState,
   lastEventsBySession,
+  latestEventSeq,
   mergeEvents,
   reduceServerMsg,
+  upsertMachine,
   type ClientRequest,
   type DistributiveOmit,
   type HubConnectionStatus,

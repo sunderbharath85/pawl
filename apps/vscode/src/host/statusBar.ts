@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import type { HubState } from "@krypto/hub-client";
 import { SPECIES_META } from "@krypto/pet-engine";
 import { DEFAULT_SPECIES } from "@krypto/protocol";
+import { OS_LABEL, machineDisplayName } from "../shared/machine";
 import type { HubConnection } from "./connection";
 import { ACTIVITY_LABEL, petViewsOf, primaryView } from "./petViews";
 import { agentName, isBusy } from "./util";
@@ -37,13 +38,13 @@ export class PetStatusBar implements vscode.Disposable {
     }
 
     if (conn.status !== "connected") {
-      const key = `off|${conn.offline}|${conn.missingToken}|${conn.status}`;
+      const key = `off|${conn.offline}|${conn.missingToken}|${conn.status}|${state.machine?.name ?? ""}`;
       if (key === this.lastKey) return;
       this.lastKey = key;
       this.item.backgroundColor = undefined;
       if (conn.offline) {
         this.item.text = `$(debug-disconnect) ${SPECIES_META[DEFAULT_SPECIES].emoji} hub offline`;
-        this.item.tooltip = this.offlineTooltip(conn.status === "unauthorized", conn.missingToken);
+        this.item.tooltip = this.offlineTooltip(state, conn.status === "unauthorized", conn.missingToken);
       } else {
         this.item.text = `$(sync~spin) ${SPECIES_META[DEFAULT_SPECIES].emoji}`;
         this.item.tooltip = "Krypto: connecting to the hub…";
@@ -56,21 +57,27 @@ export class PetStatusBar implements vscode.Disposable {
     const species = primary?.species ?? DEFAULT_SPECIES;
     const activity = primary?.activity ?? "napping";
     const busy = Object.values(state.sessions).filter(isBusy).length;
-    const key = `on|${species}|${activity}|${pendingCount}|${busy}|${views.map((v) => `${v.petId}:${v.activity}`).join(",")}`;
+    const machineKey = state.machine ? `${state.machine.id}:${state.machine.name}` : "";
+    const petsKey = views.map((v) => `${v.petId}:${v.name}:${v.activity}`).join(",");
+    const key = `on|${machineKey}|${species}|${activity}|${pendingCount}|${busy}|${petsKey}`;
     if (key === this.lastKey) return;
     this.lastKey = key;
 
-    let text = `${SPECIES_META[species].emoji} ${ACTIVITY_LABEL[activity]}`;
+    // Pets have names: lead with the most relevant pet's ("🐕 Biscuit working").
+    let text = `${SPECIES_META[species].emoji} ${primary ? `${primary.name} ` : ""}${ACTIVITY_LABEL[activity]}`;
     if (pendingCount > 0) text += `  $(bell-dot) ${pendingCount}`;
     this.item.text = text;
     this.item.backgroundColor = pendingCount > 0 ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
     this.item.tooltip = this.onlineTooltip(state, views, pendingCount, busy);
   }
 
-  private offlineTooltip(unauthorized: boolean, missingToken: boolean): vscode.MarkdownString {
+  private offlineTooltip(state: HubState, unauthorized: boolean, missingToken: boolean): vscode.MarkdownString {
     const md = new vscode.MarkdownString(undefined, true);
     md.isTrusted = { enabledCommands: ["krypto.startHub", "krypto.reconnect", "krypto.showPet"] };
-    md.appendMarkdown("**Krypto — hub offline**\n\n");
+    md.appendMarkdown("**Krypto — hub offline**");
+    // The last machine name we heard from this hub (kept across reconnects).
+    if (state.machine) md.appendMarkdown(` · ${escapeMd(machineDisplayName(state.machine))}`);
+    md.appendMarkdown("\n\n");
     if (unauthorized) md.appendMarkdown("The hub rejected our token. It may have been regenerated.\n\n");
     else if (missingToken) md.appendMarkdown("No hub token yet — the hub has never run on this machine.\n\n");
     else md.appendMarkdown("Reconnecting quietly in the background.\n\n");
@@ -85,11 +92,21 @@ export class PetStatusBar implements vscode.Disposable {
     busy: number,
   ): vscode.MarkdownString {
     const md = new vscode.MarkdownString(undefined, true);
-    md.isTrusted = { enabledCommands: ["krypto.showPet", "krypto.approvePending", "krypto.denyPending", "krypto.startSession"] };
-    md.appendMarkdown("**Krypto**\n\n");
+    md.isTrusted = {
+      enabledCommands: ["krypto.showPet", "krypto.approvePending", "krypto.denyPending", "krypto.startSession", "krypto.renameMachine"],
+    };
+    md.appendMarkdown("**Krypto**");
+    const machine = state.machine;
+    if (machine) {
+      const os = OS_LABEL[machine.os] ?? machine.os;
+      md.appendMarkdown(
+        ` · $(device-desktop) ${escapeMd(machineDisplayName(machine))} _(${escapeMd(os)})_ [$(edit)](command:krypto.renameMachine "Rename this machine")`,
+      );
+    }
+    md.appendMarkdown("\n\n");
     if (views.length === 0) md.appendMarkdown(`${SPECIES_META[DEFAULT_SPECIES].emoji} No pets yet — start a session.\n\n`);
     for (const v of views) {
-      const name = agentName(state.agents, v.agentId);
+      const name = agentName(state.agents, v.agentId, v.machineId);
       md.appendMarkdown(`${SPECIES_META[v.species].emoji} **${escapeMd(v.name)}** (${escapeMd(name)}) — ${ACTIVITY_LABEL[v.activity]}\n\n`);
     }
     md.appendMarkdown(`${busy} busy session${busy === 1 ? "" : "s"}`);

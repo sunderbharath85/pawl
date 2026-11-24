@@ -6,6 +6,15 @@ use krypto_protocol::{
     PermissionOption, PermissionOptionKind, RuleMatch, Species, ToolCallPayload, ToolKind, ToolLocation,
 };
 
+/// The test hub's machine id.
+const MID: &str = "abcdef012345";
+/// Another machine (ids with this prefix are never ours).
+const OTHER: &str = "zyxwvu987654";
+
+fn ident() -> MachineIdentity {
+    MachineIdentity { id: MID.into(), name: "Test PC".into() }
+}
+
 struct Fixture {
     hub: Hub,
     fake: FakeHost,
@@ -16,6 +25,7 @@ struct Fixture {
 fn agent(id: &str) -> Agent {
     Agent {
         id: id.into(),
+        machine_id: MID.into(),
         name: pretty_agent_name(id),
         command: vec![format!("{id}-acp")],
         env: None,
@@ -37,7 +47,7 @@ async fn fixture(rules: Option<Vec<Rule>>) -> Fixture {
 async fn fixture_with(store_rules: Option<Vec<Rule>>, config_rules: Option<Vec<Rule>>) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::in_dir(dir.path());
-    let store = Store::open(&paths.db).unwrap();
+    let store = Store::open(&paths.db, MID).unwrap();
     store.replace_agents(&[agent("codex"), agent("claude-code")]).unwrap();
     if let Some(r) = &store_rules {
         store.set_rules(r).unwrap();
@@ -45,7 +55,7 @@ async fn fixture_with(store_rules: Option<Vec<Rule>>, config_rules: Option<Vec<R
     let fake = FakeHost::default();
     let config = HubConfig { offline: true, rules: config_rules, ..Default::default() };
     let hub = Hub::build(
-        HubOptions { paths, config, token: "t".repeat(64), background: false },
+        HubOptions { paths, config, token: "t".repeat(64), machine: ident(), background: false },
         store,
         Host::Fake(fake.clone()),
     )
@@ -83,7 +93,8 @@ fn drain(rx: &mut broadcast::Receiver<ServerMsg>) -> Vec<ServerMsg> {
 
 fn permission(session_id: &str, kind: ToolKind) -> PermissionRequest {
     PermissionRequest {
-        request_id: format!("req-{}", uuid::Uuid::new_v4()),
+        request_id: global_id(MID, format!("req-{}", uuid::Uuid::new_v4())),
+        machine_id: MID.into(),
         session_id: session_id.into(),
         agent_id: "codex".into(),
         tool_call: ToolCallPayload {
@@ -127,6 +138,12 @@ async fn hello_returns_welcome_shape() {
     assert_eq!(w.protocol_version, PROTOCOL_VERSION);
     assert_eq!(w.agents.len(), 2);
     assert!(!w.rules.is_empty(), "default rules seeded");
+    assert_eq!((w.machine.id.as_str(), w.machine.name.as_str()), (MID, "Test PC"));
+    assert!(w.machine.online);
+    assert_eq!(w.machine.os, krypto_protocol::MachineOs::current());
+    assert_eq!(w.machine.hub_version.as_deref(), Some(crate::HUB_VERSION));
+    assert!(krypto_protocol::now_ms() - w.machine.last_seen < 60_000);
+    assert_eq!(w.machines, vec![w.machine.clone()]);
 }
 
 #[tokio::test]
@@ -147,14 +164,18 @@ async fn start_prompt_events_and_ack_shapes() {
     }
 
     let v = ack_result(
-        f.hub.handle(ClientMsg::GetEvents { id: "3".into(), session_id: s.id.clone(), since_id: None, limit: None }, &actor()).await,
+        f.hub.handle(ClientMsg::GetEvents { id: "3".into(), session_id: s.id.clone(), since_seq: None, limit: None }, &actor()).await,
     );
     let events: Vec<HubEvent> = serde_json::from_value(v["events"].clone()).unwrap();
     let kinds: Vec<EventType> = events.iter().map(|e| e.kind).collect();
     assert_eq!(kinds, vec![EventType::SessionStart, EventType::UserMessage, EventType::UserMessage]);
+    for e in &events {
+        assert_eq!(e.id, global_id(MID, e.seq));
+        assert_eq!((e.machine_id.as_str(), e.session_id.as_str()), (MID, s.id.as_str()));
+    }
     let since = ack_result(
         f.hub
-            .handle(ClientMsg::GetEvents { id: "4".into(), session_id: s.id.clone(), since_id: Some(events[1].id), limit: Some(10) }, &actor())
+            .handle(ClientMsg::GetEvents { id: "4".into(), session_id: s.id.clone(), since_seq: Some(events[1].seq), limit: Some(10) }, &actor())
             .await,
     );
     assert_eq!(since["events"].as_array().unwrap().len(), 1);
@@ -168,7 +189,11 @@ async fn start_prompt_events_and_ack_shapes() {
     assert!(msgs.iter().any(|m| matches!(m, ServerMsg::Session { .. })));
 
     let err = ack_error(f.hub.handle(ClientMsg::Prompt { id: "6".into(), session_id: "nope".into(), text: "x".into() }, &actor()).await);
-    assert!(err.contains("unknown session"));
+    assert_eq!(err, "not_found");
+    let err = ack_error(
+        f.hub.handle(ClientMsg::Prompt { id: "6b".into(), session_id: global_id(MID, "nope"), text: "x".into() }, &actor()).await,
+    );
+    assert_eq!(err, "not_found");
     let err = ack_error(
         f.hub.handle(ClientMsg::StartSession { id: "7".into(), agent_id: "codex".into(), cwd: "Z:/definitely/missing".into(), prompt: None }, &actor()).await,
     );
@@ -214,10 +239,12 @@ async fn ask_rule_then_user_resolves_with_audit() {
     assert_eq!(audit[0].actor, "desktop#1");
     assert_eq!(audit[0].locations, vec!["/repo/src/lib.rs".to_string()]);
 
+    assert_eq!(audit[0].machine_id, MID);
+
     let err = ack_error(
         f.hub.handle(ClientMsg::ResolvePermission { id: "r2".into(), request_id: req.request_id.clone(), option_id: None }, &actor()).await,
     );
-    assert!(err.contains("no pending permission request"));
+    assert_eq!(err, "not_found");
 }
 
 #[tokio::test]
@@ -473,9 +500,19 @@ async fn update_pet_validates_and_broadcasts() {
             .handle(ClientMsg::UpdatePet { id: "u2".into(), pet_id: pet.id.clone(), patch: PetPatch { name: Some(" ".into()), ..Default::default() } }, &actor())
             .await,
     );
-    assert!(err.contains("name"));
-    assert!(ack_error(f.hub.handle(ClientMsg::UpdatePet { id: "u3".into(), pet_id: "nope".into(), patch: PetPatch::default() }, &actor()).await)
-        .contains("unknown pet"));
+    assert_eq!(err, "invalid");
+    assert_eq!(
+        ack_error(f.hub.handle(ClientMsg::UpdatePet { id: "u3".into(), pet_id: "nope".into(), patch: PetPatch::default() }, &actor()).await),
+        "not_found"
+    );
+    assert_eq!(
+        ack_error(
+            f.hub
+                .handle(ClientMsg::UpdatePet { id: "u4".into(), pet_id: global_id(MID, "pet-nope"), patch: PetPatch::default() }, &actor())
+                .await
+        ),
+        "not_found"
+    );
 }
 
 #[tokio::test]
@@ -515,9 +552,15 @@ async fn restart_closes_owned_sessions() {
     let s = start(&f).await;
     let paths = f.hub.paths().clone();
     drop(f.hub);
-    let store = Store::open(&paths.db).unwrap();
+    let store = Store::open(&paths.db, MID).unwrap();
     let hub = Hub::build(
-        HubOptions { paths, config: HubConfig { offline: true, ..Default::default() }, token: "t".into(), background: false },
+        HubOptions {
+            paths,
+            config: HubConfig { offline: true, ..Default::default() },
+            token: "t".into(),
+            machine: ident(),
+            background: false,
+        },
         store,
         Host::Fake(FakeHost::default()),
     )
@@ -534,4 +577,275 @@ fn names_and_cwd() {
     assert!(resolve_cwd("").is_err());
     let d = tempfile::tempdir().unwrap();
     assert!(resolve_cwd(&d.path().to_string_lossy()).unwrap().is_absolute());
+}
+
+#[tokio::test]
+async fn ids_on_the_wire_are_global() {
+    let mut f = fixture(None).await;
+    let s = start(&f).await;
+    assert_eq!(s.machine_id, MID);
+    assert_eq!(parse_global_id(&s.id).map(|(m, _)| m), Some(MID));
+
+    let pets = f.hub.pets();
+    let codex = pets.iter().find(|p| p.agent_id == "codex").unwrap();
+    assert_eq!(codex.id, global_id(MID, "pet-codex"));
+    assert_eq!(codex.machine_id, MID);
+
+    let v = ack_result(f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: Some(codex.id.clone()), text: "hi".into() }, &actor()).await);
+    let m: ChatMessage = serde_json::from_value(v["message"].clone()).unwrap();
+    assert_eq!(m.machine_id, MID);
+    assert_eq!(parse_global_id(&m.id).map(|(m, _)| m), Some(MID));
+
+    f.hub
+        .on_host_event(HostEvent::Event { session_id: s.id.clone(), kind: EventType::Stop, payload: json!({ "stopReason": "end_turn" }) })
+        .await;
+    let msgs = drain(&mut f.rx);
+    let note = msgs
+        .iter()
+        .find_map(|m| match m {
+            ServerMsg::Notification { notification } => Some(notification.clone()),
+            _ => None,
+        })
+        .expect("a stop notification");
+    assert_eq!(note.machine_id, MID);
+    assert_eq!(parse_global_id(&note.id).map(|(m, _)| m), Some(MID));
+    let ev = msgs
+        .iter()
+        .find_map(|m| match m {
+            ServerMsg::Event { event } if event.kind == EventType::Stop => Some(event.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(ev.id, global_id(MID, ev.seq));
+
+    // hook sessions too
+    f.hub
+        .ingest_hook(HookSource::Claude, json!({ "hook_event_name": "SessionStart", "session_id": "ext-1", "cwd": "/repo" }))
+        .await
+        .unwrap();
+    let hooked = f.hub.list_sessions(false).await.unwrap().into_iter().find(|x| x.agent_id == "claude-code").expect("hook session");
+    assert_eq!(hooked.machine_id, MID);
+    assert_eq!(parse_global_id(&hooked.id).map(|(m, _)| m), Some(MID));
+}
+
+#[tokio::test]
+async fn foreign_and_legacy_ids_are_refused() {
+    let f = fixture(None).await;
+    let s = start(&f).await;
+    let local = parse_global_id(&s.id).unwrap().1.to_string();
+    let theirs = global_id(OTHER, &local);
+    let cases: Vec<(ClientMsg, &str)> = vec![
+        (ClientMsg::Prompt { id: "1".into(), session_id: theirs.clone(), text: "x".into() }, "not_owner"),
+        (ClientMsg::Prompt { id: "2".into(), session_id: local.clone(), text: "x".into() }, "not_found"),
+        (ClientMsg::Cancel { id: "3".into(), session_id: theirs.clone() }, "not_owner"),
+        (ClientMsg::Cancel { id: "4".into(), session_id: local.clone() }, "not_found"),
+        (ClientMsg::GetEvents { id: "5".into(), session_id: theirs.clone(), since_seq: None, limit: None }, "not_owner"),
+        (ClientMsg::GetEvents { id: "6".into(), session_id: local.clone(), since_seq: None, limit: None }, "not_found"),
+        (ClientMsg::GetEvents { id: "6b".into(), session_id: global_id(MID, "missing"), since_seq: None, limit: None }, "not_found"),
+        (ClientMsg::ResolvePermission { id: "7".into(), request_id: global_id(OTHER, "r"), option_id: None }, "not_owner"),
+        (ClientMsg::ResolvePermission { id: "8".into(), request_id: "r".into(), option_id: None }, "not_found"),
+        (ClientMsg::UpdatePet { id: "9".into(), pet_id: global_id(OTHER, "pet-codex"), patch: PetPatch::default() }, "not_owner"),
+        (ClientMsg::UpdatePet { id: "10".into(), pet_id: "pet-codex".into(), patch: PetPatch::default() }, "not_found"),
+        (ClientMsg::Chat { id: "11".into(), pet_id: Some(global_id(OTHER, "pet-codex")), text: "hi".into() }, "not_owner"),
+        (ClientMsg::Chat { id: "12".into(), pet_id: Some("pet-codex".into()), text: "hi".into() }, "not_found"),
+        (ClientMsg::UpdateMachine { id: "13".into(), machine_id: OTHER.into(), name: "Mac mini".into() }, "not_owner"),
+        (ClientMsg::UpdateMachine { id: "14".into(), machine_id: "nope".into(), name: "Mac mini".into() }, "invalid"),
+        (ClientMsg::UpdateMachine { id: "15".into(), machine_id: "ABCDEF012345".into(), name: "Mac mini".into() }, "invalid"),
+        (ClientMsg::UpdateMachine { id: "16".into(), machine_id: format!("{MID}:x"), name: "Mac mini".into() }, "invalid"),
+        (ClientMsg::UpdateMachine { id: "17".into(), machine_id: String::new(), name: "Mac mini".into() }, "invalid"),
+    ];
+    for (msg, want) in cases {
+        let id = msg.id().to_string();
+        let got = ack_error(f.hub.handle(msg, &actor()).await);
+        assert_eq!(got, want, "message {id}");
+    }
+    // our own prefix still works
+    ack_result(f.hub.handle(ClientMsg::Prompt { id: "ok".into(), session_id: s.id.clone(), text: "x".into() }, &actor()).await);
+    assert!(f.hub.store().audit_log(10).unwrap().is_empty(), "refused requests decide nothing");
+}
+
+#[tokio::test]
+async fn update_machine_persists_and_broadcasts() {
+    let mut f = fixture(None).await;
+    drain(&mut f.rx);
+    let v = ack_result(
+        f.hub.handle(ClientMsg::UpdateMachine { id: "m".into(), machine_id: MID.into(), name: "  Windows PC  ".into() }, &actor()).await,
+    );
+    let m: Machine = serde_json::from_value(v["machine"].clone()).unwrap();
+    assert_eq!((m.id.as_str(), m.name.as_str()), (MID, "Windows PC"));
+    assert!(m.online);
+    assert_eq!(f.hub.machine().name, "Windows PC");
+    assert_eq!(f.hub.welcome().machine.name, "Windows PC");
+    assert_eq!(f.hub.welcome().machines[0].name, "Windows PC");
+    let saved = machine::load(f.hub.paths()).unwrap().unwrap();
+    assert_eq!(saved, MachineIdentity { id: MID.into(), name: "Windows PC".into() });
+    let msgs = drain(&mut f.rx);
+    assert!(msgs.iter().any(|x| matches!(x, ServerMsg::Machine { machine } if machine.name == "Windows PC" && machine.id == MID)));
+
+    // 40 chars (counted as chars, not bytes) is fine; 41 or blank is "invalid" and changes nothing
+    let forty = "ü".repeat(40);
+    ack_result(f.hub.handle(ClientMsg::UpdateMachine { id: "m2".into(), machine_id: MID.into(), name: forty.clone() }, &actor()).await);
+    assert_eq!(f.hub.machine().name, forty);
+    drain(&mut f.rx);
+    for bad in ["".to_string(), "   ".to_string(), "ü".repeat(41), "a\tb".to_string()] {
+        let err = ack_error(f.hub.handle(ClientMsg::UpdateMachine { id: "bad".into(), machine_id: MID.into(), name: bad.clone() }, &actor()).await);
+        assert_eq!(err, "invalid", "{bad:?}");
+    }
+    assert_eq!(f.hub.machine().name, forty);
+    assert_eq!(machine::load(f.hub.paths()).unwrap().unwrap().name, forty);
+    assert!(!drain(&mut f.rx).iter().any(|x| matches!(x, ServerMsg::Machine { .. })));
+}
+
+#[tokio::test]
+async fn default_pets_get_distinct_names() {
+    let f = fixture(None).await;
+    let cwd = f.dir.path().to_string_lossy().into_owned();
+    for (i, agent_id) in ["codex", "claude-code"].into_iter().enumerate() {
+        ack_result(
+            f.hub
+                .handle(ClientMsg::StartSession { id: format!("s{i}"), agent_id: agent_id.into(), cwd: cwd.clone(), prompt: None }, &actor())
+                .await,
+        );
+    }
+    let pets = f.hub.pets();
+    assert_eq!(pets.len(), 2);
+    assert_ne!(pets[0].name.to_lowercase(), pets[1].name.to_lowercase());
+    for p in &pets {
+        assert_eq!(p.id, global_id(MID, format!("pet-{}", p.agent_id)));
+        assert_eq!(p.species, Species::Dog);
+    }
+}
+
+#[tokio::test]
+async fn store_of_another_machine_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path());
+    let store = Store::open(&paths.db, OTHER).unwrap();
+    let r = Hub::build(
+        HubOptions { paths, config: HubConfig { offline: true, ..Default::default() }, token: "t".into(), machine: ident(), background: false },
+        store,
+        Host::Fake(FakeHost::default()),
+    )
+    .await;
+    assert!(r.is_err());
+}
+
+fn pet(machine_id: &str, agent_id: &str, name: &str) -> Pet {
+    Pet {
+        id: global_id(machine_id, format!("pet-{agent_id}")),
+        machine_id: machine_id.into(),
+        agent_id: agent_id.into(),
+        species: Species::Dog,
+        skin: "default".into(),
+        name: name.into(),
+        personality: "eager".into(),
+        mood: 70,
+        xp: 0,
+    }
+}
+
+#[test]
+fn dedupe_keeps_the_oldest_name_and_renames_later_duplicates() {
+    let mut pets = vec![
+        pet(MID, "claude-code", "Mochi"),
+        pet(MID, "copilot", " mochi "),
+        pet(MID, "codex", "Biscuit"),
+        pet(MID, "opencode-v2", "MOCHI"),
+        pet(MID, "gemini", "  "),
+    ];
+    let renamed = dedupe_pet_names(&mut pets, MID);
+    assert_eq!(renamed, vec![1, 3, 4]);
+    assert_eq!(pets[0].name, "Mochi");
+    assert_eq!(pets[2].name, "Biscuit");
+    let keys: HashSet<String> = pets.iter().map(|p| p.name.trim().to_lowercase()).collect();
+    assert_eq!(keys.len(), pets.len(), "{:?}", pets.iter().map(|p| &p.name).collect::<Vec<_>>());
+    assert!(pets.iter().all(|p| !p.name.trim().is_empty()));
+    // already unique: nothing changes
+    let before = pets.clone();
+    assert!(dedupe_pet_names(&mut pets, MID).is_empty());
+    assert_eq!(pets, before);
+}
+
+#[test]
+fn dedupe_never_renames_other_machines_pets() {
+    let mut pets = vec![pet(MID, "codex", "Mochi"), pet(OTHER, "codex", "Mochi")];
+    assert_eq!(dedupe_pet_names(&mut pets, MID), vec![0]);
+    assert_eq!(pets[1].name, "Mochi");
+    assert_ne!(pets[0].name.to_lowercase(), "mochi");
+}
+
+/// The live-test bug: a v1 hub.db where claude-code, copilot and opencode-v2 are all "Mochi".
+#[tokio::test]
+async fn migrated_duplicate_pet_names_are_fixed_at_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path());
+    crate::store::create_v1_db_for_tests(
+        &paths.db,
+        &[("pet-claude-code", "claude-code", "Mochi"), ("pet-copilot", "copilot", "Mochi"), ("pet-x", "opencode-v2", "mochi")],
+    );
+    let build = |paths: Paths| async move {
+        let store = Store::open(&paths.db, MID).unwrap();
+        Hub::build(
+            HubOptions { paths, config: HubConfig { offline: true, ..Default::default() }, token: "t".into(), machine: ident(), background: false },
+            store,
+            Host::Fake(FakeHost::default()),
+        )
+        .await
+        .unwrap()
+    };
+    let hub = build(paths.clone()).await;
+    let pets = hub.pets();
+    assert_eq!(pets.len(), 3);
+    let by_agent = |a: &str| pets.iter().find(|p| p.agent_id == a).unwrap().clone();
+    assert_eq!(by_agent("claude-code").name, "Mochi", "the oldest pet keeps its name");
+    assert_eq!(by_agent("opencode-v2").id, global_id(MID, "pet-opencode-v2"));
+    let keys: HashSet<String> = pets.iter().map(|p| p.name.to_lowercase()).collect();
+    assert_eq!(keys.len(), 3, "{pets:?}");
+    // persisted: a restart sees the same names and renames nothing
+    let mut stored = hub.store().pets().unwrap();
+    stored.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+    let mut live = pets.clone();
+    live.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+    assert_eq!(stored, live);
+    drop(hub);
+    let again = build(paths).await;
+    assert_eq!(again.pets(), pets);
+}
+
+#[tokio::test]
+async fn update_pet_names_are_validated_and_unique() {
+    let f = fixture(None).await;
+    let cwd = f.dir.path().to_string_lossy().into_owned();
+    for (i, agent_id) in ["codex", "claude-code"].into_iter().enumerate() {
+        ack_result(
+            f.hub
+                .handle(ClientMsg::StartSession { id: format!("s{i}"), agent_id: agent_id.into(), cwd: cwd.clone(), prompt: None }, &actor())
+                .await,
+        );
+    }
+    let codex = f.hub.pets().into_iter().find(|p| p.agent_id == "codex").unwrap();
+    let claude = f.hub.pets().into_iter().find(|p| p.agent_id == "claude-code").unwrap();
+    let rename = |pet_id: String, name: String| ClientMsg::UpdatePet {
+        id: "n".into(),
+        pet_id,
+        patch: PetPatch { name: Some(name), ..Default::default() },
+    };
+
+    // another pet's name, any case / surrounding whitespace: name_taken, nothing changes
+    let taken = format!("  {}  ", claude.name.to_uppercase());
+    assert_eq!(ack_error(f.hub.handle(rename(codex.id.clone(), taken), &actor()).await), "name_taken");
+    assert_eq!(f.hub.pets().into_iter().find(|p| p.id == codex.id).unwrap().name, codex.name);
+
+    // re-casing its own name is fine
+    let v = ack_result(f.hub.handle(rename(codex.id.clone(), codex.name.to_uppercase()), &actor()).await);
+    assert_eq!(v["pet"]["name"], codex.name.to_uppercase().as_str());
+
+    // 1..=40 chars (as chars) after trimming
+    let forty = "ö".repeat(40);
+    let v = ack_result(f.hub.handle(rename(codex.id.clone(), format!(" {forty} ")), &actor()).await);
+    assert_eq!(v["pet"]["name"], forty.as_str());
+    for bad in [String::new(), "   ".into(), "ö".repeat(41), "a\nb".into()] {
+        assert_eq!(ack_error(f.hub.handle(rename(codex.id.clone(), bad.clone()), &actor()).await), "invalid", "{bad:?}");
+    }
+    assert_eq!(f.hub.store().pets().unwrap().into_iter().find(|p| p.id == codex.id).unwrap().name, forty);
 }

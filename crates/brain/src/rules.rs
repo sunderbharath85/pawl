@@ -504,6 +504,7 @@ mod tests {
     fn req(kind: Option<ToolKind>, paths: &[&str]) -> PermissionRequest {
         PermissionRequest {
             request_id: "r1".into(),
+            machine_id: "abcdef012345".into(),
             session_id: "s1".into(),
             agent_id: "codex".into(),
             tool_call: ToolCallPayload {

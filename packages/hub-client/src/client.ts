@@ -9,6 +9,7 @@ import type {
   ClientMsg,
   HistorySession,
   HubEvent,
+  Machine,
   Pet,
   PermissionRequest,
   Rule,
@@ -327,10 +328,13 @@ export class HubClient {
     return res.sessions;
   }
 
-  /** Fetch (older/missed) events; they are also merged into `state.events`. */
-  async getEvents(sessionId: string, sinceId?: number, limit?: number): Promise<HubEvent[]> {
+  /**
+   * Fetch (older/missed) events of a session; they are also merged into `state.events` (deduped by id).
+   * `sinceSeq` is the `seq` cursor: only events with a greater `seq` are returned (see `latestEventSeq`).
+   */
+  async getEvents(sessionId: string, sinceSeq?: number, limit?: number): Promise<HubEvent[]> {
     const msg: DistributiveOmit<Extract<ClientMsg, { type: "get_events" }>, "id"> = { type: "get_events", sessionId };
-    if (sinceId !== undefined) msg.sinceId = sinceId;
+    if (sinceSeq !== undefined) msg.sinceSeq = sinceSeq;
     if (limit !== undefined) msg.limit = limit;
     const res = await this.request<"get_events">(msg);
     return res.events;
@@ -351,7 +355,55 @@ export class HubClient {
     return res.rules;
   }
 
+  /**
+   * Rename this hub's machine (the local one from the Welcome). The name is trimmed and must be
+   * 1–40 characters (else rejects with code `invalid` without contacting the hub). If the client has
+   * not completed a hello yet, waits for it (same timeout as a request). Resolves with the updated machine,
+   * which is also folded into `state.machine` / `state.machines`.
+   */
+  async updateMachine(name: string): Promise<Machine> {
+    const trimmed = normalizeMachineName(name);
+    if (trimmed === null) {
+      throw new HubRequestError("invalid", "update_machine", `machine name must be 1–${MACHINE_NAME_MAX} characters`);
+    }
+    const machineId = await this.localMachineId("update_machine");
+    const res = await this.request<"update_machine">({ type: "update_machine", machineId, name: trimmed });
+    return res.machine;
+  }
+
   // ---------------------------------------------------------------- internals
+
+  /** This hub's machine id, waiting for the hello `Welcome` if it has not arrived yet. */
+  private localMachineId(type: string): Promise<string> {
+    const known = this.state.machine?.id;
+    if (known) return Promise.resolve(known);
+    return new Promise<string>((resolve, reject) => {
+      const fail = (code: string, message: string) => {
+        cleanup();
+        reject(new HubRequestError(code, type, message));
+      };
+      const check = (state: HubState) => {
+        if (state.machine?.id) {
+          cleanup();
+          resolve(state.machine.id);
+        } else if (state.status === "unauthorized") {
+          fail("unauthorized", "hub rejected the token (unauthorized)");
+        } else if (!this.active) {
+          fail("closed", "hub client is not connected; call connect() first");
+        } else if (state.status === "connected") {
+          // Connected to a hub whose Welcome carries no machine (pre-v2 hub).
+          fail("no_machine", "hub did not report its machine (protocol v2 required)");
+        }
+      };
+      const timer = setTimeout(() => fail("timeout", `hub request "${type}" timed out waiting for the hub's machine`), this.opts.requestTimeoutMs);
+      const unsubscribe = this.subscribe((state) => check(state));
+      function cleanup(): void {
+        clearTimeout(timer);
+        unsubscribe();
+      }
+      check(this.state);
+    });
+  }
 
   private requirePending(requestId: string, type: string): PermissionRequest {
     const req = this.state.pending[requestId];
@@ -616,6 +668,16 @@ export class HubClient {
       if (set) for (const fn of [...set]) safeCall(() => fn(msg));
     }
   }
+}
+
+/** Max machine display name length (Unicode code points), matching the hub's validation. */
+export const MACHINE_NAME_MAX = 40;
+
+/** Trimmed machine name if it is 1–`MACHINE_NAME_MAX` code points long, else null. */
+export function normalizeMachineName(name: string): string | null {
+  const trimmed = name.trim();
+  const length = [...trimmed].length;
+  return length >= 1 && length <= MACHINE_NAME_MAX ? trimmed : null;
 }
 
 /** Option id for an approve/deny decision: allow → allow_once ?? allow_always; reject → reject_once ?? null. */

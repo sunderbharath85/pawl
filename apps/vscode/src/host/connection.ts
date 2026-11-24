@@ -19,6 +19,7 @@ interface Credentials {
 export function emptyHubState(status: HubState["status"] = "disconnected"): HubState {
   return {
     status,
+    machines: {},
     agents: [],
     sessions: {},
     pets: {},

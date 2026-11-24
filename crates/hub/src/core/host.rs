@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use krypto_acp::{AcpHost, HostEvent};
-use krypto_protocol::{Agent, HistorySession, Session, SessionId};
+use krypto_protocol::{Agent, HistorySession, MachineId, Session, SessionId};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Clone)]
@@ -15,8 +15,8 @@ pub(crate) enum Host {
 }
 
 impl Host {
-    pub(crate) fn acp(events: UnboundedSender<HostEvent>) -> Self {
-        Host::Acp(AcpHost::new(events))
+    pub(crate) fn acp(machine_id: MachineId, events: UnboundedSender<HostEvent>) -> Self {
+        Host::Acp(AcpHost::new(machine_id, events))
     }
 
     pub(crate) async fn start_session(&self, agent: &Agent, cwd: PathBuf, id: SessionId, prompt: Option<String>) -> Result<Session> {
@@ -115,8 +115,11 @@ pub(crate) mod fake {
         pub(crate) fn start_session(&self, agent: &Agent, cwd: PathBuf, id: SessionId, prompt: Option<String>) -> Result<Session> {
             self.record(format!("start {} {}", agent.id, prompt.unwrap_or_default()))?;
             let now = krypto_protocol::now_ms();
+            // Hub session ids are global; the owning machine is their prefix.
+            let machine_id = krypto_protocol::parse_global_id(&id).map(|(m, _)| m.to_string()).unwrap_or_default();
             Ok(Session {
                 id,
+                machine_id,
                 agent_id: agent.id.clone(),
                 acp_session_id: Some(format!("acp-{}", uuid::Uuid::new_v4())),
                 external_id: None,

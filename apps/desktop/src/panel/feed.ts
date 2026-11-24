@@ -50,6 +50,7 @@ function textOf(payload: unknown): string {
   return "";
 }
 
+/** Feed items keyed by the events' global ids (`${machineId}:${seq}`); tool rows by tool call id. */
 export function buildFeed(events: readonly HubEvent[]): FeedItem[] {
   const items: FeedItem[] = [];
   const toolIndex = new Map<string, number>();
@@ -62,7 +63,7 @@ export function buildFeed(events: readonly HubEvent[]): FeedItem[] {
       items[items.length - 1] = { ...last, text: last.text + text };
       return;
     }
-    items.push({ kind: "text", key: `e${ev.id}`, role, text, ts: ev.ts });
+    items.push({ kind: "text", key: ev.id, role, text, ts: ev.ts });
   };
 
   for (const ev of events) {
@@ -111,7 +112,7 @@ export function buildFeed(events: readonly HubEvent[]): FeedItem[] {
         const entries = (obj(ev.payload).entries as PlanEntry[] | undefined) ?? [];
         const last = items[items.length - 1];
         if (last && last.kind === "plan") items[items.length - 1] = { ...last, entries, ts: ev.ts };
-        else items.push({ kind: "plan", key: `e${ev.id}`, entries, ts: ev.ts });
+        else items.push({ kind: "plan", key: ev.id, entries, ts: ev.ts });
         break;
       }
       case "request_permission": {
@@ -119,7 +120,7 @@ export function buildFeed(events: readonly HubEvent[]): FeedItem[] {
         const tool = obj(p.toolCall) as Partial<ToolCallPayload>;
         items.push({
           kind: "permission",
-          key: `e${ev.id}`,
+          key: ev.id,
           requestId: str(p.requestId),
           title: tool.title ?? p.title ?? "Permission requested",
           toolKind: tool.kind ?? p.kind ?? "other",
@@ -131,7 +132,7 @@ export function buildFeed(events: readonly HubEvent[]): FeedItem[] {
         const p = obj(ev.payload) as Partial<PermissionResolvedPayload>;
         items.push({
           kind: "resolved",
-          key: `e${ev.id}`,
+          key: ev.id,
           requestId: p.requestId ?? "",
           outcome: p.outcome ?? null,
           by: p.by ?? "user",
@@ -140,27 +141,27 @@ export function buildFeed(events: readonly HubEvent[]): FeedItem[] {
         break;
       }
       case "stop":
-        items.push({ kind: "stop", key: `e${ev.id}`, reason: str(obj(ev.payload).stopReason) ?? "end_turn", ts: ev.ts });
+        items.push({ kind: "stop", key: ev.id, reason: str(obj(ev.payload).stopReason) ?? "end_turn", ts: ev.ts });
         break;
       case "error":
-        items.push({ kind: "error", key: `e${ev.id}`, message: str(obj(ev.payload).message) ?? "Error", ts: ev.ts });
+        items.push({ kind: "error", key: ev.id, message: str(obj(ev.payload).message) ?? "Error", ts: ev.ts });
         break;
       case "session_start":
-        items.push({ kind: "notice", key: `e${ev.id}`, icon: "🐾", text: "Session started", ts: ev.ts });
+        items.push({ kind: "notice", key: ev.id, icon: "🐾", text: "Session started", ts: ev.ts });
         break;
       case "session_end":
-        items.push({ kind: "notice", key: `e${ev.id}`, icon: "🛏️", text: "Session ended", ts: ev.ts });
+        items.push({ kind: "notice", key: ev.id, icon: "🛏️", text: "Session ended", ts: ev.ts });
         break;
       case "notification": {
         const p = obj(ev.payload);
         const text = [str(p.title), str(p.body) ?? str(p.message)].filter(Boolean).join(": ") || "Notification";
-        items.push({ kind: "notice", key: `e${ev.id}`, icon: "🔔", text, ts: ev.ts });
+        items.push({ kind: "notice", key: ev.id, icon: "🔔", text, ts: ev.ts });
         break;
       }
       case "hook": {
         const p = obj(ev.payload) as Partial<HookPayload>;
         const text = p.message ? `${p.hookEvent ?? "hook"}: ${p.message}` : (p.hookEvent ?? "hook event");
-        items.push({ kind: "notice", key: `e${ev.id}`, icon: "🪝", text: `${p.source ?? "agent"} · ${text}`, ts: ev.ts });
+        items.push({ kind: "notice", key: ev.id, icon: "🪝", text: `${p.source ?? "agent"} · ${text}`, ts: ev.ts });
         break;
       }
     }

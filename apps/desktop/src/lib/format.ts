@@ -1,4 +1,5 @@
 import type { Agent, PermissionRequest, Session, SessionStatus, ToolKind } from "@krypto/protocol";
+import { agentFor } from "./machine";
 
 export const STATUS_META: Record<SessionStatus, { label: string; tone: string }> = {
   idle: { label: "Idle", tone: "idle" },
@@ -55,12 +56,13 @@ export function shortPath(p: string, segments = 2): string {
   return "…/" + parts.slice(-segments).join("/");
 }
 
-export function agentName(agents: Agent[], id: string): string {
-  return agents.find((a) => a.id === id)?.name ?? id;
+/** Display name of agent `id` on `machineId` (agents are per machine; ids repeat across machines). */
+export function agentName(agents: Agent[], id: string, machineId?: string): string {
+  return agentFor(agents, id, machineId)?.name ?? id;
 }
 
 export function sessionTitle(s: Session, agents: Agent[]): string {
-  return s.title?.trim() || `${agentName(agents, s.agentId)} · ${shortPath(s.cwd || "~")}`;
+  return s.title?.trim() || `${agentName(agents, s.agentId, s.machineId)} · ${shortPath(s.cwd || "~")}`;
 }
 
 export function permissionSummary(req: PermissionRequest): string {

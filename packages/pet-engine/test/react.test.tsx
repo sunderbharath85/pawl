@@ -8,7 +8,7 @@ import { currentX, haltMotion, planWander, restingMotion } from "../src/react/st
 const SPECIES: Species[] = ["dog", "cat", "bird", "robot"];
 
 function view(over: Partial<PetView> = {}): PetView {
-  return { petId: "p1", agentId: "claude-code", species: "dog", name: "Biscuit", activity: "idle", since: 0, mood: 70, ...over };
+  return { petId: "winpc0000001:p1", machineId: "winpc0000001", agentId: "claude-code", species: "dog", name: "Biscuit", activity: "idle", since: 0, mood: 70, ...over };
 }
 
 describe("PetSprite (SSR)", () => {
@@ -67,6 +67,28 @@ describe("PetStage (SSR)", () => {
     expect(html).toContain("translateX(52.0px)"); // lane 0 center 100 - 48
     expect(html).toContain("translateX(252.0px)"); // lane 1 center 300 - 48
     expect(html).toContain('role="button"');
+  });
+});
+
+describe("PetStage names", () => {
+  const views = [view({ petId: "a", name: "Biscuit" }), view({ petId: "b", name: "Pepper", machineName: "Mac mini" })];
+  const render = (extra: { showNames?: boolean } = {}) =>
+    renderToStaticMarkup(<PetStage views={views} width={400} onApprove={() => {}} onDeny={() => {}} {...extra} />);
+
+  test("shows each pet's name by default", () => {
+    const html = render();
+    expect(html.match(/class="ap-stage-name"/g)?.length).toBe(2);
+    expect(html).toContain(">Biscuit</div>");
+    expect(html).toContain(">Pepper</div>");
+    expect(html).not.toContain("Mac mini"); // name only; visitor labels come in step 3
+  });
+
+  test("showNames={false} hides the name tags and the room for them", () => {
+    const shown = render();
+    const hidden = render({ showNames: false });
+    expect(hidden).not.toContain("ap-stage-name");
+    expect(shown).toContain("height:202px"); // 96 pet + 88 bubble room + 18 name room
+    expect(hidden).toContain("height:184px");
   });
 });
 

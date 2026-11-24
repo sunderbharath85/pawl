@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import type { Session } from "@krypto/protocol";
 import { STATUS_META, SOURCE_LABEL, agentName, isActive, sessionTitle, timeAgo } from "../lib/format";
+import { OS_LABEL, machineDisplayName, machineSummary } from "../lib/machine";
 import { usePanel, type Route } from "./context";
 import * as I from "./icons";
 import { ACTIVITY_LABEL, PetAvatar, activityUrgency, safePetLine } from "./PetAvatar";
@@ -38,8 +39,24 @@ export function Sidebar() {
     { route: { view: "settings" }, label: "Settings", icon: <I.Gear /> },
   ];
 
+  const machine = state.machine;
+
   return (
     <aside className="sidebar">
+      <button
+        className={`machine-tag${route.view === "settings" ? " is-active" : ""}`}
+        onClick={() => navigate({ view: "settings" })}
+        title={`${machineSummary(machine)}
+Rename it in Settings`}
+      >
+        <I.Monitor size={15} />
+        <span className="machine-tag-text">
+          <span className="machine-tag-label">This machine</span>
+          <span className="machine-tag-name">{machineDisplayName(machine)}</span>
+        </span>
+        {machine && <span className="machine-tag-os">{OS_LABEL[machine.os] ?? machine.os}</span>}
+      </button>
+
       <button
         className={`hero tone-${hero?.activity ?? "napping"}`}
         onClick={() => setHeroIdx((i) => i + 1)}
@@ -112,7 +129,7 @@ export function Sidebar() {
         <span className="session-row-main">
           <span className="session-row-title">{sessionTitle(s, state.agents)}</span>
           <span className="session-row-sub">
-            {agentName(state.agents, s.agentId)} · {SOURCE_LABEL[s.source]} · {timeAgo(s.lastEventAt, now)}
+            {agentName(state.agents, s.agentId, s.machineId)} · {SOURCE_LABEL[s.source]} · {timeAgo(s.lastEventAt, now)}
           </span>
         </span>
         {waiting > 0 && <span className="badge badge-alert">{waiting}</span>}

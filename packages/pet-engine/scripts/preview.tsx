@@ -21,7 +21,7 @@ const rows = species
   .join("");
 const bubble = renderToStaticMarkup(
   <PetBubble
-    view={{ petId: "p", agentId: "a", species: "dog", name: "Biscuit", activity: "alert", since: 0, mood: 70, bubble: { kind: "permission", text: "Woof! Need you! Run npm test?", requestId: "r" } }}
+    view={{ petId: "m:p", machineId: "m", agentId: "a", species: "dog", name: "Biscuit", activity: "alert", since: 0, mood: 70, bubble: { kind: "permission", text: "Woof! Need you! Run npm test?", requestId: "r" } }}
     onApprove={() => {}}
     onDeny={() => {}}
   />,
