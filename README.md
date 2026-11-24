@@ -2,9 +2,9 @@
 
 Named dog pets that watch and drive your coding agents over ACP ([Agent Client Protocol](https://agentclientprotocol.com/)).
 
-![Krypto's dog, idle animation frames](assets/pets/dog/idle.png)
+![The desktop strip: named dogs nap, Juniper barks for an approval, and the Laptop's dogs visit](docs/screenshots/pet-strip.png)
 
-*Placeholder: these are the dog's idle sprite frames. A screenshot of the desktop strip and VS Code view will replace this.*
+*The desktop strip, which sits along the bottom of your screen (shown here on a plain background). Each agent's dog has a name. Juniper needs an approval for `bun test`; the dogs tagged "· Laptop" belong to another paired machine.*
 
 ## What it is
 
@@ -16,9 +16,22 @@ You see the pets in three places:
 
 - **Desktop dog:** a Tauri app with a transparent, always-on-top strip where the dogs walk, plus a panel for sessions, the event feed, chat, approvals, pets and rules.
 - **Krypto for VS Code:** pets in the status bar and a webview, approvals, commands, and opening the files an agent edited.
-- **Phone:** planned, not built yet (see [Status](#status)).
+- **Phone:** an Expo app for iOS and Android that pairs by QR code and reaches every machine through your relay. Approving or starting an agent needs biometrics or the device passcode.
 
-The goal is to cover all of your machines: a session on a Windows PC shows up as a visiting dog on a Mac, and you can approve it from either one or from the phone. That part is in progress; today Krypto works on a single machine.
+Krypto covers all of your machines: a session on a Windows PC shows up as a visiting dog on a Mac, and you can approve it from either one or from the phone.
+
+## Screenshots
+
+The desktop panel, connected to two paired machines ("Desk PC" and "Laptop"):
+
+| | |
+|---|---|
+| ![Home view](docs/screenshots/panel-home.png) | ![Approvals view](docs/screenshots/panel-approvals.png) |
+| **Home:** who is busy and who needs you | **Approvals:** from this machine, and from the Laptop after a confirmation |
+| ![Machines view](docs/screenshots/panel-machines.png) | ![Pets view](docs/screenshots/panel-pets.png) |
+| **Machines:** paired machines, phones, and pairing | **Pets:** rename, pick dog, cat, bird or robot, set a personality |
+| ![New session view](docs/screenshots/panel-new-session.png) | |
+| **New session:** pick a machine and an agent; each agent shows its pet | |
 
 ## How it works
 
@@ -42,7 +55,7 @@ The goal is to cover all of your machines: a session on a Windows PC shows up as
 
 ## Status
 
-Krypto is pre-1.0. Single-machine v1 is built; multi-machine support is being added in the steps listed under "Migration path" in [PLAN.md](PLAN.md).
+Krypto is pre-1.0. Single-machine v1 is built, and so is multi-machine support (steps 1–7 under "Migration path" in [PLAN.md](PLAN.md)). Next is polish (step 8).
 
 | Area | State |
 |---|---|
@@ -51,12 +64,12 @@ Krypto is pre-1.0. Single-machine v1 is built; multi-machine support is being ad
 | Agent discovery and hooks (Claude Code, Codex, Copilot) | Built, unit-tested |
 | Rules, bot, watchdog, pet growth | Built, unit-tested |
 | `@krypto/hub-client`, `@krypto/pet-engine` | Built, unit-tested |
-| Desktop app | Builds and typechecks; not yet tested end to end |
+| Desktop app | Builds and typechecks; UI checked in a browser against two live hubs; the Tauri shell is not yet tested end to end |
 | VS Code extension | Builds and typechecks; not yet tested end to end |
 | Pet art | Done: dog, cat, bird and robot, 9 animations each |
-| Multi-machine (PLAN.md migration steps 1–7) | In progress. Done: step 1 (machine identity: global ids, machine names, pet names), step 2 (pairing + presence over the LAN) step 3 (mirror of other machines, visitor dogs, "runs to you") step 4 (approve, prompt, cancel and start on another machine), step 5 (commands by machine, repo and pet name), step 5b (every setting in the app), step 6 (relay) and step 7 (phone app). Next: polish (step 8) |
-| Relay | Not built |
-| Phone app | Not built. Only a scaffold and the relay/crypto/pairing libraries exist |
+| Multi-machine (PLAN.md migration steps 1–7) | Done: step 1 (machine identity: global ids, machine names, pet names), step 2 (pairing + presence over the LAN), step 3 (mirror of other machines, visitor dogs, "runs to you"), step 4 (approve, prompt, cancel and start on another machine), step 5 (commands by machine, repo and pet name), step 5b (every setting in the app), step 6 (relay) and step 7 (phone app). Next: polish (step 8) |
+| Relay | Built (Cloudflare Worker + Durable Object); tested end to end with two hubs and a scripted phone |
+| Phone app | Built (Expo, 8 screens); protocol tested with a scripted phone against a live relay; not yet run on a device |
 
 ## Quickstart (from source)
 
