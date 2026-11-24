@@ -59,7 +59,7 @@ export function permission(requestId: string, over: Partial<PermissionRequest> =
 }
 
 export const welcome: Welcome = {
-  protocolVersion: 5,
+  protocolVersion: 6,
   hubVersion: "0.1.0",
   machine,
   machines: [machine],

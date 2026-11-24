@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Agent, MachineId } from "@krypto/protocol";
+import type { Agent, MachineId, RepoRef } from "@krypto/protocol";
 import { errorText, shortPath } from "../../lib/format";
 import {
   OS_LABEL,
@@ -8,7 +8,6 @@ import {
   isLocal,
   machineDisplayName,
   petFor,
-  recentCwds,
   sortedMachines,
   startNeedsConfirmation,
 } from "@krypto/hub-client";
@@ -17,6 +16,17 @@ import { useSettings } from "../../lib/settings";
 import { usePanel } from "../context";
 import * as I from "../icons";
 import { PetAvatar } from "../PetAvatar";
+
+/** A machine's repo index (`list_repos{machineId}`): the folders it runs agents in, newest first. */
+interface MachineRepos {
+  machineId: MachineId;
+  repos: RepoRef[];
+  loading: boolean;
+  error: string | null;
+}
+
+/** Repos shown under the folder field at once. */
+const REPO_PICKS = 12;
 
 /** Another machine's agents, as last reported in its presence (`list_agents{machineId}`). */
 interface RemoteAgents {
@@ -51,7 +61,36 @@ export function NewSessionView() {
   const [refreshing, setRefreshing] = useState(false);
   /** Remote start: the confirm step is showing. */
   const [confirming, setConfirming] = useState(false);
-  const suggestions = useMemo(() => recentCwds(state, target), [state, target]);
+  const [repoIndex, setRepoIndex] = useState<MachineRepos | null>(null);
+  const repos = repoIndex?.machineId === target ? repoIndex.repos : [];
+  // Repos matching what is typed (by name or path), newest first.
+  const repoPicks = useMemo(() => {
+    const q = cwd.trim().toLowerCase();
+    const hit = (r: RepoRef) => !q || r.name.toLowerCase().includes(q) || r.path.toLowerCase().includes(q);
+    const exact = repos.find((r) => r.path === cwd.trim());
+    return exact ? [] : repos.filter(hit).slice(0, REPO_PICKS);
+  }, [repos, cwd]);
+
+  // The chosen machine's repo index (this machine's too): the folder picker.
+  useEffect(() => {
+    if (meta.phase !== "connected") return;
+    let alive = true;
+    setRepoIndex({ machineId: target, repos: [], loading: true, error: null });
+    client
+      .listRepos({ machineId: target })
+      .then((list) => {
+        if (!alive) return;
+        setRepoIndex({ machineId: target, repos: list, loading: false, error: null });
+        // A remote machine starts only in folders it already uses: preselect its newest.
+        if (remote) setCwd((c) => c || list[0]?.path || "");
+      })
+      .catch((err) => alive && setRepoIndex({ machineId: target, repos: [], loading: false, error: remote ? intentErrorText(err, targetName, "start") : errorText(err) }));
+    return () => {
+      alive = false;
+    };
+    // targetName / remote follow target.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, target, meta.phase]);
 
   // The machine went offline or was unpaired: back to this one.
   useEffect(() => {
@@ -79,8 +118,8 @@ export function NewSessionView() {
   const pickMachine = (id: MachineId) => {
     setMachineId(id);
     setConfirming(false);
-    if (id === own) setCwd(settings.lastCwd);
-    else setCwd(recentCwds(state, id)[0] ?? "");
+    // This machine keeps the last folder used; another machine gets its newest repo once its index loads.
+    setCwd(id === own ? settings.lastCwd : "");
   };
 
   const selected: Agent | undefined =
@@ -238,10 +277,13 @@ export function NewSessionView() {
           )}
         </div>
 
-        <label className="field">
-          <span className="field-label">Working folder{remote ? ` on ${targetName}` : ""}</span>
+        <div className="field">
+          <label className="field-label" htmlFor="new-session-cwd">
+            Working folder{remote ? ` on ${targetName}` : ""}
+          </label>
           <div className="input-row">
             <input
+              id="new-session-cwd"
               className="input mono"
               value={cwd}
               list="new-session-cwds"
@@ -265,10 +307,33 @@ export function NewSessionView() {
             )}
           </div>
           <datalist id="new-session-cwds">
-            {suggestions.map((s) => (
-              <option key={s} value={s} />
+            {repos.map((r) => (
+              <option key={r.path} value={r.path} label={r.name} />
             ))}
           </datalist>
+          {repoPicks.length > 0 && (
+            <div className="repo-picker" role="listbox" aria-label={`Repos on ${targetName}`}>
+              {repoPicks.map((r) => (
+                <button
+                  type="button"
+                  key={r.path}
+                  role="option"
+                  aria-selected={r.path === cwd.trim()}
+                  className="repo-choice"
+                  title={r.path}
+                  onClick={() => {
+                    setCwd(r.path);
+                    setConfirming(false);
+                  }}
+                >
+                  <strong>{r.name}</strong>
+                  <span className="mono">{shortPath(r.path, 3)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {repoIndex?.machineId === target && repoIndex.loading && <span className="hint">Loading the repos {targetName} uses…</span>}
+          {repoIndex?.machineId === target && repoIndex.error && <span className="field-error">{repoIndex.error}</span>}
           {cwd && (
             <span className="hint">
               The agent can read and write files inside {shortPath(cwd, 3)}
@@ -278,10 +343,10 @@ export function NewSessionView() {
           {remote && (
             <span className="hint">
               Only folders {targetName} already uses
-              {suggestions.length > 0 ? " (pick one from the list)" : `: start a session on ${targetName} first to add one`}.
+              {repos.length > 0 ? " (pick one of its repos)" : `: start a session on ${targetName} first to add one`}.
             </span>
           )}
-        </label>
+        </div>
 
         <label className="field">
           <span className="field-label">First prompt (optional)</span>

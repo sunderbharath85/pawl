@@ -12,6 +12,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+uuid = { workspace = true }
 globset = "0.4"
 reqwest = { version = "0.13", features = ["json"] }
 

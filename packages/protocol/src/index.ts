@@ -3,7 +3,7 @@
 // crates/protocol/src/lib.rs and must stay byte-compatible (camelCase fields,
 // snake_case `type` tags). Change both together.
 
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 export const HUB_DEFAULT_PORT = 47800;
 export const HUB_HOST = "127.0.0.1";
 /** Folder name under the OS data dir (Win %APPDATA%, mac ~/Library/Application Support, linux ~/.local/share). */
@@ -304,6 +304,28 @@ export interface ChatMessage {
   text: string;
   ts: UnixMs;
   sessionId?: SessionId;
+  /** Commands the bot understood for another machine; several = it is asking which one was meant. */
+  proposals?: ChatProposal[];
+}
+
+/**
+ * A command the bot understood but does not run by itself (another machine's agent). The client shows it with a
+ * confirm step and, on confirm, sends the ordinary ClientMsg, which the hubs validate as usual:
+ * start -> start_session{agentId, cwd, prompt: text, machineId, confirmed: true}; prompt -> prompt{sessionId, text}.
+ */
+export interface ChatProposal {
+  id: string;
+  kind: "start" | "prompt";
+  machineId: MachineId;
+  agentId: AgentId;
+  /** start: a folder from that machine's repo index. */
+  cwd?: string;
+  repoName?: string;
+  /** prompt: the open session that gets `text`. */
+  sessionId?: SessionId;
+  text: string;
+  /** One line for the button, e.g. "Start Claude Code on Mac mini in ai-pet: run the tests". */
+  summary: string;
 }
 
 export type NotificationLevel = "info" | "success" | "warning" | "alert";
@@ -342,11 +364,19 @@ export interface PeerStatus {
   publicKey: string;
 }
 
-/** A repo a hub can run agents in. Filled in migration step 5; hubs send [] until then. */
+/**
+ * A folder a hub runs agents in (its repo index, migration step 5): canonical cwds of its local sessions plus
+ * config.toml `[repos] paths`. Remote start is allowed only in these folders or under `[peer] start_roots`.
+ * `name` is the folder name, made unique per machine ("api (work)").
+ */
 export interface RepoRef {
   name: string;
   path: string;
+  lastUsedAt?: UnixMs;
 }
+
+/** A hub shares at most this many repos (newest first). */
+export const REPO_INDEX_MAX = 200;
 
 /** Heartbeat a hub sends each paired hub every PRESENCE_INTERVAL_MS and on change. */
 export interface Presence {
@@ -488,6 +518,57 @@ export type PeerBody =
 
 export type PeerBodyType = PeerBody["type"];
 
+// ---------- relay (migration step 6) ----------
+/**
+ * The relay (Cloudflare Worker + one Durable Object mailbox per device) routes PeerEnvelopes between devices that
+ * are not on the same LAN. It sees only public keys and ciphertext. A device's relay address IS its X25519 public key
+ * (base64url, unpadded, 43 chars), so nobody can claim another device's mailbox.
+ * Connect: `wss://<relay>/v1/connect?pk=<pk>`. Every frame is JSON text.
+ */
+export const RELAY_PROTOCOL_VERSION = 1;
+/** Text the device boxes in its auth answer: `${RELAY_AUTH_CONTEXT}:${challengeNonce}:${relayHost}`. */
+export const RELAY_AUTH_CONTEXT = "krypto-relay-auth-v1";
+/** A mailbox accepts frames only from these many allowed senders. */
+export const RELAY_MAX_ALLOWED = 64;
+/** Frames queued for an offline device: at most this many, this many bytes, kept this long. */
+export const RELAY_QUEUE_MAX_FRAMES = 256;
+export const RELAY_QUEUE_MAX_BYTES = 2 * 1024 * 1024;
+export const RELAY_QUEUE_TTL_MS = 24 * 60 * 60 * 1000;
+/** Same cap as the LAN link. */
+export const RELAY_FRAME_MAX_BYTES = 320 * 1024;
+
+/** Relay -> device. */
+export type RelayServerFrame =
+  /** First frame: prove you hold the secret key for `pk`. `relayPk` is a fresh X25519 key for this connection. */
+  | { t: "challenge"; nonce: string; relayPk: string; v: 1 }
+  | { t: "ok"; queued: number }
+  /** A frame from an authenticated sender (`from` = its public key). Check it matches the roster key for env.from. */
+  | { t: "msg"; from: string; env: PeerEnvelope }
+  | { t: "error"; code: RelayErrorCode; to?: string }
+  | { t: "pong"; ts: UnixMs };
+
+export type RelayErrorCode =
+  | "bad_auth"
+  | "bad_frame"
+  | "too_large"
+  | "not_allowed"
+  | "queue_full"
+  | "rate_limited";
+
+/** Device -> relay. */
+export type RelayClientFrame =
+  /** `box` = nacl.box(utf8(`${RELAY_AUTH_CONTEXT}:${nonce}:${host}`), challenge nonce, relayPk, device secret key). */
+  | { t: "auth"; box: string }
+  /** Replace this mailbox's allowed senders (public keys of paired devices). */
+  | { t: "allow"; pks: string[] }
+  /** One-shot pairing slot: a frame carrying this token may arrive once from any sender before `exp`. Max 4 live. */
+  | { t: "allow_pairing"; token: string; exp: UnixMs }
+  /** `pairing` = the inviter's token from the invite URI (only for the first pair_request). */
+  | { t: "send"; to: string; env: PeerEnvelope; pairing?: string }
+  /** Phone only: content-free wake ("Your pet needs you") when a frame is queued while it is offline. */
+  | { t: "register_push"; expoToken: string }
+  | { t: "ping"; ts: UnixMs };
+
 // ---------- hooks ----------
 export type HookSource = "claude" | "codex" | "copilot";
 
@@ -533,7 +614,9 @@ export type ClientMsg =
   /** Unpair a device: its links close, it can no longer connect, and the peer is told. Errors: not_found. */
   | { type: "revoke_device"; id: string; deviceId: string }
   /** The user is active on this machine (throttled by clients to USER_ACTIVITY_REPORT_MS). Hub stamps the time. */
-  | { type: "user_activity"; id: string };
+  | { type: "user_activity"; id: string }
+  /** A machine's repo index (default: this machine; another machine: from its latest presence). */
+  | { type: "list_repos"; id: string; machineId?: MachineId };
 
 export type ClientMsgType = ClientMsg["type"];
 
@@ -557,6 +640,7 @@ export interface AckResults {
   join_peer: { device: Device; machine: Machine };
   revoke_device: Record<string, never>;
   user_activity: Record<string, never>;
+  list_repos: { repos: RepoRef[] };
 }
 
 // ---------- hub -> client ----------

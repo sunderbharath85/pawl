@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 pub const HUB_DEFAULT_PORT: u16 = 47800;
 pub const HUB_HOST: &str = "127.0.0.1";
 pub const HUB_DATA_DIR_NAME: &str = "krypto";
@@ -126,12 +126,49 @@ pub struct PeerStatus {
     pub public_key: String,
 }
 
-/// A repo a hub can run agents in. Filled in migration step 5; hubs send [] until then.
+/// A folder a hub runs agents in (its repo index, migration step 5): canonical cwds of its local sessions plus
+/// config.toml `[repos] paths`. Remote start is allowed only in these folders or under `[peer] start_roots`.
+/// `name` is the folder name, made unique per machine ("api (work)").
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoRef {
     pub name: String,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<UnixMs>,
+}
+
+/// A hub shares at most this many repos (newest first).
+pub const REPO_INDEX_MAX: usize = 200;
+
+/// A command the bot understood but does not run by itself (another machine's agent). The client shows it with a
+/// confirm step and, on confirm, sends the ordinary ClientMsg, which the hubs validate as usual:
+/// start -> start_session{agent_id, cwd, prompt: text, machine_id, confirmed: true}; prompt -> prompt{session_id, text}.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatProposal {
+    pub id: String,
+    pub kind: ChatProposalKind,
+    pub machine_id: MachineId,
+    pub agent_id: AgentId,
+    /// start: a folder from that machine's repo index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_name: Option<String>,
+    /// prompt: the open session that gets `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    pub text: String,
+    /// One line for the button, e.g. "Start Claude Code on Mac mini in ai-pet: run the tests".
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatProposalKind {
+    Start,
+    Prompt,
 }
 
 /// Heartbeat a hub sends each paired hub every PRESENCE_INTERVAL_MS and on change.
@@ -764,6 +801,9 @@ pub struct ChatMessage {
     pub ts: UnixMs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
+    /// Commands the bot understood for another machine; several = it is asking which one was meant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<ChatProposal>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -788,6 +828,72 @@ pub struct HubNotification {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<AgentId>,
     pub ts: UnixMs,
+}
+
+// ---------- relay (migration step 6) ----------
+/// The relay (Cloudflare Worker + one Durable Object mailbox per device) routes PeerEnvelopes between devices that
+/// are not on the same LAN. It sees only public keys and ciphertext. A device's relay address IS its X25519 public
+/// key (base64url, unpadded, 43 chars). Connect: `wss://<relay>/v1/connect?pk=<pk>`. JSON text frames.
+pub const RELAY_PROTOCOL_VERSION: u8 = 1;
+/// Text the device boxes in its auth answer: `{RELAY_AUTH_CONTEXT}:{challenge_nonce}:{relay_host}`.
+pub const RELAY_AUTH_CONTEXT: &str = "krypto-relay-auth-v1";
+pub const RELAY_MAX_ALLOWED: usize = 64;
+pub const RELAY_QUEUE_MAX_FRAMES: usize = 256;
+pub const RELAY_QUEUE_MAX_BYTES: usize = 2 * 1024 * 1024;
+pub const RELAY_QUEUE_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+pub const RELAY_FRAME_MAX_BYTES: usize = 320 * 1024;
+
+/// Relay -> device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum RelayServerFrame {
+    /// First frame: prove you hold the secret key for `pk`. `relay_pk` is a fresh X25519 key for this connection.
+    Challenge { nonce: String, relay_pk: String, v: u8 },
+    Ok { queued: u32 },
+    /// A frame from an authenticated sender (`from` = its public key). Check it matches the roster key for env.from.
+    Msg { from: String, env: PeerEnvelope },
+    Error {
+        code: RelayErrorCode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+    },
+    Pong { ts: UnixMs },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayErrorCode {
+    BadAuth,
+    BadFrame,
+    TooLarge,
+    NotAllowed,
+    QueueFull,
+    RateLimited,
+}
+
+/// Device -> relay.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum RelayClientFrame {
+    /// `box` = NaCl box of `{RELAY_AUTH_CONTEXT}:{nonce}:{host}` with the challenge nonce, to relay_pk, from the device key.
+    Auth {
+        #[serde(rename = "box")]
+        ciphertext: String,
+    },
+    /// Replace this mailbox's allowed senders (public keys of paired devices).
+    Allow { pks: Vec<String> },
+    /// One-shot pairing slot: a frame carrying this token may arrive once from any sender before `exp`. Max 4 live.
+    AllowPairing { token: String, exp: UnixMs },
+    /// `pairing` = the inviter's token from the invite URI (only for the first pair_request).
+    Send {
+        to: String,
+        env: PeerEnvelope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pairing: Option<String>,
+    },
+    /// Phone only: content-free wake when a frame is queued while it is offline.
+    RegisterPush { expo_token: String },
+    Ping { ts: UnixMs },
 }
 
 // ---------- client -> hub ----------
@@ -862,6 +968,12 @@ pub enum ClientMsg {
     RevokeDevice { id: String, device_id: String },
     /// The user is active on this machine (clients throttle to USER_ACTIVITY_REPORT_MS). Hub stamps the time.
     UserActivity { id: String },
+    /// A machine's repo index (default: this machine; another machine: from its latest presence). Ack `{repos}`.
+    ListRepos {
+        id: String,
+        #[serde(default)]
+        machine_id: Option<MachineId>,
+    },
 }
 
 impl ClientMsg {
@@ -884,7 +996,8 @@ impl ClientMsg {
             | ClientMsg::CreateInvite { id, .. }
             | ClientMsg::JoinPeer { id, .. }
             | ClientMsg::RevokeDevice { id, .. }
-            | ClientMsg::UserActivity { id } => id,
+            | ClientMsg::UserActivity { id }
+            | ClientMsg::ListRepos { id, .. } => id,
         }
     }
 }
@@ -1000,6 +1113,20 @@ mod tests {
         );
         let a = PeerBody::IntentAck { intent_id: "i1".into(), status: IntentStatus::Rejected, reason: Some(IntentRejectReason::AlreadyDecided), result: None };
         assert_eq!(serde_json::to_value(&a).unwrap(), serde_json::json!({"type":"intent_ack","intentId":"i1","status":"rejected","reason":"already_decided"}));
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"list_repos","id":"7","machineId":"abcdef012345"}"#).unwrap();
+        assert_eq!(m.id(), "7");
+        let p = ChatProposal {
+            id: "p".into(),
+            kind: ChatProposalKind::Start,
+            machine_id: "abcdef012345".into(),
+            agent_id: "claude-code".into(),
+            cwd: Some("/r".into()),
+            repo_name: Some("r".into()),
+            session_id: None,
+            text: "run the tests".into(),
+            summary: "Start".into(),
+        };
+        assert_eq!(serde_json::to_value(&p).unwrap()["kind"], "start");
         let s = ServerMsg::MachineRemoved { machine_id: "abcdef012345".into() };
         assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::json!({"type":"machine_removed","machineId":"abcdef012345"}));
     }

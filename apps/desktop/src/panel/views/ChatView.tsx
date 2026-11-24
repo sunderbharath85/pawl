@@ -6,6 +6,7 @@ import { petList } from "../../lib/pets";
 import { usePanel } from "../context";
 import * as I from "../icons";
 import { PetAvatar } from "../PetAvatar";
+import { ChatProposals } from "./ChatProposals";
 
 const SUGGESTIONS = ["What's everyone doing?", "Summarize the last session", "Approve it", "Tell Codex to run the tests"];
 
@@ -90,6 +91,7 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
               <div>
                 <div className="msg-name">{from?.name ?? "Pet"}</div>
                 <div className="msg-bubble">{m.text}</div>
+                <ChatProposals message={m} />
                 <div className="msg-foot">
                   <time>{clockTime(m.ts)}</time>
                   {m.sessionId && state.sessions[m.sessionId] && (

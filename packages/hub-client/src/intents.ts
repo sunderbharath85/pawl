@@ -128,7 +128,7 @@ export function intentErrorText(err: unknown, machineName: string, action: Inten
       return `Too many requests to ${machineName} at once. Wait a moment and try again.`;
     case "invalid":
       return action === "start"
-        ? `${machineName} can't start that: the agent must be installed there and the folder must exist on it.`
+        ? `${machineName} can't start that: the agent must be installed there and the folder must be one of its repos.`
         : action === "prompt"
           ? `${machineName} refused that message (too long, or the session can't take prompts).`
           : `${machineName} refused that: the option isn't valid for this request.`;

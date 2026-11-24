@@ -679,3 +679,154 @@ No new dependencies expected; ask t13 first.
   Mac mini in <cwd>? [y/N]" unless --yes; `krypto approve <requestId> [--option <id>] [--yes]` and `krypto deny <requestId>`
   work for local and remote requests. A remote approve always asks interactively on the terminal (it needs a TTY;
   `--yes` is NOT honoured for remote approvals, so a script cannot approve on another machine).
+
+## Step 5 — Remote commands by machine + repo (PLAN.md migration step 5) — protocol v6
+
+Branch `step-5-remote-commands`. Protocol already updated by the orchestrator (PROTOCOL_VERSION = 6): `RepoRef`
+(+ `lastUsedAt`, doc = the repo index), `REPO_INDEX_MAX` (200), `ChatProposal` / `ChatProposalKind` (Rust),
+`ChatMessage.proposals`, ClientMsg `list_repos{machineId?}` -> `{repos}`. Read the doc comments; they are the spec.
+
+Goal: "Tell the Mac mini's Claude to run the tests in repo X" typed on the PC does the right thing, and asks when
+the target is ambiguous. **Security rule:** the bot never runs a command on another machine by itself. For a remote
+target it replies with `proposals`; the user confirms in the client, which sends the ordinary `start_session` /
+`prompt` ClientMsg (step-4 rules apply unchanged). Only the deterministic parser creates proposals or actions; LLM
+output stays text. Local targets keep today's behaviour (BrainAction executed by the hub).
+
+### Ownership (step 5)
+| Role | Owns |
+|---|---|
+| sde-brain (new) | `crates/brain/` |
+| sde-hubcore | `crates/hub/` |
+| fe-apps | `packages/hub-client/`, `packages/pet-engine/`, `apps/desktop/`, `apps/vscode/` |
+
+No new dependencies expected; ask t13 first.
+
+### Brain API (sde-brain implements; sde-hubcore codes against it)
+```rust
+pub struct BrainContext {
+    pub machine: Machine, pub machines: Vec<Machine>,
+    pub agents: Vec<Agent>,                                  // this machine (unchanged)
+    pub remote_agents: BTreeMap<MachineId, Vec<Agent>>,      // NEW: paired machines' agents from presence
+    pub repos: BTreeMap<MachineId, Vec<RepoRef>>,            // NEW: repo index per machine, this one included
+    pub pets: Vec<Pet>,                                      // NEW: every machine's pets (for "tell Biscuit to ...")
+    pub sessions: Vec<Session>, pub recent_events: Vec<HubEvent>, pub pending: Vec<PermissionRequest>,
+    pub pet: Option<Pet>,                                    // the pet being chatted with (unchanged)
+}
+pub struct BrainReply {
+    pub text: String,
+    pub action: Option<BrainAction>,     // local targets only (unchanged)
+    pub proposals: Vec<ChatProposal>,    // NEW: remote targets only; ids unique (uuid v4)
+}
+```
+Parsing (deterministic, case-insensitive, tolerant of "the", "'s", punctuation):
+- Machine: its display name or a unique prefix ("mac mini", "the mac mini's", "on windows pc"); "here"/"this
+  machine" = local.
+- Pet: any known pet name ("tell Biscuit to ...", "Biscuit, ..."). A pet fixes machine + agent.
+- Agent: id, name or common alias (claude / claude code, codex, gemini, copilot).
+- Repo: "in repo X", "in the X repo", "in X" / "for X" where X matches a repo name (exact, then unique prefix) in the
+  candidate machines' indexes.
+- Task text: the rest after "to" / ":" ("run the tests"). Empty task -> start without a prompt (like today).
+Resolution: pet -> machine+agent; else explicit machine; else infer: the repo exists on exactly one machine, or the
+agent has a session in that repo on exactly one machine. Agent missing -> the machine's only installed agent, else
+ask. Repo missing -> that agent's most recent session cwd on that machine, else ask. Several candidates -> reply with
+one proposal per candidate (max 5) and a question. Nothing matches -> say what is known ("Mac mini has: api, web").
+Offline machine -> say so (with last seen), no proposal. Agent not installed there -> say so.
+Prompt vs start: if that agent has an open **owned** session (not ended, status idle/done, not waiting on a
+permission) in that repo on that machine -> `prompt` proposal for it; else `start`. Hook sessions are never prompted.
+Summary text names everything: "Start Claude Code on Mac mini in ai-pet: run the tests" /
+"Send to Claude Code on Mac mini (ai-pet): run the tests".
+Status questions with targets work too ("what is the Mac mini's Claude doing?").
+Tests: the example sentence, pet addressing, ambiguity (two machines with repo X), offline, unknown repo, prompt vs
+start, local target still yields a BrainAction, and that no LLM path can produce a proposal or action.
+
+### Hub (sde-hubcore)
+- Repo index: canonical cwds of local sessions (owned + hook) with lastUsedAt, plus config.toml `[repos] paths = [...]`;
+  drop folders that no longer exist; unique names per machine ("name (parent)"); newest REPO_INDEX_MAX. Rebuild on a
+  new local session cwd, on config load and hourly. The step-4 "known folder" check for remote start uses the same
+  index (+ `[peer] start_roots`), one function.
+- Presence carries `repos` (was []). Inbound peer repos validated: <= REPO_INDEX_MAX, name <= 80 chars, path <= 1024,
+  no control chars; stored per peer (persist like agents).
+- `list_repos{machineId?}`; BrainContext wiring (remote_agents, repos, pets of all machines); chat replies store and
+  broadcast `ChatMessage.proposals`.
+- CLI: `krypto repos [--machine <name|id>] [--json]`; `krypto start <agent> --machine X --repo <name>` (repo name ->
+  path via that machine's index; ambiguous/unknown -> error listing names); `krypto chat "<text>"` prints the reply
+  and numbered proposals, `--pick N` executes proposal N through the normal path (remote start still asks on the TTY).
+
+### Clients (fe-apps)
+- hub-client: `listRepos({machineId})`, `executeProposal(p, {confirmed})` (maps to start_session / prompt; start needs
+  confirmed, checked before sending), tests.
+- Desktop chat view and VS Code chat: render proposals as buttons with the summary; click -> confirm step on this
+  device ("Run on Mac mini?") -> execute; show the result inline (started / sent / error text from intentErrorText).
+  Several proposals = choose one. A proposal is single-use in the UI (disable after use) and expires after 10 min.
+- New session view: repo picker from `listRepos({machineId})` (name + path), replacing recent-cwd suggestions.
+
+## Step 6 — Relay (PLAN.md migration step 6)
+
+Types already in both protocol files ("relay (migration step 6)"): `RelayServerFrame`, `RelayClientFrame`,
+`RelayErrorCode`, `RELAY_*` constants. They are the spec; this section adds behaviour. Supersedes the old
+"Relay (wave 2)" section above.
+
+Goal: paired devices reach each other when they are not on the same LAN. Every hub connects **outbound** to the relay;
+the LAN link stays the preferred fast path with relay fallback. The relay sees public keys and ciphertext only.
+
+### Ownership (step 6, phase A — runs in parallel with steps 5 / 5b)
+| Role | Owns |
+|---|---|
+| sde-relay (new) | `services/relay/` (`@krypto/relay`, Cloudflare Worker + Durable Objects) |
+| sde-peer | `crates/peer/` (relay transport) |
+Phase B (after 5b): sde-hubcore wires `[relay]` settings + status into the hub; fe-apps adds the relay settings UI.
+
+Dependencies approved by the user ("complete all steps, use recommended choices"): `wrangler` and
+`@cloudflare/workers-types` (dev, services/relay), `tweetnacl` (services/relay runtime; already used by apps/mobile),
+`tokio-tungstenite` feature `rustls-tls-webpki-roots` (crates/peer, for wss://). Nothing else without asking t13.
+
+### Relay service (sde-relay)
+- Worker `GET /v1/connect?pk=<b64url pk>` (WebSocket upgrade only; anything else 404, `/health` -> `{ok:true}`):
+  validate pk (43 chars base64url -> 32 bytes) and route to Durable Object `Mailbox` `idFromName(pk)`. Use the
+  WebSocket Hibernation API. One live socket per mailbox (a new authenticated one replaces the old).
+- Auth: on connect send `challenge{nonce (24 random bytes b64), relayPk (fresh X25519 per connection), v:1}`. The device
+  answers `auth{box}` within 10 s; open with tweetnacl `nacl.box.open(box, nonce, devicePk, relaySk)`; plaintext must
+  equal `${RELAY_AUTH_CONTEXT}:${nonce}:${host}` (host = request Host header). Else `error{bad_auth}` + close. Then
+  `ok{queued}` and flush the queue. Nothing but `auth` is accepted before that.
+- `allow{pks}`: replace the allowed-sender set (<= RELAY_MAX_ALLOWED, each a valid pk); persisted in DO storage.
+  `allow_pairing{token, exp}`: one-shot slot (token 16 bytes b64url, exp <= now + 1 h, max 4 live, persisted).
+- `send{to, env, pairing?}`: frame <= RELAY_FRAME_MAX_BYTES (else `too_large`); per-socket rate limit (e.g. 50
+  frames/s, burst 200 -> `rate_limited`); forward to the recipient DO, which delivers `msg{from: senderPk, env}` if the
+  sender is allowed, or if `pairing` matches a live slot (consume it); else `error{not_allowed, to}` to the sender.
+  Recipient offline -> queue (RELAY_QUEUE_MAX_FRAMES / _BYTES / _TTL_MS; oldest dropped first; alarm cleans expired;
+  full -> `queue_full`). The relay never parses `env` beyond size and JSON shape.
+- `register_push{expoToken}` (store; validate `ExponentPushToken[...]` shape): when a frame is queued for an offline
+  mailbox with a token, send one content-free Expo push ("Your pet needs you") at most once per minute.
+- `ping` -> `pong`. Idle sockets are fine (hibernation).
+- No logging of envelopes, tokens or push tokens; log only counts and error codes.
+- Tests (bun test): pure modules for frame validation, auth verify, allowlist / pairing slots, queue caps + TTL,
+  rate limiter, with an in-memory storage fake. Smoke: `wrangler dev` locally + a bun script acting as two devices
+  (auth, allow, send/deliver, not_allowed, queue while offline then flush, pairing slot one-shot, bad auth).
+  **Do not deploy**; t13 deploys after review.
+
+- **Encodings (fixed by sde-relay):** relay addresses (`?pk=`, `allow.pks`, `send.to`, `msg.from`) = base64url
+  unpadded, 43 chars, canonical only. `challenge.nonce` (24 B), `challenge.relayPk` (32 B) and `auth.box` = standard
+  base64, padded. Pairing token = base64url unpadded, 22 chars (16 B). Auth plaintext host = the connect request's
+  Host header (e.g. `127.0.0.1:8787` under `wrangler dev`). Queue overflow drops the oldest frames to fit; the
+  sender still gets `error{queue_full, to}` although its frame is queued. `pong.ts` = relay clock. Close codes: 1008
+  bad_auth / auth timeout, 4000 replaced by a newer authenticated socket.
+
+### Relay transport (sde-peer, crates/peer)
+- `PeerNode::set_relay(&self, url: Option<String>)` (runtime; None = off). Connect outbound to
+  `{url}/v1/connect?pk=<own pk b64url>`, answer the challenge with `crypto_box` (same key as the LAN link), send
+  `allow` with every non-revoked roster device's pk (resend on roster change), `allow_pairing` for every live invite.
+  Reconnect with backoff (1 s -> 60 s, jitter). `relay_status() -> RelayStatus { url, connected, last_error }`
+  and `PeerEvent::RelayStatus(RelayStatus)` on change.
+- Logical links per peer: path LAN or relay. No LAN link -> send `hello` via the relay; the reply makes the link
+  up on the relay path (LinkUp as today, plus `PeerEvent::LinkPath { device_id, path }`). A LAN link that comes up
+  later takes over (prefer LAN); losing it falls back to the relay without a LinkDown if the relay path is up.
+  Presence / mirror / intents / bye use the active path. Offline rules unchanged.
+- Inbound `msg{from, env}`: `from` must equal the roster key of `env.from` (for pair_request: the envelope `pk`);
+  then the normal open + seq + direction checks. Mismatch -> drop + warn (no payload).
+- Invites: when the relay is connected, `create_invite` adds `relay=<percent-encoded url>&rt=<b64url 16 bytes>` to the
+  URI and registers `allow_pairing{rt, exp}`; `addr` becomes optional when `relay` is present (a phone or a hub off
+  the LAN has no addr). `join` tries the LAN addr first (3 s) and falls back to the relay with `pairing = rt`.
+  `Invite::parse` accepts these params (still strict otherwise).
+- Tests: an in-process mock relay (Rust, tokio-tungstenite server implementing the frames above) — auth, allow,
+  relay-only pairing, link over relay, LAN takeover and fallback, from/env.from mismatch dropped, relay restart
+  reconnect. Gate: cargo test -p krypto-peer + clippy -D warnings.

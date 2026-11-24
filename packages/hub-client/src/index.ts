@@ -7,10 +7,22 @@ export {
   pickPermissionOption,
   REMOTE_REQUEST_TIMEOUT_MS,
   type HubClientOptions,
+  type ProposalResult,
   type RequestOptions,
   type ResolveOptions,
   type StartSessionOptions,
 } from "./client";
+export {
+  PROPOSAL_TTL_MS,
+  ProposalLedger,
+  proposalConfirmText,
+  proposalDoneText,
+  proposalExpired,
+  proposalProblem,
+  proposalRetryable,
+  repoIndexHas,
+  type ProposalEntry,
+} from "./proposals";
 export {
   approveOptionId,
   INTENT_ERROR_CODES,

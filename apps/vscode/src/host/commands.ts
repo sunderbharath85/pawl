@@ -10,7 +10,6 @@ import {
   petFor,
   petRenameErrorText,
   readOnlyReason,
-  recentCwds,
   renameErrorText,
   sortedMachines,
   startNeedsConfirmation,
@@ -153,18 +152,18 @@ export class Commands {
     return pick?.id;
   }
 
-  /** A folder on another machine: its recent session folders, or one typed in. */
+  /** A folder on another machine: one of its repos (its repo index, `list_repos`), or one typed in. */
   private async pickRemoteCwd(machineId: string): Promise<string | undefined> {
     const name = machineDisplayName(this.hub.state.machines[machineId]);
-    const recent = recentCwds(this.hub.state, machineId);
+    const repos = await this.hub.api.listRepos({ machineId }).catch((err) => Promise.reject(remoteError(this.hub, machineId, "start", err)));
     const TYPE = `$(edit) Enter another folder ${name} already uses…`;
-    if (recent.length > 0) {
-      const pick = await vscode.window.showQuickPick([...recent.map((cwd) => ({ label: cwd })), { label: TYPE }], {
-        title: `Krypto: working folder on ${name}`,
-        placeHolder: `Only folders ${name} already uses`,
-      });
+    if (repos.length > 0) {
+      const pick = await vscode.window.showQuickPick(
+        [...repos.map((r) => ({ label: `$(repo) ${r.name}`, description: r.path, path: r.path })), { label: TYPE, description: "", path: "" }],
+        { title: `Krypto: working folder on ${name}`, placeHolder: `Only folders ${name} already uses`, matchOnDescription: true },
+      );
       if (!pick) return undefined;
-      if (pick.label !== TYPE) return pick.label;
+      if (pick.path) return pick.path;
     }
     const typed = await vscode.window.showInputBox({
       title: `Krypto: working folder on ${name}`,
@@ -234,6 +233,17 @@ export class Commands {
     if (folders.length > 1) {
       const pick = await vscode.window.showWorkspaceFolderPick({ placeHolder: "Working directory for the agent" });
       return pick?.uri.fsPath;
+    }
+    // No workspace folder: this machine's repos first, then a folder dialog.
+    const repos = await this.hub.api.listRepos().catch(() => []);
+    if (repos.length > 0) {
+      const BROWSE = "$(folder-opened) Browse…";
+      const pick = await vscode.window.showQuickPick(
+        [...repos.map((r) => ({ label: `$(repo) ${r.name}`, description: r.path, path: r.path })), { label: BROWSE, description: "", path: "" }],
+        { title: "Krypto: working directory for the agent", placeHolder: "Pick a repo, or browse for a folder", matchOnDescription: true },
+      );
+      if (!pick) return undefined;
+      if (pick.path) return pick.path;
     }
     const last = this.context.globalState.get<string>(LAST_CWD_KEY);
     const chosen = await vscode.window.showOpenDialog({

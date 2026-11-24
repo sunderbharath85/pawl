@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import type { WebviewToHost } from "./shared/messages";
 import { sessionBackfill } from "@krypto/hub-client";
 import { ActivityReporter } from "./host/activity";
+import { runProposal } from "./host/proposals";
 import { answerRequest, remoteError } from "./host/remote";
 import { Commands } from "./host/commands";
 import { HubConnection } from "./host/connection";
@@ -95,6 +96,9 @@ async function handleWebviewMessage(msg: WebviewToHost, hub: HubConnection): Pro
       return;
     case "chat":
       if (msg.text.trim()) await hub.api.chat(msg.text.trim(), msg.petId);
+      return;
+    case "proposal":
+      await runProposal(hub, msg.messageId, msg.proposalId);
       return;
     case "loadEvents":
       // First open: latest window; afterwards catch up from the newest held `seq`. HubClient merges

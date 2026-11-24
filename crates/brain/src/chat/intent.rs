@@ -9,12 +9,19 @@
 //! - daily report: "daily report", "recap", "what happened today"
 //! - status: "what's Claude doing?", "status", "how is codex", "codex?"
 //! - everything else is small talk.
+//!
+//! Targets (migration step 5), recognized in commands, status questions and approvals:
+//! - machine: display name or unique prefix, in context ("on the mac mini", "the mac mini's claude",
+//!   "tell the mac mini to …", "what is the mac mini doing?"); "here" / "on this machine" = local.
+//! - pet: any known pet name ("tell Biscuit to …", "Biscuit, run the tests", "what's Rex doing?");
+//!   a pet fixes machine + agent.
+//! - repo: names from every machine's repo index and sessions; the caller resolves them per machine.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use krypto_protocol::{Agent, AgentId, Session};
+use krypto_protocol::{Agent, AgentId, MachineId, Pet, Session};
 
-use crate::util::{basename, path_key};
+use crate::util::{basename, clean_name, path_key};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AgentRef {
@@ -34,13 +41,47 @@ pub(crate) enum Pick {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RepoRef {
     Path(String),
-    Known { name: String, cwd: String },
+    /// A name some machine's repo index (or a session cwd) matches. `name` as typed, `key` normalized,
+    /// `explicit` = said "repo"/"project"/… (allows a fuzzy match). The caller resolves it per machine.
+    Named { name: String, key: String, explicit: bool },
     Unknown { name: String },
+}
+
+/// A machine the user named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MachineRef {
+    /// "here", "on this machine".
+    Here,
+    /// By display name or unique prefix (may be this machine's own id).
+    Id(MachineId),
+}
+
+/// A pet the user named: it fixes the machine and the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PetRef {
+    pub id: String,
+    pub name: String,
+    pub machine_id: MachineId,
+    pub agent_id: AgentId,
+}
+
+/// Where the user pointed a command, status question or approval.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Target {
+    pub machine: Option<MachineRef>,
+    pub pet: Option<PetRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Parsed {
+    pub intent: Intent,
+    pub target: Target,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommandIntent {
-    pub agent: AgentRef,
+    /// None when only a machine or pet was named ("tell the mac mini to run the tests").
+    pub agent: Option<AgentRef>,
     pub repo: Option<RepoRef>,
     pub task: String,
     /// "start …" / "new session": always start a session instead of prompting one.
@@ -81,6 +122,8 @@ pub(crate) struct Tok {
     /// Followed by `,` or `:` (addressing: "codex, …").
     pub sep: bool,
     pub quoted: bool,
+    /// Ends in a possessive "'s" ("mac mini's").
+    pub poss: bool,
 }
 
 fn make_tok(orig: String, sep: bool, quoted: bool) -> Tok {
@@ -90,8 +133,10 @@ fn make_tok(orig: String, sep: bool, quoted: bool) -> Tok {
         .trim_end_matches(|c: char| "\"'`)]}>.,!?;:*".contains(c))
         .to_string();
     let plain = norm.replace('\'', "");
-    let key = norm.strip_suffix("'s").filter(|k| !k.is_empty()).unwrap_or(&norm).to_string();
-    Tok { orig, plain, key, sep, quoted }
+    let stripped = norm.strip_suffix("'s").filter(|k| !k.is_empty());
+    let poss = stripped.is_some() && !quoted;
+    let key = stripped.unwrap_or(&norm).to_string();
+    Tok { orig, plain, key, sep, quoted, poss }
 }
 
 pub(crate) fn tokenize(text: &str) -> Vec<Tok> {
@@ -186,7 +231,21 @@ const GENERIC_NAME_WORDS: &[&str] = &[
 ];
 const STATUS_WORDS: &[&str] = &[
     "doing", "status", "progress", "happening", "update", "updates", "sessions", "pending", "waiting", "busy", "news",
-    "working", "stuck", "summary", "summarize", "agents", "overview",
+    "working", "stuck", "summary", "summarize", "agents", "overview", "running",
+];
+/// Prepositions that introduce a machine ("on the mac mini", "at windows pc").
+const MACHINE_PREPS: &[&str] = &["on", "at"];
+/// Nouns that may follow a machine name ("the mac mini machine").
+const MACHINE_NOUNS: &[&str] = &["machine", "computer", "box", "laptop", "desktop", "pc", "device", "host", "server"];
+/// Words that may follow a machine phrase ("tell the mac mini to …", "on the mac mini in repo x",
+/// "is the mac mini busy?"); anything else means the name is part of a longer phrase.
+const MACHINE_FOLLOW: &[&str] = &[
+    "to", "in", "and", "for", "with", "then", "please", "now", "right", "doing", "up", "is", "has", "busy", "working",
+    "running", "status",
+];
+const QUESTION_WORDS: &[&str] = &[
+    "what", "whats", "how", "hows", "why", "who", "whos", "where", "wheres", "when", "is", "are", "was", "were", "do",
+    "does", "did", "can", "could", "will", "would", "should", "any", "anything", "anyone",
 ];
 const STATUS_PHRASES: &[&str] = &["up to", "working on", "going on", "check on", "whats new", "where are we"];
 const SMALLTALK_QUESTIONS: &[&str] = &[
@@ -212,7 +271,9 @@ fn capitalize(w: &str) -> String {
 struct Alias {
     words: Vec<String>,
     agent_id: AgentId,
-    rank: (bool, i64),
+    /// (on this machine, installed, last seen): a tie between this machine's agent and a paired
+    /// machine's goes to this machine's.
+    rank: (bool, bool, i64),
 }
 
 /// Names users can type for each agent (ids, display names, first words), from discovery
@@ -266,13 +327,17 @@ fn aliases_for(id: &str, name: Option<&str>) -> BTreeSet<Vec<String>> {
 }
 
 impl AgentCatalog {
-    pub fn build(agents: &[Agent], sessions: &[Session]) -> Self {
+    /// `is_local` tells this machine's ids apart: its agents win alias ties.
+    pub fn build(agents: &[Agent], sessions: &[Session], is_local: impl Fn(&str) -> bool) -> Self {
         let last_seen = |id: &str| sessions.iter().filter(|s| s.agent_id == id).map(|s| s.last_event_at).max().unwrap_or(0);
         let mut aliases = Vec::new();
         let mut seen: HashSet<&str> = HashSet::new();
+        let mut agents: Vec<&Agent> = agents.iter().collect();
+        // This machine's entry of an id first (it is the one that can run here).
+        agents.sort_by_key(|a| !is_local(&a.machine_id));
         for a in agents {
             if seen.insert(a.id.as_str()) {
-                let rank = (a.installed, last_seen(&a.id));
+                let rank = (is_local(&a.machine_id), a.installed, last_seen(&a.id));
                 for words in aliases_for(&a.id, Some(&a.name)) {
                     aliases.push(Alias { words, agent_id: a.id.clone(), rank });
                 }
@@ -280,7 +345,8 @@ impl AgentCatalog {
         }
         for s in sessions {
             if seen.insert(s.agent_id.as_str()) {
-                let rank = (false, last_seen(&s.agent_id));
+                let local = sessions.iter().any(|x| x.agent_id == s.agent_id && is_local(&x.machine_id));
+                let rank = (local, false, last_seen(&s.agent_id));
                 for words in aliases_for(&s.agent_id, None) {
                     aliases.push(Alias { words, agent_id: s.agent_id.clone(), rank });
                 }
@@ -289,7 +355,7 @@ impl AgentCatalog {
         Self { aliases }
     }
 
-    /// Longest alias starting at token `i` (ties: installed, then most recently seen).
+    /// Longest alias starting at token `i` (ties: this machine's agent, installed, then most recently seen).
     pub fn match_at(&self, toks: &[Tok], i: usize) -> Option<(AgentId, usize)> {
         self.aliases
             .iter()
@@ -323,20 +389,265 @@ fn mention_anywhere(toks: &[Tok], cat: &AgentCatalog) -> Option<AgentRef> {
     })
 }
 
-// ---------- repo index ----------
+// ---------- machine and pet names ----------
 
 #[derive(Debug, Clone)]
-struct RepoEntry {
-    base: String,
+struct NamedMachine {
+    id: MachineId,
     alnum: String,
+    local: bool,
+}
+
+#[derive(Debug, Clone)]
+struct NamedPet {
+    words: Vec<String>,
+    pet: PetRef,
+    /// (the pet being chatted with, on this machine): wins a tie between equal names.
+    rank: (bool, bool),
+}
+
+/// Machine and pet names users can type (from the brain context).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Targets {
+    machines: Vec<NamedMachine>,
+    pets: Vec<NamedPet>,
+}
+
+/// Machine names that would shadow words for this machine; such a machine can't be named in chat.
+const RESERVED_MACHINE_NAMES: &[&str] = &[
+    "here", "local", "locally", "localhost", "me", "my", "this", "thismachine", "thiscomputer", "thispc", "thislaptop",
+    "thisdesktop", "thisbox", "thisone",
+];
+
+impl Targets {
+    /// `machines`: (id, display name). `pets`: every known pet (repeats of an id are ignored).
+    /// `local_id`: this machine's id; `chatted`: the id of the pet being chatted with.
+    pub fn new<'a>(
+        machines: impl IntoIterator<Item = (&'a str, &'a str)>,
+        pets: impl IntoIterator<Item = &'a Pet>,
+        local_id: &str,
+        chatted: Option<&str>,
+    ) -> Self {
+        let is_local = |id: &str| local_id.is_empty() || id.is_empty() || id == local_id;
+        let mut seen: HashSet<String> = HashSet::new();
+        let machines = machines
+            .into_iter()
+            .filter(|(id, _)| !id.is_empty() && seen.insert((*id).to_string()))
+            .map(|(id, name)| NamedMachine { id: id.to_string(), alnum: alnum(name), local: is_local(id) })
+            .filter(|m| !m.alnum.is_empty() && !RESERVED_MACHINE_NAMES.contains(&m.alnum.as_str()))
+            .collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        let pets = pets
+            .into_iter()
+            .filter(|p| seen.insert(p.id.clone()))
+            .map(|p| NamedPet {
+                words: split_words(&p.name),
+                pet: PetRef {
+                    id: p.id.clone(),
+                    name: p.name.trim().to_string(),
+                    machine_id: p.machine_id.clone(),
+                    agent_id: p.agent_id.clone(),
+                },
+                rank: (chatted == Some(p.id.as_str()), is_local(&p.machine_id)),
+            })
+            .filter(|p| !p.words.is_empty())
+            .collect();
+        Self { machines, pets }
+    }
+
+    /// Longest machine name, else a unique prefix of 3+ letters, starting at token `i`:
+    /// (machine id, token length, full name matched).
+    fn machine_at(&self, toks: &[Tok], i: usize) -> Option<(MachineId, usize, bool)> {
+        let mut full: Option<(usize, Vec<&NamedMachine>)> = None;
+        let mut prefix: Option<(usize, Vec<&NamedMachine>)> = None;
+        let mut typed = String::new();
+        for (k, t) in toks[i..].iter().enumerate() {
+            if t.quoted {
+                break;
+            }
+            typed.push_str(&alnum(&t.key));
+            if typed.is_empty() {
+                break;
+            }
+            let eq: Vec<&NamedMachine> = self.machines.iter().filter(|m| m.alnum == typed).collect();
+            if !eq.is_empty() {
+                full = Some((k + 1, eq));
+            }
+            let pre: Vec<&NamedMachine> =
+                self.machines.iter().filter(|m| m.alnum.len() > typed.len() && m.alnum.starts_with(&typed)).collect();
+            if pre.is_empty() {
+                break;
+            }
+            if typed.len() >= 3 {
+                prefix = Some((k + 1, pre));
+            }
+            // "mac mini's" / "mac mini," ends the name.
+            if t.poss || t.sep {
+                break;
+            }
+        }
+        // One match, or this machine among several equal ones (a tie goes to this machine).
+        let pick = |ms: Vec<&NamedMachine>| -> Option<MachineId> {
+            match ms.as_slice() {
+                [one] => Some(one.id.clone()),
+                many => {
+                    let local: Vec<&&NamedMachine> = many.iter().filter(|m| m.local).collect();
+                    (local.len() == 1).then(|| local[0].id.clone())
+                }
+            }
+        };
+        if let Some((len, ms)) = full {
+            return pick(ms).map(|id| (id, len, true));
+        }
+        let (len, ms) = prefix?;
+        pick(ms).map(|id| (id, len, false))
+    }
+
+    /// A pet name starting at token `i`: (pet, token length). Equal names: the chatted pet, then this
+    /// machine's pet.
+    pub fn pet_at(&self, toks: &[Tok], i: usize) -> Option<(PetRef, usize)> {
+        self.pets
+            .iter()
+            .filter(|p| {
+                let n = p.words.len();
+                i + n <= toks.len() && p.words.iter().zip(&toks[i..i + n]).all(|(w, t)| !t.quoted && *w == t.key)
+            })
+            .max_by_key(|p| (p.words.len(), p.rank))
+            .map(|p| (p.pet.clone(), p.words.len()))
+    }
+
+    /// True if `p` is the pet being chatted with (by id).
+    fn is_chatted(&self, p: &PetRef) -> bool {
+        self.pets.iter().any(|n| n.rank.0 && n.pet.id == p.id)
+    }
+
+    /// First pet mention anywhere.
+    fn find_pet(&self, toks: &[Tok]) -> Option<PetRef> {
+        (0..toks.len()).find_map(|i| self.pet_at(toks, i).map(|(p, _)| p))
+    }
+}
+
+fn is_question(toks: &[Tok]) -> bool {
+    toks.first().is_some_and(|t| QUESTION_WORDS.contains(&t.plain.as_str()))
+        || toks.last().is_some_and(|t| t.orig.trim_end().ends_with('?'))
+        || toks.iter().any(|t| STATUS_WORDS.contains(&t.plain.as_str()))
+}
+
+/// "here" or "this machine" at token `i`: (token length, needs context). "this machine" counts only
+/// after "on"/"from", possessive or before an agent name, so a task like "wipe this machine" keeps
+/// its words. "locally" is never taken: "run the build locally" means something to the agent.
+fn local_at(toks: &[Tok], i: usize) -> Option<(usize, bool)> {
+    let w = |k: usize| toks.get(k).filter(|t| !t.quoted).map(|t| t.plain.as_str()).unwrap_or("");
+    match w(i) {
+        "this" if ["machine", "computer", "pc", "laptop", "desktop", "box"].contains(&toks.get(i + 1).map_or("", |t| t.key.as_str())) => {
+            Some((2, true))
+        }
+        "here" => {
+            let prev = if i > 0 { w(i - 1) } else { "" };
+            let tail = i + 1 == toks.len() || toks[i].sep || ["in", "on", "to", "and"].contains(&w(i + 1));
+            let spatial = ["in", "from", "over", "right", "near", "out", "up", "down", "come", "get", "go"].contains(&prev);
+            (tail && !spatial).then_some((1, false))
+        }
+        _ => None,
+    }
+}
+
+/// Find and remove one machine phrase ("on the mac mini", "the mac mini's", "here"). A machine name
+/// counts only in context, so ordinary words are not taken for machines: after "on"/"at"/"from",
+/// possessive, right before an agent or pet name, after a command verb ("tell the mac mini to …"),
+/// addressed at the start ("Mac mini: …"), or (full name) in a question. A prefix must also end the
+/// phrase ("tell the mac to …", not "on the mac address"). Returns the machine and whether the phrase
+/// was a lead address ("on the mac mini, …").
+fn take_machine(toks: &mut Vec<Tok>, targets: &Targets, cat: &AgentCatalog) -> Option<(MachineRef, bool)> {
+    let question = is_question(toks);
+    let w = |t: &[Tok], k: usize| t.get(k).map(|t| t.plain.clone()).unwrap_or_default();
+    for i in 0..toks.len() {
+        if toks[i].quoted {
+            continue;
+        }
+        let (found, mut end, full, local_needs_context) = if let Some((len, needs)) = local_at(toks, i) {
+            (MachineRef::Here, i + len, true, needs)
+        } else if let Some((id, len, full)) = targets.machine_at(toks, i) {
+            (MachineRef::Id(id), i + len, full, false)
+        } else {
+            continue;
+        };
+        let named = matches!(found, MachineRef::Id(_));
+        // An agent or pet name typed here is the agent or pet, not a machine that happens to share it
+        // ("tell claude to …" with a paired machine called "Claude"), so it can't redirect a command.
+        if named {
+            let len = end - i;
+            let agent = cat.match_at(toks, i).is_some_and(|(_, l)| l >= len)
+                || (len == 1 && KNOWN_AGENT_WORDS.contains(&toks[i].key.as_str()));
+            let pet = targets.pet_at(toks, i).is_some_and(|(_, l)| l >= len);
+            if agent || pet {
+                continue;
+            }
+        }
+        if named && !toks[end - 1].poss && !toks[end - 1].sep && MACHINE_NOUNS.contains(&w(toks, end).as_str()) {
+            end += 1;
+        }
+        let (poss, sep) = (toks[end - 1].poss, toks[end - 1].sep);
+        let mut start = i;
+        while start > 0 && ["the", "my", "our", "that"].contains(&w(toks, start - 1).as_str()) {
+            start -= 1;
+        }
+        let prep = start > 0 && MACHINE_PREPS.contains(&w(toks, start - 1).as_str());
+        if prep {
+            start -= 1;
+        }
+        let next = w(toks, end);
+        let next_names = end < toks.len()
+            && (cat.match_at(toks, end).is_some()
+                || targets.pet_at(toks, end).is_some()
+                || KNOWN_AGENT_WORDS.contains(&toks[end].key.as_str()));
+        let after_verb = !prep && start > 0 && COMMAND_VERBS.contains(&w(toks, start - 1).as_str()) && (next == "to" || sep);
+        let lead = start == 0 && sep && end < toks.len();
+        let context = if named {
+            prep || poss || next_names || after_verb || lead || (full && question)
+        } else {
+            !local_needs_context || prep || poss || next_names || after_verb
+        };
+        let boundary = end == toks.len() || poss || sep || next_names || MACHINE_FOLLOW.contains(&next.as_str());
+        if !context || (named && !boundary) {
+            continue;
+        }
+        if sep && start > 0 {
+            toks[start - 1].sep = true;
+        }
+        toks.drain(start..end);
+        return Some((found, lead));
+    }
+    None
+}
+
+// ---------- repo index ----------
+
+/// One folder of a machine's repo index.
+#[derive(Debug, Clone)]
+pub(crate) struct RepoEntry {
+    pub machine_id: MachineId,
+    /// Lowercase folder name.
+    base: String,
+    /// Lowercase index name ("api (work)").
+    name: String,
+    alnum: String,
+    name_alnum: String,
+    /// The index name, shown in replies.
     display: String,
-    key: String,
+    /// `path_key` of `cwd`.
+    pub key: String,
+    /// The index path (canonical, existing when the hub built the index).
     cwd: String,
-    agent_id: String,
+    /// Agents with a session in this folder on this machine (ranking only).
+    agents: Vec<AgentId>,
+    /// Latest use: the index's `lastUsedAt` or a session's last event, whichever is newer (ranking only).
     ts: i64,
 }
 
-/// Session working directories, matched by basename ("repo X").
+/// The hubs' repo indexes (`BrainContext::repos`, this machine's included): the only source of repo
+/// names and folders, on every machine. The hub drops folders that no longer exist, so a stale
+/// session cwd never becomes a repo; sessions only rank the index's folders (agent, recency).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RepoIndex {
     entries: Vec<RepoEntry>,
@@ -346,72 +657,126 @@ fn alnum(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
+/// A folder on one machine: (cwd, display name).
+pub(crate) type Folder = (String, String);
+
 impl RepoIndex {
-    pub fn build(sessions: &[Session]) -> Self {
-        let entries = sessions
-            .iter()
-            .filter(|s| !s.cwd.trim().is_empty())
-            .map(|s| {
-                let display = basename(&s.cwd).to_string();
-                let base = display.to_lowercase();
-                RepoEntry {
+    pub fn build(sessions: &[Session], index: &BTreeMap<MachineId, Vec<krypto_protocol::RepoRef>>) -> Self {
+        let mut entries = Vec::new();
+        for (machine_id, repos) in index {
+            for r in repos.iter().filter(|r| !r.path.trim().is_empty()) {
+                let key = path_key(&r.path);
+                let used: Vec<&Session> =
+                    sessions.iter().filter(|s| &s.machine_id == machine_id && path_key(&s.cwd) == key).collect();
+                let mut agents: Vec<AgentId> = used.iter().map(|s| s.agent_id.clone()).collect();
+                agents.sort();
+                agents.dedup();
+                let ts = used.iter().map(|s| s.last_event_at).chain(r.last_used_at).max().unwrap_or(0);
+                // Index names and paths come from other machines too: bounded, no control characters.
+                let display = if r.name.trim().is_empty() { basename(&r.path) } else { clean_name(&r.name) };
+                let base = basename(&r.path).to_lowercase();
+                let name = display.to_lowercase();
+                entries.push(RepoEntry {
+                    machine_id: machine_id.clone(),
                     alnum: alnum(&base),
+                    name_alnum: alnum(&name),
                     base,
+                    name,
                     display,
-                    key: path_key(&s.cwd),
-                    cwd: s.cwd.clone(),
-                    agent_id: s.agent_id.clone(),
-                    ts: s.last_event_at,
-                }
-            })
-            .collect();
+                    key,
+                    cwd: r.path.clone(),
+                    agents,
+                    ts,
+                });
+            }
+        }
         Self { entries }
     }
 
-    /// Resolve a repo name to a session cwd: exact basename, then alphanumeric-equal, then
-    /// (if `fuzzy`) a unique substring match. Prefers `prefer_agent`'s sessions, then recency.
-    pub fn resolve(&self, name: &str, prefer_agent: Option<&str>, fuzzy: bool) -> Option<String> {
+    /// Entries whose name matches, among those `keep` accepts: exact folder or index name, then
+    /// alphanumeric-equal, then a unique prefix (3+ letters), then (if `fuzzy`) a unique substring.
+    /// "Unique" counts distinct folder names, so one repo cloned on several machines is one match.
+    pub fn matching(&self, name: &str, fuzzy: bool, keep: impl Fn(&RepoEntry) -> bool) -> Vec<&RepoEntry> {
         let name = name.trim().to_lowercase();
         let na = alnum(&name);
         if na.is_empty() {
-            return None;
+            return Vec::new();
         }
-        let pick = |c: Vec<&RepoEntry>| {
-            c.into_iter()
-                .max_by_key(|e| (prefer_agent == Some(e.agent_id.as_str()), e.ts))
-                .map(|e| e.cwd.clone())
-        };
-        let exact: Vec<&RepoEntry> = self.entries.iter().filter(|e| e.base == name).collect();
+        let scope: Vec<&RepoEntry> = self.entries.iter().filter(|e| keep(e)).collect();
+        let tier = |f: &dyn Fn(&RepoEntry) -> bool| -> Vec<&RepoEntry> { scope.iter().copied().filter(|e| f(e)).collect() };
+        fn unique(v: Vec<&RepoEntry>) -> Vec<&RepoEntry> {
+            let names: BTreeSet<&str> = v.iter().map(|e| e.base.as_str()).collect();
+            if names.len() == 1 {
+                v
+            } else {
+                Vec::new()
+            }
+        }
+        let exact = tier(&|e| e.base == name || e.name == name);
         if !exact.is_empty() {
-            return pick(exact);
+            return exact;
         }
-        let loose: Vec<&RepoEntry> = self.entries.iter().filter(|e| e.alnum == na).collect();
+        let loose = tier(&|e| e.alnum == na || e.name_alnum == na);
         if !loose.is_empty() {
-            return pick(loose);
+            return loose;
         }
-        if !fuzzy || na.len() < 3 {
-            return None;
+        if na.len() < 3 {
+            return Vec::new();
         }
-        let fz: Vec<&RepoEntry> = self
-            .entries
-            .iter()
-            .filter(|e| e.alnum.contains(&na) || (e.alnum.len() >= 3 && na.contains(&e.alnum)))
-            .collect();
-        let distinct: BTreeSet<&str> = fz.iter().map(|e| e.key.as_str()).collect();
-        if distinct.len() == 1 {
-            pick(fz)
-        } else {
-            None
+        let prefix = unique(tier(&|e| e.alnum.starts_with(&na) || e.name_alnum.starts_with(&na)));
+        if !prefix.is_empty() || !fuzzy {
+            return prefix;
         }
+        unique(tier(&|e| e.alnum.contains(&na) || (e.alnum.len() >= 3 && na.contains(&e.alnum))))
     }
 
-    /// Distinct repo names, most recent first (for hints).
-    pub fn names(&self, max: usize) -> Vec<String> {
-        let mut e: Vec<&RepoEntry> = self.entries.iter().collect();
-        e.sort_by_key(|x| std::cmp::Reverse(x.ts));
-        let mut seen = HashSet::new();
-        e.into_iter().filter(|x| seen.insert(x.base.clone())).take(max).map(|x| x.display.clone()).collect()
+    /// True if some machine knows a repo by that name.
+    pub fn known(&self, name: &str, fuzzy: bool) -> bool {
+        !self.matching(name, fuzzy, |_| true).is_empty()
     }
+
+    /// One index path for a repo name among `keep`'s entries: a folder `prefer_agent` worked in first,
+    /// then the most recently used.
+    pub fn resolve(&self, name: &str, prefer_agent: Option<&str>, fuzzy: bool, keep: impl Fn(&RepoEntry) -> bool) -> Option<String> {
+        self.matching(name, fuzzy, keep)
+            .into_iter()
+            .max_by_key(|e| (prefer_agent.is_some_and(|a| e.agents.iter().any(|x| x == a)), e.ts))
+            .map(|e| e.cwd.clone())
+    }
+
+    /// Distinct folders on `machine_id` matching `name`, most recently used first.
+    pub fn folders_on(&self, machine_id: &str, name: &str, fuzzy: bool) -> Vec<Folder> {
+        dedupe(self.matching(name, fuzzy, |e| e.machine_id == machine_id))
+    }
+
+    /// The index folder with path key `key` among `keep`'s entries (e.g. a session's cwd), if indexed.
+    pub fn folder_where(&self, key: &str, keep: impl Fn(&RepoEntry) -> bool) -> Option<Folder> {
+        dedupe(self.entries.iter().filter(|e| e.key == key && keep(e)).collect()).into_iter().next()
+    }
+
+    /// The index folder with path key `key` on `machine_id`, if that machine knows it.
+    pub fn folder_by_key(&self, machine_id: &str, key: &str) -> Option<Folder> {
+        self.folder_where(key, |e| e.machine_id == machine_id)
+    }
+
+    /// Distinct repo names among `keep`'s entries, most recently used first (for hints).
+    pub fn names(&self, max: usize, keep: impl Fn(&RepoEntry) -> bool) -> Vec<String> {
+        dedupe(self.entries.iter().filter(|e| keep(e)).collect()).into_iter().take(max).map(|(_, name)| name).collect()
+    }
+}
+
+/// One (cwd, display) per folder, most recently used first (ties by name).
+fn dedupe(hits: Vec<&RepoEntry>) -> Vec<Folder> {
+    let mut by_key: BTreeMap<&str, &RepoEntry> = BTreeMap::new();
+    for e in hits {
+        let slot = by_key.entry(e.key.as_str()).or_insert(e);
+        if e.ts > slot.ts {
+            *slot = e;
+        }
+    }
+    let mut v: Vec<&RepoEntry> = by_key.into_values().collect();
+    v.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| a.display.cmp(&b.display)));
+    v.into_iter().map(|e| (e.cwd.clone(), e.display.clone())).collect()
 }
 
 fn clean_orig(s: &str) -> String {
@@ -451,7 +816,7 @@ fn expand_home(p: &str) -> String {
     }
 }
 
-fn classify_repo(prep: Option<&str>, explicit: bool, tok: &Tok, repos: &RepoIndex, prefer: Option<&str>) -> Option<RepoRef> {
+fn classify_repo(prep: Option<&str>, explicit: bool, tok: &Tok, repos: &RepoIndex) -> Option<RepoRef> {
     let raw = clean_orig(&tok.orig);
     if raw.is_empty() || NOT_NAMES.contains(&tok.plain.as_str()) || REPO_WORDS.contains(&tok.plain.as_str()) {
         return None;
@@ -460,16 +825,18 @@ fn classify_repo(prep: Option<&str>, explicit: bool, tok: &Tok, repos: &RepoInde
         let path_ok = explicit || prep.is_some_and(|p| PATH_PREPS.contains(&p));
         return path_ok.then(|| RepoRef::Path(expand_home(&raw)));
     }
-    match repos.resolve(&tok.key, prefer, explicit) {
-        Some(cwd) => Some(RepoRef::Known { name: raw, cwd }),
-        None if explicit => Some(RepoRef::Unknown { name: raw }),
-        None => None,
+    if repos.known(&tok.key, explicit) {
+        Some(RepoRef::Named { name: raw, key: tok.key.clone(), explicit })
+    } else if explicit {
+        Some(RepoRef::Unknown { name: raw })
+    } else {
+        None
     }
 }
 
-/// Find "in repo X" / "in the X project" / "at ~/code/x" / "in X" (X a known repo).
+/// Find "in repo X" / "in the X project" / "at ~/code/x" / "in X" (X a known repo on some machine).
 /// Returns the last match and its token range.
-fn extract_repo(toks: &[&Tok], repos: &RepoIndex, prefer: Option<&str>) -> (Option<RepoRef>, Option<(usize, usize)>) {
+fn extract_repo(toks: &[&Tok], repos: &RepoIndex) -> (Option<RepoRef>, Option<(usize, usize)>) {
     let n = toks.len();
     let w = |i: usize| toks.get(i).map(|t| t.plain.as_str()).unwrap_or("");
     let mut best = (None, None);
@@ -502,7 +869,7 @@ fn extract_repo(toks: &[&Tok], repos: &RepoIndex, prefer: Option<&str>) -> (Opti
             explicit = true;
             k += 1;
         }
-        match classify_repo(prep, explicit, toks[j], repos, prefer) {
+        match classify_repo(prep, explicit, toks[j], repos) {
             Some(r) => {
                 best = (Some(r), Some((i, k)));
                 i = k;
@@ -572,15 +939,31 @@ fn is_status_phrase(words: &[&str], s: &str) -> bool {
 
 // ---------- parser ----------
 
-fn strip_fillers(toks: &mut Vec<Tok>, pet_name: Option<&str>) {
+/// Strip lead fillers ("hey", "please", the chatted pet's name, "can you") and trailing ones. Returns the
+/// pet addressed at the start: the chatted pet by name, or any known pet followed by "," / ":".
+fn strip_fillers(toks: &mut Vec<Tok>, pet_name: Option<&str>, targets: &Targets) -> Option<PetRef> {
     let pet = pet_name.map(|n| n.trim().to_lowercase()).filter(|n| !n.is_empty());
+    let mut addressed = None;
     loop {
         if toks.len() <= 1 {
             break;
         }
         let n0 = toks[0].key.clone();
         let n1 = toks[1].plain.clone();
-        if LEAD_FILLERS.contains(&n0.as_str()) || pet.as_deref() == Some(n0.as_str()) {
+        if LEAD_FILLERS.contains(&n0.as_str()) {
+            toks.remove(0);
+            continue;
+        }
+        if let Some((p, len)) = targets.pet_at(toks, 0) {
+            // The chatted pet by id: a paired machine's pet with the same name is not it.
+            let chatted = targets.is_chatted(&p);
+            if len < toks.len() && (chatted || toks[len - 1].sep) {
+                toks.drain(..len);
+                addressed = Some(p);
+                continue;
+            }
+        }
+        if pet.as_deref() == Some(n0.as_str()) {
             toks.remove(0);
         } else if (["can", "could", "would", "will"].contains(&n0.as_str()) && n1 == "you")
             || (["tell", "show", "give"].contains(&n0.as_str()) && n1 == "me")
@@ -596,6 +979,7 @@ fn strip_fillers(toks: &mut Vec<Tok>, pet_name: Option<&str>) {
     while toks.len() > 1 && TRAIL_FILLERS.contains(&toks[toks.len() - 1].plain.as_str()) {
         toks.pop();
     }
+    addressed
 }
 
 fn parse_pick(w: &str) -> Option<Pick> {
@@ -611,7 +995,7 @@ fn parse_pick(w: &str) -> Option<Pick> {
     }
 }
 
-fn parse_resolve(toks: &[Tok], words: &[&str], s: &str, cat: &AgentCatalog) -> Option<Intent> {
+fn parse_resolve(toks: &[Tok], words: &[&str], s: &str, cat: &AgentCatalog, targets: &Targets, target: &mut Target) -> Option<Intent> {
     let (approve, rest_start) = if APPROVE_WHOLE.contains(&s) {
         (true, toks.len())
     } else if DENY_WHOLE.contains(&s) {
@@ -628,12 +1012,49 @@ fn parse_resolve(toks: &[Tok], words: &[&str], s: &str, cat: &AgentCatalog) -> O
     };
     let always = words.iter().any(|w| ALWAYS.contains(w)) || s.contains("from now on") || s == "never";
     let rest = &toks[rest_start.min(toks.len())..];
-    let agent = mention_anywhere(rest, cat);
+    let mut agent = mention_anywhere(rest, cat);
+    if agent.is_none() {
+        if let Some(p) = targets.find_pet(rest) {
+            agent = Some(AgentRef::Known(p.agent_id.clone()));
+            target.pet = Some(p);
+        }
+    }
     let pick = rest.iter().find_map(|t| parse_pick(&t.plain));
     Some(Intent::Resolve { approve, always, agent, pick })
 }
 
-fn parse_command(toks: &[Tok], cat: &AgentCatalog, repos: &RepoIndex) -> Option<Intent> {
+/// An agent or pet name at token `i` (a pet stands for its agent and fixes the target).
+fn agent_or_pet_at(toks: &[Tok], i: usize, cat: &AgentCatalog, targets: &Targets, target: &mut Target) -> Option<(AgentRef, usize)> {
+    if let Some(found) = agent_at(toks, i, cat) {
+        return Some(found);
+    }
+    let (pet, len) = targets.pet_at(toks, i)?;
+    let agent = AgentRef::Known(pet.agent_id.clone());
+    target.pet = Some(pet);
+    Some((agent, len))
+}
+
+/// True if `toks` read as an instruction ("run the tests"), not a question, status ask or small talk.
+fn task_like(toks: &[Tok]) -> bool {
+    let words: Vec<&str> = toks.iter().map(|t| t.plain.as_str()).collect();
+    let Some(first) = words.first() else { return false };
+    let s = words.join(" ");
+    !QUESTION_WORDS.contains(first)
+        && !toks.last().is_some_and(|t| t.orig.trim_end().ends_with('?'))
+        && !is_status_phrase(&words, &s)
+        && !is_daily(&words, &s)
+        && !SMALLTALK_QUESTIONS.iter().any(|p| s == *p || s.starts_with(&format!("{p} ")))
+        && talk_kind(&s) == Talk::Other
+}
+
+fn parse_command(
+    toks: &[Tok],
+    cat: &AgentCatalog,
+    repos: &RepoIndex,
+    targets: &Targets,
+    target: &mut Target,
+    addressed: Option<&PetRef>,
+) -> Option<Intent> {
     let w = |i: usize| toks.get(i).map(|t| t.plain.as_str()).unwrap_or("");
     let first = w(0);
     let rest_words = |from: usize| -> (Vec<&str>, String) {
@@ -641,13 +1062,18 @@ fn parse_command(toks: &[Tok], cat: &AgentCatalog, repos: &RepoIndex) -> Option<
         let s = v.join(" ");
         (v, s)
     };
+    let machine = target.machine.is_some();
     let (agent, after, force_start) = if COMMAND_VERBS.contains(&first) {
         let mut i = 1;
         while DETERMINERS.contains(&w(i)) {
             i += 1;
         }
-        let (agent, len) = agent_at(toks, i, cat)?;
-        let mut j = i + len;
+        let (agent, mut j) = match agent_or_pet_at(toks, i, cat, targets, target) {
+            Some((a, len)) => (Some(a), i + len),
+            // "tell the mac mini to …" (the machine phrase is already gone): the agent is picked later.
+            None if machine && (w(i) == "to" || AGENT_NOUNS.contains(&w(i))) => (None, i),
+            None => return None,
+        };
         while AGENT_NOUNS.contains(&w(j)) {
             j += 1;
         }
@@ -657,7 +1083,7 @@ fn parse_command(toks: &[Tok], cat: &AgentCatalog, repos: &RepoIndex) -> Option<
         if first == "ask" && w(j) != "to" {
             let (v, s) = rest_words(j);
             if v.is_empty() || is_status_phrase(&v, &s) {
-                return Some(Intent::Status { agent: Some(agent) });
+                return Some(Intent::Status { agent });
             }
         }
         (agent, j, false)
@@ -666,8 +1092,12 @@ fn parse_command(toks: &[Tok], cat: &AgentCatalog, repos: &RepoIndex) -> Option<
         while START_SKIP.contains(&w(i)) {
             i += 1;
         }
-        let (agent, len) = agent_at(toks, i, cat)?;
-        let mut j = i + len;
+        let (agent, mut j) = match agent_or_pet_at(toks, i, cat, targets, target) {
+            Some((a, len)) => (Some(a), i + len),
+            // "start a session on the mac mini in api" / "Biscuit, start a new session in api".
+            None if (machine || addressed.is_some()) && AGENT_NOUNS.contains(&w(i)) => (None, i),
+            None => return None,
+        };
         while AGENT_NOUNS.contains(&w(j)) {
             j += 1;
         }
@@ -683,24 +1113,31 @@ fn parse_command(toks: &[Tok], cat: &AgentCatalog, repos: &RepoIndex) -> Option<
         if is_status_phrase(&v, &s) {
             return Some(Intent::Status { agent: Some(agent) });
         }
-        (agent, j, false)
+        (Some(agent), j, false)
     };
+    let mut cmd = command_from(toks, after, agent, force_start, first == "tell", repos);
+    if cmd.agent.is_none() {
+        if let Some(p) = addressed {
+            cmd.agent = Some(AgentRef::Known(p.agent_id.clone()));
+            target.pet = Some(p.clone());
+        }
+    }
+    Some(Intent::Command(cmd))
+}
 
+/// Repo, task and "new session" from the tokens after the agent.
+fn command_from(toks: &[Tok], after: usize, agent: Option<AgentRef>, force_start: bool, after_tell: bool, repos: &RepoIndex) -> CommandIntent {
     let rest: Vec<&Tok> = toks[after.min(toks.len())..].iter().collect();
     let (rest, new_session) = take_new_session(rest);
-    let prefer = match &agent {
-        AgentRef::Known(id) => Some(id.as_str()),
-        AgentRef::Unknown(_) => None,
-    };
-    let (repo, range) = extract_repo(&rest, repos, prefer);
+    let (repo, range) = extract_repo(&rest, repos);
     let mut task: Vec<&Tok> = rest
         .iter()
         .enumerate()
         .filter(|(i, _)| range.is_none_or(|(a, b)| *i < a || *i >= b))
         .map(|(_, t)| *t)
         .collect();
-    strip_connectors(&mut task, first == "tell");
-    Some(Intent::Command(CommandIntent { agent, repo, task: join_task(&task), force_new: force_start || new_session }))
+    strip_connectors(&mut task, after_tell);
+    CommandIntent { agent, repo, task: join_task(&task), force_new: force_start || new_session }
 }
 
 fn is_help(s: &str, words: &[&str]) -> bool {
@@ -735,9 +1172,34 @@ fn is_status(words: &[&str], s: &str, has_agent: bool, only_agent: bool) -> bool
             && (s.starts_with("how") || s.starts_with("is ") || s.starts_with("whats") || s.starts_with("what is")))
 }
 
-pub(crate) fn parse(text: &str, cat: &AgentCatalog, repos: &RepoIndex, pet_name: Option<&str>) -> Intent {
+/// Parse the user's own message. `targets` names machines and pets; `pet_name` is the pet being chatted with.
+pub(crate) fn parse(text: &str, cat: &AgentCatalog, repos: &RepoIndex, targets: &Targets, pet_name: Option<&str>) -> Parsed {
     let mut toks = tokenize(text);
-    strip_fillers(&mut toks, pet_name);
+    let mut addressed = strip_fillers(&mut toks, pet_name, targets);
+    let mut target = Target::default();
+    let mut lead_machine = false;
+    if let Some((m, lead)) = take_machine(&mut toks, targets, cat) {
+        target.machine = Some(m);
+        lead_machine = lead;
+        if let Some(p) = strip_fillers(&mut toks, pet_name, targets) {
+            addressed = Some(p);
+        }
+    }
+    // Addressing alone ("Rex, good boy!") is small talk, judged on the whole message.
+    let addressed_task = (addressed.is_some() || lead_machine) && talk_kind(text) == Talk::Other;
+    let intent = classify(&toks, cat, repos, targets, &mut target, addressed.as_ref(), addressed_task);
+    Parsed { intent, target }
+}
+
+fn classify(
+    toks: &[Tok],
+    cat: &AgentCatalog,
+    repos: &RepoIndex,
+    targets: &Targets,
+    target: &mut Target,
+    addressed: Option<&PetRef>,
+    addressed_task: bool,
+) -> Intent {
     if toks.is_empty() {
         return Intent::SmallTalk;
     }
@@ -746,20 +1208,40 @@ pub(crate) fn parse(text: &str, cat: &AgentCatalog, repos: &RepoIndex, pet_name:
     if is_help(&s, &words) {
         return Intent::Help;
     }
-    if let Some(i) = parse_resolve(&toks, &words, &s, cat) {
+    if let Some(i) = parse_resolve(toks, &words, &s, cat, targets, target) {
         return i;
     }
-    if let Some(i) = parse_command(&toks, cat, repos) {
+    if let Some(i) = parse_command(toks, cat, repos, targets, target, addressed) {
         return i;
+    }
+    // "Biscuit, run the tests" / "on the mac mini, run the tests": the addressee is the agent.
+    if addressed_task && task_like(toks) {
+        let agent = addressed.map(|p| AgentRef::Known(p.agent_id.clone()));
+        if let Some(p) = addressed {
+            target.pet = Some(p.clone());
+        }
+        return Intent::Command(command_from(toks, 0, agent, false, false, repos));
     }
     if is_daily(&words, &s) {
         return Intent::DailyReport;
     }
-    let mention = cat.find(&toks);
-    let only_agent = mention.as_ref().is_some_and(|(_, idx, len)| *idx == 0 && *len == toks.len());
-    let has_agent = mention.is_some() || toks.iter().any(|t| KNOWN_AGENT_WORDS.contains(&t.key.as_str()));
+    let mention = cat.find(toks);
+    let pet = (0..toks.len()).find_map(|i| targets.pet_at(toks, i).map(|(p, len)| (p, i, len)));
+    let only_agent = mention.as_ref().is_some_and(|(_, idx, len)| *idx == 0 && *len == toks.len())
+        || pet.as_ref().is_some_and(|(_, idx, len)| *idx == 0 && *len == toks.len());
+    let has_agent = mention.is_some()
+        || pet.is_some()
+        || target.machine.is_some()
+        || toks.iter().any(|t| KNOWN_AGENT_WORDS.contains(&t.key.as_str()));
     if is_status(&words, &s, has_agent, only_agent) {
-        return Intent::Status { agent: mention_anywhere(&toks, cat) };
+        let mut agent = mention_anywhere(toks, cat);
+        if agent.is_none() {
+            if let Some((p, _, _)) = pet {
+                agent = Some(AgentRef::Known(p.agent_id.clone()));
+                target.pet = Some(p);
+            }
+        }
+        return Intent::Status { agent };
     }
     Intent::SmallTalk
 }
@@ -841,12 +1323,17 @@ mod tests {
             session("s2", "codex", "/home/me/web-app"),
             session("s3", "copilot", "/home/me/api"),
         ];
-        (AgentCatalog::build(&agents, &sessions), RepoIndex::build(&sessions))
+        // The hub's index: here the sessions' folders (it drops the ones that no longer exist).
+        let index = BTreeMap::from([(
+            "abcdef012345".to_string(),
+            sessions.iter().map(|s| krypto_protocol::RepoRef { name: basename(&s.cwd), path: s.cwd.clone(), last_used_at: None }).collect(),
+        )]);
+        (AgentCatalog::build(&agents, &sessions, |m| m == "abcdef012345"), RepoIndex::build(&sessions, &index))
     }
 
     fn p(text: &str) -> Intent {
         let (c, r) = setup();
-        parse(text, &c, &r, Some("Biscuit"))
+        parse(text, &c, &r, &Targets::default(), Some("Biscuit")).intent
     }
 
     fn cmd(text: &str) -> CommandIntent {
@@ -858,6 +1345,10 @@ mod tests {
 
     fn known(id: &str) -> AgentRef {
         AgentRef::Known(id.into())
+    }
+
+    fn named(name: &str, explicit: bool) -> RepoRef {
+        RepoRef::Named { name: name.into(), key: name.to_lowercase(), explicit }
     }
 
     #[test]
@@ -887,21 +1378,21 @@ mod tests {
     #[test]
     fn commands_resolve_agent_repo_and_task() {
         let c = cmd("tell codex to run the tests in repo ai-pet");
-        assert_eq!(c.agent, known("codex"));
-        assert_eq!(c.repo, Some(RepoRef::Known { name: "ai-pet".into(), cwd: "E:\\workspace\\ai-pet".into() }));
+        assert_eq!(c.agent, Some(known("codex")));
+        assert_eq!(c.repo, Some(named("ai-pet", true)));
         assert_eq!(c.task, "run the tests");
         assert!(!c.force_new);
 
         let c = cmd("Tell Claude in the web-app repo to fix the failing build, please");
-        assert_eq!(c.agent, known("claude-code"));
-        assert_eq!(c.repo, Some(RepoRef::Known { name: "web-app".into(), cwd: "/home/me/web-app".into() }));
+        assert_eq!(c.agent, Some(known("claude-code")));
+        assert_eq!(c.repo, Some(named("web-app", true)));
         assert_eq!(c.task, "fix the failing build");
 
         let c = cmd("have codex add a README");
         assert_eq!((c.repo, c.task.as_str()), (None, "add a README"));
 
         let c = cmd("codex, write tests for the parser");
-        assert_eq!(c.agent, known("codex"));
+        assert_eq!(c.agent, Some(known("codex")));
         assert_eq!(c.repo, None);
         assert_eq!(c.task, "write tests for the parser");
 
@@ -919,17 +1410,17 @@ mod tests {
         assert_eq!(c.task, "lint ai-pet");
 
         let c = cmd("tell gemini to explain the code");
-        assert_eq!(c.agent, known("gemini"));
+        assert_eq!(c.agent, Some(known("gemini")));
 
         let c = cmd("tell cursor to do stuff");
-        assert_eq!(c.agent, AgentRef::Unknown("Cursor".into()));
+        assert_eq!(c.agent, Some(AgentRef::Unknown("Cursor".into())));
 
         // A prepositional phrase that is not a repo stays in the task.
         let c = cmd("tell codex to fix the bug in the parser");
         assert_eq!((c.repo, c.task.as_str()), (None, "fix the bug in the parser"));
         // Fuzzy match on explicit repo word.
         let c = cmd("tell codex to deploy in repo web");
-        assert_eq!(c.repo, Some(RepoRef::Known { name: "web".into(), cwd: "/home/me/web-app".into() }));
+        assert_eq!(c.repo, Some(named("web", true)));
     }
 
     #[test]
@@ -971,11 +1462,188 @@ mod tests {
     #[test]
     fn repo_resolution() {
         let (_, r) = setup();
-        assert_eq!(r.resolve("AI-PET", None, false).as_deref(), Some("E:\\workspace\\ai-pet"));
-        assert_eq!(r.resolve("aipet", None, false).as_deref(), Some("E:\\workspace\\ai-pet"));
-        assert_eq!(r.resolve("pet", None, false), None);
-        assert_eq!(r.resolve("pet", None, true).as_deref(), Some("E:\\workspace\\ai-pet"));
-        assert_eq!(r.resolve("ap", None, true), None);
-        assert_eq!(r.names(5).len(), 3);
+        let all = |_: &RepoEntry| true;
+        assert_eq!(r.resolve("AI-PET", None, false, all).as_deref(), Some("E:\\workspace\\ai-pet"));
+        assert_eq!(r.resolve("aipet", None, false, all).as_deref(), Some("E:\\workspace\\ai-pet"));
+        assert_eq!(r.resolve("pet", None, false, all), None);
+        assert_eq!(r.resolve("pet", None, true, all).as_deref(), Some("E:\\workspace\\ai-pet"));
+        assert_eq!(r.resolve("ap", None, true, all), None);
+        // A unique prefix of 3+ letters matches without the "repo" word.
+        assert_eq!(r.resolve("web", None, false, all).as_deref(), Some("/home/me/web-app"));
+        assert_eq!(r.names(5, all).len(), 3);
+    }
+
+    const MAC: &str = "zz9988776655";
+    const PC: &str = "abcdef012345";
+
+    fn pet(id: &str, name: &str, machine: &str, agent: &str) -> Pet {
+        Pet {
+            id: id.into(),
+            machine_id: machine.into(),
+            agent_id: agent.into(),
+            species: krypto_protocol::Species::Dog,
+            skin: "default".into(),
+            name: name.into(),
+            personality: String::new(),
+            mood: 50,
+            xp: 0,
+        }
+    }
+
+    /// Two machines (this PC and a Mac mini), a pet on each, and repo indexes on both.
+    fn world() -> (AgentCatalog, RepoIndex, Targets) {
+        let (c, _) = setup();
+        let mut mac_session = session("m1", "claude-code", "/Users/me/api");
+        mac_session.machine_id = MAC.into();
+        let sessions = vec![session("s1", "claude-code", "E:\\workspace\\ai-pet"), mac_session];
+        let mut index = BTreeMap::new();
+        let repo = |name: &str, path: &str| krypto_protocol::RepoRef { name: name.into(), path: path.into(), last_used_at: Some(1) };
+        index.insert(MAC.to_string(), vec![repo("api", "/Users/me/api"), repo("web (work)", "/Users/me/work/web")]);
+        index.insert(PC.to_string(), vec![repo("ai-pet", "E:\\workspace\\ai-pet")]);
+        let repos = RepoIndex::build(&sessions, &index);
+        let pets = [pet("p1", "Biscuit", PC, "claude-code"), pet("p2", "Rex", MAC, "codex")];
+        let targets = Targets::new([(PC, "Windows PC"), (MAC, "Mac mini"), ("aa0000000000", "MacBook Pro")], pets.iter(), PC, Some("p1"));
+        (c, repos, targets)
+    }
+
+    fn pt(text: &str) -> Parsed {
+        let (c, r, t) = world();
+        parse(text, &c, &r, &t, Some("Biscuit"))
+    }
+
+    fn on(id: &str) -> Option<MachineRef> {
+        Some(MachineRef::Id(id.into()))
+    }
+
+    #[test]
+    fn machine_targets_in_commands() {
+        for text in [
+            "Tell the Mac mini's Claude to run the tests in repo api",
+            "tell claude on the mac mini to run the tests in repo api",
+            "on the Mac mini, tell claude to run the tests in repo api",
+            "tell the mac mini claude to run the tests in api",
+            "tell claude to run the tests in repo api on the mac mini",
+            "tell claude on mac mini: run the tests in repo api",
+        ] {
+            let p = pt(text);
+            assert_eq!(p.target.machine, on(MAC), "{text}");
+            let Intent::Command(c) = p.intent else { panic!("{text}: {:?}", p.intent) };
+            assert_eq!(c.agent, Some(known("claude-code")), "{text}");
+            assert!(matches!(c.repo, Some(RepoRef::Named { ref key, .. }) if key == "api"), "{text}: {:?}", c.repo);
+            assert_eq!(c.task, "run the tests", "{text}");
+        }
+        // Machine only: the agent is picked later.
+        let p = pt("tell the mac mini to run the tests in api");
+        assert_eq!(p.target.machine, on(MAC));
+        assert!(matches!(p.intent, Intent::Command(CommandIntent { agent: None, ref task, .. }) if task == "run the tests"), "{:?}", p.intent);
+        // Unique prefix ("mac" is ambiguous with MacBook Pro, "mini" is not a prefix).
+        let p = pt("tell the macb claude to lint");
+        assert_eq!(p.target.machine, on("aa0000000000"));
+        let p = pt("tell claude on the mac to lint");
+        assert_eq!(p.target.machine, None, "ambiguous prefix stays text");
+        // This machine.
+        for text in ["tell claude to lint here", "tell claude on this machine to lint", "tell this machine's claude to lint"] {
+            let p = pt(text);
+            assert_eq!(p.target.machine, Some(MachineRef::Here), "{text}");
+            assert!(matches!(p.intent, Intent::Command(CommandIntent { ref task, .. }) if task == "lint"), "{text}: {:?}", p.intent);
+        }
+        let p = pt("tell claude on windows pc to lint");
+        assert_eq!(p.target.machine, on(PC));
+        // Ordinary words are not machines: "here" inside the task, no machine context.
+        let p = pt("tell claude to fix the bug in here");
+        assert_eq!(p.target.machine, None);
+        assert!(matches!(p.intent, Intent::Command(CommandIntent { ref task, .. }) if task == "fix the bug in here"), "{:?}", p.intent);
+        let p = pt("tell claude to say mac mini twice");
+        assert_eq!(p.target.machine, None);
+        let p = pt("tell claude to work on the mac mini setup script");
+        assert_eq!(p.target.machine, None);
+        assert!(matches!(p.intent, Intent::Command(CommandIntent { ref task, .. }) if task == "work on the mac mini setup script"), "{:?}", p.intent);
+        assert_eq!(pt("is the mac mini busy?").target.machine, on(MAC));
+        // Words of the task stay in the task.
+        for (text, task) in [("tell claude to wipe this machine", "wipe this machine"), ("tell claude to run the build locally", "run the build locally")] {
+            let p = pt(text);
+            assert_eq!(p.target.machine, None, "{text}");
+            assert!(matches!(p.intent, Intent::Command(CommandIntent { task: ref t, .. }) if t == task), "{text}: {:?}", p.intent);
+        }
+        // Quoted text is never a target.
+        let p = pt("tell claude to run \"ssh mac mini\"");
+        assert_eq!(p.target.machine, None);
+    }
+
+    #[test]
+    fn pet_targets() {
+        let p = pt("tell Rex to run the tests in api");
+        assert_eq!(p.target.pet.as_ref().map(|p| p.machine_id.as_str()), Some(MAC));
+        assert!(matches!(p.intent, Intent::Command(CommandIntent { agent: Some(AgentRef::Known(ref a)), ref task, .. }) if a == "codex" && task == "run the tests"), "{:?}", p.intent);
+        let p = pt("Rex, run the tests in api");
+        assert_eq!(p.target.pet.as_ref().map(|p| p.name.as_str()), Some("Rex"));
+        assert!(matches!(p.intent, Intent::Command(CommandIntent { agent: Some(AgentRef::Known(ref a)), ref task, .. }) if a == "codex" && task == "run the tests"), "{:?}", p.intent);
+        // The chatted pet addressed by name, then an instruction.
+        let p = pt("Biscuit, fix the build in ai-pet");
+        assert_eq!(p.target.pet.as_ref().map(|p| p.agent_id.as_str()), Some("claude-code"));
+        assert!(matches!(p.intent, Intent::Command(CommandIntent { ref task, .. }) if task == "fix the build"), "{:?}", p.intent);
+        let p = pt("Rex, start a new session in api");
+        assert!(matches!(p.intent, Intent::Command(CommandIntent { force_new: true, ref task, .. }) if task.is_empty()), "{:?}", p.intent);
+        // Addressing the chatted pet is not a target for questions, small talk or approvals.
+        assert_eq!(pt("Biscuit, what is codex up to?").target, Target::default());
+        assert_eq!(pt("Biscuit, how are you?").intent, Intent::SmallTalk);
+        assert_eq!(pt("Rex, good boy!").intent, Intent::SmallTalk);
+        let p = pt("Biscuit, approve");
+        assert_eq!((p.intent, p.target), (Intent::Resolve { approve: true, always: false, agent: None, pick: None }, Target::default()));
+        // Status of a pet's agent.
+        let p = pt("what's Rex doing?");
+        assert_eq!(p.intent, Intent::Status { agent: Some(known("codex")) });
+        assert_eq!(p.target.pet.map(|p| p.machine_id), Some(MAC.to_string()));
+    }
+
+    #[test]
+    fn status_questions_with_targets() {
+        let p = pt("what is the Mac mini's Claude doing?");
+        assert_eq!((p.intent, p.target.machine), (Intent::Status { agent: Some(known("claude-code")) }, on(MAC)));
+        let p = pt("what is the mac mini doing?");
+        assert_eq!((p.intent, p.target.machine), (Intent::Status { agent: None }, on(MAC)));
+        let p = pt("what's running on the mac mini");
+        assert_eq!((p.intent, p.target.machine), (Intent::Status { agent: None }, on(MAC)));
+        let p = pt("how is claude doing on windows pc?");
+        assert_eq!((p.intent, p.target.machine), (Intent::Status { agent: Some(known("claude-code")) }, on(PC)));
+        let p = pt("approve the mac mini's request");
+        assert!(matches!(p.intent, Intent::Resolve { approve: true, .. }));
+        assert_eq!(p.target.machine, on(MAC));
+    }
+
+    #[test]
+    fn local_agent_wins_alias_ties() {
+        // A paired machine's "Claude" (listed first, seen more recently) and this machine's Claude Code.
+        let mut remote = agent("claude-acp", "Claude");
+        remote.machine_id = MAC.into();
+        let mut s = session("m1", "claude-acp", "/Users/me/api");
+        s.machine_id = MAC.into();
+        s.last_event_at = 99;
+        let cat = AgentCatalog::build(&[remote, agent("claude-code", "Claude Code")], &[s], |m| m == PC);
+        assert_eq!(cat.match_at(&tokenize("claude"), 0).map(|(id, _)| id).as_deref(), Some("claude-code"));
+        // Equal machine names: this machine.
+        let t = Targets::new([(MAC, "Studio"), (PC, "Studio")], [], PC, None);
+        let mut toks = tokenize("tell claude on studio to lint");
+        assert_eq!(take_machine(&mut toks, &t, &cat).map(|(m, _)| m), Some(MachineRef::Id(PC.into())));
+        // A machine named like an agent is not taken for one.
+        let t = Targets::new([(MAC, "Claude"), (PC, "Windows PC")], [], PC, None);
+        let p = parse("tell claude to lint", &cat, &RepoIndex::default(), &t, None);
+        assert_eq!(p.target.machine, None);
+        assert!(matches!(p.intent, Intent::Command(CommandIntent { agent: Some(AgentRef::Known(ref a)), .. }) if a == "claude-code"));
+        // A machine named "here" can't be named at all.
+        let t = Targets::new([(MAC, "here")], [], PC, None);
+        assert_eq!(parse("tell claude to lint here", &cat, &RepoIndex::default(), &t, None).target.machine, Some(MachineRef::Here));
+    }
+
+    #[test]
+    fn repo_index_spans_machines() {
+        let (_, r, _) = world();
+        assert!(r.known("web", false), "index name \"web (work)\" matches its folder");
+        assert_eq!(r.folders_on(MAC, "web", false), vec![("/Users/me/work/web".to_string(), "web (work)".to_string())]);
+        // The index entry wins over the session cwd for the same folder.
+        assert_eq!(r.folders_on(MAC, "api", false), vec![("/Users/me/api".to_string(), "api".to_string())]);
+        assert!(r.folders_on(PC, "api", false).is_empty());
+        assert_eq!(r.names(5, |e| e.machine_id == MAC), vec!["api".to_string(), "web (work)".to_string()]);
+        assert!(r.folder_by_key(MAC, &path_key("/Users/me/api")).is_some());
     }
 }

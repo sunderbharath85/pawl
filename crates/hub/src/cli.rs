@@ -11,9 +11,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use futures::{SinkExt, StreamExt};
 use krypto_discovery::hooks::HookTarget;
 use krypto_protocol::{
-    Agent, ClientKind, ClientMsg, Device, DeviceKind, EventType, HubEvent, Machine, MachineOs, PeerStatus,
-    PermissionOptionKind, PermissionOutcome, PermissionRequest, PlanPayload, ResolvedBy, ServerMsg, Session,
-    ToolCallPayload, Welcome,
+    Agent, ChatMessage, ChatProposal, ChatProposalKind, ChatRole, ClientKind, ClientMsg, Device, DeviceKind, EventType,
+    HubEvent, Machine, MachineOs, PeerStatus, PermissionOptionKind, PermissionOutcome, PermissionRequest, PlanPayload,
+    RepoRef, ResolvedBy, ServerMsg, Session, ToolCallPayload, Welcome,
 };
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
@@ -77,6 +77,9 @@ pub enum Command {
         /// Run it on a paired machine (name or id; see `krypto machines`); --cwd is then a path there
         #[arg(long, value_name = "NAME|ID")]
         machine: Option<String>,
+        /// Run it in this repo of that machine's index instead of --cwd (see `krypto repos`)
+        #[arg(long, value_name = "NAME")]
+        repo: Option<String>,
         /// Accepted for scripts, but a start on another machine always asks on this terminal
         #[arg(long)]
         yes: bool,
@@ -105,6 +108,23 @@ pub enum Command {
         /// Print JSON
         #[arg(long)]
         json: bool,
+    },
+    /// List a machine's repos: the folders its sessions used, plus config.toml [repos] paths
+    Repos {
+        /// Another machine (name or id; default: this one)
+        #[arg(long, value_name = "NAME|ID")]
+        machine: Option<String>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Talk to your pet; commands for another machine come back as numbered proposals
+    Chat {
+        /// What to say, e.g. "tell the Mac mini's Claude to run the tests in repo api"
+        text: String,
+        /// Run proposal N of the reply (another machine: asks on this terminal first)
+        #[arg(long, value_name = "N")]
+        pick: Option<usize>,
     },
     /// Forward an agent hook payload (stdin JSON, or JSON as the last argument) to the hub
     Hook {
@@ -200,9 +220,11 @@ pub async fn run() -> ExitCode {
         Command::Serve { peer_listen } => run_serve(paths, cli.port, peer_listen).await,
         Command::Agents { refresh, json } => run_agents(&paths, cli.port, refresh, json).await,
         Command::Sessions { json } => run_sessions(&paths, cli.port, json).await,
-        Command::Start { agent, cwd, prompt, local, machine, yes } => {
-            run_start(paths, cli.port, agent, cwd, prompt, local, machine, yes).await
+        Command::Start { agent, cwd, prompt, local, machine, repo, yes } => {
+            run_start(paths, cli.port, agent, cwd, prompt, local, machine, repo, yes).await
         }
+        Command::Repos { machine, json } => run_repos(&paths, cli.port, machine, json).await,
+        Command::Chat { text, pick } => run_chat(&paths, cli.port, text, pick).await,
         Command::Approve { request, option, yes } => run_decide(&paths, cli.port, true, request, option, yes).await,
         Command::Deny { request, option } => run_decide(&paths, cli.port, false, request, option, false).await,
         Command::Pending { json } => run_pending(&paths, cli.port, json).await,
@@ -561,6 +583,11 @@ fn printable(s: &str) -> String {
     s.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
 }
 
+/// `printable` for multi-line text (replies): line breaks stay, other control characters do not.
+fn printable_lines(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() && c != '\n' { '?' } else { c }).collect()
+}
+
 fn local_time(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|t| t.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
@@ -917,6 +944,197 @@ async fn run_pending(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> Re
     Ok(())
 }
 
+// ---------------------------------------------------------------- repos / chat (step 5)
+
+/// A repo by name in one machine's index: exact (case-insensitive), else a unique prefix.
+fn resolve_repo<'a>(repos: &'a [RepoRef], query: &str, machine: &str) -> Result<&'a RepoRef> {
+    let q = query.trim().to_lowercase();
+    if let Some(r) = repos.iter().find(|r| r.name.to_lowercase() == q) {
+        return Ok(r);
+    }
+    let hits: Vec<&RepoRef> = repos.iter().filter(|r| r.name.to_lowercase().starts_with(&q)).collect();
+    let names = |v: &[&RepoRef]| v.iter().map(|r| printable(&r.name)).collect::<Vec<_>>().join(", ");
+    match hits.as_slice() {
+        [r] => Ok(r),
+        [] => {
+            let all: Vec<&RepoRef> = repos.iter().collect();
+            if all.is_empty() {
+                bail!("{machine} has no repos yet (it lists folders its sessions used, see `krypto repos`)");
+            }
+            bail!("{machine} has no repo {query:?}; it has: {}", names(&all))
+        }
+        many => bail!("{query:?} matches several repos on {machine}: {}", names(many)),
+    }
+}
+
+/// `krypto repos [--machine X]`: a machine's repo index (from the running hub, else from hub.db).
+async fn run_repos(paths: &Paths, port_flag: Option<u16>, machine: Option<String>, as_json: bool) -> Result<()> {
+    let (repos, where_) = match RemoteHub::connect(paths, port_flag).await? {
+        Some(hub) => {
+            let target = match &machine {
+                Some(q) => resolve_machine(&hub.welcome.machines, q)?.clone(),
+                None => hub.welcome.machine.clone(),
+            };
+            let mut conn = Conn::Remote(Box::new(hub));
+            let v = intent_request(&mut conn, ClientMsg::ListRepos { id: rid(), machine_id: Some(target.id.clone()) }, &target.name).await?;
+            let repos: Vec<RepoRef> = serde_json::from_value(v.get("repos").cloned().unwrap_or_default()).context("parse repos")?;
+            (repos, printable(&target.name))
+        }
+        None => {
+            paths.ensure()?;
+            let me = machine::load_or_create(paths)?;
+            let cfg = HubConfig::load(paths)?;
+            if !paths.db.exists() {
+                (crate::repos::build_index(cfg.repos.paths.into_iter().map(|p| (p, None))), printable(&me.name))
+            } else {
+                let store = crate::store::Store::open(&paths.db, &me.id)?;
+                let roster = store.run(|s| s.roster()).await?;
+                match &machine {
+                    None => {
+                        let extra = cfg.repos.paths.clone();
+                        let repos = store
+                            .run(move |s| {
+                                let mut c: Vec<(String, Option<krypto_protocol::UnixMs>)> =
+                                    s.local_session_folders()?.into_iter().map(|(p, t)| (p, Some(t))).collect();
+                                c.extend(extra.into_iter().map(|p| (p, None)));
+                                Ok(crate::repos::build_index(c))
+                            })
+                            .await?;
+                        (repos, printable(&me.name))
+                    }
+                    Some(q) => {
+                        let machines: Vec<Machine> = roster.iter().map(|e| e.machine.clone()).collect();
+                        let target = resolve_machine(&machines, q)?.clone();
+                        let id = target.id.clone();
+                        let repos = store.run(move |s| s.device_repos(&id)).await?.unwrap_or_default();
+                        (repos, format!("{} (last known; its hub is not reachable from here now)", printable(&target.name)))
+                    }
+                }
+            }
+        }
+    };
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&repos)?);
+        return Ok(());
+    }
+    if repos.is_empty() {
+        println!("No repos on {where_} yet (folders its sessions used, plus config.toml [repos] paths).");
+        return Ok(());
+    }
+    let now = krypto_protocol::now_ms();
+    let rows: Vec<Vec<String>> = repos
+        .iter()
+        .map(|r| vec![printable(&r.name), r.last_used_at.map_or_else(|| "-".into(), |t| ago(now, t)), printable(&r.path)])
+        .collect();
+    println!("Repos on {where_}:");
+    print_table(&["NAME", "LAST USED", "PATH"], &rows);
+    Ok(())
+}
+
+/// Print a chat reply and its numbered proposals.
+fn print_reply(reply: &ChatMessage) {
+    println!("{}", printable_lines(&reply.text));
+    if !reply.proposals.is_empty() {
+        println!();
+        for (i, p) in reply.proposals.iter().enumerate() {
+            println!("  {}) {}", i + 1, printable(&p.summary));
+        }
+        println!();
+        println!("Run one with `krypto chat \"<same text>\" --pick N`.");
+    }
+}
+
+/// `krypto chat "<text>" [--pick N]`: ask the pet, print its reply and proposals; `--pick N` runs
+/// proposal N through the normal path (another machine: start asks on this terminal first).
+async fn run_chat(paths: &Paths, port_flag: Option<u16>, text: String, pick: Option<usize>) -> Result<()> {
+    let hub = running_hub(paths, port_flag).await?;
+    let me = hub.welcome.machine.id.clone();
+    let machines = hub.welcome.machines.clone();
+    let mut conn = Conn::Remote(Box::new(hub));
+    let v = conn.request(ClientMsg::Chat { id: rid(), pet_id: None, text }).await?;
+    let sent: ChatMessage = serde_json::from_value(v.get("message").cloned().unwrap_or_default()).context("parse message")?;
+    let reply = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            match conn.next().await? {
+                Some(ServerMsg::Chat { message }) if message.role == ChatRole::Pet && message.ts >= sent.ts => return Ok(message),
+                Some(_) => {}
+                None => bail!("hub closed the connection"),
+            }
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("no reply from the pet within 60 s"))??;
+    print_reply(&reply);
+    let Some(n) = pick else { return Ok(()) };
+    let p = reply
+        .proposals
+        .get(n.checked_sub(1).unwrap_or(usize::MAX))
+        .with_context(|| format!("there is no proposal {n} (the reply has {})", reply.proposals.len()))?
+        .clone();
+    execute_proposal(&mut conn, &p, &me, &machines).await
+}
+
+/// Refuse a proposal that does not add up: an unknown machine, a start without a folder (or with a
+/// session), a prompt without a session, or a prompt whose session belongs to another machine.
+fn check_proposal(p: &ChatProposal, machines: &[Machine]) -> Result<()> {
+    if !machines.iter().any(|m| m.id == p.machine_id) {
+        bail!("the proposal names a machine this hub does not know");
+    }
+    match p.kind {
+        ChatProposalKind::Start => {
+            if p.cwd.as_deref().is_none_or(|c| c.trim().is_empty()) || p.session_id.is_some() {
+                bail!("the start proposal has no folder (or names a session)");
+            }
+        }
+        ChatProposalKind::Prompt => {
+            let sid = p.session_id.as_deref().context("the prompt proposal has no session")?;
+            let owner = krypto_protocol::parse_global_id(sid).map(|(m, _)| m);
+            if owner != Some(p.machine_id.as_str()) {
+                bail!("the prompt proposal's session is not on the machine it names");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Run a proposal as its ordinary ClientMsg (the hubs check it like any other request). Anything
+/// for another machine, start or prompt, is confirmed by a person on this terminal first.
+async fn execute_proposal(conn: &mut Conn, p: &ChatProposal, me: &str, machines: &[Machine]) -> Result<()> {
+    check_proposal(p, machines)?;
+    let remote = p.machine_id != me;
+    let where_ = machine_name(machines, &p.machine_id);
+    let agent = printable(&p.agent_id);
+    if asks_first(remote, false, false) && !ask_yes_no(format!("Run on {where_}: {}?", printable(&p.summary))).await? {
+        eprintln!("Not run.");
+        return Ok(());
+    }
+    match p.kind {
+        ChatProposalKind::Start => {
+            let cwd = p.cwd.clone().context("the proposal has no folder")?;
+            let msg = ClientMsg::StartSession {
+                id: rid(),
+                agent_id: p.agent_id.clone(),
+                cwd,
+                prompt: Some(p.text.clone()).filter(|t| !t.trim().is_empty()),
+                machine_id: remote.then(|| p.machine_id.clone()),
+                confirmed: remote.then_some(true),
+            };
+            let v = intent_request(conn, msg, &where_).await?;
+            let s: Session = serde_json::from_value(v.get("session").cloned().unwrap_or_default()).context("parse session")?;
+            println!("Started {agent} on {where_}: session {} in {}", printable(&short_id(&s.id)), printable(&s.cwd));
+            if let Some(w) = v.get("warning").and_then(Value::as_str) {
+                eprintln!("warning: {}", printable(w));
+            }
+        }
+        ChatProposalKind::Prompt => {
+            let session_id = p.session_id.clone().context("the proposal has no session")?;
+            intent_request(conn, ClientMsg::Prompt { id: rid(), session_id: session_id.clone(), text: p.text.clone() }, &where_).await?;
+            println!("Sent to {agent} on {where_} (session {})", printable(&short_id(&session_id)));
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- agents / sessions
 
 async fn run_agents(paths: &Paths, port_flag: Option<u16>, refresh: bool, as_json: bool) -> Result<()> {
@@ -1018,6 +1236,8 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let line = |cells: Vec<String>| {
         let mut out = String::new();
         for (i, c) in cells.iter().enumerate() {
+            // Cells often hold other machines' data (names, titles, cwds): never terminal controls.
+            let c = &printable(c);
             if i + 1 == cells.len() {
                 out.push_str(c);
             } else {
@@ -1098,14 +1318,29 @@ async fn run_start(
     prompt: Option<String>,
     force_local: bool,
     machine: Option<String>,
+    repo: Option<String>,
     yes: bool,
 ) -> Result<()> {
-    if let Some(query) = machine {
+    let mut cwd = cwd;
+    if repo.is_some() && cwd.as_os_str() != "." {
+        bail!("use --cwd or --repo, not both");
+    }
+    if machine.is_some() || repo.is_some() {
         if force_local {
-            bail!("--machine and --local cannot be combined");
+            bail!("--machine/--repo and --local cannot be combined");
         }
         let hub = running_hub(&paths, port_flag).await?;
-        let target = resolve_machine(&hub.welcome.machines, &query)?.clone();
+        let target = match &machine {
+            Some(q) => resolve_machine(&hub.welcome.machines, q)?.clone(),
+            None => hub.welcome.machine.clone(),
+        };
+        let mut hub = hub;
+        if let Some(name) = &repo {
+            // The repo's path on that machine, from its index.
+            let v = hub.request_raw(ClientMsg::ListRepos { id: rid(), machine_id: Some(target.id.clone()) }).await?;
+            let repos: Vec<RepoRef> = serde_json::from_value(v.get("repos").cloned().unwrap_or_default()).context("parse repos")?;
+            cwd = PathBuf::from(&resolve_repo(&repos, name, &printable(&target.name))?.path);
+        }
         if target.id != hub.welcome.machine.id {
             // A path on that machine: passed as given (it checks it is an absolute, existing directory).
             let dir = cwd.to_string_lossy().into_owned();
@@ -1126,6 +1361,10 @@ async fn run_start(
             }
             let mut conn = Conn::Remote(Box::new(hub));
             return drive_session(&mut conn, &agent, &dir, prompt, Some(&target)).await;
+        }
+        if repo.is_some() {
+            let mut conn = Conn::Remote(Box::new(hub));
+            return drive_session(&mut conn, &agent, &cwd.to_string_lossy(), prompt, None).await;
         }
     }
     let cwd = std::path::absolute(&cwd).with_context(|| format!("bad --cwd {}", cwd.display()))?;
@@ -1636,6 +1875,59 @@ mod tests {
         assert!(!asks_first(false, true, true));
         assert!(!asks_first(false, false, false));
         assert!(PAIRED_CAN.contains("approve once") && PAIRED_CAN.contains("accept_intents = false"));
+    }
+
+    #[test]
+    fn repo_commands_parse_and_repos_resolve() {
+        let c = Cli::try_parse_from(["krypto", "repos", "--machine", "Mac mini", "--json"]).unwrap();
+        assert!(matches!(c.command, Command::Repos { machine: Some(ref m), json: true } if m == "Mac mini"));
+        let c = Cli::try_parse_from(["krypto", "start", "codex", "--machine", "Mac mini", "--repo", "api"]).unwrap();
+        assert!(matches!(c.command, Command::Start { repo: Some(ref r), .. } if r == "api"));
+        let c = Cli::try_parse_from(["krypto", "chat", "tell codex to run the tests", "--pick", "2"]).unwrap();
+        assert!(matches!(c.command, Command::Chat { ref text, pick: Some(2) } if text.starts_with("tell codex")));
+
+        let r = |n: &str| RepoRef { name: n.into(), path: format!("/srv/{n}"), last_used_at: None };
+        let repos = vec![r("api (work)"), r("api (home)"), r("web"), r("website")];
+        assert_eq!(resolve_repo(&repos, "WEB", "Mac mini").unwrap().name, "web", "exact first");
+        assert_eq!(resolve_repo(&repos, "api (h", "Mac mini").unwrap().name, "api (home)", "unique prefix");
+        let err = resolve_repo(&repos, "api", "Mac mini").unwrap_err().to_string();
+        assert!(err.contains("several repos") && err.contains("api (work)") && err.contains("api (home)"), "{err}");
+        let err = resolve_repo(&repos, "docs", "Mac mini").unwrap_err().to_string();
+        assert!(err.contains("has no repo") && err.contains("website"), "lists what it has: {err}");
+        assert!(resolve_repo(&[], "x", "Mac mini").unwrap_err().to_string().contains("no repos yet"));
+    }
+
+    #[test]
+    fn proposals_must_add_up_before_they_run() {
+        let ms = vec![machine("aaaaaa111111", "Desk"), machine("bbbbbb222222", "Mac mini")];
+        let p = |kind, machine_id: &str, cwd: Option<&str>, session: Option<&str>| ChatProposal {
+            id: "p".into(),
+            kind,
+            machine_id: machine_id.into(),
+            agent_id: "codex".into(),
+            cwd: cwd.map(Into::into),
+            repo_name: None,
+            session_id: session.map(Into::into),
+            text: "run the tests".into(),
+            summary: "s".into(),
+        };
+        use ChatProposalKind::{Prompt, Start};
+        assert!(check_proposal(&p(Start, "bbbbbb222222", Some("/srv/api"), None), &ms).is_ok());
+        assert!(check_proposal(&p(Prompt, "bbbbbb222222", None, Some("bbbbbb222222:s1")), &ms).is_ok());
+        for (bad, why) in [
+            (p(Start, "cccccc333333", Some("/srv/api"), None), "unknown machine"),
+            (p(Start, "bbbbbb222222", None, None), "start without a folder"),
+            (p(Start, "bbbbbb222222", Some("  "), None), "blank folder"),
+            (p(Start, "bbbbbb222222", Some("/srv/api"), Some("bbbbbb222222:s1")), "start naming a session"),
+            (p(Prompt, "bbbbbb222222", None, None), "prompt without a session"),
+            (p(Prompt, "bbbbbb222222", None, Some("aaaaaa111111:s1")), "session on another machine"),
+            (p(Prompt, "bbbbbb222222", None, Some("legacy-id")), "unprefixed session"),
+        ] {
+            assert!(check_proposal(&bad, &ms).is_err(), "{why}");
+        }
+        // A remote proposal of either kind asks a person first (no TTY: refused by ask_yes_no).
+        assert!(asks_first(true, false, false));
+        assert_eq!(printable_lines("a\nb\u{1b}[2J"), "a\nb?[2J");
     }
 
     #[test]

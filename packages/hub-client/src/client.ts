@@ -5,6 +5,7 @@ import type {
   AckResults,
   Agent,
   ChatMessage,
+  ChatProposal,
   ClientKind,
   ClientMsg,
   HistorySession,
@@ -12,6 +13,7 @@ import type {
   Machine,
   Pet,
   PermissionRequest,
+  RepoRef,
   Rule,
   ServerMsg,
   Session,
@@ -31,6 +33,7 @@ import {
   type StateLimits,
 } from "./state";
 import { isAllowOption, remoteOptionBlocked } from "./intents";
+import { proposalProblem, repoIndexHas } from "./proposals";
 import { MACHINE_NAME_MAX, normalizeMachineName } from "./machine";
 import { INVITE_TTL_MAX_SECS, INVITE_TTL_MIN_SECS, parseInviteUri } from "./peer";
 import { toHubWsUrl } from "./url";
@@ -123,6 +126,9 @@ export interface StartSessionOptions {
   confirmed?: boolean | undefined;
 }
 
+/** What running a chat proposal did. */
+export type ProposalResult = { kind: "started"; session: Session } | { kind: "sent"; sessionId: string };
+
 /** Options for answering a permission request. */
 export interface ResolveOptions {
   /** The user confirmed on this device (required to approve another machine's request). */
@@ -184,6 +190,8 @@ export class HubClient {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly stateListeners = new Set<StateListener>();
   private readonly typeListeners = new Map<string, Set<AnyMsgListener>>();
+  /** Last `list_repos` answer per other machine (start proposals must name one of its repos). */
+  private readonly repoCache = new Map<MachineId, RepoRef[]>();
   /** When `user_activity` was last sent on the current connection (reset by every hello). */
   private lastActivityReport = -Infinity;
 
@@ -413,6 +421,52 @@ export class HubClient {
     if (o.machineId !== undefined && o.machineId !== this.state.machine?.id) msg.machineId = o.machineId;
     const res = await this.request<"list_agents">(msg);
     return res.agents;
+  }
+
+  /** A machine's repo index (default: this machine; another machine: from its latest presence). */
+  async listRepos(opts: { machineId?: MachineId | undefined } = {}): Promise<RepoRef[]> {
+    const msg: DistributiveOmit<Extract<ClientMsg, { type: "list_repos" }>, "id"> = { type: "list_repos" };
+    if (opts.machineId !== undefined && opts.machineId !== "" && opts.machineId !== this.state.machine?.id) msg.machineId = opts.machineId;
+    const res = await this.request<"list_repos">(msg);
+    const repos = res.repos ?? [];
+    if (msg.machineId !== undefined) this.repoCache.set(msg.machineId, repos);
+    return repos;
+  }
+
+  /**
+   * Run a chat proposal (PLAN.md migration step 5) the user confirmed on this device: `start` becomes
+   * start_session on the proposal's machine, `prompt` a prompt to its session; the hubs validate as usual.
+   * Both kinds need `confirmed: true` (checked before sending, code `unconfirmed`): the bot never runs a command
+   * by itself. A malformed proposal, a start aimed at this machine, or a start whose folder is not in that
+   * machine's repo index (`list_repos`, fetched when not cached or not found in the cache) rejects with `invalid`
+   * and starts nothing.
+   */
+  async executeProposal(p: ChatProposal, opts: { confirmed?: boolean | undefined } = {}): Promise<ProposalResult> {
+    const type = p.kind === "prompt" ? "prompt" : "start_session";
+    if (opts.confirmed !== true) throw new HubRequestError("unconfirmed", type, "a chat proposal runs only after the user confirms it on this device");
+    const own = this.state.machine?.id;
+    if (p.kind === "start" && !own) throw new HubRequestError("no_machine", type, "the hub has not introduced this machine yet");
+    const problem = proposalProblem(p, own);
+    if (problem) throw new HubRequestError("invalid", type, `the proposal cannot run: ${problem}`);
+    if (p.kind === "start") {
+      const cwd = p.cwd!.trim();
+      const os = this.state.machines[p.machineId]?.os;
+      const cached = this.repoCache.get(p.machineId);
+      const repos = cached && repoIndexHas(cached, cwd, os) ? cached : await this.listRepos({ machineId: p.machineId });
+      if (!repoIndexHas(repos, cwd, os)) {
+        throw new HubRequestError("invalid", type, "the proposal cannot run: its folder is not one of that machine's repos");
+      }
+      const session = await this.startSession({
+        agentId: p.agentId,
+        cwd,
+        prompt: p.text?.trim() ? p.text.trim() : undefined,
+        machineId: p.machineId,
+        confirmed: true,
+      });
+      return { kind: "started", session };
+    }
+    await this.prompt(p.sessionId!, p.text.trim());
+    return { kind: "sent", sessionId: p.sessionId! };
   }
 
   async listSessions(includeEnded?: boolean): Promise<Session[]> {

@@ -202,54 +202,6 @@ pub(crate) fn validate_prompt(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// `p` as a plain path: the Windows verbatim prefix of a drive path is dropped (`\\?\C:\x` -> `C:\x`).
-/// None for network shares (`\\server\share`, `\\?\UNC\...`) and device paths (`\\.\...`, other `\\?\`).
-pub(crate) fn plain_path(p: &Path) -> Option<std::path::PathBuf> {
-    use std::path::{Component, Prefix};
-    let mut parts = p.components();
-    match parts.next() {
-        Some(Component::Prefix(pre)) => match pre.kind() {
-            Prefix::Disk(_) => Some(p.to_path_buf()),
-            Prefix::VerbatimDisk(d) => {
-                let mut out = std::path::PathBuf::from(format!("{}:\\", d as char));
-                for c in parts {
-                    if let Component::Normal(n) = c {
-                        out.push(n);
-                    }
-                }
-                Some(out)
-            }
-            _ => None,
-        },
-        _ => Some(p.to_path_buf()),
-    }
-}
-
-/// Path components for comparison (case-insensitive on Windows).
-fn path_key(p: &Path) -> Vec<String> {
-    p.components()
-        .map(|c| {
-            let s = c.as_os_str().to_string_lossy().into_owned();
-            if cfg!(windows) {
-                s.to_lowercase()
-            } else {
-                s
-            }
-        })
-        .collect()
-}
-
-/// `child` is `root` or inside it.
-pub(crate) fn is_within(child: &Path, root: &Path) -> bool {
-    let (c, r) = (path_key(child), path_key(root));
-    c.len() >= r.len() && c[..r.len()] == r[..]
-}
-
-/// A path canonicalized as a plain local path (None if it does not exist or is a share/device path).
-fn canonical_plain(p: &Path) -> Option<std::path::PathBuf> {
-    plain_path(&std::fs::canonicalize(p).ok()?)
-}
-
 /// The origin's check of an owner's `applied` result: a start must return a session of the target
 /// machine (bounded size; an optional warning is kept, cleaned); every other kind returns `{}`.
 pub(crate) fn checked_result(kind: &str, target: &str, result: Option<Value>) -> std::result::Result<Value, AckCode> {
@@ -430,9 +382,9 @@ impl Hub {
     // ------------------------------------------------------------ owner
 
     /// Where a remote start may run. The cwd must be absolute and exist (`invalid` otherwise); it is
-    /// canonicalized, network-share and device paths are `forbidden`, and the result must be a folder
-    /// this machine already knows: the folder of one of its own previous sessions (or inside it), or
-    /// inside a `[peer] start_roots` entry. Anything else is `forbidden`.
+    /// canonicalized, network-share and device paths are `forbidden`, and the result must be a known
+    /// folder ([`Hub::is_known_folder`]: in this machine's repo index or under `[peer] start_roots`).
+    /// Anything else is `forbidden`.
     pub(super) async fn remote_start_dir(&self, cwd: &str) -> std::result::Result<std::path::PathBuf, IntentRejectReason> {
         let raw = cwd.trim();
         if raw.starts_with("\\\\") || raw.starts_with("//") {
@@ -446,24 +398,11 @@ impl Hub {
         if !canon.is_dir() {
             return Err(IntentRejectReason::Invalid);
         }
-        let dir = plain_path(&canon).ok_or(IntentRejectReason::Forbidden)?;
-        let roots = self.inner.config.peer.start_roots.clone();
-        let known = self
-            .inner
-            .store
-            .run(move |s| {
-                let mut v: Vec<std::path::PathBuf> =
-                    s.local_session_cwds()?.iter().filter_map(|c| canonical_plain(Path::new(c))).collect();
-                v.extend(roots.iter().filter_map(|r| canonical_plain(Path::new(r.trim()))));
-                Ok(v)
-            })
-            .await
-            .map_err(|_| IntentRejectReason::Invalid)?;
-        if known.iter().any(|k| is_within(&dir, k)) {
-            Ok(dir)
-        } else {
-            Err(IntentRejectReason::Forbidden)
+        let dir = crate::repos::plain_path(&canon).ok_or(IntentRejectReason::Forbidden)?;
+        if !self.is_known_folder(&dir).await {
+            return Err(IntentRejectReason::Forbidden);
         }
+        Ok(dir)
     }
 
     /// More than INTENT_RATE_PER_SEC intents from `from` within one second?

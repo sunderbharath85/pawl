@@ -32,6 +32,7 @@ const MIGRATIONS: &[Migration] =
         Migration::Sql(SCHEMA_V3),
         Migration::Sql(SCHEMA_V4),
         Migration::Sql(SCHEMA_V5),
+        Migration::Sql(SCHEMA_V6),
     ];
 
 const SCHEMA_V1: &str = r#"
@@ -201,6 +202,12 @@ CREATE INDEX intent_log_ts ON intent_log(ts);
 ALTER TABLE intent_log ADD COLUMN repeats INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE devices ADD COLUMN agents TEXT;
 ALTER TABLE sessions ADD COLUMN remote_driven INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// v6 (remote commands): chat replies keep their proposals; each paired hub's last reported repos.
+const SCHEMA_V6: &str = r#"
+ALTER TABLE chat ADD COLUMN proposals TEXT;
+ALTER TABLE devices ADD COLUMN repos TEXT;
 "#;
 
 /// intent_log rows are kept this long, and at most INTENT_LOG_MAX_ROWS of them.
@@ -729,8 +736,18 @@ impl Store {
 
     pub fn insert_chat(&self, m: &ChatMessage) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO chat (id, machine_id, pet_id, role, text, ts, session_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![m.id, m.machine_id, m.pet_id, enum_str(&m.role), m.text, m.ts, m.session_id],
+            "INSERT INTO chat (id, machine_id, pet_id, role, text, ts, session_id, proposals)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                m.id,
+                m.machine_id,
+                m.pet_id,
+                enum_str(&m.role),
+                m.text,
+                m.ts,
+                m.session_id,
+                if m.proposals.is_empty() { None } else { Some(json(&m.proposals)?) }
+            ],
         )?;
         Ok(())
     }
@@ -739,7 +756,7 @@ impl Store {
     pub fn recent_chat(&self, limit: u32) -> Result<Vec<ChatMessage>> {
         let c = self.conn();
         let mut st =
-            c.prepare("SELECT id, machine_id, pet_id, role, text, ts, session_id FROM chat ORDER BY seq DESC LIMIT ?1")?;
+            c.prepare("SELECT id, machine_id, pet_id, role, text, ts, session_id, proposals FROM chat ORDER BY seq DESC LIMIT ?1")?;
         let rows = st.query_map([limit], |r| {
             let role: String = r.get(3)?;
             Ok(ChatMessage {
@@ -750,6 +767,10 @@ impl Store {
                 text: r.get(4)?,
                 ts: r.get(5)?,
                 session_id: r.get(6)?,
+                proposals: r
+                    .get::<_, Option<String>>(7)?
+                    .and_then(|j| serde_json::from_str(&j).ok())
+                    .unwrap_or_default(),
             })
         })?;
         let mut v: Vec<ChatMessage> = rows.filter_map(|r| r.ok()).collect();
@@ -858,13 +879,33 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// The distinct working directories of this machine's own sessions (owned and hook-tracked;
-    /// never mirrored ones).
-    pub fn local_session_cwds(&self) -> Result<Vec<String>> {
+    /// The working directories of this machine's own sessions (owned and hook-tracked; never
+    /// mirrored ones), each with the last activity there.
+    pub fn local_session_folders(&self) -> Result<Vec<(String, UnixMs)>> {
         let c = self.conn();
-        let mut st = c.prepare("SELECT DISTINCT cwd FROM sessions WHERE machine_id = ?1 AND cwd != ''")?;
-        let rows = st.query_map([&self.machine_id], |r| r.get(0))?;
+        let mut st = c.prepare(
+            "SELECT cwd, MAX(last_event_at) FROM sessions WHERE machine_id = ?1 AND cwd != '' GROUP BY cwd",
+        )?;
+        let rows = st.query_map([&self.machine_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Remember a paired hub's repo index (its latest presence), for list_repos while it is offline.
+    pub fn set_device_repos(&self, device_id: &str, repos: &[krypto_protocol::RepoRef]) -> Result<()> {
+        self.conn().execute(
+            "UPDATE devices SET repos = ?2 WHERE id = ?1 AND revoked_at IS NULL",
+            params![device_id, json(&repos)?],
+        )?;
+        Ok(())
+    }
+
+    /// A paired hub's last reported repo index (None if it never reported or is not paired).
+    pub fn device_repos(&self, device_id: &str) -> Result<Option<Vec<krypto_protocol::RepoRef>>> {
+        let v: Option<Option<String>> = self
+            .conn()
+            .query_row("SELECT repos FROM devices WHERE id = ?1 AND revoked_at IS NULL", [device_id], |r| r.get(0))
+            .optional()?;
+        Ok(v.flatten().and_then(|j| serde_json::from_str(&j).ok()))
     }
 
     /// Latest intent log entries (newest first).
@@ -2134,9 +2175,22 @@ mod tests {
             text: "woof".into(),
             ts: 3,
             session_id: None,
+            proposals: vec![krypto_protocol::ChatProposal {
+                id: "p1".into(),
+                kind: krypto_protocol::ChatProposalKind::Start,
+                machine_id: "zyxwvu987654".into(),
+                agent_id: "codex".into(),
+                cwd: Some("/srv/api".into()),
+                repo_name: Some("api".into()),
+                session_id: None,
+                text: "run the tests".into(),
+                summary: "Start Codex on Mac mini in api: run the tests".into(),
+            }],
         };
         s.insert_chat(&m).unwrap();
-        assert_eq!(s.recent_chat(5).unwrap(), vec![m]);
+        let plain = ChatMessage { id: gid("c2"), proposals: Vec::new(), ..m.clone() };
+        s.insert_chat(&plain).unwrap();
+        assert_eq!(s.recent_chat(5).unwrap(), vec![m, plain], "proposals are kept with their message");
 
         let _ = PermissionOutcome::Cancelled;
         s.set_setting("k", "v").unwrap();

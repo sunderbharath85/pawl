@@ -4,7 +4,7 @@ Named dog pets that watch and drive your coding agents over ACP (Agent Client Pr
 
 - Whiteboard: https://claude.ai/artifact/E8zVPktys5q8qKw5AjmjtB
 - Last updated: 2026-11-23
-- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto, step 1 (machine identity), step 2 (pairing + LAN presence, protocol v3), step 3 (mirror events + visitors, protocol v4), step 4 (intents + acks, protocol v5). Next: step 5 (remote commands by machine + repo).
+- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto, step 1 (machine identity), step 2 (pairing + LAN presence, protocol v3), step 3 (mirror events + visitors, protocol v4), step 4 (intents + acks, protocol v5), step 5 (remote commands by machine + repo, protocol v6). In progress: step 5b (settings in the UI) and step 6 (relay).
 
 ## Decisions
 
@@ -15,6 +15,7 @@ Named dog pets that watch and drive your coding agents over ACP (Agent Client Pr
 - **The dog is the default pet.** There is one pet per agent per machine. Cat, bird and robot are optional skins (art and SVG already exist; keep them, low priority).
 - **Every pet has a name.** It is auto-picked, unique across paired machines and user-editable. It shows above the pet everywhere and can be used in commands ("tell Biscuit to run the tests").
 - **The editor is VS Code.** VS Code has no native ACP support, so VS Code sessions are tracked through agent hooks plus the "Krypto for VS Code" extension. A Zed/JetBrains wrapper is optional, later.
+- **Everything is configurable in the UI.** The desktop panel can change every setting; VS Code links to it. A CLI flag or `config.toml` edit is fine for initial setup but is never the only way. Each step that adds a setting ships its UI in the same step. Settings calls are local-only (never from a peer, the phone or the relay), secrets are write-only in the UI, and risky toggles need an in-app confirm.
 - **TypeScript toolchain: bun.** The hub is Rust, the desktop app is Tauri 2 + React, the phone app is Expo, and the relay runs on Cloudflare Workers + Durable Objects.
 
 ## Goal
@@ -259,11 +260,22 @@ Each step can ship and be tested on its own.
    - Hardened after a security review: a remote approve can only choose allow-once (always-allow only on the owner); remote start canonicalizes the folder, refuses network-share and device paths, and only runs in folders the owner already uses or under `[peer] start_roots`; sessions started or prompted from another machine never get rule auto-approval; remote approve and remote start in the CLI always ask on the terminal (`--yes` ignored); `[peer] accept_intents = false` turns remote control off.
    - The owner cannot verify the other device's confirmation, so pairing is the trust decision.
 
-5. **Remote commands by machine + repo.**
+5. ✅ **Remote commands by machine + repo.** (done 2026-11-24; protocol v6)
    - Repo index in presence.
    - The brain parses machine and pet-name targets and routes `start`/`prompt` intents.
    - The bot asks when the target is ambiguous.
    - Test: "Tell the Mac mini's Claude to run the tests in repo X" from the PC.
+   - The bot never runs a command on another machine by itself: it replies with proposals that the user confirms in the client (desktop, VS Code, or `krypto chat --pick N` on a terminal), which then sends the ordinary step-4 request. Only the deterministic parser creates proposals; LLM output stays text.
+   - Hardened after a security review: peer agents, repos, names and session folders are validated; this machine wins name ties; "approve N" numbers this machine's requests; the CLI asks before any remote proposal and needs a TTY.
+   - A repo that exists on this machine stays local when no machine is named.
+   - Backlog: on Windows, `taskkill /F` on a hub leaves its ACP agent processes running.
+
+5b. **Settings in the UI.** (in progress; protocol v7, dep `toml_edit`)
+   - Hub API: `get_settings` / `update_settings` (validated, applied at runtime where possible, "restart needed" otherwise, every change audited with the client that made it) for everything in `config.toml`: port and retention, bot model and keys (write-only), watchdog timings, daily report time, peer listener on/off and address (start/stop at runtime), remote control (`accept_intents`), `start_roots`, `[repos] paths`, custom agents.
+   - Hooks: show per-agent hook status and install/update/remove them from the UI (the same code as `krypto install-hooks`, with a preview first).
+   - Desktop Settings grouped as Hub, This machine, Machines & pairing, Remote control, Repos, Agents & hooks, Bot, Notifications. Risky changes (listener on, remote control on, a new start root, a custom agent command) need an in-app confirm that says what it allows.
+   - First-run setup in the desktop app: start the hub, name this machine, install hooks for the agents it found, optionally pair a machine.
+   - VS Code: "Krypto: Open Settings" opens the desktop panel; the machine/pet rename commands stay.
 6. **Relay.**
    - A Cloudflare Worker routes the same envelopes. Hubs connect outbound.
    - The LAN link becomes a preferred fast path with relay fallback.

@@ -170,6 +170,28 @@ button.link:hover:not(:disabled) {
   color: var(--vscode-textLink-foreground);
 }
 
+/* ---------- chat proposals (step 5) ---------- */
+.proposals {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 6px;
+}
+.proposals .proposal {
+  text-align: left;
+  white-space: normal;
+}
+.proposals .proposal.used {
+  border-style: dashed;
+}
+.proposal-ok {
+  color: var(--vscode-testing-iconPassed, var(--vscode-foreground));
+}
+.proposal-error {
+  color: var(--vscode-errorForeground);
+}
+
 /* ---------- other machines (mirrored, read-only) ---------- */
 .machine-chip {
   display: inline-block;

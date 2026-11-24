@@ -10,6 +10,9 @@ A dog (or cat, bird, robot) that watches and drives your coding agents through t
   Paired machines' pets visit on the right, and a pet with a waiting approval runs to the machine you are
   using. Other machines' sessions can be prompted, cancelled, approved and denied from here; approving one
   (or starting a session on another machine) asks in a modal first ("Approve on Mac mini: …?").
+  In chat, "tell the Mac mini's Claude to run the tests in ai-pet" comes back as a button; clicking it asks
+  "Run on Mac mini?" before anything is sent (each suggestion works once, for 10 minutes). Start Session on
+  another machine picks from that machine's repos.
   `Krypto: Open Pet in Editor` opens the same view in an editor tab.
 - **Commands:** Start Session (pick this machine or an online paired one), Prompt Session, Cancel Session, Approve Pending, Deny Pending, Show Pet,
   Rename Pet, Change Pet Species, Rename This Machine, Show Machines (read-only; pair machines in the desktop

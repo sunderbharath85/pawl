@@ -15,6 +15,9 @@ import {
 import {
   agentFor,
   approveOptionId,
+  ownerName,
+  proposalExpired,
+  type ProposalEntry,
   groupByMachine,
   isLocal,
   machineDisplayName,
@@ -557,10 +560,77 @@ function Composer({ placeholder, disabled, onSend }: { placeholder: string; disa
   );
 }
 
+/**
+ * Chat proposals (PLAN.md migration step 5): commands the bot understood for another machine's agent, as
+ * buttons. A click asks the host, which confirms in a modal ("Run on Mac mini?") before anything is sent.
+ * Single use per message (alternatives: once one runs the rest are spent) and only for 10 minutes.
+ */
+function ProposalButtons({
+  message,
+  entry,
+  place,
+  connected,
+  now,
+  onOpenSession,
+}: {
+  message: ChatMessage;
+  entry: ProposalEntry | undefined;
+  place: Place;
+  connected: boolean;
+  now: number;
+  onOpenSession(id: string): void;
+}) {
+  const list = message.proposals ?? [];
+  if (list.length === 0) return null;
+  const expired = proposalExpired(message, now);
+  const open = connected && !expired && (!entry || (entry.status === "failed" && entry.retryable));
+  return (
+    <div className="proposals">
+      {list.length > 1 && open && <div className="muted small">Pick one:</div>}
+      {list.map((p) => {
+        const offline = offlineReason(place, p.machineId);
+        return (
+          <button
+            key={p.id}
+            className={`secondary proposal${entry?.proposalId === p.id ? " used" : ""}`}
+            disabled={!open || !!offline}
+            title={offline ?? (expired ? "This suggestion expired; ask again." : `Runs on ${ownerName(place, p.machineId)} after you confirm`)}
+            onClick={() => post({ type: "proposal", messageId: message.id, proposalId: p.id })}
+          >
+            {p.summary}
+          </button>
+        );
+      })}
+      {entry?.status === "running" && <div className="muted small">Sending…</div>}
+      {entry?.status === "done" && (
+        <div className="small proposal-ok">
+          {entry.text}{" "}
+          {entry.sessionId && (
+            <button className="link" onClick={() => onOpenSession(entry.sessionId!)}>
+              Open session
+            </button>
+          )}
+        </div>
+      )}
+      {entry?.status === "failed" && (
+        <div className="small proposal-error" role="alert">
+          {entry.text}
+          {entry.retryable && !expired ? " You can try again." : ""}
+        </div>
+      )}
+      {expired && !entry && <div className="muted small">This suggestion expired. Ask again to get a fresh one.</div>}
+    </div>
+  );
+}
+
 export function ChatPanel({
   chat,
   pets,
   agents,
+  place,
+  proposals,
+  now,
+  onOpenSession,
   connected,
   petId,
   onPetChange,
@@ -568,6 +638,10 @@ export function ChatPanel({
   chat: ChatMessage[];
   pets: Pet[];
   agents: Agent[];
+  place: Place;
+  proposals: Record<string, ProposalEntry>;
+  now: number;
+  onOpenSession(id: string): void;
   connected: boolean;
   petId: string | null;
   onPetChange(id: string | null): void;
@@ -611,6 +685,16 @@ export function ChatPanel({
             <div key={m.id} className={`msg ${m.role === "user" ? "user" : "agent"}`}>
               {m.role === "pet" && <div className="msg-from">{petName(m.petId)}</div>}
               {m.text}
+              {m.role === "pet" && (
+                <ProposalButtons
+                  message={m}
+                  entry={proposals[m.id]}
+                  place={place}
+                  connected={connected}
+                  now={now}
+                  onOpenSession={onOpenSession}
+                />
+              )}
             </div>
           ))
         )}

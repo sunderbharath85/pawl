@@ -195,6 +195,13 @@ pub fn parse_peer_listen(s: &str) -> Result<SocketAddr> {
     }
 }
 
+/// `[repos]`: folders to list in this machine's repo index besides those its sessions used.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReposSection {
+    pub paths: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HubConfig {
@@ -216,6 +223,7 @@ pub struct HubConfig {
     /// Events older than this are pruned at startup (0 = keep forever).
     pub event_retention_days: u32,
     pub peer: PeerSection,
+    pub repos: ReposSection,
 }
 
 impl Default for HubConfig {
@@ -232,6 +240,7 @@ impl Default for HubConfig {
             owned_session_idle_hours: 12,
             event_retention_days: 30,
             peer: PeerSection::default(),
+            repos: ReposSection::default(),
         }
     }
 }
@@ -253,6 +262,9 @@ const CONFIG_TEMPLATE: &str = r#"# Krypto hub configuration. Every key is option
 # listen = "192.168.1.20:47801"   # hub-to-hub listener (off by default; needed to create invites)
 # accept_intents = true           # false = paired machines can watch but never act here
 # start_roots = ["E:/work"]       # paired machines may also start agents under these folders
+#
+# [repos]
+# paths = ["E:/work/api"]          # also offered as repos ("in repo api"), besides folders sessions used
 #
 # [watchdog]
 # waiting_nudge_after_ms = 300000

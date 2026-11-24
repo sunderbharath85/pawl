@@ -104,6 +104,9 @@ pub(crate) fn check_session(s: &Session, from: &str) -> Option<&'static str> {
     if !owned_by(&s.id, from) {
         return Some("session id is not the sender's");
     }
+    if s.cwd.chars().count() > crate::repos::PEER_REPO_PATH_MAX || s.cwd.chars().any(char::is_control) {
+        return Some("session cwd is over 1024 characters or has control characters");
+    }
     None
 }
 
@@ -1058,6 +1061,12 @@ mod tests {
         let mut spoof = session(PEER, "s1");
         spoof.id = global_id(ME, "s1");
         assert!(check_session(&spoof, PEER).is_some(), "id prefix of this hub");
+        let mut long_cwd = session(PEER, "s1");
+        long_cwd.cwd = "/".repeat(1025);
+        assert!(check_session(&long_cwd, PEER).is_some(), "cwd over 1024 characters");
+        let mut ctl_cwd = session(PEER, "s1");
+        ctl_cwd.cwd = "/srv/api\u{1b}]0;x\u{7}".into();
+        assert!(check_session(&ctl_cwd, PEER).is_some(), "control characters in cwd");
 
         assert_eq!(check_event(&event(PEER, 7, &sid), PEER), None);
         let mut e = event(PEER, 7, &sid);

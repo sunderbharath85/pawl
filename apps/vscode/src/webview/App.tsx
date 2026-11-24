@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { derivePetViews, lastSignificantEvents, type PetView } from "@krypto/pet-engine";
 import { PetStage } from "@krypto/pet-engine/react";
-import { activeMachineId, isLocal, machineCounts, machineDisplayName, machineSummary, machinesLine } from "@krypto/hub-client";
+import {
+  activeMachineId,
+  isLocal,
+  machineCounts,
+  machineDisplayName,
+  machineSummary,
+  machinesLine,
+  type ProposalEntry,
+} from "@krypto/hub-client";
 import { DEFAULT_SPECIES, type Session } from "@krypto/protocol";
 import type { ConnInfo, HostToWebview, SpritesInfo, WebviewHubState } from "../shared/messages";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -64,6 +72,7 @@ function useWidth<T extends HTMLElement>(): [RefObject<T | null>, number] {
 
 export function App() {
   const [hub, setHub] = useState<WebviewHubState>(EMPTY_STATE);
+  const [proposals, setProposals] = useState<Record<string, ProposalEntry>>({});
   const [conn, setConn] = useState<ConnInfo>(INITIAL_CONN);
   const [sprites, setSprites] = useState<SpritesInfo | null>(null);
   const [mode, setMode] = useState<"view" | "panel">("view");
@@ -100,6 +109,7 @@ export function App() {
         case "state":
           setConn(msg.conn);
           setHub(msg.state);
+          setProposals(msg.proposals ?? {});
           break;
         case "focusSession":
           update({ tab: "sessions", selectedSessionId: msg.sessionId });
@@ -307,6 +317,10 @@ export function App() {
             chat={hub.chat}
             pets={localPets}
             agents={hub.agents}
+            place={place}
+            proposals={proposals}
+            now={now}
+            onOpenSession={(id) => update({ tab: "sessions", selectedSessionId: id })}
             connected={connected}
             petId={persisted.chatPetId}
             onPetChange={(id) => update({ chatPetId: id })}

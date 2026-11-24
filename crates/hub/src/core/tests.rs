@@ -2029,7 +2029,7 @@ async fn remote_start_runs_only_in_folders_this_machine_knows() {
         // Case-insensitive, and the verbatim form of a known drive path is the same folder.
         let upper = s(&inside).to_uppercase();
         assert_eq!(reason(&intent(&f.hub, OTHER, "w1", true, start("codex", upper)).await), None);
-        let verbatim = format!(r"\\?\{}", s(&std::fs::canonicalize(&inside).map(|p| intents::plain_path(&p).unwrap()).unwrap()));
+        let verbatim = format!(r"\\?\{}", s(&std::fs::canonicalize(&inside).map(|p| crate::repos::plain_path(&p).unwrap()).unwrap()));
         assert_eq!(reason(&intent(&f.hub, OTHER, "w2", true, start("codex", verbatim)).await), Some(Reject::Forbidden), "raw \\\\ paths are refused outright");
     }
 }
@@ -2037,7 +2037,7 @@ async fn remote_start_runs_only_in_folders_this_machine_knows() {
 #[test]
 fn plain_paths_drop_the_verbatim_prefix_and_refuse_shares() {
     use std::path::Path;
-    let w = |p: &str| intents::plain_path(Path::new(p)).map(|x| x.to_string_lossy().into_owned());
+    let w = |p: &str| crate::repos::plain_path(Path::new(p)).map(|x| x.to_string_lossy().into_owned());
     if cfg!(windows) {
         assert_eq!(w(r"\\?\C:\Users\me\repo").as_deref(), Some(r"C:\Users\me\repo"));
         assert_eq!(w(r"C:\Users\me").as_deref(), Some(r"C:\Users\me"));
@@ -2045,13 +2045,13 @@ fn plain_paths_drop_the_verbatim_prefix_and_refuse_shares() {
         assert_eq!(w(r"\\server\share\x"), None);
         assert_eq!(w(r"\\.\PhysicalDrive0"), None);
         assert_eq!(w(r"\\?\GLOBALROOT\Device"), None);
-        assert!(intents::is_within(Path::new(r"c:\USERS\me\repo\x"), Path::new(r"C:\Users\me\repo")));
-        assert!(!intents::is_within(Path::new(r"C:\Users\me\repo2"), Path::new(r"C:\Users\me\repo")));
+        assert!(crate::repos::is_within(Path::new(r"c:\USERS\me\repo\x"), Path::new(r"C:\Users\me\repo")));
+        assert!(!crate::repos::is_within(Path::new(r"C:\Users\me\repo2"), Path::new(r"C:\Users\me\repo")));
     } else {
         assert_eq!(w("/home/me/repo").as_deref(), Some("/home/me/repo"));
-        assert!(intents::is_within(Path::new("/home/me/repo/x"), Path::new("/home/me/repo")));
-        assert!(!intents::is_within(Path::new("/home/me/repo2"), Path::new("/home/me/repo")));
-        assert!(!intents::is_within(Path::new("/home/me/REPO"), Path::new("/home/me/repo")));
+        assert!(crate::repos::is_within(Path::new("/home/me/repo/x"), Path::new("/home/me/repo")));
+        assert!(!crate::repos::is_within(Path::new("/home/me/repo2"), Path::new("/home/me/repo")));
+        assert!(!crate::repos::is_within(Path::new("/home/me/REPO"), Path::new("/home/me/repo")));
     }
 }
 
@@ -2381,4 +2381,207 @@ async fn two_hubs_approve_start_and_time_out() {
     assert_eq!(err, "timeout");
     assert!(started.elapsed() >= INTENT_TIMEOUT);
     assert_eq!(b.store().intent_log(1).unwrap()[0].status, "timeout");
+}
+
+// ---------------------------------------------------------------- repos + remote commands (step 5)
+
+use krypto_peer::PeerEvent;
+use krypto_protocol::{ChatProposalKind, Presence, RepoRef};
+
+fn repo(name: &str, path: &str) -> RepoRef {
+    RepoRef { name: name.into(), path: path.into(), last_used_at: Some(1) }
+}
+
+/// A presence from `peer` with these agents and repos.
+fn presence_of(peer: &str, agents: Vec<Agent>, repos: Vec<RepoRef>) -> Presence {
+    let now = krypto_protocol::now_ms();
+    Presence {
+        machine: Machine {
+            id: peer.into(),
+            name: "Mac mini".into(),
+            os: krypto_protocol::MachineOs::Macos,
+            last_seen: now,
+            online: true,
+            hub_version: None,
+            user_active_at: None,
+        },
+        agents,
+        repos,
+        pets: vec![],
+        user_active_at: None,
+        ts: now,
+    }
+}
+
+async fn list_repos(hub: &Hub, machine: Option<&str>) -> std::result::Result<Vec<RepoRef>, String> {
+    match hub.handle(ClientMsg::ListRepos { id: "lr".into(), machine_id: machine.map(Into::into) }, &actor()).await {
+        ServerMsg::Ack { ok: true, result, .. } => Ok(serde_json::from_value(result.unwrap()["repos"].clone()).unwrap()),
+        other => Err(ack_error(other)),
+    }
+}
+
+/// The index comes from this machine's session folders (canonical, newest first) plus config
+/// `[repos] paths`, is rebuilt when a session uses a new folder, and drops folders that are gone.
+#[tokio::test]
+async fn the_repo_index_follows_sessions_and_config() {
+    let extra = tempfile::tempdir().unwrap();
+    let docs = extra.path().join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    let docs_cfg = docs.to_string_lossy().into_owned();
+    let f = fixture_config(move |c| c.repos.paths = vec![docs_cfg, "/definitely/not/here".into()]).await;
+    let names = |h: &Hub| h.repos().into_iter().map(|r| r.name).collect::<Vec<_>>();
+    assert_eq!(names(&f.hub), vec!["docs"], "config paths that exist; missing ones dropped");
+
+    let api = f.dir.path().join("work").join("api");
+    std::fs::create_dir_all(&api).unwrap();
+    let api_cwd = api.join("..").join("api").to_string_lossy().into_owned(); // not canonical on purpose
+    ack_result(f.hub.handle(ClientMsg::StartSession { machine_id: None, confirmed: None, id: "s".into(), agent_id: "codex".into(), cwd: api_cwd, prompt: None }, &actor()).await);
+    wait_until("the new folder is indexed", || {
+        let h = f.hub.clone();
+        async move { h.repos().iter().any(|r| r.name == "api") }
+    })
+    .await;
+    let idx = f.hub.repos();
+    assert_eq!(idx[0].name, "api", "newest first");
+    assert_eq!(idx[0].path, crate::repos::canonical_dir(&api).unwrap().to_string_lossy(), "canonical path");
+    assert!(idx[0].last_used_at.is_some());
+    assert_eq!(list_repos(&f.hub, None).await.unwrap(), idx);
+    assert_eq!(list_repos(&f.hub, Some(MID)).await.unwrap(), idx, "this machine by id");
+
+    // A folder that disappears is dropped at the next rebuild.
+    std::fs::remove_dir_all(&docs).unwrap();
+    f.hub.rebuild_repo_index().await;
+    assert_eq!(names(&f.hub), vec!["api"]);
+}
+
+/// A paired hub's repos arrive in its presence, are validated, kept for when it is offline, and
+/// served by list_repos; unknown machines are not_found.
+#[tokio::test]
+async fn peer_repos_are_validated_stored_and_listed() {
+    let f = fixture(None).await;
+    roster_peer(&f.hub, OTHER).await;
+    assert_eq!(list_repos(&f.hub, Some(OTHER)).await.unwrap(), vec![], "nothing reported yet");
+    let mut repos = vec![repo("api", "/srv/api"), repo("web", "/srv/web"), repo("bad\u{7}", "/srv/x"), repo("", "/srv/y"), repo("z", &"/".repeat(2000))];
+    repos.extend((0..300).map(|i| repo(&format!("r{i}"), &format!("/r/{i}"))));
+    let codex = Agent { machine_id: OTHER.into(), ..agent("codex") };
+    let bad = Agent { id: "../evil".into(), ..codex.clone() };
+    let noisy = Agent { id: "noisy".into(), name: "Noisy\u{1b}[2J".into(), ..codex.clone() };
+    f.hub.on_peer_event(PeerEvent::Presence { device_id: OTHER.into(), presence: presence_of(OTHER, vec![codex.clone(), bad, noisy], repos) }).await;
+    let v = ack_result(f.hub.handle(ClientMsg::ListAgents { id: "la".into(), refresh: None, machine_id: Some(OTHER.into()) }, &actor()).await);
+    assert_eq!(v["agents"].as_array().unwrap().len(), 1, "invalid agents dropped: {v}");
+    assert_eq!(f.hub.store().device_agents(OTHER).unwrap().unwrap().len(), 1, "and never persisted");
+    let got = list_repos(&f.hub, Some(OTHER)).await.unwrap();
+    assert_eq!(got.len(), krypto_protocol::REPO_INDEX_MAX);
+    assert_eq!((got[0].name.as_str(), got[1].name.as_str(), got[2].name.as_str()), ("api", "web", "r0"), "invalid entries dropped");
+    assert_eq!(f.hub.store().device_repos(OTHER).unwrap().unwrap(), got, "persisted for later");
+    assert_eq!(list_repos(&f.hub, Some(THIRD)).await.unwrap_err(), "not_found");
+
+    // The brain sees every machine's agents, repos and pets.
+    feed(&f.hub, OTHER, MirrorUpdate::Session { session: remote_session(OTHER, "s1") }).await;
+    feed(&f.hub, OTHER, MirrorUpdate::Pet { pet: remote_pet(OTHER, "codex", "Biscuit") }).await;
+    let ctx = f.hub.brain_context(None).await;
+    assert_eq!(ctx.remote_agents.get(OTHER).map(|a| a[0].id.as_str()), Some("codex"));
+    assert_eq!(ctx.repos.get(OTHER).map(|r| r.len()), Some(krypto_protocol::REPO_INDEX_MAX));
+    assert!(ctx.repos.contains_key(MID), "this machine's index too");
+    assert!(ctx.pets.iter().any(|p| p.name == "Biscuit" && p.machine_id == OTHER));
+}
+
+/// The step-4 known-folder rule is the repo index (+ start_roots): a `[repos] paths` folder allows
+/// a remote start without any session there; a folder no longer in the index does not.
+#[tokio::test]
+async fn remote_start_uses_the_repo_index() {
+    let extra = tempfile::tempdir().unwrap();
+    let listed = extra.path().join("listed");
+    let unlisted = extra.path().join("unlisted");
+    std::fs::create_dir_all(&listed).unwrap();
+    std::fs::create_dir_all(&unlisted).unwrap();
+    let cfg = listed.to_string_lossy().into_owned();
+    let f = fixture_config(move |c| c.repos.paths = vec![cfg]).await;
+    roster_peer(&f.hub, OTHER).await;
+    let start = |p: &std::path::Path| Intent::Start { agent_id: "codex".into(), cwd: p.to_string_lossy().into(), prompt: None };
+    assert_eq!(intent(&f.hub, OTHER, "a", true, start(&listed)).await.status, IntentStatus::Applied, "in the index");
+    assert_eq!(reason(&intent(&f.hub, OTHER, "b", true, start(&unlisted)).await), Some(Reject::Forbidden), "not in it");
+}
+
+/// A reply's proposals are stored with the message and broadcast; nothing is started or sent by
+/// the hub for them (the user confirms one in a client). At most five are kept.
+#[tokio::test]
+async fn chat_proposals_are_stored_and_broadcast() {
+    let mut f = fixture(None).await;
+    roster_peer(&f.hub, OTHER).await;
+    drain(&mut f.rx);
+    let proposal = |i: usize| krypto_protocol::ChatProposal {
+        id: format!("p{i}"),
+        kind: ChatProposalKind::Start,
+        machine_id: OTHER.into(),
+        agent_id: "codex".into(),
+        cwd: Some("/srv/api".into()),
+        repo_name: Some("api".into()),
+        session_id: None,
+        text: "run the tests".into(),
+        summary: format!("Start Codex on Mac mini in api: run the tests ({i})"),
+    };
+    let reply = BrainReply { text: "Which one?".into(), action: None, proposals: (0..7).map(proposal).collect() };
+    let msg = f.hub.deliver_reply(None, reply, &actor()).await;
+    assert_eq!(msg.proposals.len(), 5, "capped");
+    let got = match wait_for(&mut f.rx, "the pet's reply", |m| matches!(m, ServerMsg::Chat { message } if message.role == ChatRole::Pet)).await {
+        ServerMsg::Chat { message } => message,
+        _ => unreachable!(),
+    };
+    assert_eq!(got, msg, "broadcast with its proposals");
+    assert_eq!(f.hub.store().recent_chat(5).unwrap().last().unwrap(), &msg, "stored with its proposals");
+    assert!(!f.fake.calls().iter().any(|c| c.starts_with("start")), "nothing was started");
+    assert!(f.hub.store().intent_log(5).unwrap().is_empty(), "nothing was sent to the other machine");
+}
+
+/// End to end with the real brain over real peer links: B's pet answers "tell Desk's codex to run
+/// the tests in repo api" with one proposal for A, and runs nothing. A's codex has an open idle
+/// session there, so it is a prompt to that session; once it ended, it is a start in A's folder.
+#[tokio::test]
+async fn a_chat_on_one_hub_proposes_a_command_on_the_other() {
+    let da = tempfile::tempdir().unwrap();
+    let (a, a_fake) = peer_hub_with_fake(da.path(), MID, "Desk", Some("127.0.0.1:0")).await;
+    let (b, _db) = peer_hub(OTHER, "Laptop", None).await;
+    let api = da.path().join("api");
+    std::fs::create_dir_all(&api).unwrap();
+    let v = ack_result(a.handle(ClientMsg::StartSession { machine_id: None, confirmed: None, id: "s".into(), agent_id: "codex".into(), cwd: api.to_string_lossy().into(), prompt: None }, &actor()).await);
+    let open: Session = serde_json::from_value(v["session"].clone()).unwrap();
+    pair(&a, &b).await;
+    wait_until("b knows a's repos and session", || {
+        let (b, sid) = (b.clone(), open.id.clone());
+        async move {
+            list_repos(&b, Some(MID)).await.is_ok_and(|r| r.iter().any(|x| x.name == "api"))
+                && b.welcome().sessions.iter().any(|s| s.id == sid)
+        }
+    })
+    .await;
+    let ask = |b: Hub| async move {
+        let mut brx = b.subscribe();
+        ack_result(b.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: "tell Desk's codex to run the tests in repo api".into() }, &actor()).await);
+        match wait_for(&mut brx, "the pet's reply", |m| matches!(m, ServerMsg::Chat { message } if message.role == ChatRole::Pet)).await {
+            ServerMsg::Chat { message } => message,
+            _ => unreachable!(),
+        }
+    };
+    let reply = ask(b.clone()).await;
+    assert_eq!(reply.proposals.len(), 1, "{reply:?}");
+    let p = &reply.proposals[0];
+    assert_eq!((p.kind, p.machine_id.as_str(), p.agent_id.as_str()), (ChatProposalKind::Prompt, MID, "codex"));
+    assert_eq!((p.session_id.as_deref(), p.text.as_str()), (Some(open.id.as_str()), "run the tests"));
+
+    // The session ends: the same sentence proposes a start in A's indexed folder.
+    ack_result(a.handle(ClientMsg::Cancel { id: "x".into(), session_id: open.id.clone() }, &actor()).await);
+    a.close_session(&open.id).await.unwrap();
+    wait_until("b sees it ended", || {
+        let (b, sid) = (b.clone(), open.id.clone());
+        async move { b.welcome().sessions.iter().any(|s| s.id == sid && s.ended_at.is_some()) }
+    })
+    .await;
+    let reply = ask(b.clone()).await;
+    assert_eq!(reply.proposals.len(), 1, "{reply:?}");
+    let p = &reply.proposals[0];
+    let api_path = crate::repos::canonical_dir(&api).unwrap().to_string_lossy().into_owned();
+    assert_eq!((p.kind, p.machine_id.as_str(), p.cwd.as_deref()), (ChatProposalKind::Start, MID, Some(api_path.as_str())));
+    assert_eq!(a_fake.calls().iter().filter(|c| c.starts_with("start codex")).count(), 1, "only A's own start: the chats ran nothing");
+    assert!(!a_fake.calls().iter().any(|c| c.starts_with("prompt")), "nor prompted anything");
 }

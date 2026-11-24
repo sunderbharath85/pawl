@@ -192,6 +192,11 @@ impl Hub {
         v
     }
 
+    /// A paired hub's repo index from its latest presence (None until one arrived).
+    pub(super) fn presence_repos(&self, machine_id: &str) -> Option<Vec<krypto_protocol::RepoRef>> {
+        self.peers().presence.get(machine_id).map(|p| p.repos.clone())
+    }
+
     /// A paired hub's agents from its latest presence (None until one arrived).
     pub(super) fn presence_agents(&self, machine_id: &str) -> Option<Vec<Agent>> {
         self.peers().presence.get(machine_id).map(|p| p.agents.clone())
@@ -228,7 +233,7 @@ impl Hub {
             user_active_at: machine.user_active_at,
             machine,
             agents: st.agents.clone(),
-            repos: Vec::new(),
+            repos: self.repos(),
             pets,
             ts: krypto_protocol::now_ms(),
         }
@@ -370,7 +375,19 @@ impl Hub {
                     // Not (or no longer) paired: never keep its data.
                     return;
                 }
-                let presence = presence_to_local_clock(presence, krypto_protocol::now_ms());
+                let mut presence = presence_to_local_clock(presence, krypto_protocol::now_ms());
+                // Its repo index and agents feed "in repo X", "tell its codex" and the pickers: only
+                // well-formed entries.
+                presence.repos = crate::repos::validate_peer_repos(std::mem::take(&mut presence.repos));
+                presence.agents = crate::repos::validate_peer_agents(std::mem::take(&mut presence.agents));
+                let repos_changed =
+                    self.peers().presence.get(&device_id).is_none_or(|old| old.repos != presence.repos);
+                if repos_changed {
+                    let (id, repos) = (device_id.clone(), presence.repos.clone());
+                    if let Err(e) = self.inner.store.run(move |s| s.set_device_repos(&id, &repos)).await {
+                        tracing::warn!("save the repos of {device_id}: {e:#}");
+                    }
+                }
                 let agents_changed =
                     self.peers().presence.get(&device_id).is_none_or(|old| old.agents != presence.agents);
                 if agents_changed {

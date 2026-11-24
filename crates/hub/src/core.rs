@@ -5,6 +5,7 @@ mod host;
 mod intents;
 mod mirror;
 mod peers;
+mod repo_index;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -48,6 +49,8 @@ const HOOK_ALERT_DEDUPE_MS: i64 = 10_000;
 pub const MAX_PET_NAME_CHARS: usize = 40;
 /// userActiveAt changes smaller than this are not worth a presence push or a `machine` broadcast.
 pub const ACTIVITY_STEP_MS: i64 = 30_000;
+/// At most this many proposals in one chat reply.
+const MAX_PROPOSALS: usize = 5;
 /// Events handed to the brain: up to this many of this machine's, plus up to half as many mirrored.
 const BRAIN_EVENTS: u32 = 400;
 
@@ -324,6 +327,10 @@ struct Inner {
     intents: Mutex<intents::IntentState>,
     /// Woken whenever a decision in flight finishes (see [`Hub::decide`]).
     decide_done: tokio::sync::Notify,
+    /// This machine's repo index (see `repo_index.rs`).
+    repos: Mutex<Vec<krypto_protocol::RepoRef>>,
+    /// Session folders seen since startup (a new one triggers an index rebuild).
+    seen_cwds: Mutex<HashSet<String>>,
     activity: Mutex<Activity>,
 }
 
@@ -487,10 +494,14 @@ impl Hub {
                 mirror: Mutex::new(mirror::MirrorCache::default()),
                 intents: Mutex::new(intents::IntentState::default()),
                 decide_done: tokio::sync::Notify::new(),
+                repos: Mutex::new(Vec::new()),
+                seen_cwds: Mutex::new(HashSet::new()),
                 activity: Mutex::new(Activity::default()),
             }),
         };
         hub.set_mirror(mirror_sessions, mirror_pets, mirror_pending);
+        hub.rebuild_repo_index().await;
+        tokio::spawn(hub.clone().repo_index_loop());
         let tap = hub.inner.bus.tap();
         tokio::spawn(hub.clone().mirror_out_loop(tap));
         tokio::spawn(hub.clone().mirror_prune_loop());
@@ -795,6 +806,7 @@ impl Hub {
                 self.user_activity();
                 json!({})
             }
+            ClientMsg::ListRepos { machine_id, .. } => json!({ "repos": self.repos_of(machine_id.as_deref()).await? }),
         })
     }
 
@@ -1258,6 +1270,9 @@ impl Hub {
         let s2 = s.clone();
         if let Err(e) = self.inner.store.run(move |st| st.upsert_session(&s2)).await {
             tracing::warn!("persist session {}: {e:#}", s.id);
+        }
+        if s.machine_id == self.inner.machine_id {
+            self.note_session_folder(&s.cwd);
         }
         self.inner.bus.send(ServerMsg::Session { session: s.clone() });
     }
@@ -1730,6 +1745,7 @@ impl Hub {
             text,
             ts: krypto_protocol::now_ms(),
             session_id: None,
+            proposals: Vec::new(),
         };
         let m2 = msg.clone();
         self.inner.store.run(move |s| s.insert_chat(&m2)).await?;
@@ -1787,7 +1803,33 @@ impl Hub {
             })
             .await
             .unwrap_or_default();
-        BrainContext { machine: self.machine(), machines: self.machines(), agents, sessions, recent_events, pending, pet }
+        // Paired hubs' agents and every machine's repo index, so "tell the Mac mini's Claude to ... in
+        // repo X" resolves; every machine's pets, so "tell Biscuit to ..." does. The brain only ever
+        // proposes commands for them (the user confirms in a client).
+        let mut remote_agents = std::collections::BTreeMap::new();
+        let mut repos = std::collections::BTreeMap::new();
+        repos.insert(self.inner.machine_id.clone(), self.repos());
+        let hubs: Vec<String> =
+            self.devices().into_iter().filter(|d| d.kind == krypto_protocol::DeviceKind::Hub).map(|d| d.id).collect();
+        for id in hubs {
+            remote_agents.insert(id.clone(), self.peer_agents(&id).await.unwrap_or_default());
+            repos.insert(id.clone(), self.repos_of(Some(&id)).await.unwrap_or_default());
+        }
+        let mut pets = self.pets();
+        pets.extend(self.mirror_pets());
+        sort_pets(&mut pets);
+        BrainContext {
+            machine: self.machine(),
+            machines: self.machines(),
+            agents,
+            remote_agents,
+            repos,
+            pets,
+            sessions,
+            recent_events,
+            pending,
+            pet,
+        }
     }
 
     async fn chat_reply(&self, user: ChatMessage, pet: Option<Pet>, actor: Actor) {
@@ -1796,13 +1838,27 @@ impl Hub {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("brain failed: {e:#}");
-                BrainReply { text: "*whimper* My brain got tangled. Try me again in a moment?".into(), action: None }
+                BrainReply {
+                    text: "*whimper* My brain got tangled. Try me again in a moment?".into(),
+                    action: None,
+                    proposals: Vec::new(),
+                }
             }
         };
+        self.deliver_reply(pet, reply, &actor).await;
+    }
+
+    /// A brain reply becomes the pet's chat message: a local action runs here (as before);
+    /// commands for another machine are only proposed: they are stored and broadcast with the
+    /// message, and the user confirms one in a client, which sends the ordinary start_session /
+    /// prompt (step-4 rules apply).
+    pub(super) async fn deliver_reply(&self, pet: Option<Pet>, reply: BrainReply, actor: &Actor) -> ChatMessage {
         let mut text = reply.text;
         let mut session_id = None;
+        let mut proposals = reply.proposals;
+        proposals.truncate(MAX_PROPOSALS);
         if let Some(action) = reply.action {
-            match self.execute_action(action, &actor).await {
+            match self.execute_action(action, actor).await {
                 Ok(sid) => session_id = sid,
                 Err(e) => text.push_str(&format!("\n\n(I couldn't do that: {e:#})")),
             }
@@ -1815,12 +1871,14 @@ impl Hub {
             text,
             ts: krypto_protocol::now_ms(),
             session_id,
+            proposals,
         };
         let m2 = msg.clone();
         if let Err(e) = self.inner.store.run(move |s| s.insert_chat(&m2)).await {
             tracing::warn!("persist chat reply: {e:#}");
         }
-        self.inner.bus.send(ServerMsg::Chat { message: msg });
+        self.inner.bus.send(ServerMsg::Chat { message: msg.clone() });
+        msg
     }
 
     async fn execute_action(&self, action: BrainAction, actor: &Actor) -> Result<Option<SessionId>> {
@@ -2020,6 +2078,7 @@ impl Hub {
             text,
             ts: krypto_protocol::now_ms(),
             session_id: None,
+            proposals: Vec::new(),
         };
         let m2 = msg.clone();
         if let Err(e) = self.inner.store.run(move |s| s.insert_chat(&m2)).await {

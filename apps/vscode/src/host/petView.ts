@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { promises as fsp } from "node:fs";
-import type { HubState } from "@krypto/hub-client";
+import type { HubState, ProposalEntry } from "@krypto/hub-client";
 import { parseSpriteManifest, type SpriteManifest } from "@krypto/pet-engine";
 import {
   WEBVIEW_EVENTS_PER_SESSION,
@@ -10,6 +10,7 @@ import {
   type WebviewToHost,
 } from "../shared/messages";
 import type { HubConnection } from "./connection";
+import { proposalLedger } from "./proposals";
 import { errorMessage, nonce } from "./util";
 
 export const PET_VIEW_ID = "krypto.petView";
@@ -47,6 +48,8 @@ export class PetWebviews implements vscode.WebviewViewProvider, vscode.WebviewPa
       vscode.window.registerWebviewViewProvider(PET_VIEW_ID, this, { webviewOptions: { retainContextWhenHidden: true } }),
       vscode.window.registerWebviewPanelSerializer(PET_PANEL_TYPE, this),
       hub.onState(() => this.schedulePush()),
+      // A chat proposal ran (or failed): show it in every view at once.
+      new vscode.Disposable(proposalLedger.subscribe(() => this.schedulePush(true))),
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.postInitAll()),
     );
   }
@@ -213,7 +216,12 @@ export class PetWebviews implements vscode.WebviewViewProvider, vscode.WebviewPa
       events[sid] = list.length > WEBVIEW_EVENTS_PER_SESSION ? list.slice(-WEBVIEW_EVENTS_PER_SESSION) : list;
     }
     const { rules: _rules, ...rest } = state;
-    return { type: "state", conn: this.hub.info, state: { ...rest, events } };
+    const proposals: Record<string, ProposalEntry> = {};
+    for (const m of state.chat) {
+      const entry = m.proposals?.length ? proposalLedger.get(m.id) : undefined;
+      if (entry) proposals[m.id] = entry;
+    }
+    return { type: "state", conn: this.hub.info, state: { ...rest, events }, proposals };
   }
 
   private schedulePush(immediate = false): void {

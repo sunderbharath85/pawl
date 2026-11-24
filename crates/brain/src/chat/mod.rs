@@ -1,30 +1,33 @@
 //! Chat bot brain.
 //!
 //! [`Brain::handle`] parses the message with a deterministic, rule-based intent parser
-//! (status, commands, approve/deny, daily report, help). Only that parser produces
-//! [`BrainAction`]s. An optional LLM (Anthropic Messages API or Ollama) words summaries and
-//! small talk in the pet's voice; with no model configured, or when a call fails, replies
-//! fall back to deterministic text.
+//! (status, commands, approve/deny, daily report, help; with machine, pet, agent and repo
+//! targets). Only that parser produces [`BrainAction`]s (this machine) and
+//! [`ChatProposal`]s (another machine: the user confirms them in a client). An optional LLM
+//! (Anthropic Messages API or Ollama) words summaries and small talk in the pet's voice; its
+//! output is only ever reply text. With no model configured, or when a call fails, replies fall
+//! back to deterministic text.
 
 mod intent;
 mod llm;
 mod machines;
+mod remote;
 mod summary;
 mod voice;
 
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use krypto_protocol::{
-    now_ms, Agent, AgentId, HubEvent, Machine, MachineOs, PermissionOptionKind, PermissionRequest, Pet, RequestId,
-    Session, SessionId, SessionSource, SessionStatus, UnixMs,
+    now_ms, Agent, AgentId, ChatProposal, HubEvent, Machine, MachineId, MachineOs, PermissionOptionKind,
+    PermissionRequest, Pet, RequestId, Session, SessionId, SessionSource, SessionStatus, UnixMs,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::growth;
 use crate::util::{agent_handle, agent_name, ago, basename, fnv1a, path_key, plural, truncate};
-use intent::{AgentCatalog, AgentRef, CommandIntent, Intent, Pick, RepoIndex, RepoRef, Talk};
+use intent::{AgentCatalog, AgentRef, CommandIntent, Intent, Parsed, Pick, RepoIndex, RepoRef, Talk, Target, Targets};
 use llm::Llm;
 use machines::MachineNames;
 use voice::Voice;
@@ -91,10 +94,19 @@ pub struct BrainContext {
     /// Every known machine, including this one (may be empty: then only `machine` is known).
     /// Used to name machines in replies once more than one is known.
     pub machines: Vec<Machine>,
+    /// This machine's agents (discovery).
     pub agents: Vec<Agent>,
+    /// Paired machines' agents, from their latest presence (offline machines: last known).
+    pub remote_agents: BTreeMap<MachineId, Vec<Agent>>,
+    /// Repo index per machine, this one included (`krypto_protocol::RepoRef`, newest first).
+    pub repos: BTreeMap<MachineId, Vec<krypto_protocol::RepoRef>>,
+    /// Every known machine's pets (for "tell Biscuit to ...").
+    pub pets: Vec<Pet>,
+    /// Sessions of this machine and mirrored ones of paired machines.
     pub sessions: Vec<Session>,
     pub recent_events: Vec<HubEvent>,
     pub pending: Vec<PermissionRequest>,
+    /// The pet being chatted with.
     pub pet: Option<Pet>,
 }
 
@@ -113,6 +125,9 @@ impl Default for BrainContext {
             },
             machines: Vec::new(),
             agents: Vec::new(),
+            remote_agents: BTreeMap::new(),
+            repos: BTreeMap::new(),
+            pets: Vec::new(),
             sessions: Vec::new(),
             recent_events: Vec::new(),
             pending: Vec::new(),
@@ -131,12 +146,18 @@ pub enum BrainAction {
     ResolvePermission { request_id: RequestId, option_id: Option<String> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrainReply {
     pub text: String,
+    /// Executed by the hub. Local targets only; only the deterministic parser sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<BrainAction>,
+    /// Commands for another machine's agent, never run by the hub: the client shows them with a confirm step
+    /// (several = the bot is asking which one was meant). Remote targets only; ids unique (uuid v4); only the
+    /// deterministic parser sets them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<ChatProposal>,
 }
 
 /// The `<context>` block of an LLM prompt. Everything in it (session titles, tool calls, agent output,
@@ -153,7 +174,12 @@ pub(crate) fn context_block(body: &str) -> String {
 }
 
 fn say(text: impl Into<String>) -> BrainReply {
-    BrainReply { text: text.into(), action: None }
+    BrainReply { text: text.into(), action: None, proposals: Vec::new() }
+}
+
+/// A reply that carries a local action for the hub to execute.
+fn act(text: impl Into<String>, action: BrainAction) -> BrainReply {
+    BrainReply { text: text.into(), action: Some(action), proposals: Vec::new() }
 }
 
 #[derive(Clone)]
@@ -227,30 +253,43 @@ impl Brain {
         self.llm.is_some()
     }
 
-    /// Rule-based intent parse first ("what's claude doing", "tell codex to run the tests in repo X",
-    /// "approve"/"deny"), LLM for summaries/small talk, deterministic fallback when no model configured.
-    /// Actions come only from the deterministic parser.
+    /// Rule-based intent parse first ("what's claude doing", "tell the Mac mini's Claude to run the tests
+    /// in repo X", "approve"/"deny"), LLM for summaries/small talk, deterministic fallback when no model
+    /// configured. Actions (this machine) and proposals (other machines) come only from the deterministic
+    /// parse of `text`, the user's own message; LLM paths only ever produce reply text.
     pub async fn handle(&self, text: &str, ctx: &BrainContext) -> anyhow::Result<BrainReply> {
         let voice = Voice::for_pet(ctx.pet.as_ref());
         let seed = fnv1a(text);
-        let catalog = AgentCatalog::build(&ctx.agents, &ctx.sessions);
-        // Repo names resolve to local paths only: sessions start on this machine.
-        let local: Vec<Session> = ctx.sessions.iter().filter(|s| is_local(ctx, &s.machine_id)).cloned().collect();
-        let repos = RepoIndex::build(&local);
-        let intent = intent::parse(text, &catalog, &repos, ctx.pet.as_ref().map(|p| p.name.as_str()));
-        tracing::debug!(?intent, "brain: parsed intent");
+        let agents = remote::all_agents(ctx);
+        let catalog = AgentCatalog::build(&agents, &ctx.sessions, |m| is_local(ctx, m));
+        let repos = RepoIndex::build(&ctx.sessions, &ctx.repos);
+        let machines = std::iter::once(&ctx.machine).chain(&ctx.machines).map(|m| (m.id.as_str(), m.name.as_str()));
+        let targets = Targets::new(machines, ctx.pets.iter().chain(ctx.pet.as_ref()), &ctx.machine.id, ctx.pet.as_ref().map(|p| p.id.as_str()));
+        let Parsed { intent, target } = intent::parse(text, &catalog, &repos, &targets, ctx.pet.as_ref().map(|p| p.name.as_str()));
+        tracing::debug!(?intent, ?target, "brain: parsed intent");
         let now = now_ms();
-        let reply = match intent {
-            Intent::Help => say(help_text(&voice, seed, &repos)),
-            Intent::Resolve { approve, always, agent, pick } => resolve_request(ctx, &voice, seed, approve, always, agent, pick),
-            Intent::Command(cmd) => command(ctx, &voice, seed, &repos, cmd),
-            Intent::Status { agent } => self.status(ctx, &voice, seed, agent, now).await,
+        let mut reply = match intent {
+            Intent::Help => say(help_text(ctx, &voice, seed, &repos)),
+            Intent::Resolve { approve, always, agent, pick } => {
+                let scope = remote::target_machine(ctx, &target);
+                resolve_request(ctx, &voice, seed, approve, always, agent, pick, scope.as_deref())
+            }
+            Intent::Command(cmd) => match remote::route(ctx, &repos, &cmd, &target) {
+                remote::Route::Local => command(ctx, &voice, seed, &repos, cmd),
+                remote::Route::Remote(machines) => remote::remote_command(ctx, &voice, seed, &repos, &cmd, &machines, now),
+            },
+            Intent::Status { agent } => self.status(ctx, &voice, seed, agent, &target, now).await,
             Intent::DailyReport => {
                 let machines = MachineNames::from_ctx(ctx);
                 say(self.daily_inner(&ctx.sessions, &ctx.recent_events, &ctx.agents, &machines, &voice, seed, now).await)
             }
             Intent::SmallTalk => say(self.small_talk(text, ctx, &voice, seed, now).await),
         };
+        // Belt and braces: an action is for this machine only, a proposal for another machine only.
+        reply.proposals.retain(|p| !is_local(ctx, &p.machine_id));
+        if reply.action.is_some() {
+            reply.proposals.clear();
+        }
         Ok(reply)
     }
 
@@ -337,7 +376,18 @@ impl Brain {
         summary::daily_report_text(sessions, events, agents, machines, Some((voice, seed)), now)
     }
 
-    async fn status(&self, ctx: &BrainContext, voice: &Voice, seed: u64, agent: Option<AgentRef>, now: UnixMs) -> BrainReply {
+    async fn status(
+        &self,
+        ctx: &BrainContext,
+        voice: &Voice,
+        seed: u64,
+        agent: Option<AgentRef>,
+        target: &Target,
+        now: UnixMs,
+    ) -> BrainReply {
+        if let Some(m) = remote::target_machine(ctx, target) {
+            return say(self.machine_status(ctx, voice, seed, agent, &m, now).await);
+        }
         match agent {
             Some(AgentRef::Known(id)) => say(self.agent_status(ctx, voice, seed, &id, now).await),
             Some(AgentRef::Unknown(name)) => say(format!(
@@ -347,6 +397,45 @@ impl Brain {
             )),
             None => say(overview(ctx, voice, seed, now, true)),
         }
+    }
+
+    /// Status of one machine ("what is the Mac mini doing?") or of an agent there ("the Mac mini's Claude").
+    async fn machine_status(&self, ctx: &BrainContext, voice: &Voice, seed: u64, agent: Option<AgentRef>, m: &str, now: UnixMs) -> String {
+        let name = remote::machine_name(ctx, m);
+        let scoped = remote::scoped(ctx, m);
+        let offline = (!is_local(ctx, m))
+            .then(|| ctx.machines.iter().find(|x| x.id == m && !x.online))
+            .flatten()
+            .map(|x| format!(" ({name} is offline, last seen {}: this is what I saw last.)", ago(x.last_seen, now)))
+            .unwrap_or_default();
+        let body = match agent {
+            Some(AgentRef::Known(id)) if scoped.sessions.iter().any(|s| s.agent_id == id) => {
+                self.agent_status(&scoped, voice, seed, &id, now).await
+            }
+            Some(AgentRef::Known(id)) => {
+                let aname = agent_name(&id, &scoped.agents);
+                if remote::agents_on(ctx, m).iter().any(|a| a.id == id && a.installed) {
+                    format!("{} {aname} has nothing running on {name} right now.", voice.sleepy(seed))
+                } else {
+                    format!("{} I don't see {aname} on {name}.", voice.thinking(seed))
+                }
+            }
+            Some(AgentRef::Unknown(n)) => format!("{} I haven't seen {n} on {name}.", voice.thinking(seed)),
+            None if scoped.sessions.iter().any(|s| s.ended_at.is_none()) => overview(&scoped, voice, seed, now, true),
+            None => {
+                let mut t = format!("{} All quiet on {name}: no agents are working there right now.", voice.sleepy(seed));
+                if let Some(last) = scoped.sessions.iter().max_by_key(|s| s.last_event_at) {
+                    t.push_str(&format!(
+                        " Last activity: {} in {} {}.",
+                        agent_name(&last.agent_id, &scoped.agents),
+                        basename(&last.cwd),
+                        ago(last.last_event_at, now)
+                    ));
+                }
+                t
+            }
+        };
+        format!("{body}{offline}")
     }
 
     async fn agent_status(&self, ctx: &BrainContext, voice: &Voice, seed: u64, id: &str, now: UnixMs) -> String {
@@ -416,12 +505,22 @@ impl Brain {
 
 // ---------- deterministic replies ----------
 
-fn help_text(voice: &Voice, seed: u64, repos: &RepoIndex) -> String {
-    let repo = repos.names(1).into_iter().next().unwrap_or_else(|| "my-app".into());
+fn help_text(ctx: &BrainContext, voice: &Voice, seed: u64, repos: &RepoIndex) -> String {
+    let repo = repos.names(1, |e| is_local(ctx, &e.machine_id)).into_iter().next().unwrap_or_else(|| "my-app".into());
+    let remote = ctx
+        .machines
+        .iter()
+        .find(|m| !is_local(ctx, &m.id) && !m.name.trim().is_empty())
+        .map(|m| {
+            let name = m.name.trim();
+            let repo = repos.names(1, |e| e.machine_id == m.id).into_iter().next().unwrap_or_else(|| "my-app".into());
+            format!("\n• “tell the {name}'s claude to run the tests in repo {repo}” for another machine (you confirm first)")
+        })
+        .unwrap_or_default();
     format!(
         "{} Here's what I can do:\n\
          • “what's Claude doing?” for a live status\n\
-         • “tell codex to run the tests in repo {repo}” to start or prompt a session\n\
+         • “tell codex to run the tests in repo {repo}” to start or prompt a session{remote}\n\
          • “approve” / “deny” (add “always” to remember) for a pending request\n\
          • “daily report” for today's recap",
         voice.sound(seed)
@@ -447,10 +546,16 @@ fn overview(ctx: &BrainContext, voice: &Voice, seed: u64, now: UnixMs, full: boo
         return t;
     }
     let busy = live.iter().filter(|s| is_busy(s.status)).count();
-    let pending_line = match ctx.pending.len() {
-        0 => String::new(),
-        1 => " 1 request needs your OK: say “approve” or “deny”.".to_string(),
-        n => format!(" {n} requests need your OK: say “approve 1”, “deny 2”…"),
+    // Numbers match "approve N": this machine's requests; other machines' are answered in the panel.
+    let here = ctx.pending.iter().filter(|r| is_local(ctx, &r.machine_id)).count();
+    let elsewhere = ctx.pending.len() - here;
+    let pending_line = match (here, elsewhere) {
+        (0, 0) => String::new(),
+        (0, 1) | (1, 0) => " 1 request needs your OK: say “approve” or “deny”.".to_string(),
+        (0, n) => format!(" {n} requests need your OK on other machines: answer them in the Krypto panel."),
+        (1, n) => format!(" 1 request needs your OK: say “approve” or “deny” (+{n} on other machines, in the Krypto panel)."),
+        (h, 0) => format!(" {h} requests need your OK: say “approve 1”, “deny 2”…"),
+        (h, n) => format!(" {h} requests need your OK: say “approve 1”, “deny 2”… (+{n} on other machines, in the Krypto panel)."),
     };
     if !full {
         return format!("{} open, {} busy.{pending_line}", plural(live.len(), "session"), busy);
@@ -568,6 +673,7 @@ fn find_option(req: &PermissionRequest, kind: PermissionOptionKind) -> Option<St
     req.options.iter().find(|o| o.kind == kind).map(|o| o.option_id.clone())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_request(
     ctx: &BrainContext,
     voice: &Voice,
@@ -576,12 +682,42 @@ fn resolve_request(
     always: bool,
     agent: Option<AgentRef>,
     pick: Option<Pick>,
+    machine: Option<&str>,
 ) -> BrainReply {
     let verb = if approve { "approve" } else { "deny" };
-    let mut pending: Vec<&PermissionRequest> = ctx.pending.iter().collect();
-    pending.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.request_id.cmp(&b.request_id)));
+    let mut all: Vec<&PermissionRequest> = ctx.pending.iter().collect();
+    all.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.request_id.cmp(&b.request_id)));
+    // Which requests count, and are numbered for "approve 2": a named machine's ("approve the Mac
+    // mini's request"); else this machine's, so a number never lands on another machine's request.
+    // Only when nothing here waits do other machines' requests count (chat never decides them: the
+    // reply says where to answer).
+    let (pending, elsewhere): (Vec<&PermissionRequest>, usize) = match machine {
+        Some(m) => (all.into_iter().filter(|r| remote::same_machine(ctx, &r.machine_id, m)).collect(), 0),
+        None => {
+            let (here, other): (Vec<&PermissionRequest>, Vec<&PermissionRequest>) =
+                all.into_iter().partition(|r| is_local(ctx, &r.machine_id));
+            if here.is_empty() {
+                (other, 0)
+            } else {
+                let n = other.len();
+                (here, n)
+            }
+        }
+    };
+    let elsewhere_note = match elsewhere {
+        0 => String::new(),
+        n => format!(
+            "\n({} on other machines: answer {} in the Krypto panel, or name the machine.)",
+            plural(n, "more request"),
+            if n == 1 { "it" } else { "them" }
+        ),
+    };
     if pending.is_empty() {
-        return say(format!("{} Nothing is waiting for a yes or no right now.", voice.sound(seed)));
+        let place = match machine {
+            Some(m) if !ctx.pending.is_empty() => format!(" on {}", remote::machine_name(ctx, m)),
+            _ => String::new(),
+        };
+        return say(format!("{} Nothing{place} is waiting for a yes or no right now.", voice.sound(seed)));
     }
     let chosen: &PermissionRequest = if let Some(pick) = pick {
         let idx = match pick {
@@ -592,7 +728,7 @@ fn resolve_request(
             Some(r) => r,
             None => {
                 return say(format!(
-                    "{} There's no request #{}. Waiting:{}",
+                    "{} There's no request #{}. Waiting:{}{elsewhere_note}",
                     voice.thinking(seed),
                     idx + 1,
                     pending_list(&pending, ctx)
@@ -614,7 +750,7 @@ fn resolve_request(
                     None => "Nobody".into(),
                 };
                 return say(format!(
-                    "{} {who} isn't waiting on anything. Waiting:{}",
+                    "{} {who} isn't waiting on anything. Waiting:{}{elsewhere_note}",
                     voice.thinking(seed),
                     pending_list(&pending, ctx)
                 ));
@@ -625,7 +761,7 @@ fn resolve_request(
                     _ => format!("“{verb} 1” or “{verb} {}”", agent_handle(&filtered[0].agent_id, &ctx.agents)),
                 };
                 return say(format!(
-                    "{} More than one request is waiting. Which one?{}\nSay {example}.",
+                    "{} More than one request is waiting. Which one?{}\nSay {example}.{elsewhere_note}",
                     voice.alert(seed),
                     pending_list(&pending, ctx)
                 ));
@@ -667,10 +803,10 @@ fn resolve_request(
             return say(format!("{} {name}'s request has no allow option, so I can't approve it.", voice.sad(seed)));
         };
         let lead = if always && note.is_empty() { "Approved for good" } else { "Approved" };
-        BrainReply {
-            text: format!("{} {lead}! {name} can go ahead: {what}{note}. {}", voice.sound(seed), voice.happy(seed)),
-            action: Some(BrainAction::ResolvePermission { request_id, option_id: Some(option_id) }),
-        }
+        act(
+            format!("{} {lead}! {name} can go ahead: {what}{note}. {}", voice.sound(seed), voice.happy(seed)),
+            BrainAction::ResolvePermission { request_id, option_id: Some(option_id) },
+        )
     } else {
         let option = if always {
             find_option(chosen, PermissionOptionKind::RejectAlways).or_else(|| find_option(chosen, PermissionOptionKind::RejectOnce))
@@ -682,17 +818,26 @@ fn resolve_request(
             Some(_) => format!("{} Denied: {name} won't do “{what}”.", voice.alert(seed)),
             None => format!("{} Denied. {name} had no reject option, so I cancelled “{what}”.", voice.alert(seed)),
         };
-        BrainReply { text, action: Some(BrainAction::ResolvePermission { request_id, option_id: option }) }
+        act(text, BrainAction::ResolvePermission { request_id, option_id: option })
     }
 }
 
-/// The only plausible cwd for a new or prompted session, from this machine's sessions.
-fn default_cwd(ctx: &BrainContext, agent_id: &str) -> Option<String> {
+/// The only plausible cwd for a new or prompted session: this machine's session folders that are in
+/// its repo index (a session in a folder that no longer exists does not count), as index paths.
+fn default_cwd(ctx: &BrainContext, repos: &RepoIndex, agent_id: &str) -> Option<String> {
     let local = || ctx.sessions.iter().filter(|s| is_local(ctx, &s.machine_id));
+    let indexed = |cwds: Vec<String>| -> Vec<String> {
+        let mut seen = HashSet::new();
+        cwds.iter()
+            .filter_map(|c| repos.folder_where(&path_key(c), |e| is_local(ctx, &e.machine_id)))
+            .map(|(cwd, _)| cwd)
+            .filter(|c| seen.insert(path_key(c)))
+            .collect()
+    };
     let sets: [Vec<String>; 3] = [
-        distinct_cwds(local().filter(|s| s.agent_id == agent_id && s.ended_at.is_none())),
-        distinct_cwds(local().filter(|s| s.agent_id == agent_id)),
-        distinct_cwds(local().filter(|s| s.ended_at.is_none())),
+        indexed(distinct_cwds(local().filter(|s| s.agent_id == agent_id && s.ended_at.is_none()))),
+        indexed(distinct_cwds(local().filter(|s| s.agent_id == agent_id))),
+        indexed(distinct_cwds(local().filter(|s| s.ended_at.is_none()))),
     ];
     for set in sets {
         match set.len() {
@@ -704,60 +849,96 @@ fn default_cwd(ctx: &BrainContext, agent_id: &str) -> Option<String> {
     None
 }
 
+/// " Mac mini has: api, web." for every other machine with known repos (empty with one machine).
+fn other_machines_repos(ctx: &BrainContext, repos: &RepoIndex) -> String {
+    ctx.machines
+        .iter()
+        .filter(|m| !is_local(ctx, &m.id))
+        .filter(|m| !repos.names(1, |e| e.machine_id == m.id).is_empty())
+        .take(3)
+        .map(|m| remote::repos_hint(ctx, repos, &m.id))
+        .collect()
+}
+
+/// A command for this machine: start or prompt a local session (a [`BrainAction`] the hub executes).
 fn command(ctx: &BrainContext, voice: &Voice, seed: u64, repos: &RepoIndex, cmd: CommandIntent) -> BrainReply {
+    let local_agents: Vec<&Agent> = ctx.agents.iter().filter(|a| is_local(ctx, &a.machine_id)).collect();
     let known_names = || {
-        let names: Vec<String> = ctx.agents.iter().filter(|a| a.installed).map(|a| a.name.clone()).take(6).collect();
+        let names: Vec<String> = local_agents.iter().filter(|a| a.installed).map(|a| a.name.clone()).take(6).collect();
         if names.is_empty() {
             String::new()
         } else {
             format!(" I know: {}.", names.join(", "))
         }
     };
+    let everyone = remote::all_agents(ctx);
     let agent_id = match cmd.agent {
-        AgentRef::Known(id) => id,
-        AgentRef::Unknown(name) => {
+        Some(AgentRef::Known(id)) => id,
+        Some(AgentRef::Unknown(name)) => {
             return say(format!("{} I don't see {name} among your agents.{}", voice.thinking(seed), known_names()))
         }
+        // "tell this machine to …": its only installed agent, else ask.
+        None => {
+            let installed: Vec<&&Agent> = local_agents.iter().filter(|a| a.installed).collect();
+            match installed.as_slice() {
+                [one] => one.id.clone(),
+                [] => return say(format!("{} No agents are installed on this machine yet.", voice.sad(seed))),
+                many => {
+                    return say(format!(
+                        "{} Which agent should do it?{} Say “tell {} to …”.",
+                        voice.thinking(seed),
+                        known_names(),
+                        agent_handle(&many[0].id, &everyone)
+                    ))
+                }
+            }
+        }
     };
-    let name = agent_name(&agent_id, &ctx.agents);
-    let handle = agent_handle(&agent_id, &ctx.agents);
+    let name = agent_name(&agent_id, &everyone);
+    let handle = agent_handle(&agent_id, &everyone);
     let machines = MachineNames::from_ctx(ctx);
-    // Sessions start on this machine: prefer the local agent with that id.
-    let Some(agent) = ctx.agents.iter().filter(|a| a.id == agent_id).min_by_key(|a| !is_local(ctx, &a.machine_id)) else {
+    // Sessions start on this machine: only a local agent with that id will do.
+    let Some(agent) = local_agents.iter().copied().find(|a| a.id == agent_id) else {
+        if let Some(there) = everyone.iter().find(|a| a.id == agent_id && !is_local(ctx, &a.machine_id)) {
+            let there = remote::machine_name(ctx, &there.machine_id);
+            return say(format!(
+                "{} {name} isn't on this machine; I see it on {there}. Say “tell {handle} on {there} to …” and confirm it there.",
+                voice.sad(seed)
+            ));
+        }
         return say(format!(
             "{} I only see {name} through its hooks, so I can't drive it from here. Ask it in its own app!",
             voice.sad(seed)
         ));
     };
-    if !is_local(ctx, &agent.machine_id) {
-        let there = machines.label(&agent.machine_id).unwrap_or_else(|| agent.machine_id.clone());
-        return say(format!(
-            "{} {name} lives on {there}, and I can only start agents on this machine for now.",
-            voice.sad(seed)
-        ));
-    }
     let here = machines.on(&agent.machine_id);
     if !agent.installed {
         return say(format!("{} {name} isn't installed yet, so I can't start it.{}", voice.sad(seed), known_names()));
     }
     let task = cmd.task.trim().to_string();
     let example_task = if task.is_empty() { "run the tests".to_string() } else { truncate(&task, 40) };
+    let unknown_repo = |repo: &str| {
+        let known = repos.names(5, |e| is_local(ctx, &e.machine_id));
+        let hint = if known.is_empty() {
+            " Give me a path instead, like “in C:\\code\\app”.".to_string()
+        } else {
+            format!(" I know: {}. Or give me a path.", known.join(", "))
+        };
+        say(format!("{} I don't know a repo called “{repo}” here.{hint}{}", voice.thinking(seed), other_machines_repos(ctx, repos)))
+    };
     let cwd = match cmd.repo {
         Some(RepoRef::Path(p)) => p,
-        Some(RepoRef::Known { cwd, .. }) => cwd,
-        Some(RepoRef::Unknown { name: repo }) => {
-            let known = repos.names(5);
-            let hint = if known.is_empty() {
-                " Give me a path instead, like “in C:\\code\\app”.".to_string()
-            } else {
-                format!(" I know: {}. Or give me a path.", known.join(", "))
-            };
-            return say(format!("{} I don't know a repo called “{repo}”.{hint}", voice.thinking(seed)));
+        Some(RepoRef::Named { name: repo, key, explicit }) => {
+            match repos.resolve(&key, Some(&agent_id), explicit, |e| is_local(ctx, &e.machine_id)) {
+                Some(cwd) => cwd,
+                None => return unknown_repo(&repo),
+            }
         }
-        None => match default_cwd(ctx, &agent_id) {
+        Some(RepoRef::Unknown { name: repo }) => return unknown_repo(&repo),
+        None => match default_cwd(ctx, repos, &agent_id) {
             Some(c) => c,
             None => {
-                let known = repos.names(5);
+                let known = repos.names(5, |e| is_local(ctx, &e.machine_id));
                 let hint = if known.is_empty() { String::new() } else { format!(" I know: {}.", known.join(", ")) };
                 return say(format!(
                     "{} Which repo should {name} work in? Say “tell {handle} to {example_task} in repo <name>” or give a path.{hint}",
@@ -792,15 +973,10 @@ fn command(ctx: &BrainContext, voice: &Voice, seed: u64, repos: &RepoIndex, cmd:
                     status_word(s.status)
                 ));
             }
-            return BrainReply {
-                text: format!(
-                    "{} Telling {name}{here} in {repo}: “{}” {}",
-                    voice.sound(seed),
-                    truncate(&task, 120),
-                    voice.working(seed)
-                ),
-                action: Some(BrainAction::Prompt { session_id: s.id.clone(), text: task }),
-            };
+            return act(
+                format!("{} Telling {name}{here} in {repo}: “{}” {}", voice.sound(seed), truncate(&task, 120), voice.working(seed)),
+                BrainAction::Prompt { session_id: s.id.clone(), text: task },
+            );
         }
         if task.is_empty() {
             return say(format!("{} What should {name} do in {repo}?", voice.thinking(seed)));
@@ -816,7 +992,7 @@ fn command(ctx: &BrainContext, voice: &Voice, seed: u64, repos: &RepoIndex, cmd:
             voice.happy(seed)
         )
     };
-    BrainReply { text, action: Some(BrainAction::StartSession { agent_id, cwd, prompt: task }) }
+    act(text, BrainAction::StartSession { agent_id, cwd, prompt: task })
 }
 
 #[cfg(test)]

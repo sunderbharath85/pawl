@@ -126,7 +126,7 @@ describe("intentErrorText", () => {
   });
 
   test("invalid and not_found depend on the action", () => {
-    expect(intentErrorText(err("invalid"), "Mac mini", "start")).toContain("folder must exist");
+    expect(intentErrorText(err("invalid"), "Mac mini", "start")).toContain("folder must be one of its repos");
     expect(intentErrorText(err("invalid"), "Mac mini", "approve")).toContain("option");
     expect(intentErrorText(err("not_found"), "Mac mini", "prompt")).toContain("session");
     expect(intentErrorText(err("not_found"), "Mac mini", "approve")).toContain("request");
