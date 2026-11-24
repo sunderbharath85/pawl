@@ -351,6 +351,11 @@ body::after {
 }
 .cta__title { position: relative; font-size: clamp(3rem, 9vw, 9rem); letter-spacing: -0.055em; line-height: 0.95; font-weight: 600; max-width: 80rem; margin: 0 auto; }
 .cta__row { position: relative; margin-top: 3rem; display: flex; flex-wrap: wrap; gap: 0.8rem; justify-content: center; }
+.dl-grid { position: relative; margin-top: 3rem; display: flex; flex-wrap: wrap; gap: 2rem 3.5rem; justify-content: center; }
+.dl { display: flex; flex-direction: column; align-items: center; gap: 0.8rem; }
+.dl__os { font-family: var(--mono); font-size: 0.85rem; color: var(--on-dark-muted); letter-spacing: 0.04em; }
+.dl.is-mine .dl__os { color: var(--brass); }
+.dl__row { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; }
 .cta__fine { position: relative; margin: 1.6rem auto 0; max-width: 36rem; color: var(--on-dark-muted); font-size: 0.95rem; }
 .cta__fine a { color: var(--brass); }
 .parade { position: relative; height: clamp(7rem, 12vw, 10rem); margin-top: clamp(5rem, 10vw, 8rem); border-bottom: 1px solid rgba(251, 243, 231, 0.1); }

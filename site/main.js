@@ -247,7 +247,31 @@ setInterval(() => {
   showQuote(quoteIndex + 1);
 }, 5200);
 
-// ---------------------------------------------------------------- downloads: point at the newest release
+// ---------------------------------------------------------------- downloads: the visitor's platform, newest release
+const os = (() => {
+  const ua = navigator.userAgent;
+  if (/Windows/.test(ua)) return "windows";
+  if (/Android|iPhone|iPad/.test(ua)) return "other";
+  if (/Mac/.test(ua)) return "mac";
+  if (/Linux|X11/.test(ua)) return "linux";
+  return "other";
+})();
+const PRIMARY = { windows: ["exe", "Download for Windows"], mac: ["dmg-arm", "Download for macOS"], linux: ["deb", "Download for Linux"] };
+const mine = $(`.dl[data-os="${os}"]`);
+if (mine) {
+  mine.classList.add("is-mine");
+  const first = $(".btn", mine);
+  first?.classList.replace("btn--ghost", "btn--orange");
+}
+const hero = $('[data-dl="auto"]');
+function pointHero() {
+  const pick = PRIMARY[os];
+  if (!pick || !hero) return;
+  const source = $(`.dl [data-dl="${pick[0]}"]`);
+  if (source) hero.href = source.href;
+  $("[data-dl-label]", hero).textContent = pick[1];
+}
+pointHero();
 fetch(`https://api.github.com/repos/${REPO}/releases?per_page=5`, { headers: { Accept: "application/vnd.github+json" } })
   .then((r) => (r.ok ? r.json() : []))
   .then((releases) => {
@@ -257,13 +281,18 @@ fetch(`https://api.github.com/repos/${REPO}/releases?per_page=5`, { headers: { A
     const links = {
       exe: pick((n) => n.endsWith("-setup.exe")),
       msi: pick((n) => n.endsWith(".msi")),
-      zip: pick((n) => n.startsWith("pawl-cli-") && n.endsWith(".zip")),
+      "dmg-arm": pick((n) => n.endsWith("_aarch64.dmg")),
+      "dmg-x64": pick((n) => n.endsWith("_x64.dmg")),
+      deb: pick((n) => n.endsWith(".deb")),
+      appimage: pick((n) => n.endsWith(".AppImage")),
+      rpm: pick((n) => n.endsWith(".rpm")),
     };
-    $$("[data-dl]").forEach((a) => {
+    $$(".dl [data-dl]").forEach((a) => {
       const url = links[a.dataset.dl];
       if (url) a.href = url;
     });
     $$("[data-dl-ver]").forEach((el) => (el.textContent = rel.tag_name));
+    pointHero();
   })
   .catch(() => {});
 

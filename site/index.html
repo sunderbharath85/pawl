@@ -67,8 +67,8 @@
         </h1>
         <p class="hero__lede">Pawl gives every coding agent on every machine a named pet. It naps while nothing runs, digs while the agent works, and barks the moment it needs your OK.</p>
         <div class="hero__ctas">
-          <a class="btn btn--light" data-dl="exe" href="https://github.com/sunderbharath85/pawl/releases/download/v0.1.0/Pawl_0.1.0_x64-setup.exe">
-            <span>Download for Windows</span>
+          <a class="btn btn--light" data-dl="auto" href="#download">
+            <span data-dl-label>Download</span>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 19.5h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </a>
           <a class="btn btn--ghost" href="https://github.com/sunderbharath85/pawl" rel="noopener">
@@ -257,12 +257,31 @@ Approved: bun test</code></pre>
 
     <section class="cta" id="download">
       <h2 class="cta__title">Give your agents a pet.</h2>
-      <div class="cta__row">
-        <a class="btn btn--orange" data-dl="exe" href="https://github.com/sunderbharath85/pawl/releases/download/v0.1.0/Pawl_0.1.0_x64-setup.exe"><span>Windows installer</span><small data-dl-ver>v0.1.0</small></a>
-        <a class="btn btn--ghost" data-dl="msi" href="https://github.com/sunderbharath85/pawl/releases/download/v0.1.0/Pawl_0.1.0_x64_en-US.msi"><span>MSI</span></a>
-        <a class="btn btn--ghost" data-dl="zip" href="https://github.com/sunderbharath85/pawl/releases/download/v0.1.0/pawl-cli-0.1.0-x86_64-pc-windows-msvc.zip"><span>CLI only</span></a>
+      <div class="dl-grid">
+        <div class="dl" data-os="windows">
+          <p class="dl__os">Windows</p>
+          <div class="dl__row">
+            <a class="btn btn--ghost" data-dl="exe" href="https://github.com/sunderbharath85/pawl/releases/download/v0.1.1/Pawl_0.1.1_x64-setup.exe"><span>Installer</span></a>
+            <a class="btn btn--ghost" data-dl="msi" href="https://github.com/sunderbharath85/pawl/releases/download/v0.1.1/Pawl_0.1.1_x64_en-US.msi"><span>MSI</span></a>
+          </div>
+        </div>
+        <div class="dl" data-os="mac">
+          <p class="dl__os">macOS</p>
+          <div class="dl__row">
+            <a class="btn btn--ghost" data-dl="dmg-arm" href="https://github.com/sunderbharath85/pawl/releases/download/v0.1.1/Pawl_0.1.1_aarch64.dmg"><span>Apple silicon</span></a>
+            <a class="btn btn--ghost" data-dl="dmg-x64" href="https://github.com/sunderbharath85/pawl/releases/download/v0.1.1/Pawl_0.1.1_x64.dmg"><span>Intel</span></a>
+          </div>
+        </div>
+        <div class="dl" data-os="linux">
+          <p class="dl__os">Linux</p>
+          <div class="dl__row">
+            <a class="btn btn--ghost" data-dl="deb" href="https://github.com/sunderbharath85/pawl/releases/download/v0.1.1/Pawl_0.1.1_amd64.deb"><span>.deb</span></a>
+            <a class="btn btn--ghost" data-dl="appimage" href="https://github.com/sunderbharath85/pawl/releases/download/v0.1.1/Pawl_0.1.1_amd64.AppImage"><span>AppImage</span></a>
+            <a class="btn btn--ghost" data-dl="rpm" href="https://github.com/sunderbharath85/pawl/releases/download/v0.1.1/Pawl-0.1.1-1.x86_64.rpm"><span>.rpm</span></a>
+          </div>
+        </div>
       </div>
-      <p class="cta__fine">macOS and Linux: <a href="https://github.com/sunderbharath85/pawl#quickstart-from-source">build from source</a>. Windows builds are not code-signed yet, so SmartScreen may ask you to confirm.</p>
+      <p class="cta__fine">Version <span data-dl-ver>v0.1.1</span>. The command line on its own and checksums are on the <a href="https://github.com/sunderbharath85/pawl/releases">releases page</a>. Builds are not signed yet, so Windows SmartScreen or macOS Gatekeeper may ask you to confirm the first time.</p>
       <div class="parade" aria-hidden="true">
         <div class="walker" style="--d:26s;--delay:0s"><div class="sprite" style="--src:url(pets/dog/walk.png);--fps:8"></div></div>
         <div class="walker" style="--d:31s;--delay:-9s"><div class="sprite" style="--src:url(pets/cat/walk.png);--fps:8"></div></div>
