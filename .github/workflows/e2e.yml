@@ -20,13 +20,13 @@ jobs:
     env:
       # Keep each suite's temp dir (hub data and logs) so a failure can be inspected from the artifact.
       E2E_KEEP: "1"
-      TMPDIR: ${{ runner.temp }}/e2e
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: mkdir -p "$TMPDIR"
+      # (the runner context is not available in job-level env, so set TMPDIR here)
+      - run: mkdir -p "$RUNNER_TEMP/e2e" && echo "TMPDIR=$RUNNER_TEMP/e2e" >> "$GITHUB_ENV"
       - run: bun install --frozen-lockfile
       - run: cargo build -p pawl-hub
       - name: Install Chromium
