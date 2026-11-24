@@ -101,13 +101,19 @@ describe("nonce domain separation (challenge vs envelope nonces)", () => {
   };
 
   test("byte 15 of every challenge nonce is in 2..=255", () => {
+    // Bulk check on the nonce generator itself (createChallenge also derives an X25519 key, which is slow in pure
+    // JS: 2000 of those could exceed bun's 5 s test timeout on a busy machine).
     const seen = new Set<number>();
-    for (let i = 0; i < 2000; i++) {
-      const b = decodeStd(createChallenge().frame.nonce)![NONCE_DOMAIN_BYTE]!;
+    for (let i = 0; i < 5000; i++) {
+      const b = challengeNonce()[NONCE_DOMAIN_BYTE]!;
       expect(b).toBeGreaterThanOrEqual(2);
       seen.add(b);
     }
     expect(seen.size).toBeGreaterThan(200); // still spread over the range
+    // And the challenges the relay actually sends.
+    for (let i = 0; i < 200; i++) {
+      expect(decodeStd(createChallenge().frame.nonce)![NONCE_DOMAIN_BYTE]!).toBeGreaterThanOrEqual(2);
+    }
   });
 
   test("the mapping covers every random byte value and keeps the other 23 bytes", () => {

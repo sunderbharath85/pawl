@@ -1,0 +1,123 @@
+{
+  "description": "Invite URIs: krypto://peer?v=1&mid=&pk=(base64url)&addr=(host:port, optional with relay)&code=(base64url 16 bytes)&exp=(unix ms)[&relay=(percent-encoded URL)&rt=(base64url 16 bytes)[&rk=(access key)]]. Parsing is strict (any invalid or duplicate known parameter refuses the URI; unknown ones are ignored). publicKey here is the standard base64 form of pk. relay is the normalized URL.",
+  "invalid": [
+    {
+      "name": "other scheme",
+      "uri": "https://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=wss%3A%2F%2Frelay.example.com&rt=oKGio6SlpqeoqaqrrK2urw&rk=k3y_example-123"
+    },
+    {
+      "name": "version 2",
+      "uri": "krypto://peer?v=2&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=wss%3A%2F%2Frelay.example.com&rt=oKGio6SlpqeoqaqrrK2urw&rk=k3y_example-123"
+    },
+    {
+      "name": "upper-case machine id",
+      "uri": "krypto://peer?v=1&mid=HUBAAAAAAAAA&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=wss%3A%2F%2Frelay.example.com&rt=oKGio6SlpqeoqaqrrK2urw&rk=k3y_example-123"
+    },
+    {
+      "name": "short public key",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=AAAA&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=wss%3A%2F%2Frelay.example.com&rt=oKGio6SlpqeoqaqrrK2urw&rk=k3y_example-123"
+    },
+    {
+      "name": "public key of small order",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=wss%3A%2F%2Frelay.example.com&rt=oKGio6SlpqeoqaqrrK2urw&rk=k3y_example-123"
+    },
+    {
+      "name": "code of 15 bytes",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0e&exp=1764000600000&relay=wss%3A%2F%2Frelay.example.com&rt=oKGio6SlpqeoqaqrrK2urw&rk=k3y_example-123"
+    },
+    {
+      "name": "expiry not a number",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0eHw&exp=x1764000600000&relay=wss%3A%2F%2Frelay.example.com&rt=oKGio6SlpqeoqaqrrK2urw&rk=k3y_example-123"
+    },
+    {
+      "name": "duplicate parameter",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=wss%3A%2F%2Frelay.example.com&rt=oKGio6SlpqeoqaqrrK2urw&rk=k3y_example-123&v=1"
+    },
+    {
+      "name": "no addr and no relay",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000"
+    },
+    {
+      "name": "relay without rt",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=wss%3A%2F%2Frelay.example.com&rk=k3y_example-123"
+    },
+    {
+      "name": "rk without relay",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&rk=abc"
+    },
+    {
+      "name": "ws relay off loopback",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=ws%3A%2F%2Frelay.example.com&rt=oKGio6SlpqeoqaqrrK2urw&rk=k3y_example-123"
+    },
+    {
+      "name": "addr without port",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=192.168.1.20&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=wss%3A%2F%2Frelay.example.com&rt=oKGio6SlpqeoqaqrrK2urw&rk=k3y_example-123"
+    },
+    {
+      "name": "fragment",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=wss%3A%2F%2Frelay.example.com&rt=oKGio6SlpqeoqaqrrK2urw&rk=k3y_example-123#x"
+    }
+  ],
+  "valid": [
+    {
+      "addr": "192.168.1.20:47801",
+      "code": "EBESExQVFhcYGRobHB0eHw",
+      "expiresAt": 1764000600000,
+      "machineId": "hubaaaaaaaaa",
+      "name": "LAN only",
+      "publicKey": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=",
+      "relay": null,
+      "relayKey": null,
+      "relayToken": null,
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000"
+    },
+    {
+      "addr": "192.168.1.20:47801",
+      "code": "EBESExQVFhcYGRobHB0eHw",
+      "expiresAt": 1764000600000,
+      "machineId": "hubaaaaaaaaa",
+      "name": "LAN plus relay",
+      "publicKey": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=",
+      "relay": "wss://relay.example.com",
+      "relayKey": "k3y_example-123",
+      "relayToken": "oKGio6SlpqeoqaqrrK2urw",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=192.168.1.20:47801&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=wss%3A%2F%2Frelay.example.com&rt=oKGio6SlpqeoqaqrrK2urw&rk=k3y_example-123"
+    },
+    {
+      "addr": null,
+      "code": "EBESExQVFhcYGRobHB0eHw",
+      "expiresAt": 1764000600000,
+      "machineId": "hubaaaaaaaaa",
+      "name": "relay only (phone QR)",
+      "publicKey": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=",
+      "relay": "wss://relay.example.com",
+      "relayKey": "k3y_example-123",
+      "relayToken": "oKGio6SlpqeoqaqrrK2urw",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=wss%3A%2F%2Frelay.example.com&rt=oKGio6SlpqeoqaqrrK2urw&rk=k3y_example-123"
+    },
+    {
+      "addr": "[fe80::1]:47801",
+      "code": "EBESExQVFhcYGRobHB0eHw",
+      "expiresAt": 1764000600000,
+      "machineId": "hubaaaaaaaaa",
+      "name": "IPv6 addr, relay with port and path, no access key",
+      "publicKey": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=",
+      "relay": "wss://relay.example.com:8443/krypto",
+      "relayKey": null,
+      "relayToken": "oKGio6SlpqeoqaqrrK2urw",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&addr=%5Bfe80::1%5D:47801&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=wss%3A%2F%2Frelay.example.com%3A8443%2Fkrypto&rt=oKGio6SlpqeoqaqrrK2urw"
+    },
+    {
+      "addr": null,
+      "code": "EBESExQVFhcYGRobHB0eHw",
+      "expiresAt": 1764000600000,
+      "machineId": "hubaaaaaaaaa",
+      "name": "local dev relay (ws on loopback)",
+      "publicKey": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=",
+      "relay": "ws://127.0.0.1:8787",
+      "relayKey": "devkey",
+      "relayToken": "oKGio6SlpqeoqaqrrK2urw",
+      "uri": "krypto://peer?v=1&mid=hubaaaaaaaaa&pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&code=EBESExQVFhcYGRobHB0eHw&exp=1764000600000&relay=ws%3A%2F%2F127.0.0.1%3A8787&rt=oKGio6SlpqeoqaqrrK2urw&rk=devkey"
+    }
+  ]
+}

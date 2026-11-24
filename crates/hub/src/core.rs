@@ -833,12 +833,11 @@ impl Hub {
             ClientMsg::UpdateMachine { machine_id, name, .. } => {
                 json!({ "machine": self.update_machine(&machine_id, &name).await? })
             }
-            ClientMsg::CreateInvite { ttl_secs, addr, .. } => self.create_invite(ttl_secs, addr)?,
-            ClientMsg::JoinPeer { uri, .. } => self.join_peer(&uri, actor).await?,
-            ClientMsg::RevokeDevice { device_id, .. } => {
-                self.revoke_device(&device_id, actor).await?;
-                json!({})
+            ClientMsg::CreateInvite { ttl_secs, addr, for_phone, .. } => {
+                self.create_invite(ttl_secs, addr, for_phone.unwrap_or(false))?
             }
+            ClientMsg::JoinPeer { uri, .. } => self.join_peer(&uri, actor).await?,
+            ClientMsg::RevokeDevice { device_id, .. } => self.revoke_device(&device_id, actor).await?,
             ClientMsg::UserActivity { .. } => {
                 self.user_activity();
                 json!({})
@@ -1490,6 +1489,8 @@ impl Hub {
             tracing::warn!("record permission request: {e:#}");
         }
         self.inner.bus.send(ServerMsg::PermissionRequest { request: req.clone() });
+        // Paired phones that are offline get a content-free push through the relay to come and see it.
+        self.wake_offline_phones();
         let (agent_name, pet_name) = {
             let st = self.st();
             (st.agent_name(&req.agent_id), st.pet_for(&req.machine_id, &req.agent_id).map(|p| p.name.clone()))
@@ -2175,13 +2176,15 @@ fn name_key(name: &str) -> String {
     name.trim().to_lowercase()
 }
 
-/// Trimmed pet name, 1..=40 characters; else `invalid`.
+/// Trimmed pet name, 1..=40 characters, no control or invisible formatting characters (pet names
+/// reach paired devices: the same rule as device names, `krypto_peer::device_name_ok`); else `invalid`.
 pub fn validate_pet_name(name: &str) -> Result<String> {
     let name = name.trim();
     let len = name.chars().count();
-    if len == 0 || len > MAX_PET_NAME_CHARS || name.chars().any(char::is_control) {
-        return Err(anyhow::Error::new(AckCode::Invalid)
-            .context(format!("pet name must be 1-{MAX_PET_NAME_CHARS} characters without control characters")));
+    if len == 0 || len > MAX_PET_NAME_CHARS || !name.chars().all(machine::name_char_ok) {
+        return Err(anyhow::Error::new(AckCode::Invalid).context(format!(
+            "pet name must be 1-{MAX_PET_NAME_CHARS} characters without control or invisible characters (bidi controls, zero-width)"
+        )));
     }
     Ok(name.to_string())
 }

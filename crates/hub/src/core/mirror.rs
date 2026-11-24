@@ -428,9 +428,9 @@ impl Hub {
 
     // ------------------------------------------------------------ outbound (owner)
 
-    /// Linked paired hubs (the devices mirror updates go to).
-    fn linked_hubs(&self) -> Vec<String> {
-        let paired: HashSet<String> = self.devices().into_iter().filter(|d| d.kind == DeviceKind::Hub).map(|d| d.id).collect();
+    /// Linked paired devices, hubs and phones (the devices mirror updates go to).
+    fn linked_devices(&self) -> Vec<String> {
+        let paired: HashSet<String> = self.devices().into_iter().map(|d| d.id).collect();
         self.inner.peer.online().into_iter().map(|(id, _)| id).filter(|id| paired.contains(id)).collect()
     }
 
@@ -478,7 +478,7 @@ impl Hub {
                 _ = shutdown.changed() => break,
             };
             let Some(update) = self.outbound_update(msg) else { continue };
-            let peers = self.linked_hubs();
+            let peers = self.linked_devices();
             if peers.is_empty() {
                 continue;
             }
@@ -707,13 +707,16 @@ impl Hub {
 
     /// A body from a linked device (pair/hello/presence/bye never come here). Called in arrival order.
     pub(super) async fn on_peer_body(&self, from: &str, body: PeerBody) {
-        let paired_hub = self.devices().iter().any(|d| d.id == from && d.kind == DeviceKind::Hub);
-        if from == self.inner.machine_id || !is_valid_machine_id(from) || !paired_hub {
-            tracing::warn!(device = %from, "ignoring a peer body from a device that is not a paired hub");
+        let kind = self.devices().into_iter().find(|d| d.id == from).map(|d| d.kind);
+        let Some(kind) = kind.filter(|_| from != self.inner.machine_id && is_valid_machine_id(from)) else {
+            tracing::warn!(device = %from, "ignoring a peer body from a device that is not paired");
             return;
-        }
+        };
         if !self.admit_body(from) {
             return;
+        }
+        if kind == DeviceKind::Phone {
+            return self.on_phone_body(from, body).await;
         }
         match body {
             PeerBody::Mirror { update } => self.apply_update(from, update).await,
@@ -729,13 +732,30 @@ impl Hub {
             PeerBody::IntentAck { intent_id, status, reason, result } => {
                 self.on_intent_ack(from, &intent_id, super::intents::Ack { status, reason, result })
             }
-            PeerBody::PairRequest { .. }
+            PeerBody::RosterIntro { .. }
+            | PeerBody::PairRequest { .. }
             | PeerBody::PairAccept { .. }
             | PeerBody::PairReject { .. }
             | PeerBody::Hello { .. }
             | PeerBody::Presence { .. }
             | PeerBody::Bye { .. } => {
                 tracing::debug!(device = %from, "ignoring a link-layer body delivered as data");
+            }
+        }
+    }
+
+    /// A body from a paired phone. A phone reads this hub's own items (sync_request, then the live
+    /// mirror) and acts through intents, always as client `mobile` whatever it claims; it keeps no
+    /// mirror we could ask for (and the node drops its intros). Everything else is dropped.
+    async fn on_phone_body(&self, from: &str, body: PeerBody) {
+        match body {
+            PeerBody::SyncRequest { since_seq } => self.on_sync_request(from, since_seq),
+            PeerBody::Intent { intent_id, confirmed, intent, .. } => {
+                self.on_intent(from, intent_id, ClientKind::Mobile, confirmed, intent)
+            }
+            other => {
+                let kind = serde_json::to_value(&other).ok().and_then(|v| v.get("type").and_then(Value::as_str).map(str::to_string));
+                tracing::debug!(device = %from, body = kind.as_deref().unwrap_or("?"), "ignoring a body a phone does not send");
             }
         }
     }

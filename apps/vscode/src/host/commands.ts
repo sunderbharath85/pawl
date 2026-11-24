@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
 import {
+  checkMachineName,
   checkPetName,
   isLocal,
   MACHINE_NAME_MAX,
@@ -389,12 +390,16 @@ export class Commands {
         valueSelection: [0, machine.name.length],
         placeHolder: "e.g. Windows PC",
         ignoreFocusOut: true,
-        validateInput: (v) => (normalizeMachineName(v) === null ? `Use 1–${MACHINE_NAME_MAX} characters.` : null),
+        // The hub's 1–40 characters plus the peer name rule (no control / invisible characters).
+        validateInput: (v) => {
+          const check = checkMachineName(v);
+          return check.ok ? null : check.error;
+        },
       });
       if (next === undefined) return; // Esc
     }
     const trimmed = normalizeMachineName(next);
-    if (trimmed === null) throw new Error(`the machine name must be 1–${MACHINE_NAME_MAX} characters`);
+    if (trimmed === null) throw new Error(`the machine name must be 1–${MACHINE_NAME_MAX} characters, without control or invisible characters`);
     if (trimmed === machine.name) return;
     let updated: Machine;
     try {

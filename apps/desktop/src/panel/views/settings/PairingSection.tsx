@@ -1,10 +1,11 @@
-// Machines & pairing: the peer listener (on/off + address, applied at runtime by the hub) and a way to the
-// Machines view. `ListenerControl` is also used by the first-run setup and the Machines view's invite card.
+// Machines & pairing: the peer listener (on/off + address, applied at runtime by the hub), whether devices introduced
+// by paired hubs are accepted (step 7), and a way to the Machines view. `ListenerControl` is also used by the first-run
+// setup and the Machines view's invite card.
 import { useEffect, useMemo, useState } from "react";
-import { isWildcardListen, linkPathLabel, machineCounts, machinesLine, pairingAllowsText } from "@krypto/hub-client";
+import { isWildcardListen, linkPathLabel, machineCounts, machinesLine, pairingAllowsText, phoneCounts, phonesLine } from "@krypto/hub-client";
 import { PEER_DEFAULT_PORT, type HubSettings } from "@krypto/protocol";
 import { isTauri, native } from "../../../lib/native";
-import { pairingForm, pairingPatch } from "../../../lib/settingsForms";
+import { introsForm, introsPatch, pairingForm, pairingPatch } from "../../../lib/settingsForms";
 import { usePanel } from "../../context";
 import { errorFor, Field, OverrideNote, SaveBar, SettingsSection, Toggle, useDraft, useSectionSave } from "./shared";
 import type { SectionProps } from "./sections";
@@ -98,9 +99,51 @@ export function ListenerControl({ settings, live, compact }: { settings: HubSett
   );
 }
 
+/**
+ * "Accept devices introduced by paired hubs" (`peer.acceptRosterIntros`). Turning it on asks first (a paired hub can
+ * then add devices here); off is applied without asking. Hidden text for a hub that predates it.
+ */
+function RosterIntrosControl({ settings, live }: Pick<SectionProps, "settings" | "live">) {
+  const source = useMemo(() => introsForm(settings) ?? { accept: false }, [settings]);
+  const supported = introsForm(settings) !== null;
+  const { draft, update, dirty, reset } = useDraft(source);
+  const save = useSectionSave(["peer.acceptRosterIntros"]);
+  if (!supported) {
+    return <p className="hint">Update krypto on this machine to choose whether paired machines may introduce new devices here.</p>;
+  }
+  const pinned = !!settings.overriddenBy["peer.acceptRosterIntros"];
+  return (
+    <div className="intros-control">
+      <Toggle
+        label="Accept devices introduced by paired hubs"
+        hint={
+          draft.accept
+            ? "On: when one of your paired machines pairs a new phone or machine, it introduces it here and this machine adds it too, so you pair once. An introduction never replaces a device already paired here, and each one shows a notification."
+            : "Off: introductions are noted (you get a notification) but nothing is added; pair each phone or machine here yourself."
+        }
+        checked={draft.accept}
+        disabled={!live || save.saving || pinned}
+        onChange={() => update({ accept: !draft.accept })}
+      />
+      <OverrideNote settings={settings} field="peer.acceptRosterIntros" />
+      <SaveBar
+        dirty={dirty}
+        saving={save.saving}
+        message={save.message}
+        disabled={!live}
+        onReset={() => (reset(), save.clear())}
+        onSave={() =>
+          void save.run(introsPatch(draft, settings), { success: draft.accept ? "Introduced devices are accepted" : "Introduced devices are not added" })
+        }
+      />
+    </div>
+  );
+}
+
 export function PairingSection({ settings, live }: SectionProps) {
   const { state, navigate } = usePanel();
   const counts = machineCounts(state);
+  const phones = phoneCounts(state);
   const linked = state.devices.filter((d) => d.path);
   return (
     <SettingsSection
@@ -115,11 +158,13 @@ export function PairingSection({ settings, live }: SectionProps) {
     >
       <p className="pairing-allows">{pairingAllowsText(settings.peer.acceptIntents)}</p>
       <ListenerControl settings={settings} live={live} />
+      <RosterIntrosControl settings={settings} live={live} />
       <p className="hint">
         {counts.total > 1 ? `${machinesLine(counts.total, live ? counts.online : undefined)}.` : "No machines paired yet."}{" "}
+        {phones.total > 0 ? `${phonesLine(phones.total, live ? phones.online : undefined)}. ` : ""}
         {linked.length > 0 &&
           `Linked now: ${linked.map((d) => `${d.name} (${linkPathLabel(d.path)})`).join(", ")}. `}
-        Create invites, join a machine and unpair in Machines.
+        Create invites, pair a phone, join a machine and unpair in Machines.
       </p>
     </SettingsSection>
   );

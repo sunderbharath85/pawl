@@ -43,6 +43,9 @@ pub enum InviteError {
     ListenerOff,
     #[error("invalid")]
     Invalid,
+    /// A relay-only invite needs a connected relay.
+    #[error("relay_off")]
+    RelayOff,
 }
 
 impl fmt::Debug for Invite {
@@ -126,6 +129,7 @@ impl Invite {
         let public_key: [u8; 32] = b64::decode_url(&pk)
             .ok()
             .and_then(|b| b.try_into().ok())
+            .filter(|pk| !crate::intro::is_low_order(pk))
             .ok_or(InviteError::BadUri)?;
         match b64::decode_url(&code) {
             Ok(c) if c.len() == CODE_LEN => {}
@@ -197,7 +201,7 @@ pub(crate) fn valid_host(host: &str) -> bool {
 /// Only IP literals in private (10/8, 172.16/12, 192.168/16), Tailscale CGNAT (100.64/10),
 /// link-local (169.254/16, fe80::/10), loopback and IPv6 ULA (fc00::/7) ranges, so a paired peer cannot
 /// point our dialer at arbitrary hosts. The addr in an invite URI (typed by the user) is not restricted.
-pub(crate) fn peer_addr_ok(s: &str) -> bool {
+pub fn peer_addr_ok(s: &str) -> bool {
     if !valid_addr(s) {
         return false;
     }
@@ -378,6 +382,8 @@ mod tests {
             format!("{good}&v=1"),
             format!("{good}#frag"),
             good.replace("&pk=", "&pk=AAAA"),
+            // A key of small order (0).
+            good.replace(&format!("pk={}", b64::encode_url(&[9u8; 32])), &format!("pk={}", b64::encode_url(&[0u8; 32]))),
             good.split("&code=").next().unwrap().to_string() + "&code=AAAA&exp=1",
             format!("{}{}", good, "x".repeat(MAX_URI_LEN)),
         ];

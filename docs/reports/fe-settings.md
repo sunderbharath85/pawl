@@ -246,3 +246,146 @@ src-tauri `cargo check` + 10 tests; VS Code tsc + 21 + build; mobile tsc.
 
 **Gap:** `homeDir()` relies on `core:default` including the path permissions (Tauri 2). If it is denied, the lookup
 returns null and the pattern rules (C:\Users\name, /home/name, /Users/name) still catch the usual home folders.
+
+## Step 7 (phone): pairing by QR code, phones in the devices list (protocol v8)
+
+Branch `step-7-phone`. Nothing committed. The only new dependency is the approved `qrcode` (^1.5.4) with
+`@types/qrcode` (^1.5.6, dev), in apps/desktop only, added with `scripts/bun-locked.sh`. That changed
+`apps/desktop/package.json` (CRLF kept) and `bun.lock`.
+
+### hub-client
+- **v8 compile fix (landed first; it unblocked fe-mobile):**
+  - `OS_LABEL` gains `ios: "iOS"` and `android: "Android"`.
+  - New `isPhoneOs()`.
+  - `editableSettings` and `settingsPatch` carry `peer.acceptRosterIntros`. A v7 hub has no such field, so it never appears in a patch.
+  - Field label: "Accept introduced devices".
+- **`riskyChanges`:** turning `peer.acceptRosterIntros` from false to true asks first.
+  - Title: "Let paired machines add devices to <machine>?"
+  - Button: "Accept introductions".
+  - The body says:
+    - a paired hub can add a phone or machine here without an invite;
+    - that device then sees (and, with remote control on, acts on) this machine's sessions, pets and approvals;
+    - an intro never replaces a device that is already paired;
+    - each intro shows a notification, and any device can be revoked in Machines.
+  - Turning it off saves without asking.
+- **New `src/devices.ts` (pure):**
+  - `PHONE_PROTOCOL_VERSION = 8`.
+  - `isPhone`, and `phoneOs(device)`, which reads `Device.os` (ios / android, otherwise null).
+  - `groupDevices(devices)` returns `{hubs, phones, other}`, each sorted online first, then by name.
+  - `pairedPhones`, `phoneCounts`, `phonesLine`.
+  - `introducedByText(device, state)` returns "Added by Mac mini". It falls back to the roster name, then "machine <id> (no longer paired)". It is null for direct pairings.
+  - `PendingInvite` (with `forPhone`), `inviteUsedBy`, and `inviteState` (waiting with time left / used by / expired):
+    - a phone invite is used only by a new, directly paired phone;
+    - a machine invite is used only by a new hub;
+    - devices with `introducedBy` never count as using an invite.
+  - `isPhoneInvite(uri)`: relay-only means a relay is present and there is no addr.
+  - `PHONE_QR_WARNING`.
+  - `phonePairingBlock(state, connected)` returns one of `disconnected`, `old_hub`, `relay_off` or `relay_down`, or null.
+- **`createInvite({forPhone})` sends `forPhone: true`.** It is refused locally in three cases:
+  - with an `addr`: `invalid`;
+  - on a hub older than protocol v8: `unsupported`;
+  - when the hub answers with an invite that is not relay-only: `unsupported`, so a QR code a phone can't use is never shown.
+- **`sortedMachines` / `machineCounts` skip any machine whose os is ios / android.** Phones are never machines, even if a hub listed one.
+- **`pairingAllowsText(acceptIntents, "phone")`** adds a phone wording.
+
+### Desktop
+- **`lib/qr.ts`:** `qrSvg(text)` runs `qrcode.create` (error correction M, 4-module quiet zone) locally. `qrPath()` turns the module grid into one SVG path. React renders it, with no innerHTML and no remote service.
+- **`panel/views/PhonePairing.tsx`:**
+  - `PhoneInviteCard`:
+    - "Show QR code" sends `create_invite{forPhone, ttlSecs}` and shows:
+      - the QR code (always dark on white);
+      - the expiry countdown;
+      - "Single use: it pairs one phone, until HH:MM";
+      - the access-key warning;
+      - the link with copy (rk shown masked, the real URI copied);
+      - Hide and New code buttons.
+    - It notices the phone that used the code and shows a note and a toast.
+    - When the relay is missing or down it shows why and a "Relay settings" link. An old hub gets the update text.
+    - The `relay_off` and `unsupported` errors have their own texts.
+  - `PhoneList` / `PhoneRow`:
+    - iOS / Android / generic phone glyph (plain shapes, not brand logos) and OS chip;
+    - online state, LAN / Relay chip, paired time, and "Added by <machine>";
+    - Revoke through the in-app confirm (danger). The text says revocation is per machine.
+- **`MachinesView`:**
+  - phones are no longer shown as machine rows;
+  - introduced hubs show "Added by …";
+  - new "Phones" list and a "Pair a phone" card.
+  - `CopyField` moved to `panel/CopyField.tsx`.
+- **`lib/pairing.ts`:**
+  - `ShownInvite = PendingInvite`, and `inviteUsedBy` now comes from hub-client.
+  - Separate `phoneInviteHolder` (in memory only), so a machine invite and a phone invite can both be open.
+  - New error texts: `relay_off`, `unsupported`, and the `create_phone_invite` action.
+- **Settings → Machines & pairing:** new toggle "Accept devices introduced by paired hubs" with on/off explanations and its own save bar.
+  - Turning it on goes through the risky confirm.
+  - For a v7 hub it shows "Update krypto…" instead.
+  - The section's summary line also counts phones.
+- **First-run setup:** a new optional "Phone" step (Hub → Name → Hooks → Pair → Phone → Done) uses the same card.
+- **Notifications:** roster-intro `notification` messages already go through the generic path (OS notification and Pet mail). The Pet mail empty text now mentions devices added by other machines.
+- **`settings.css`:** styles for QR frame, QR warning, phone rows and the intros control.
+
+### VS Code
+- The status bar tooltip has a phone line, e.g. "$(device-mobile) 2 phones paired · 1 online". It also shows when no other machine is paired, and it is part of the redraw key.
+- "Krypto: Show Machines" lists phones after the machines: `$(device-mobile)` label, "iOS phone · Relay", presence, "Added by …".
+
+### Commands run (all pass)
+- `packages/hub-client`: `bunx tsc --noEmit`; `bun test`: 245 pass.
+  - New `test/devices.test.ts`.
+  - New tests in settings.test.ts (acceptRosterIntros) and client.test.ts (forPhone).
+- `apps/desktop`:
+  - `bunx tsc --noEmit` for tsconfig, tsconfig.node and tsconfig.test.
+  - `bun run test`: 47 pass (new `qr.test.ts`; pairing and settingsForms tests extended).
+  - `bunx vite build`: ok, with qrcode bundled.
+- `apps/vscode`: `bunx tsc --noEmit`; `bun test`: 23 pass; `bun run build`: ok.
+- `apps/mobile`: `bunx tsc --noEmit`: ok.
+- src-tauri is unchanged, so `cargo check` was not re-run.
+
+### Known gaps (step 7)
+- Not run against a real hub, phone, Tauri window or Extension Host. No QR scan was tried with a phone camera; the QR is checked by its finder pattern and size only.
+- "Revoke everywhere" is not offered (the contract keeps revocation per hub for step 7).
+- Intro notifications are not told apart from other hub notifications (HubNotification has no kind), so they don't link to Machines.
+
+### Follow-up: revoking a hub that introduced devices
+- Protocol (added by t13): `AckResults.revoke_device = { introduced?: Array<{ id; name; kind }> }`.
+- hub-client:
+  - `revokeDevice(id)` now resolves with the ack, or `{}` from an older hub.
+  - New `revokeDevices(devices)` revokes them one after another. One failure does not stop the rest, and `not_found` counts as removed. It returns `{removed, failed: [... & {code}]}`.
+  - New helpers in `devices.ts`:
+    - `introducedByRevoked(result, revokedId)` drops entries with no id, duplicates and the revoked device itself, and uses the id as the name when the name is blank;
+    - `revokeIntroducedPrompt(hubName, devices)` builds the "Also remove the devices <hub> added?" prompt: one item per device (Phone / Machine), "Remove it" / "Remove all N", and "Keep it" / "Keep them";
+    - `revokeManyText(result, hubName)` builds the result toast (info, or error that names what is still paired).
+  - Tests: `devices.test.ts` (cleanup, prompt wording, toast text) and `client.test.ts` (ack passthrough, an old hub's empty ack, sequential revokes with ok / not_found / refused).
+- Desktop: new `panel/useRevokeDevice.ts`.
+  - It revokes the device and toasts.
+  - When the ack lists introduced devices, it opens the in-app (danger) confirm listing them, and on yes calls `revokeDevices` and toasts the result.
+  - Machine rows and phone rows both use it.
+  - The dialog lives in ConfirmProvider, so it still works after the revoked row is gone.
+- Gates:
+  - hub-client: tsc ok, 249 tests pass.
+  - desktop: 3 tsc configs ok, 47 tests pass, vite build ok.
+  - vscode: tsc ok, 23 tests pass.
+  - mobile: tsc ok.
+
+### Follow-up: machine names pre-checked with the peer name rule
+- **hub-client `src/names.ts` (new):** the same rule as crates/peer `device_name_ok`. Code points are written as numbers, so no tool can turn an escape into the invisible character itself.
+  - `DEVICE_NAME_MAX = 64`.
+  - `trimWhiteSpace`: Unicode White_Space, exactly what Rust `str::trim` removes. It is not JS `trim()`, which also removes U+FEFF and keeps U+0085.
+  - `deviceNameProblem(name, max?)` returns `bad_char`, `empty`, `too_long` or null.
+    - `bad_char` covers Cc, U+061C, U+200B–200F, U+2028–202E, U+2060–2064, U+2066–2069 and U+FEFF anywhere in the untrimmed name, and also lone UTF-16 surrogates.
+    - Length is counted in code points after trimming.
+  - `deviceNameOk`.
+- **`normalizeMachineName` / `checkMachineName`** now apply the peer rule plus the hub's own 1–40.
+  - They trim with `trimWhiteSpace`.
+  - New message for `bad_char`: "Remove control or invisible characters…".
+  - The `updateMachine` local error text mentions it too.
+- **New `test/names.test.ts`** reads `crates/peer/tests/vectors/names.json`.
+  - It decodes each `utf8Hex` with `ignoreBOM` (one vector starts with U+FEFF) and asserts it equals `name`.
+  - It runs every valid and invalid vector through `deviceNameOk`, and through the machine-name checks (valid ones only when they fit in 40).
+  - It checks that `maxChars` equals `DEVICE_NAME_MAX`.
+  - Plus problem and message cases.
+- **Desktop:** the MachineNameForm, used by Settings → This machine and by setup, shows the character problem as you type. Its hint reads "1–40 characters, no invisible characters".
+- **VS Code:** "Rename This Machine" validates with `checkMachineName`.
+- **Gates:**
+  - hub-client: tsc ok, 299 tests pass (50 new, including all 46 name vectors).
+  - desktop: 3 tsc configs ok, 47 tests pass, vite build ok.
+  - vscode: tsc ok, 23 tests pass, build ok.
+  - mobile: tsc ok.

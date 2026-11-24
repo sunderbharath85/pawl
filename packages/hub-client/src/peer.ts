@@ -138,10 +138,11 @@ export function maskInviteSecrets(text: string): string {
 /**
  * One line for the pairing UI, shown before Create invite / Join: what a paired machine can do with this one.
  * `acceptIntents` = this hub's remote control setting (undefined while unknown). Pairing works both ways, so the
- * same is true for this machine on the other one, as far as that one allows.
+ * same is true for this machine on the other one, as far as that one allows. `who` = "phone" for the phone pairing
+ * card (a phone acts under the same remote control rule).
  */
-export function pairingAllowsText(acceptIntents: boolean | undefined): string {
-  const sees = "A paired machine sees this machine's sessions, pets and approvals";
+export function pairingAllowsText(acceptIntents: boolean | undefined, who: "machine" | "phone" = "machine"): string {
+  const sees = `A paired ${who} sees this machine's sessions, pets and approvals`;
   if (acceptIntents === false) return `${sees}. Remote control is off here, so it cannot act on this machine.`;
   if (acceptIntents === true) {
     return `${sees}, and can start agents in allowed folders, send prompts, cancel, and approve once or deny here (remote control is on).`;

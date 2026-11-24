@@ -18,6 +18,7 @@ import type {
   Session,
   Welcome,
 } from "@krypto/protocol";
+import { isPhoneOs } from "./machine";
 
 /** `Omit` that distributes over unions (keeps discriminated unions intact). */
 export type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -387,7 +388,8 @@ export function lastEventsBySession(state: Pick<HubState, "events">): Record<str
  */
 export function sortedMachines(state: Pick<HubState, "machine" | "machines">): Machine[] {
   const own = state.machine?.id;
-  return Object.values(state.machines).sort(
+  // Phones are devices, never machines (a hub should not list them; skip one if it does).
+  return Object.values(state.machines).filter((m) => !isPhoneOs(m.os)).sort(
     (a, b) =>
       Number(b.id === own) - Number(a.id === own) ||
       Number(b.online) - Number(a.online) ||
@@ -398,6 +400,6 @@ export function sortedMachines(state: Pick<HubState, "machine" | "machines">): M
 
 /** "N machines · M online" numbers: every known machine (this one included) and how many are online. */
 export function machineCounts(state: Pick<HubState, "machines">): { total: number; online: number } {
-  const all = Object.values(state.machines);
+  const all = Object.values(state.machines).filter((m) => !isPhoneOs(m.os));
   return { total: all.length, online: all.filter((m) => m.online).length };
 }

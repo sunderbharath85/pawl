@@ -41,6 +41,7 @@ pub const WD_TICK: &str = "watchdog.tickSecs";
 pub const PEER_LISTEN: &str = "peer.listen";
 pub const PEER_ACCEPT: &str = "peer.acceptIntents";
 pub const PEER_ROOTS: &str = "peer.startRoots";
+pub const PEER_INTROS: &str = "peer.acceptRosterIntros";
 pub const REPOS_PATHS: &str = "repos.paths";
 pub const RELAY_URL: &str = "relay.url";
 pub const RELAY_KEY: &str = "relay.accessKey";
@@ -64,6 +65,7 @@ pub const ALL_KEYS: &[&str] = &[
     PEER_LISTEN,
     PEER_ACCEPT,
     PEER_ROOTS,
+    PEER_INTROS,
     REPOS_PATHS,
     RELAY_URL,
     RELAY_KEY,
@@ -161,6 +163,7 @@ pub fn to_settings(cfg: &HubConfig, overrides: &Overrides) -> HubSettings {
             listen: cfg.peer.listen_addr().ok().flatten().map(|a| a.to_string()),
             accept_intents: cfg.peer.accept_intents,
             start_roots: cfg.peer.start_roots.clone(),
+            accept_roster_intros: cfg.peer.accept_roster_intros,
         },
         repos: HubSettingsRepos { paths: cfg.repos.paths.clone() },
         relay: HubSettingsRelay { url: nonblank(&cfg.relay.url), access_key_set: nonblank(&cfg.relay.access_key).is_some() },
@@ -195,6 +198,7 @@ pub fn changed_keys(a: &HubConfig, b: &HubConfig) -> Vec<&'static str> {
             PEER_LISTEN => x.peer.listen != y.peer.listen,
             PEER_ACCEPT => x.peer.accept_intents != y.peer.accept_intents,
             PEER_ROOTS => x.peer.start_roots != y.peer.start_roots,
+            PEER_INTROS => x.peer.accept_roster_intros != y.peer.accept_roster_intros,
             REPOS_PATHS => x.repos.paths != y.repos.paths,
             RELAY_URL => x.relay.url != y.relay.url,
             RELAY_KEY => nonblank(&a.relay.access_key) != nonblank(&b.relay.access_key),
@@ -411,8 +415,11 @@ fn check_custom_agents(list: &[CustomAgentSetting], cur: &[CustomAgent], reserve
             return Err(invalid(f("id"), format!("{id:?} is used twice")));
         }
         let name = a.name.trim();
-        if name.is_empty() || name.chars().count() > MAX_AGENT_NAME_CHARS || name.chars().any(char::is_control) {
-            return Err(invalid(f("name"), format!("must be 1-{MAX_AGENT_NAME_CHARS} characters without control characters")));
+        if name.is_empty() || name.chars().count() > MAX_AGENT_NAME_CHARS || !name.chars().all(crate::machine::name_char_ok) {
+            return Err(invalid(
+                f("name"),
+                format!("must be 1-{MAX_AGENT_NAME_CHARS} characters without control or invisible characters (bidi controls, zero-width)"),
+            ));
         }
         if a.command.is_empty() || a.command[0].trim().is_empty() {
             return Err(invalid(f("command"), "must name a program to run"));
@@ -529,6 +536,9 @@ pub fn apply_patch(cur: &HubConfig, patch: &HubSettingsPatch, reserved: &[String
         }
         if let Some(roots) = &p.start_roots {
             next.peer.start_roots = check_dirs(PEER_ROOTS, roots, MAX_START_ROOTS)?;
+        }
+        if let Some(a) = p.accept_roster_intros {
+            next.peer.accept_roster_intros = a;
         }
     }
     if let Some(r) = &patch.repos {
@@ -695,6 +705,7 @@ pub fn edit_config(old: Option<&str>, next: &HubConfig, changed: &[&str]) -> Res
             PEER_LISTEN => set_opt(section(&mut doc, "peer")?, "listen", next.peer.listen.as_deref()),
             PEER_ACCEPT => set_value(section(&mut doc, "peer")?, "accept_intents", next.peer.accept_intents),
             PEER_ROOTS => set_value(section(&mut doc, "peer")?, "start_roots", string_array(&next.peer.start_roots)),
+            PEER_INTROS => set_value(section(&mut doc, "peer")?, "accept_roster_intros", next.peer.accept_roster_intros),
             REPOS_PATHS => set_value(section(&mut doc, "repos")?, "paths", string_array(&next.repos.paths)),
             RELAY_URL => set_opt(section(&mut doc, "relay")?, "url", next.relay.url.as_deref()),
             RELAY_KEY => set_opt(section(&mut doc, "relay")?, "access_key", next.relay.access_key.as_deref()),
@@ -772,6 +783,7 @@ pub fn masked_lines(s: &HubSettings, restart_required: &[String]) -> Vec<String>
         format!("listen                    {}{}", opt(&s.peer.listen), over(PEER_LISTEN)),
         format!("accept intents            {}", s.peer.accept_intents),
         format!("start roots               {}", list(&s.peer.start_roots)),
+        format!("accept roster intros      {}", s.peer.accept_roster_intros),
         "[repos]".to_string(),
         format!("paths                     {}", list(&s.repos.paths)),
         "[relay]".to_string(),

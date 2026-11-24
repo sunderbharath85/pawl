@@ -5,6 +5,12 @@
 //! presence snapshot peers receive, the pairing `ClientMsg`s, and the translation of `PeerEvent`s
 //! into `ServerMsg`s. Peer frames never reach `ClientMsg` handling: a peer can only pair, say
 //! hello, send presence and say bye, and the hub only ever sees the resulting `PeerEvent`s.
+//!
+//! Phones (PLAN step 7) are paired devices of kind `phone`: listed in `devices` with their link
+//! state and path, never in `machines`, never the active machine; their presence carries nothing
+//! the hub keeps (no repos, agents or pets). The group roster and the offline wake are in `intro`.
+
+mod intro;
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::RangeInclusive;
@@ -37,6 +43,10 @@ pub(super) struct Peers {
     departed: HashMap<String, RosterEntry>,
     /// The path of each live link (`PeerEvent::LinkPath`); gone on `LinkDown`. Shown as `Device.path`.
     paths: HashMap<String, LinkPath>,
+    /// When each paired phone was last woken through its relay mailbox (see `intro`).
+    wakes: HashMap<String, tokio::time::Instant>,
+    /// Each sender's `roster_intro` budget (see `intro::take_intro`).
+    intro_buckets: HashMap<String, intro::IntroBucket>,
 }
 
 /// A link-layer error as its bare snake_case wire code (`krypto-peer` errors display as the code).
@@ -299,14 +309,27 @@ impl Hub {
 
     // ------------------------------------------------------------ client messages
 
-    /// `create_invite`: a single-use invite URI for another hub to join. Needs the listener.
-    pub fn create_invite(&self, ttl_secs: Option<u32>, addr: Option<String>) -> Result<Value> {
+    /// `create_invite`: a single-use invite URI for another device to join. Needs the listener or
+    /// the relay. `for_phone`: relay-only (no `addr`, so it fits a QR code and a phone never tries
+    /// the LAN); `relay_off` while the relay is not connected.
+    pub fn create_invite(&self, ttl_secs: Option<u32>, addr: Option<String>, for_phone: bool) -> Result<Value> {
         let ttl = ttl_secs.unwrap_or(DEFAULT_INVITE_TTL_SECS);
         if !INVITE_TTL_SECS.contains(&ttl) {
             return Err(AckCode::Invalid.into());
         }
         let addr = addr.map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
-        let invite = self.inner.peer.create_invite(addr, Duration::from_secs(ttl.into())).map_err(wire)?;
+        if for_phone && addr.is_some() {
+            return Err(AckCode::Invalid.into());
+        }
+        let ttl_d = Duration::from_secs(ttl.into());
+        let invite = if for_phone {
+            // Relay-only, and bound to its purpose by the node: only a joiner whose os is ios /
+            // android may use it, and it is stored as kind phone. `relay_off` while the relay is not
+            // connected (or cannot take the pairing slot).
+            self.inner.peer.create_phone_invite(ttl_d).map_err(wire)?
+        } else {
+            self.inner.peer.create_invite(addr, ttl_d).map_err(wire)?
+        };
         // Never log the URI: it carries the one-time code.
         let advertising = invite.addr.as_deref().unwrap_or("relay only");
         tracing::info!("created a pairing invite (valid {ttl} s, advertising {advertising})");
@@ -331,7 +354,9 @@ impl Hub {
     }
 
     /// `revoke_device`: `bye{revoked}` on its live link, close it, mark it revoked, stop dialing.
-    pub async fn revoke_device(&self, device_id: &str, actor: &Actor) -> Result<()> {
+    /// Ack result `{introduced: [{id, name, kind}]}`: the devices it introduced here that are still
+    /// paired (they stay; a client may offer to revoke them too).
+    pub async fn revoke_device(&self, device_id: &str, actor: &Actor) -> Result<Value> {
         let _ops = self.inner.peer_ops.lock().await;
         let cached = self.peers().roster.contains_key(device_id);
         let known = cached || {
@@ -344,7 +369,12 @@ impl Hub {
         // The link layer first: it still needs the roster entry to say bye.
         self.inner.peer.revoke(device_id).await;
         self.remove_device(device_id, false, &actor.label).await;
-        Ok(())
+        let introduced: Vec<Value> = sorted_devices(&self.peers().roster, &HashMap::new())
+            .into_iter()
+            .filter(|d| d.introduced_by.as_deref() == Some(device_id))
+            .map(|d| json!({ "id": d.id, "name": d.name, "kind": d.kind }))
+            .collect();
+        Ok(json!({ "introduced": introduced }))
     }
 
     // ------------------------------------------------------------ peer events
@@ -369,8 +399,10 @@ impl Hub {
                 // The peer chose these names: the roster stores them sanitized, and so do we here.
                 machine.name = crate::store::sanitize_machine_name(&machine.name);
                 let device = Device { name: crate::store::sanitize_machine_name(&device.name), ..device };
+                let phone = device.kind == DeviceKind::Phone;
                 tracing::info!(
-                    "paired with {:?} ({}, {})",
+                    "paired with {} {:?} ({}, {})",
+                    if phone { "phone" } else { "hub" },
                     machine.name,
                     device.id,
                     if we_invited { "accepted our invite" } else { "joined their invite" }
@@ -378,16 +410,23 @@ impl Hub {
                 let detail = if we_invited { "accepted our invite" } else { "joined their invite" };
                 self.audit_pairing(PairingAuditKind::Paired, Some(&device), device.addr.clone(), "peer", Some(detail.into()))
                     .await;
+                let body = if phone {
+                    format!("{} can now see this machine's sessions and pets, and approve requests after a biometric check.", machine.name)
+                } else {
+                    format!("This machine and {} can now see each other.", machine.name)
+                };
                 let notification = notify::make(
                     &self.inner.machine_id,
                     NotificationLevel::Success,
                     format!("Paired with {}", machine.name),
-                    format!("This machine and {} can now see each other.", machine.name),
+                    body,
                     None,
                     None,
                 );
                 self.inner.bus.send_local(ServerMsg::Notification { notification });
                 self.sync_peers(Some((&device.id, true))).await;
+                // Group roster: introduce it to the devices we pair with, and them to it.
+                self.introduce_new_device(&device.id).await;
             }
             PeerEvent::PairRejected { remote_addr, reason } => {
                 tracing::warn!("refused a pairing attempt from {remote_addr} ({})", reject_label(reason));
@@ -404,9 +443,12 @@ impl Hub {
                 tracing::info!("link up: {device_id}");
                 self.sync_peers(Some((&device_id, true))).await;
                 // On every LinkUp: a new link can replace a live one and lose what was queued on it.
+                // Phones keep no mirror of their own: we never ask them for one.
                 if self.peers().roster.get(&device_id).is_some_and(|e| e.device.kind == DeviceKind::Hub) {
                     self.request_sync(&device_id).await;
                 }
+                // Intros it missed while offline (or that a replaced link lost).
+                self.flush_intros(&device_id).await;
             }
             PeerEvent::LinkDown { device_id } => {
                 tracing::info!("link down: {device_id}");
@@ -415,10 +457,15 @@ impl Hub {
                 self.sync_peers(Some((&device_id, false))).await;
             }
             PeerEvent::Body { device_id, body } => self.on_peer_body(&device_id, body).await,
+            PeerEvent::RosterIntro { from, devices, invalid } => self.on_roster_intro(&from, devices, invalid).await,
             PeerEvent::Presence { device_id, presence } => {
-                if !self.peers().roster.contains_key(&device_id) {
+                match self.peers().roster.get(&device_id).map(|e| e.device.kind) {
                     // Not (or no longer) paired: never keep its data.
-                    return;
+                    None => return,
+                    // A phone's presence is a keepalive: no repos, agents, pets or activity are taken
+                    // from it, so it never feeds pickers or the active machine.
+                    Some(DeviceKind::Phone) => return,
+                    Some(DeviceKind::Hub) => {}
                 }
                 let mut presence = presence_to_local_clock(presence, krypto_protocol::now_ms());
                 // Its repo index and agents feed "in repo X", "tell its codex" and the pickers: only

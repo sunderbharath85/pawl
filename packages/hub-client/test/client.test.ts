@@ -516,6 +516,34 @@ describe("pairing (protocol v3)", () => {
     await expect(p).rejects.toMatchObject({ code: "peer_listener_off" });
   });
 
+  test("createInvite forPhone: relay-only, v8 hubs only, never with an address", async () => {
+    const phoneUri = `krypto://peer?v=1&mid=${MID}&pk=cGstd2lucGM&relay=wss://relay.example.dev&rt=AAAA&rk=k3y_SECRET&code=AAAAAAAAAAAAAAAAAAAAAA&exp=1900000000000`;
+    // The welcome fixture is protocol v6: refused before anything is sent.
+    const old = connected();
+    const before = old.ws.sent.length;
+    await expect(old.c.createInvite({ forPhone: true })).rejects.toMatchObject({ code: "unsupported", requestType: "create_invite" });
+    expect(old.ws.sent.length).toBe(before);
+
+    const c = client();
+    c.connect();
+    const ws = FakeSocket.last();
+    ws.handshake({ ...welcome, protocolVersion: 8 });
+    await expect(c.createInvite({ forPhone: true, addr: "192.168.1.10:47801" })).rejects.toMatchObject({ code: "invalid" });
+    const p = c.createInvite({ forPhone: true, ttlSecs: 300 });
+    expect(ws.lastSent()).toEqual({ type: "create_invite", id: ws.lastSent().id, ttlSecs: 300, forPhone: true });
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: true, result: { uri: phoneUri, expiresAt: 9 } });
+    expect(await p).toEqual({ uri: phoneUri, expiresAt: 9 });
+
+    // A LAN invite cannot be scanned by a phone: refused rather than shown as a QR code.
+    const lan = c.createInvite({ forPhone: true });
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: true, result: { uri: inviteFrom2, expiresAt: 9 } });
+    await expect(lan).rejects.toMatchObject({ code: "unsupported" });
+
+    const off = c.createInvite({ forPhone: true });
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: false, error: "relay_off" });
+    await expect(off).rejects.toMatchObject({ code: "relay_off" });
+  });
+
   test("joinPeer sends the trimmed URI and folds the new peer into state", async () => {
     const { c, ws } = connected();
     const p = c.joinPeer(`  ${inviteFrom2}\n`);
@@ -568,6 +596,39 @@ describe("pairing (protocol v3)", () => {
     const missing = c.revokeDevice("gone00000000");
     ws.receive({ type: "ack", id: ws.lastSent().id, ok: false, error: "not_found" });
     await expect(missing).rejects.toMatchObject({ code: "not_found", requestType: "revoke_device" });
+  });
+
+  test("revokeDevice returns the devices the hub introduced; revokeDevices goes through them all", async () => {
+    const c = client();
+    c.connect();
+    const ws = FakeSocket.last();
+    ws.handshake({ ...welcome, protocolVersion: 8, machines: [machine, machine2], devices: [device2] });
+    const introduced = [
+      { id: "iphone000001", name: "iPhone", kind: "phone" as const },
+      { id: "pixel0000001", name: "Pixel", kind: "phone" as const },
+      { id: "linuxbox0003", name: "Linux box", kind: "hub" as const },
+    ];
+    const p = c.revokeDevice(MID2);
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: true, result: { introduced } });
+    expect(await p).toEqual({ introduced });
+    // An older hub acks without a result.
+    const old = c.revokeDevice("other0000001");
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: true });
+    expect(await old).toEqual({});
+
+    const all = c.revokeDevices(introduced);
+    const answer = async (error?: string) => {
+      await tick();
+      const sent = ws.lastSent();
+      expect(sent.type).toBe("revoke_device");
+      ws.receive(error ? { type: "ack", id: sent.id, ok: false, error } : { type: "ack", id: sent.id, ok: true, result: {} });
+      return sent.deviceId as string;
+    };
+    // One after another: ok, already gone, refused.
+    expect(await answer()).toBe("iphone000001");
+    expect(await answer("not_found")).toBe("pixel0000001");
+    expect(await answer("forbidden")).toBe("linuxbox0003");
+    expect(await all).toEqual({ removed: introduced.slice(0, 2), failed: [{ ...introduced[2]!, code: "forbidden" }] });
   });
 
   test("errors never echo the invite URI", async () => {

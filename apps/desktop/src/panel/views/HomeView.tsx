@@ -131,7 +131,7 @@ export function HomeView() {
         <div className="card">
           <h3>Pet mail</h3>
           {notes.length === 0 ? (
-            <p className="muted">Hub notifications (watchdog nudges, hook alerts, reports) land here.</p>
+            <p className="muted">Hub notifications (watchdog nudges, hook alerts, reports, devices added by your other machines) land here.</p>
           ) : (
             <ul className="notes">
               {notes.map((n) => (

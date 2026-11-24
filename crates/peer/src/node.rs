@@ -8,10 +8,11 @@
 //! Lock order (never take an earlier one while holding a later one): `gate` -> roster (the hub's own
 //! storage lock) -> `links`/`dialers`/`invites`/`relay`/the relay bookkeeping. Roster methods are never
 //! called while one of the later locks is held, so the hub may call any `PeerNode` method while holding
-//! its storage lock, except `revoke`, `disconnect`, `join`, `connect_known`, `set_relay` and `shutdown`,
-//! which call into the roster.
+//! its storage lock, except `revoke`, `disconnect`, `join`, `connect_known` / `roster_changed`,
+//! `wake_phone`, `set_relay` and `shutdown`, which call into the roster.
 
 use crate::envelope::{parse_pk, seal_plaintext};
+use crate::intro::device_name_ok;
 use crate::invite::{new_code, peer_addr_ok, valid_addr, CODE_LEN};
 use crate::io::{spawn_io, SendFail, WsIo, WsTx, MAX_FRAME};
 use crate::keys::wipe;
@@ -27,7 +28,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use krypto_protocol::{
-    is_valid_machine_id, now_ms, ByeReason, Device, DeviceKind, LinkPath, Machine, PairRejectReason, PeerBody,
+    is_valid_machine_id, now_ms, ByeReason, Device, DeviceKind, IntroDevice, LinkPath, Machine, MachineOs, PairRejectReason, PeerBody,
     PeerEnvelope, Presence, RelayClientFrame, RelayStatusInfo, UnixMs, MIRROR_FRAME_MAX_BYTES, PEER_PATH, PRESENCE_INTERVAL_MS, PRESENCE_OFFLINE_MS,
 };
 use relay::{PendingJoin, RelayConn, RelayState};
@@ -44,6 +45,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{timeout, Instant};
 use tracing::{debug, info, warn};
 
+mod phone;
 mod relay;
 
 /// Whole `join` (dial + pair_request + reply).
@@ -98,8 +100,17 @@ pub enum PeerEvent {
     /// An authenticated presence heartbeat.
     Presence { device_id: String, presence: Presence },
     /// Any other authenticated body (mirror, sync_request, mirror_snapshot, mirror_events, sync_done,
-    /// and later steps' bodies), in arrival order per link. Pair, hello, presence and bye never come here.
+    /// and later steps' bodies), in arrival order per link. Pair, hello, presence, bye and roster_intro
+    /// never come here.
     Body { device_id: String, body: PeerBody },
+    /// A paired hub introduced devices (`roster_intro` on its live link). `devices` passed the checks
+    /// (in the sender's order); `invalid` did not, with the reason code: a `check_intro_device` code, or
+    /// `own_device` (our id or key), `sender_device` (the sender's id or key), `duplicate` (an id or key
+    /// already named earlier in this intro). Nothing is stored: the hub checks conflicts and
+    /// revocations, stores what it accepts (`introduced_by = from`) and then calls
+    /// `PeerNode::roster_changed`. An intro from a phone, or with more than MAX_INTRO_DEVICES devices, is
+    /// dropped without an event.
+    RosterIntro { from: String, devices: Vec<IntroDevice>, invalid: Vec<(IntroDevice, &'static str)> },
     /// The device was revoked, here (`by_peer: false`) or by the peer's `bye{revoked}`. Comes after
     /// the `LinkDown` of its link, if it had one.
     Revoked { device_id: String, by_peer: bool },
@@ -147,6 +158,29 @@ pub enum SendError {
     /// (presence goes through `set_presence`); `send` refuses them.
     #[error("reserved")]
     Reserved,
+}
+
+/// `PeerNode::wake_phone` errors. `Display` is a snake_case code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum WakeError {
+    /// Not a paired device of kind phone.
+    #[error("not_phone")]
+    NotPhone,
+    /// The phone has a live link: send to it normally.
+    #[error("linked")]
+    Linked,
+    /// No relay session (relay off, connecting, or only adopted by a join that is still running).
+    #[error("relay_off")]
+    RelayOff,
+    /// This phone was woken less than a minute ago.
+    #[error("rate_limited")]
+    RateLimited,
+    /// The hub disconnected the phone (`disconnect`) and its cooldown is still running.
+    #[error("disconnected")]
+    Disconnected,
+    /// The relay queue is full; nothing was queued.
+    #[error("backpressure")]
+    Backpressure,
 }
 
 /// `join` errors. `Display` is the wire error code.
@@ -204,6 +238,8 @@ struct Inner {
     cooldowns: Mutex<HashMap<String, Instant>>,
     /// When we last told a revoked device so (`answer_revoked`).
     revoked_answers: Mutex<HashMap<String, Instant>>,
+    /// When we last woke each phone (`wake_phone`).
+    wakes: Mutex<HashMap<String, Instant>>,
     /// The relay client: URL, status and live session (see `node::relay`).
     relay: Mutex<RelayState>,
     /// Bumped whenever a relay session starts or ends, or the relay refuses a frame; dial loops wait on it.
@@ -235,6 +271,8 @@ struct LiveInvite {
     addr: Option<String>,
     /// The relay pairing slot in the URI, if it has one.
     relay: Option<RelaySlot>,
+    /// Who may use it: a phone (`create_phone_invite`) or a hub.
+    kind: DeviceKind,
 }
 
 struct RelaySlot {
@@ -531,6 +569,7 @@ impl PeerNode {
                 pair_limiter: Mutex::new(PairLimiter::default()),
                 cooldowns: Mutex::new(HashMap::new()),
                 revoked_answers: Mutex::new(HashMap::new()),
+                wakes: Mutex::new(HashMap::new()),
                 relay: Mutex::new(RelayState::default()),
                 relay_changed,
                 relay_pending: Mutex::new(HashSet::new()),
@@ -572,8 +611,17 @@ impl PeerNode {
     /// connected the URI also carries `relay`, `rt` (a one-shot relay pairing slot) and `rk` (its access
     /// key), and then needs no LAN addr. `ttl` must be 60..=3600 s. `ListenerOff`: neither the listener
     /// nor the relay is on.
+    /// Only a hub may join it: a joiner whose machine os is ios / android gets `pair_reject{invalid_invite}`.
     pub fn create_invite(&self, advertise: Option<String>, ttl: Duration) -> Result<Invite, InviteError> {
-        self.inner.create_invite(advertise, ttl)
+        self.inner.create_invite(advertise, ttl, DeviceKind::Hub)
+    }
+
+    /// New single-use invite for a phone (the QR code): only the relay carries it (no `addr`), and only a
+    /// joiner whose machine os is ios / android may use it (anyone else gets `pair_reject{invalid_invite}`
+    /// and the invite stays usable); the device is stored as kind phone. `RelayOff` while the relay is
+    /// not connected (or its queue cannot take the pairing slot). `ttl` as above.
+    pub fn create_phone_invite(&self, ttl: Duration) -> Result<Invite, InviteError> {
+        self.inner.create_invite(None, ttl, DeviceKind::Phone)
     }
 
     /// Pair with the hub that issued `uri` (see `join_invite`).
@@ -598,7 +646,8 @@ impl PeerNode {
     }
 
     /// Idempotent: keep a dial loop running for every roster hub (LAN dialing where it has an addr,
-    /// relay hellos while the relay is up), and resend the relay allow list if it changed.
+    /// relay hellos while the relay is up), and resend the relay allow list if it changed. Phones are
+    /// never dialed: they say hello first.
     pub fn connect_known(&self) {
         if tokio::runtime::Handle::try_current().is_err() {
             warn!("connect_known called outside a Tokio runtime; ignored");
@@ -631,6 +680,30 @@ impl PeerNode {
     /// peer resyncs when it reconnects. Never blocks.
     pub fn send(&self, device_id: &str, body: PeerBody) -> Result<(), SendError> {
         self.inner.send(device_id, &body)
+    }
+
+    /// `roster_intro{devices}` on the device's live link, like `send`. `TooLarge` (nothing sent) above
+    /// MAX_INTRO_DEVICES devices. Send only devices that pass `check_intro_device`: the receiver reports
+    /// the others as invalid.
+    pub fn send_roster_intro(&self, device_id: &str, devices: Vec<IntroDevice>) -> Result<(), SendError> {
+        if devices.len() > crate::intro::MAX_INTRO_DEVICES {
+            return Err(SendError::TooLarge);
+        }
+        self.inner.send(device_id, &PeerBody::RosterIntro { devices })
+    }
+
+    /// The hub changed the roster itself (e.g. stored devices from a `RosterIntro`): resend the relay
+    /// allow list and keep a dial loop for every roster hub (same as `connect_known`). Inbound LAN
+    /// hellos and relay frames read the roster live, so the new devices are accepted from now on.
+    pub fn roster_changed(&self) {
+        self.connect_known();
+    }
+
+    /// Offline wake: queue one presence in the relay mailbox of a paired phone that has no live link, so
+    /// the relay sends it a content-free push. At most one per phone per minute (`RateLimited`); sealed
+    /// and sequenced like every frame. The only frame a hub ever sends a phone unasked.
+    pub fn wake_phone(&self, device_id: &str) -> Result<(), WakeError> {
+        self.inner.wake_phone(device_id)
     }
 
     /// Revoke a device: `bye{revoked}` on its live link, close it, mark it revoked, stop dialing, drop
@@ -719,6 +792,9 @@ impl Inner {
     }
 
     fn set_machine(&self, m: Machine) {
+        if !device_name_ok(&m.name) {
+            warn!("this machine's name breaks the peer name rules; paired devices will refuse its frames");
+        }
         let mut me = lock(&self.me);
         if m.id != me.id {
             warn!(current = %me.id, given = %m.id, "set_machine with a different machine id; keeping the id");
@@ -733,6 +809,13 @@ impl Inner {
             Some(_) => lock(&self.advertise).clone(),
             None => None,
         }
+    }
+
+    /// The addr a hello reported, if we may store it: a LAN IP literal (`peer_addr_ok`) from a hub
+    /// (phones are reached over the relay only).
+    fn hello_addr(&self, device_id: &str, addr: Option<String>) -> Option<String> {
+        let addr = addr.filter(|a| peer_addr_ok(a))?;
+        self.roster.get(device_id).is_some_and(|e| e.device.kind == DeviceKind::Hub).then_some(addr)
     }
 
     fn listener_addr(&self) -> Option<SocketAddr> {
@@ -844,9 +927,14 @@ impl Inner {
 
     // ---------- invites ----------
 
-    fn create_invite(&self, advertise: Option<String>, ttl: Duration) -> Result<Invite, InviteError> {
-        let bound = self.listener_addr();
+    fn create_invite(&self, advertise: Option<String>, ttl: Duration, kind: DeviceKind) -> Result<Invite, InviteError> {
+        // Phones are reached over the relay only: their invites carry no LAN addr.
+        let relay_only = kind == DeviceKind::Phone;
+        let bound = if relay_only { None } else { self.listener_addr() };
         let relay = self.relay_conn();
+        if relay_only && relay.is_none() {
+            return Err(InviteError::RelayOff);
+        }
         // An explicit LAN address needs the listener behind it.
         if bound.is_none() && (relay.is_none() || advertise.is_some()) {
             return Err(InviteError::ListenerOff);
@@ -883,7 +971,7 @@ impl Inner {
             }
         });
         if addr.is_none() && slot.is_none() {
-            return Err(InviteError::ListenerOff);
+            return Err(if relay_only { InviteError::RelayOff } else { InviteError::ListenerOff });
         }
         let (relay_url, relay_token, relay_key) = match &slot {
             Some((s, token)) => {
@@ -905,12 +993,12 @@ impl Inner {
             if invites.len() >= MAX_INVITES {
                 invites.remove(0);
             }
-            invites.push(LiveInvite { code: code_bytes, expires_at, addr: addr.clone(), relay: slot.map(|(s, _)| s) });
+            invites.push(LiveInvite { code: code_bytes, expires_at, addr: addr.clone(), relay: slot.map(|(s, _)| s), kind });
         }
         if explicit {
             *lock(&self.advertise) = addr.clone();
         }
-        info!(addr = ?addr, relay = relay_url.is_some(), expires_at, "peer invite created");
+        info!(addr = ?addr, relay = relay_url.is_some(), ?kind, expires_at, "peer invite created");
         Ok(Invite {
             machine_id: self.me_id(),
             public_key: self.keys.public_key(),
@@ -934,7 +1022,10 @@ impl Inner {
     /// LAN addr it advertised (if any). A miss consumes nothing: anyone who knows our public key can
     /// send a wrong code, so burning invites would let them block pairing. Guessing is the rate
     /// limiter's problem (and infeasible against 128-bit codes).
-    fn consume_invite(&self, code: &str) -> Option<Option<String>> {
+    /// Use up the live invite with this code, if the joiner (machine os `os`) may use it: a phone invite
+    /// takes only ios / android, a hub invite anything else. A mismatch leaves the invite live. Returns
+    /// the invite's LAN addr and the kind to store the joiner as.
+    fn consume_invite(&self, code: &str, os: MachineOs) -> Result<(Option<String>, DeviceKind), PairRejectReason> {
         let mut given = b64::decode_url(code).ok().filter(|c| c.len() == CODE_LEN);
         let mut invites = lock(&self.invites);
         let now = now_ms();
@@ -951,7 +1042,13 @@ impl Inner {
         if let Some(g) = given.as_mut() {
             wipe(g);
         }
-        found.map(|i| invites.remove(i).addr.clone())
+        let i = found.ok_or(PairRejectReason::InvalidInvite)?;
+        let kind = invites[i].kind;
+        if (kind == DeviceKind::Phone) != crate::intro::phone_os(os) {
+            debug!(invite = ?kind, ?os, "pair attempt refused: this invite is for another kind of device");
+            return Err(PairRejectReason::InvalidInvite);
+        }
+        Ok((invites.remove(i).addr.clone(), kind))
     }
 
     /// The pairing slots of live invites made on the relay at `url` (base64url token, expiry).
@@ -1072,7 +1169,8 @@ impl Inner {
             debug!(remote = %source, "pair attempt closed: no live invite");
             return None;
         }
-        if pk == self.keys.public_key() {
+        // A key of small order would make every box to it guessable.
+        if pk == self.keys.public_key() || crate::intro::is_low_order(&pk) {
             return None;
         }
         if !lock(&self.pair_limiter).attempt(std::time::Instant::now()) {
@@ -1107,7 +1205,7 @@ impl Inner {
         let PeerBody::PairRequest { code, machine, addr, ts } = body else {
             return reject(PairRejectReason::BadRequest);
         };
-        if machine.id != env.from || !is_valid_machine_id(&env.from) || env.from == me_id {
+        if machine.id != env.from || !is_valid_machine_id(&env.from) || env.from == me_id || !device_name_ok(&machine.name) {
             return reject(PairRejectReason::BadRequest);
         }
         // A request can wait in our relay mailbox while we are offline; its joiner gave up after
@@ -1117,20 +1215,27 @@ impl Inner {
             debug!(remote = %source, "stale pair_request from the relay");
             return reject(PairRejectReason::BadRequest);
         }
-        let Some(invite_addr) = self.consume_invite(&code) else { return reject(PairRejectReason::InvalidInvite) };
+        // The invite decides the kind (a joiner's os must match it), never the joiner alone.
+        let (invite_addr, kind) = match self.consume_invite(&code, machine.os) {
+            Ok(found) => found,
+            Err(reason) => return reject(reason),
+        };
         // A peer-reported addr is kept only if it is a private/LAN IP literal.
         let addr = addr.filter(|a| peer_addr_ok(a));
 
         let now = now_ms();
         let device = Device {
             id: env.from.clone(),
-            kind: DeviceKind::Hub,
+            kind,
             name: machine.name.clone(),
             public_key: b64::encode(&pk),
             paired_at: now,
             last_seen: Some(now),
-            addr,
+            // Phones are reached over the relay only.
+            addr: addr.filter(|_| kind == DeviceKind::Hub),
             path: None,
+            introduced_by: None,
+            os: Some(machine.os),
         };
         let online = Machine { last_seen: now, online: true, ..machine };
         self.roster.upsert(RosterEntry { device: device.clone(), machine: Machine { online: false, ..online.clone() } });
@@ -1177,12 +1282,12 @@ impl Inner {
             debug!(remote = %remote, device = %env.from, "peer socket closed: hello stamped too far from our clock");
             return None;
         }
-        if machine.id != env.from || !self.accept_rx_seq(&env.from, env.seq) {
+        if machine.id != env.from || !device_name_ok(&machine.name) || !self.accept_rx_seq(&env.from, env.seq) {
             debug!(remote = %remote, device = %env.from, "peer socket closed: bad or replayed hello");
             return None;
         }
         let now = now_ms();
-        let addr = addr.filter(|a| peer_addr_ok(a));
+        let addr = self.hello_addr(&env.from, addr);
         self.roster.update_seen(&env.from, &machine, addr.as_deref(), now);
         Some(LinkSetup {
             device_id: env.from,
@@ -1279,6 +1384,10 @@ impl Inner {
                     debug!(device = %mid, "pair_accept rejected: identity, req_seq or seq check failed");
                     return PairReply::Other;
                 }
+                if !device_name_ok(&machine.name) {
+                    info!(device = %mid, "pair_accept refused: the inviter's machine name is not allowed");
+                    return PairReply::Reject;
+                }
                 PairReply::Accept(machine)
             }
             PeerBody::PairReject { reason, .. } => {
@@ -1309,6 +1418,8 @@ impl Inner {
             last_seen: Some(now),
             addr: invite.addr.clone(),
             path: None,
+            introduced_by: None,
+            os: Some(machine.os),
         };
         let online = Machine { last_seen: now, online: true, ..machine };
         self.roster.upsert(RosterEntry { device: device.clone(), machine: Machine { online: false, ..online.clone() } });
@@ -1413,7 +1524,9 @@ impl Inner {
             if self.is_closing() {
                 return;
             }
-            let Some(entry) = self.roster.get(&device_id) else { return };
+            // Phones are never dialed: they say hello when they come online, and anything we queued for
+            // an offline phone would make the relay push to it.
+            let Some(entry) = self.roster.get(&device_id).filter(|e| e.device.kind == DeviceKind::Hub) else { return };
             if let Some(until) = self.cooldown_until(&device_id) {
                 tokio::select! {
                     _ = tokio::time::sleep_until(until) => {}
@@ -1520,11 +1633,11 @@ impl Inner {
             }
             _ => return Err(()),
         };
-        if machine.id != device_id || !self.accept_rx_seq(device_id, env.seq) {
+        if machine.id != device_id || !device_name_ok(&machine.name) || !self.accept_rx_seq(device_id, env.seq) {
             return Err(());
         }
         let now = now_ms();
-        let their_addr = their_addr.filter(|a| peer_addr_ok(a));
+        let their_addr = self.hello_addr(device_id, their_addr);
         self.roster.update_seen(device_id, &machine, their_addr.as_deref(), now);
         let setup = LinkSetup {
             device_id: device_id.to_string(),
@@ -1945,7 +2058,7 @@ impl Inner {
     }
 
     /// A text frame from the link's LAN socket.
-    fn on_frame(&self, link: &Link, text: &str) -> Frame {
+    fn on_frame(self: &Arc<Self>, link: &Link, text: &str) -> Frame {
         let Ok(env) = serde_json::from_str::<PeerEnvelope>(text) else {
             debug!(device = %link.device_id, "dropped malformed frame");
             return Frame::Dropped;
@@ -1957,12 +2070,12 @@ impl Inner {
     }
 
     /// An authenticated body from the device, on either path.
-    fn on_body(&self, device_id: &str, body: PeerBody) -> Frame {
+    fn on_body(self: &Arc<Self>, device_id: &str, body: PeerBody) -> Frame {
         let now = now_ms();
         match body {
             PeerBody::Presence { presence } => {
-                if presence.machine.id != device_id {
-                    debug!(device = %device_id, "ignored presence for another machine");
+                if presence.machine.id != device_id || !device_name_ok(&presence.machine.name) {
+                    debug!(device = %device_id, "ignored presence for another machine or with a refused name");
                     return Frame::Ok;
                 }
                 self.roster.update_seen(device_id, &presence.machine, None, now);
@@ -1970,8 +2083,8 @@ impl Inner {
                 Frame::Ok
             }
             PeerBody::Hello { machine, addr, .. } => {
-                if machine.id == device_id {
-                    let addr = addr.filter(|a| peer_addr_ok(a));
+                if machine.id == device_id && device_name_ok(&machine.name) {
+                    let addr = self.hello_addr(device_id, addr);
                     self.roster.update_seen(device_id, &machine, addr.as_deref(), now);
                 }
                 Frame::Ok
@@ -1979,6 +2092,10 @@ impl Inner {
             PeerBody::Bye { reason, .. } => Frame::Bye(reason),
             // Pairing bodies mean nothing on a live link.
             PeerBody::PairRequest { .. } | PeerBody::PairAccept { .. } | PeerBody::PairReject { .. } => Frame::Ok,
+            PeerBody::RosterIntro { devices } => {
+                self.roster_intro(device_id, devices);
+                Frame::Ok
+            }
             // Everything else is the hub's (mirror, sync, ...). Never logged: it may carry user data.
             body => {
                 self.emit(PeerEvent::Body { device_id: device_id.to_string(), body });
@@ -1989,7 +2106,7 @@ impl Inner {
 
     /// Frames the LAN socket delivered before it died, handled in order. Returns a bye among them (the
     /// rest after it is ignored).
-    fn drain_lan(&self, link: &Link, lan_rx: &mut Option<mpsc::Receiver<String>>) -> Option<ByeReason> {
+    fn drain_lan(self: &Arc<Self>, link: &Link, lan_rx: &mut Option<mpsc::Receiver<String>>) -> Option<ByeReason> {
         let rx = lan_rx.as_mut()?;
         while let Ok(text) = rx.try_recv() {
             if let Frame::Bye(reason) = self.on_frame(link, &text) {

@@ -65,6 +65,7 @@ export {
   checkMachineName,
   groupByMachine,
   isLocal,
+  isPhoneOs,
   MACHINE_NAME_MAX,
   machineDisplayName,
   machinesLine,
@@ -78,6 +79,32 @@ export {
   type MachineGroup,
   type MachineNameCheck,
 } from "./machine";
+export {
+  groupDevices,
+  introducedByRevoked,
+  introducedByText,
+  inviteState,
+  inviteUsedBy,
+  isPhone,
+  isPhoneInvite,
+  pairedPhones,
+  PHONE_PROTOCOL_VERSION,
+  PHONE_QR_WARNING,
+  phoneCounts,
+  phoneOs,
+  phonePairingBlock,
+  phonesLine,
+  revokeIntroducedPrompt,
+  revokeManyText,
+  type DeviceGroups,
+  type IntroducedDevice,
+  type RevokeIntroducedPrompt,
+  type RevokeManyResult,
+  type InviteState,
+  type PendingInvite,
+  type PhonePairingBlockCode,
+} from "./devices";
+export { DEVICE_NAME_MAX, deviceNameOk, deviceNameProblem, trimWhiteSpace, type DeviceNameProblem } from "./names";
 export { checkPetName, PET_NAME_MAX, petNameMessage, petRenameErrorText, type PetNameCheck, type PetNameError } from "./petNames";
 export {
   BACKFILL_WINDOW,

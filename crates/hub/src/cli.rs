@@ -183,8 +183,11 @@ pub enum PeerAction {
         #[arg(long, value_name = "SECS")]
         ttl: Option<u32>,
         /// Address the other hub dials, "host:port" (default: the listener's; required if it binds 0.0.0.0)
-        #[arg(long, value_name = "HOST:PORT")]
+        #[arg(long, value_name = "HOST:PORT", conflicts_with = "phone")]
         addr: Option<String>,
+        /// An invite for the Krypto phone app: relay only (needs the relay connected); scan or paste it
+        #[arg(long)]
+        phone: bool,
     },
     /// Pair with the hub that created this invite URI
     Join {
@@ -592,6 +595,17 @@ pub enum Conn {
 }
 
 impl Conn {
+    /// Names of the paired devices and machines by id (who decided a remote approval).
+    fn device_names(&self) -> HashMap<String, String> {
+        let (devices, machines) = match self {
+            Conn::Remote(r) => (r.welcome.devices.clone(), r.welcome.machines.clone()),
+            Conn::Local { hub, .. } => (hub.devices(), hub.machines()),
+        };
+        let mut names: HashMap<String, String> = machines.into_iter().map(|m| (m.id, m.name)).collect();
+        names.extend(devices.into_iter().map(|d| (d.id, d.name)));
+        names
+    }
+
     pub fn local(hub: Hub) -> Self {
         let rx = hub.subscribe();
         Conn::Local { hub, rx, actor: Actor::client(ClientKind::Cli, 0) }
@@ -637,6 +651,9 @@ fn rid() -> String {
 // ---------------------------------------------------------------- peer / machines
 
 /// What pairing gives the other machine, said once by `peer invite` and `peer join`.
+/// What `krypto peer invite --phone` tells the user after the URI.
+const PHONE_INVITE_HOWTO: &str = "In the Krypto phone app, open Pair and paste this URI (the desktop app's \"Pair a phone\" shows it as a QR code). The phone pairs through the relay, then reaches every machine this one pairs with.";
+
 const PAIRED_CAN: &str = "It can see this machine's sessions and, with confirmation on its side, approve once, prompt, cancel and start agents in folders this machine already uses. Turn off with [peer] accept_intents = false.";
 
 /// Friendly text for the pairing ack error codes (the hub answers with the bare code).
@@ -654,6 +671,8 @@ fn peer_error_text(code: &str) -> Option<&'static str> {
         "invite_rejected" => "the inviting hub rejected the invite: it is wrong, expired or already used; create a new one",
         "timeout" => "the inviting hub did not answer in time",
         "not_found" => "no such paired machine",
+        "relay_off" => "a phone pairs through the relay, and this hub is not connected to one: set the relay in \
+                        the desktop app's Settings (or [relay] url in config.toml) and check `krypto settings`",
         _ => return None,
     })
 }
@@ -699,11 +718,24 @@ async fn run_peer(paths: &Paths, port_flag: Option<u16>, action: PeerAction) -> 
     let devices = hub.welcome.devices.clone();
     let mut conn = Conn::Remote(Box::new(hub));
     match action {
-        PeerAction::Invite { ttl, addr } => {
-            let v = peer_request(&mut conn, ClientMsg::CreateInvite { id: rid(), ttl_secs: ttl, addr }).await?;
+        PeerAction::Invite { ttl, addr, phone } => {
+            let msg = ClientMsg::CreateInvite { id: rid(), ttl_secs: ttl, addr, for_phone: phone.then_some(true) };
+            let v = peer_request(&mut conn, msg).await?;
             let uri = v.get("uri").and_then(Value::as_str).context("hub sent no invite uri")?;
             let expires_at = v.get("expiresAt").and_then(Value::as_i64).unwrap_or(0);
             let mins = ((expires_at - krypto_protocol::now_ms()).max(0) + 59_999) / 60_000;
+            if phone {
+                println!(
+                    "Phone invite for {} (single use, expires at {} - in {mins} min):",
+                    printable(&me.name),
+                    local_time(expires_at)
+                );
+                println!();
+                println!("  {uri}");
+                println!();
+                println!("{PHONE_INVITE_HOWTO}");
+                return Ok(());
+            }
             println!(
                 "Invite to pair with {} (single use, expires at {} - in {mins} min):",
                 printable(&me.name),
@@ -734,18 +766,44 @@ async fn run_peer(paths: &Paths, port_flag: Option<u16>, action: PeerAction) -> 
         }
         PeerAction::Revoke { machine } => {
             let device = resolve_device(&devices, &machine)?;
-            peer_request(&mut conn, ClientMsg::RevokeDevice { id: rid(), device_id: device.id.clone() }).await?;
+            let v = peer_request(&mut conn, ClientMsg::RevokeDevice { id: rid(), device_id: device.id.clone() }).await?;
             println!(
                 "Revoked {} ({}): it can no longer connect. Pair again with a new invite.",
                 printable(&device.name),
                 device.id
             );
+            if let Some(line) = introduced_line(&device.name, &v) {
+                println!("{line}");
+            }
         }
     }
     Ok(())
 }
 
 /// A paired device by exact id, else by name (trimmed, case-insensitive; must be unambiguous).
+/// After a revoke: the devices the revoked one introduced that stay paired (`introduced` in the ack).
+fn introduced_line(revoked: &str, ack: &Value) -> Option<String> {
+    let list = ack.get("introduced")?.as_array()?;
+    let names: Vec<String> = list
+        .iter()
+        .filter_map(|d| {
+            let name = printable(d.get("name")?.as_str()?);
+            Some(match d.get("kind").and_then(Value::as_str) {
+                Some("phone") => format!("{name} (phone)"),
+                _ => name,
+            })
+        })
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} added {} here; they stay paired. Revoke them too with `krypto peer revoke <name>` if you no longer trust them.",
+        printable(revoked),
+        names.join(", ")
+    ))
+}
+
 fn resolve_device<'a>(devices: &'a [Device], query: &str) -> Result<&'a Device> {
     let q = query.trim();
     if let Some(d) = devices.iter().find(|d| d.id == q) {
@@ -834,6 +892,11 @@ async fn run_machines(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
         })
         .collect();
     print_table(&["NAME", "ID", "OS", "STATUS", "LAST SEEN", "PEER ADDR", "PATH"], &rows);
+    let phones = phone_rows(&devices, &machines, now);
+    if !phones.is_empty() {
+        println!();
+        print_table(&["PHONE", "ID", "OS", "STATUS", "LAST SEEN", "PATH", "PAIRED"], &phones);
+    }
     if let Some(r) = &relay {
         println!();
         println!("relay: {}", relay_line(r));
@@ -843,6 +906,34 @@ async fn run_machines(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
         println!("No paired machines. Pair one with `krypto peer invite` (needs `krypto serve --peer-listen <LAN-IP>`).");
     }
     Ok(())
+}
+
+/// The paired phones for `krypto machines` (they are devices, never machines): online while a link
+/// is up (it has a path), and who introduced it when it was not paired here.
+fn phone_rows(devices: &[Device], machines: &[Machine], now: krypto_protocol::UnixMs) -> Vec<Vec<String>> {
+    devices
+        .iter()
+        .filter(|d| d.kind == DeviceKind::Phone)
+        .map(|d| {
+            let online = d.path.is_some();
+            let paired = match &d.introduced_by {
+                Some(by) => {
+                    let name = machines.iter().find(|m| &m.id == by).map(|m| printable(&m.name)).unwrap_or_else(|| by.clone());
+                    format!("introduced by {name}")
+                }
+                None => "here".into(),
+            };
+            vec![
+                printable(&d.name),
+                d.id.clone(),
+                d.os.map(|o| enum_label(&o)).unwrap_or_else(|| "-".into()),
+                if online { "online" } else { "offline" }.into(),
+                if online { "now".into() } else { d.last_seen.map(|t| ago(now, t)).unwrap_or_else(|| "never".into()) },
+                d.path.filter(|_| online).map(|p| enum_label(&p)).unwrap_or_else(|| "-".into()),
+                paired,
+            ]
+        })
+        .collect()
 }
 
 /// "wss://relay.example.com (connected)", "off", "wss://... (not connected: unreachable)".
@@ -1579,6 +1670,7 @@ async fn drive_session(conn: &mut Conn, agent: &str, cwd: &str, prompt: Option<S
     eprintln!("[hub] session {} ({})", session.id, enum_label(&session.status));
     let mut stdin = StdinLines::spawn();
     let mut printer = Printer::new(agent);
+    printer.names = conn.device_names();
 
     if prompt.is_some() {
         return run_turn(conn, &session.id, &mut stdin, &mut printer).await.map(|_| ());
@@ -1709,6 +1801,17 @@ fn parse_answer(req: &PermissionRequest, line: &str) -> Option<Option<String>> {
     }
 }
 
+/// Who resolved a permission, for the event stream: "by rule", "automatically", "by you", or
+/// "from iPhone" when the decision came from a paired phone or machine (`byMachineId`).
+fn decider_label(by: Option<ResolvedBy>, from: Option<&str>, names: &HashMap<String, String>) -> String {
+    match (by, from) {
+        (Some(ResolvedBy::Rule), _) => "by rule".to_string(),
+        (Some(ResolvedBy::System), _) => "automatically".to_string(),
+        (_, Some(id)) => format!("from {}", printable(names.get(id).map_or(id, String::as_str))),
+        _ => "by you".to_string(),
+    }
+}
+
 /// Human-readable event stream on stdout.
 struct Printer {
     agent: String,
@@ -1716,11 +1819,13 @@ struct Printer {
     /// Text of the `you:` line just printed; an identical user_message right after it (an agent
     /// replaying the prompt as user_message_chunk) is not printed again.
     last_user: Option<String>,
+    /// Paired device / machine names by id: "answered allow from iPhone".
+    names: HashMap<String, String>,
 }
 
 impl Printer {
     fn new(agent: &str) -> Self {
-        Self { agent: agent.to_string(), streaming: None, last_user: None }
+        Self { agent: agent.to_string(), streaming: None, last_user: None, names: HashMap::new() }
     }
 
     /// The `you:` line for a user_message, or None if it repeats the line just printed.
@@ -1810,11 +1915,7 @@ impl Printer {
                     Some(PermissionOutcome::Selected { option_id }) => format!("answered {option_id}"),
                     _ => "cancelled".into(),
                 };
-                let who = match by {
-                    Some(ResolvedBy::Rule) => "by rule",
-                    Some(ResolvedBy::System) => "automatically",
-                    _ => "by you",
-                };
+                let who = decider_label(by, e.payload.get("byMachineId").and_then(Value::as_str), &self.names);
                 let title = e.payload.pointer("/toolCall/title").and_then(Value::as_str).unwrap_or("permission");
                 println!("[permission] {title}: {what} {who}");
             }
@@ -1951,8 +2052,11 @@ mod tests {
         let c = Cli::try_parse_from(["krypto", "peer", "invite", "--ttl", "120", "--addr", "10.0.0.2:47801"]).unwrap();
         assert!(matches!(
             c.command,
-            Command::Peer { action: PeerAction::Invite { ttl: Some(120), addr: Some(ref a) } } if a == "10.0.0.2:47801"
+            Command::Peer { action: PeerAction::Invite { ttl: Some(120), addr: Some(ref a), phone: false } } if a == "10.0.0.2:47801"
         ));
+        let c = Cli::try_parse_from(["krypto", "peer", "invite", "--phone"]).unwrap();
+        assert!(matches!(c.command, Command::Peer { action: PeerAction::Invite { ttl: None, addr: None, phone: true } }));
+        assert!(Cli::try_parse_from(["krypto", "peer", "invite", "--phone", "--addr", "10.0.0.2:47801"]).is_err(), "a phone invite has no addr");
         let c = Cli::try_parse_from(["krypto", "peer", "join", "krypto://peer?v=1&mid=x"]).unwrap();
         assert!(matches!(c.command, Command::Peer { action: PeerAction::Join { ref uri } } if uri.starts_with("krypto://")));
         let c = Cli::try_parse_from(["krypto", "peer", "revoke", "Mac mini"]).unwrap();
@@ -1972,7 +2076,34 @@ mod tests {
             last_seen: None,
             addr: None,
             path: None,
+            introduced_by: None,
+            os: None,
         }
+    }
+
+    #[test]
+    fn phones_are_listed_apart_from_machines() {
+        let mac = Machine {
+            id: "aaaaaa111111".into(),
+            name: "Mac mini".into(),
+            os: krypto_protocol::MachineOs::Macos,
+            last_seen: 0,
+            online: true,
+            hub_version: None,
+            user_active_at: None,
+        };
+        let mut phone = device("pppppp111111", "iPhone");
+        phone.kind = DeviceKind::Phone;
+        phone.os = Some(krypto_protocol::MachineOs::Ios);
+        phone.path = Some(krypto_protocol::LinkPath::Relay);
+        let mut pixel = device("pppppp222222", "Pixel");
+        pixel.kind = DeviceKind::Phone;
+        pixel.introduced_by = Some(mac.id.clone());
+        pixel.last_seen = Some(1_000);
+        let rows = phone_rows(&[device("aaaaaa111111", "Mac mini"), phone, pixel], &[mac], 61_000);
+        assert_eq!(rows.len(), 2, "hubs are not phones");
+        assert_eq!(rows[0], ["iPhone", "pppppp111111", "ios", "online", "now", "relay", "here"]);
+        assert_eq!(rows[1], ["Pixel", "pppppp222222", "-", "offline", "1m ago", "-", "introduced by Mac mini"]);
     }
 
     #[test]
@@ -2175,6 +2306,26 @@ mod tests {
         let err = run_machine(&paths, Some(9), Some(" ".into()), false).await.unwrap_err();
         assert_eq!(format!("{err:#}"), "machine name must be 1-40 characters (got 0)");
         assert_eq!(machine::load(&paths).unwrap().unwrap(), renamed, "a rejected name changes nothing");
+    }
+
+    #[test]
+    fn a_revoke_names_the_devices_it_had_added() {
+        let ack = serde_json::json!({ "introduced": [{ "id": "pppppp000001", "name": "Pixel", "kind": "phone" }, { "id": "ssssss000001", "name": "Studio", "kind": "hub" }] });
+        assert_eq!(
+            introduced_line("Laptop", &ack).as_deref(),
+            Some("Laptop added Pixel (phone), Studio here; they stay paired. Revoke them too with `krypto peer revoke <name>` if you no longer trust them.")
+        );
+        assert_eq!(introduced_line("Laptop", &serde_json::json!({ "introduced": [] })), None);
+        assert_eq!(introduced_line("Laptop", &serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn remote_decisions_name_the_device() {
+        let names: HashMap<String, String> = [("pppppp000001".to_string(), "iPhone".to_string())].into();
+        assert_eq!(decider_label(Some(ResolvedBy::User), Some("pppppp000001"), &names), "from iPhone");
+        assert_eq!(decider_label(Some(ResolvedBy::User), Some("zzzzzz000009"), &names), "from zzzzzz000009", "unknown: the id");
+        assert_eq!(decider_label(Some(ResolvedBy::User), None, &names), "by you");
+        assert_eq!(decider_label(Some(ResolvedBy::Rule), None, &names), "by rule");
     }
 
     #[test]

@@ -184,6 +184,18 @@ export function pairingPatch(f: PairingForm, s: HubSettings): FormResult {
   });
 }
 
+/** Devices introduced by paired hubs (group roster, step 7). Null when the hub predates the setting (protocol < 8). */
+export function introsForm(s: HubSettings): { accept: boolean } | null {
+  const v = (s.peer as Partial<HubSettings["peer"]>).acceptRosterIntros;
+  return typeof v === "boolean" ? { accept: v } : null;
+}
+
+export function introsPatch(f: { accept: boolean }, s: HubSettings): FormResult {
+  return finish(s, {}, (d) => {
+    d.peer.acceptRosterIntros = f.accept;
+  });
+}
+
 // ---------------------------------------------------------------- folder lists (start roots, repos)
 
 /** Check every folder of a list; errors keyed `<key>[i]`. */

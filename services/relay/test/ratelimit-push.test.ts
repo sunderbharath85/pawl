@@ -109,6 +109,25 @@ describe("expo push", () => {
     expect(kv.get(PUSH_KEY)).toBeUndefined();
   });
 
+  test("clear (unregister_push) forgets the token and keeps an open throttle window", () => {
+    const kv = new MemoryKv();
+    const reg = new PushRegistry(kv);
+    expect(reg.clear(T0)).toBe(false); // nothing stored: no write
+    expect(kv.writes).toBe(0);
+    reg.register("ExponentPushToken[a]");
+    expect(reg.claim(T0)).toBe("ExponentPushToken[a]");
+    expect(reg.clear(T0 + 1)).toBe(true);
+    expect(kv.get(PUSH_KEY)).toEqual({ lastAt: T0 });
+    expect(reg.claim(T0 + PUSH_MIN_INTERVAL_MS)).toBeNull(); // no token
+    expect(reg.clear(T0 + 2)).toBe(false);
+    reg.unregister("ExponentPushToken[a]"); // a late DeviceNotRegistered for the old token: no-op
+    expect(kv.get(PUSH_KEY)).toEqual({ lastAt: T0 });
+    reg.register("ExponentPushToken[b]");
+    expect(reg.claim(T0 + 3)).toBeNull(); // throttle survived the off/on
+    expect(reg.clear(T0 + PUSH_MIN_INTERVAL_MS)).toBe(true);
+    expect(kv.get(PUSH_KEY)).toBeUndefined(); // window over: key removed
+  });
+
   test("sendWake never throws", async () => {
     const failing = (async () => {
       throw new Error("network");

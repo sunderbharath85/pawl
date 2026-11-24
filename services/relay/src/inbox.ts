@@ -81,7 +81,7 @@ export class Inbox {
     return this.queue.peek(now);
   }
 
-  /** Budget for config frames (allow, allow_pairing, register_push). False = shed with `rate_limited`. */
+  /** Budget for config frames (allow, allow_pairing, register_push, unregister_push). False = `rate_limited`. */
   takeConfig(now: number): boolean {
     if (!this.config) this.config = new TokenBucket(this.opts.configPerSec, this.opts.configBurst, now);
     return this.config.take(now);
@@ -103,6 +103,11 @@ export class Inbox {
   /** Returns true when the stored token changed. */
   registerPush(token: string): boolean {
     return this.push.register(token);
+  }
+
+  /** `unregister_push`: no wake after this until a new `register_push`. Returns true when a token was removed. */
+  unregisterPush(now: number): boolean {
+    return this.push.clear(now);
   }
 
   /** Push wakes only for a mailbox whose owner has authenticated at least once and that has paired senders. */

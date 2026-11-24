@@ -13,6 +13,7 @@
 
 pub mod b64;
 mod envelope;
+mod intro;
 mod invite;
 mod io;
 mod keys;
@@ -20,12 +21,15 @@ mod limits;
 mod node;
 mod relay;
 mod roster;
+#[cfg(test)]
+mod vectors;
 
 pub use b64::B64Error;
 pub use envelope::{open, seal, OpenError};
-pub use invite::{Invite, InviteError};
+pub use intro::{check_intro_device, device_name_ok, public_key_ok, MAX_INTRO_DEVICES, MAX_INTRO_NAME_CHARS};
+pub use invite::{peer_addr_ok, Invite, InviteError};
 pub use keys::DeviceKeys;
-pub use node::{JoinError, Joined, PeerEvent, PeerNode, PeerTimings, SendError, MAX_SEND_BODY_BYTES};
+pub use node::{JoinError, Joined, PeerEvent, PeerNode, PeerTimings, SendError, WakeError, MAX_SEND_BODY_BYTES};
 pub use relay::{RelayConfig, RelayConfigError};
 // The wire types the hub reports these with.
 pub use krypto_protocol::{LinkPath, RelayStatusInfo};

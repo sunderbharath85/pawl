@@ -1,7 +1,7 @@
 // Settings sections that are not in config.toml: This machine (its name, via update_machine), Notifications and
 // the pet strip (desktop preferences kept per machine), and This app (hub process, setup, quit).
 import { useEffect, useRef, useState } from "react";
-import { MACHINE_NAME_MAX, OS_LABEL, checkMachineName, renameErrorText } from "@krypto/hub-client";
+import { MACHINE_NAME_MAX, OS_LABEL, checkMachineName, renameErrorText, trimWhiteSpace } from "@krypto/hub-client";
 import { isTauri, native, onNative, type HubCredentials } from "../../../lib/native";
 import { notify } from "../../../lib/notifications";
 import { useSettings, type DesktopSettings } from "../../../lib/settings";
@@ -28,8 +28,8 @@ export function MachineNameForm({ onSaved, autoFocus }: { onSaved?: (name: strin
   const connected = meta.phase === "connected" && !!machine;
   const check = checkMachineName(draft);
   const dirty = check.ok ? check.name !== current : draft.trim() !== current;
-  // Show the length problem as soon as it happens; an empty field only complains on save.
-  const liveError = !check.ok && draft.trim().length > 0 ? check.error : null;
+  // Show a length or character problem (the peer name rule) as soon as it happens; an empty field only complains on save.
+  const liveError = !check.ok && trimWhiteSpace(draft).length > 0 ? check.error : null;
   const shownError = error ?? liveError;
 
   const save = async () => {
@@ -105,7 +105,7 @@ export function MachineNameForm({ onSaved, autoFocus }: { onSaved?: (name: strin
           </span>
         ) : (
           <span className="hint">
-            1–{MACHINE_NAME_MAX} characters. {connected ? "" : "The hub must be running to rename."}
+            1–{MACHINE_NAME_MAX} characters, no invisible characters. {connected ? "" : "The hub must be running to rename."}
           </span>
         )}
       </div>

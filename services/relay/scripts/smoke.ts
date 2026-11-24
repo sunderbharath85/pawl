@@ -354,6 +354,15 @@ async function main(): Promise<void> {
     await b!.conn.next(isError("bad_frame"));
   });
 
+  await check("register_push then unregister_push (twice) accepted without errors", async () => {
+    b!.conn.frames.length = 0;
+    b!.conn.send({ t: "register_push", expoToken: "ExponentPushToken[krypto-smoke]" });
+    b!.conn.send({ t: "unregister_push" });
+    b!.conn.send({ t: "unregister_push" }); // already off: still fine (nothing to write)
+    await b!.conn.sync();
+    assert(!b!.conn.frames.some((f) => f.t === "error"), `B got ${JSON.stringify(b!.conn.frames)}`);
+  });
+
   await check("too_large: frame over RELAY_FRAME_MAX_BYTES", async () => {
     b!.conn.send({ t: "send", to: A.pk, env: B.envelope(A, {}, 330 * 1024) });
     await b!.conn.next(isError("too_large"));

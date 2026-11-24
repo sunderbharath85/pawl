@@ -98,6 +98,7 @@ export const SETTINGS_FIELD_LABELS: Record<string, string> = {
   "peer.listen": "Peer listener address",
   "peer.acceptIntents": "Remote control",
   "peer.startRoots": "Start folders",
+  "peer.acceptRosterIntros": "Accept introduced devices",
   "repos.paths": "Repo folders",
   "relay.url": "Relay URL",
   "relay.accessKey": "Relay access key",
@@ -438,6 +439,10 @@ export function settingsPatch(base: HubSettings, draft: EditableSettings): HubSe
   if (draft.peer.listen !== base.peer.listen) peer.listen = draft.peer.listen;
   if (draft.peer.acceptIntents !== base.peer.acceptIntents) peer.acceptIntents = draft.peer.acceptIntents;
   if (!sameList(draft.peer.startRoots, base.peer.startRoots)) peer.startRoots = [...draft.peer.startRoots];
+  // A protocol v7 hub has no acceptRosterIntros (undefined on both sides): never part of the patch.
+  if (draft.peer.acceptRosterIntros !== base.peer.acceptRosterIntros && typeof draft.peer.acceptRosterIntros === "boolean") {
+    peer.acceptRosterIntros = draft.peer.acceptRosterIntros;
+  }
   if (Object.keys(peer).length) patch.peer = peer;
 
   if (!sameList(draft.repos.paths, base.repos.paths)) patch.repos = { paths: [...draft.repos.paths] };
@@ -452,7 +457,12 @@ export function editableSettings(s: HubSettings): EditableSettings {
     hub: { ...s.hub },
     bot: { model: s.bot.model, ollamaUrl: s.bot.ollamaUrl, ollamaModel: s.bot.ollamaModel },
     watchdog: { ...s.watchdog },
-    peer: { listen: s.peer.listen, acceptIntents: s.peer.acceptIntents, startRoots: [...s.peer.startRoots] },
+    peer: {
+      listen: s.peer.listen,
+      acceptIntents: s.peer.acceptIntents,
+      startRoots: [...s.peer.startRoots],
+      acceptRosterIntros: s.peer.acceptRosterIntros,
+    },
     repos: { paths: [...s.repos.paths] },
     relay: { url: s.relay.url },
     customAgents: s.customAgents.map((a) => ({ ...a, command: [...a.command] })),
@@ -538,7 +548,8 @@ export function broadFolderWarning(path: string, reason: string): string {
 
 /**
  * The changes in `patch` (against `base`) that need an in-app confirm, each saying exactly what it allows:
- * turning the peer listener on (or moving it to another address), turning remote control on, adding start
+ * turning the peer listener on (or moving it to another address), turning remote control on, accepting devices
+ * introduced by paired hubs, adding start
  * folders, and adding a custom agent or changing its command. Empty = save without asking.
  */
 export function riskyChanges(base: HubSettings, patch: HubSettingsPatch, ctx: RiskContext = {}): RiskyChange[] {
@@ -574,6 +585,19 @@ export function riskyChanges(base: HubSettings, patch: HubSettingsPatch, ctx: Ri
         "used and in your start folders), send prompts to its sessions, cancel them, and approve (once) or deny its " +
         "permission requests. Starting an agent and approving need a confirm on the machine the action comes from; " +
         "always-allow can only be chosen here.",
+    });
+  }
+  if (patch.peer?.acceptRosterIntros === true && base.peer.acceptRosterIntros === false) {
+    out.push({
+      key: "peer.acceptRosterIntros",
+      title: `Let paired machines add devices to ${here}?`,
+      confirm: "Accept introductions",
+      body:
+        `When a machine paired with ${here} pairs a new phone or machine, it can add that device here too, without an ` +
+        `invite from ${here}. The device then sees this machine's sessions, pets and approvals` +
+        (acceptIntents ? ", and can act on them because remote control is on. " : ". ") +
+        "An introduction never replaces a device already paired here, and each one shows a notification; you can revoke " +
+        "any device in Machines.",
     });
   }
   if (patch.peer?.startRoots) {

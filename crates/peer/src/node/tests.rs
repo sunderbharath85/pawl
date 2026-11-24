@@ -333,6 +333,8 @@ fn add_paired(roster: &MemoryRoster, id: &str, pk: &[u8; 32], addr: Option<Strin
             last_seen: None,
             addr,
             path: None,
+            introduced_by: None,
+            os: None,
         },
         machine: machine(id, "Raw"),
     });
@@ -1606,3 +1608,54 @@ async fn send_refuses_reserved_bodies() {
 }
 
 mod relay;
+
+/// A node whose machine has this name.
+fn node_named(id: &str, name: &str) -> TestNode {
+    let (tx, rx) = unbounded_channel();
+    let roster = Arc::new(MemoryRoster::new());
+    let node = PeerNode::new(DeviceKeys::generate(), machine(id, name), roster.clone(), tx).with_timings(fast());
+    TestNode { id: id.into(), node, roster, events: rx, log: Vec::new() }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_names_with_control_or_invisible_characters_are_refused() {
+    // pair_request: a joiner whose name hides a bidi override is refused.
+    let (mut a, addr) = listening(A, quiet_peer()).await;
+    let inv = a.node.create_invite(None, TTL).unwrap();
+    let bad_joiner = node_named(B, "invoice\u{202E}fdp.exe");
+    assert_eq!(bad_joiner.node.join(&inv.to_uri()).await, Err(JoinError::Rejected));
+    a.expect("PairRejected", |e| matches!(e, PeerEvent::PairRejected { reason: PairRejectReason::BadRequest, .. })).await;
+    assert!(a.roster.get(B).is_none());
+
+    // pair_accept: an inviter whose name has a zero-width space is refused by the joiner.
+    let c = node_named(C, "Mac\u{200B}mini");
+    c.node.listen(local()).await.unwrap();
+    let inv = c.node.create_invite(None, TTL).unwrap();
+    let d = node("dddddddddddd", fast());
+    assert_eq!(d.node.join(&inv.to_uri()).await, Err(JoinError::Rejected));
+    assert!(d.roster.get(C).is_none());
+
+    // hello: refused with such a name (here a BOM), accepted with a clean one.
+    a.node.test_clear_pair_limits();
+    let b_keys = DeviceKeys::generate();
+    add_paired(&a.roster, B, &b_keys.public_key(), None);
+    let a_pk = a.pk();
+    let hello_named = |name: &str| PeerBody::Hello { machine: machine(B, name), addr: None, ts: now_ms() };
+    let mut ws = raw(addr).await;
+    ws.send(env_text(&seal(&b_keys, B, A, &a_pk, time_seq(), &hello_named("B\u{FEFF}"), false))).await.unwrap();
+    assert_closed_silently(&mut ws, WAIT).await;
+    let mut ws = raw(addr).await;
+    ws.send(env_text(&seal(&b_keys, B, A, &a_pk, time_seq(), &hello_named("Bee"), false))).await.unwrap();
+    assert!(matches!(raw_next(&mut ws, WAIT).await, RawNext::Text(_)));
+    a.expect("LinkUp", is_link_up(B)).await;
+
+    // On the live link: a presence or hello with a refused name changes nothing; a clean one does.
+    let base = time_seq();
+    ws.send(env_text(&seal(&b_keys, B, A, &a_pk, base + 1, &presence_body(B, "B\u{2066}x"), false))).await.unwrap();
+    ws.send(env_text(&seal(&b_keys, B, A, &a_pk, base + 2, &hello_named("B\u{7}"), false))).await.unwrap();
+    ws.send(env_text(&seal(&b_keys, B, A, &a_pk, base + 3, &presence_body(B, "clean"), false))).await.unwrap();
+    a.expect("the clean presence", is_presence_named(B, "clean")).await;
+    assert!(a.position(is_presence_named(B, "B\u{2066}x")).is_none());
+    assert_eq!(a.roster.get(B).unwrap().device.name, "clean");
+    assert!(a.node.online().len() == 1, "the link stays up");
+}

@@ -77,8 +77,10 @@ pub fn generate_id() -> Result<MachineId> {
     Ok(id)
 }
 
-/// Trimmed name, 1..=40 characters (counted as `char`s), no control characters. A rejected name's
-/// error carries [`AckCode::Invalid`], so the `update_machine` ack error is exactly `"invalid"`.
+/// Trimmed name, 1..=40 characters (counted as `char`s), no control characters, and nothing paired
+/// devices would refuse (`krypto_peer::device_name_ok`: no bidi controls or zero-width / invisible
+/// formatting characters). A rejected name's error carries [`AckCode::Invalid`], so the
+/// `update_machine` ack error is exactly `"invalid"`.
 pub fn validate_name(name: &str) -> Result<String> {
     let name = name.trim();
     let len = name.chars().count();
@@ -86,6 +88,8 @@ pub fn validate_name(name: &str) -> Result<String> {
         format!("machine name must be 1-{MAX_NAME_CHARS} characters (got {len})")
     } else if name.chars().any(char::is_control) {
         "machine name must not contain control characters".to_string()
+    } else if !krypto_peer::device_name_ok(name) {
+        "machine name must not contain invisible characters (bidi controls, zero-width or other formatting characters)".to_string()
     } else {
         return Ok(name.to_string());
     };
@@ -98,10 +102,16 @@ pub fn default_name() -> String {
     host_name().as_deref().and_then(clean_host_name).unwrap_or_else(|| FALLBACK_NAME.to_string())
 }
 
-/// First line, control characters dropped, cut to [`MAX_NAME_CHARS`], trimmed; None if empty.
+/// A character a device name may hold anywhere (see `krypto_peer::device_name_ok`).
+pub(crate) fn name_char_ok(c: char) -> bool {
+    !c.is_control() && krypto_peer::device_name_ok(&format!("x{c}"))
+}
+
+/// First line, control and invisible formatting characters dropped, cut to [`MAX_NAME_CHARS`],
+/// trimmed; None if empty.
 fn clean_host_name(raw: &str) -> Option<String> {
     let line = raw.lines().map(str::trim).find(|l| !l.is_empty())?;
-    let cut: String = line.chars().filter(|c| !c.is_control()).take(MAX_NAME_CHARS).collect();
+    let cut: String = line.chars().filter(|c| name_char_ok(*c)).take(MAX_NAME_CHARS).collect();
     let cut = cut.trim();
     (!cut.is_empty()).then(|| cut.to_string())
 }
@@ -248,6 +258,18 @@ mod tests {
             assert_eq!(AckCode::find(&e), Some(AckCode::Invalid), "{e:#}");
             assert!(e.to_string().starts_with("machine name must"), "{e:#}");
         }
+        // Names paired devices would refuse are refused here, with a clear reason.
+        for bad in ["Mac\u{200B}mini", "\u{202E}inim caM", "a\u{2066}b\u{2069}", "\u{FEFF}Mac", "Mac\u{2060}"] {
+            assert!(!krypto_peer::device_name_ok(bad), "{bad:?}");
+            let e = validate_name(bad).unwrap_err();
+            assert_eq!(AckCode::find(&e), Some(AckCode::Invalid), "{e:#}");
+            assert!(e.to_string().contains("invisible characters"), "{e:#}");
+        }
+        // Visible Unicode is fine, and whatever passes here passes the peers' rule.
+        for good in ["Sam\u{2019}s Mac \u{1F600}", "Büro-PC", "日本のマシン"] {
+            assert_eq!(validate_name(good).unwrap(), good);
+            assert!(krypto_peer::device_name_ok(good));
+        }
     }
 
     #[test]
@@ -256,6 +278,8 @@ mod tests {
         assert_eq!(clean_host_name("\n  Sam's Mac mini  \nignored").as_deref(), Some("Sam's Mac mini"));
         assert_eq!(clean_host_name(&"a".repeat(60)).map(|s| s.len()), Some(MAX_NAME_CHARS));
         assert_eq!(clean_host_name("  \n "), None);
+        assert_eq!(clean_host_name("my\u{200B}box\u{202E}").as_deref(), Some("mybox"), "invisible characters dropped");
+        assert_eq!(clean_host_name("\u{200B}\u{FEFF}"), None);
         let d = default_name();
         assert!(validate_name(&d).is_ok(), "{d:?}");
     }

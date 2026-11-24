@@ -16,7 +16,7 @@ export const AUTH_GRACE_MS = 3000;
 /** Frames per second (and burst) a mailbox accepts from all senders together, checked before the allowlist. */
 export const INBOUND_PER_SEC = 100;
 export const INBOUND_BURST = 400;
-/** Config frames (allow, allow_pairing, register_push) per second (and burst) per mailbox. */
+/** Config frames (allow, allow_pairing, register_push, unregister_push) per second (and burst) per mailbox. */
 export const CONFIG_PER_SEC = 5;
 export const CONFIG_BURST = 10;
 

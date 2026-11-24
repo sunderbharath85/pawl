@@ -16,6 +16,7 @@ import {
   decodePk,
   encodeServerFrame,
   errorFrame,
+  isConfigFrame,
   isValidPk,
   messageBytes,
   okFrame,
@@ -186,7 +187,7 @@ export class Mailbox extends DurableObject<Env> {
       return;
     }
     const f = parsed.frame;
-    if ((f.t === "allow" || f.t === "allow_pairing" || f.t === "register_push") && !this.inbox.takeConfig(now)) {
+    if (isConfigFrame(f) && !this.inbox.takeConfig(now)) {
       this.fail(ws, "rate_limited");
       return;
     }
@@ -220,6 +221,9 @@ export class Mailbox extends DurableObject<Env> {
       case "register_push":
         if (!isValidExpoToken(f.expoToken)) this.fail(ws, "bad_frame");
         else this.inbox.registerPush(f.expoToken);
+        return;
+      case "unregister_push":
+        this.inbox.unregisterPush(now);
         return;
       case "ping":
         this.sendTo(ws, pongFrame(now));

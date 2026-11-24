@@ -10,24 +10,34 @@ import {
   type MachineOs,
   type Pet,
 } from "@krypto/protocol";
+import { deviceNameProblem, trimWhiteSpace } from "./names";
 import type { HubState } from "./state";
 
 /** Max machine display name length (Unicode code points), matching the hub's validation. */
 export const MACHINE_NAME_MAX = 40;
 
-/** Trimmed machine name if it is 1–`MACHINE_NAME_MAX` code points long, else null. */
+/**
+ * The machine name to send (trimmed of Unicode White_Space), or null when the hub or its peers would refuse it: the
+ * peer name rule (no control or invisible format characters anywhere, see `deviceNameOk`) and the hub's own
+ * 1–`MACHINE_NAME_MAX` code points.
+ */
 export function normalizeMachineName(name: string): string | null {
-  const trimmed = name.trim();
-  const length = [...trimmed].length;
-  return length >= 1 && length <= MACHINE_NAME_MAX ? trimmed : null;
+  return deviceNameProblem(name, MACHINE_NAME_MAX) === null ? trimWhiteSpace(name) : null;
 }
 
 export const OS_LABEL: Record<MachineOs, string> = {
   windows: "Windows",
   macos: "macOS",
   linux: "Linux",
+  ios: "iOS",
+  android: "Android",
   other: "Other OS",
 };
+
+/** Phones (migration step 7) run iOS / Android; they are paired devices, never machines. */
+export function isPhoneOs(os: MachineOs | null | undefined): boolean {
+  return os === "ios" || os === "android";
+}
 
 /** Shown before the hub has said hello (no machine known yet). */
 export const UNKNOWN_MACHINE_NAME = "This machine";
@@ -81,11 +91,17 @@ export function renameErrorText(err: unknown): string {
 
 export type MachineNameCheck = { ok: true; name: string } | { ok: false; error: string };
 
-/** Client-side mirror of the hub's rule: trimmed, 1–40 characters. */
+/** What the hub and its peers accept: trimmed, 1–40 characters, no control or invisible characters (see `deviceNameOk`). */
 export function checkMachineName(raw: string): MachineNameCheck {
-  const name = normalizeMachineName(raw);
-  if (name !== null) return { ok: true, name };
-  return raw.trim().length === 0
+  const problem = deviceNameProblem(raw, MACHINE_NAME_MAX);
+  if (problem === null) return { ok: true, name: trimWhiteSpace(raw) };
+  if (problem === "bad_char") {
+    return {
+      ok: false,
+      error: "Remove control or invisible characters (such as tabs, zero-width spaces or text-direction marks); other machines refuse names with them.",
+    };
+  }
+  return problem === "empty"
     ? { ok: false, error: "Give this machine a name." }
     : { ok: false, error: `Keep it to ${MACHINE_NAME_MAX} characters or fewer.` };
 }

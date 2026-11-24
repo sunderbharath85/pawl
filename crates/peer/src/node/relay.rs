@@ -607,11 +607,11 @@ impl Inner {
                 return
             }
             PeerBody::Hello { machine, addr, .. } => {
-                if machine.id != device_id {
-                    debug!(device = %device_id, "relay: dropped a hello for another machine");
+                if machine.id != device_id || !device_name_ok(&machine.name) {
+                    debug!(device = %device_id, "relay: dropped a hello for another machine or with a refused name");
                     return;
                 }
-                let addr = addr.clone().filter(|a| peer_addr_ok(a));
+                let addr = self.hello_addr(&device_id, addr.clone());
                 self.roster.update_seen(&device_id, machine, addr.as_deref(), now);
                 // Our first frame on the link (a presence) answers it.
                 (machine.clone(), None)

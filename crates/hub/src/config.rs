@@ -173,11 +173,14 @@ pub struct PeerSection {
     /// Folders (and everything under them) where paired hubs may start agents, besides the folders
     /// of this machine's own previous sessions.
     pub start_roots: Vec<String>,
+    /// Add the devices another paired hub introduces (`roster_intro`, step 7: "Mac mini added
+    /// iPhone"). false = such intros are audited and shown, never added.
+    pub accept_roster_intros: bool,
 }
 
 impl Default for PeerSection {
     fn default() -> Self {
-        Self { listen: None, accept_intents: true, start_roots: Vec::new() }
+        Self { listen: None, accept_intents: true, start_roots: Vec::new(), accept_roster_intros: true }
     }
 }
 
@@ -299,6 +302,7 @@ pub(crate) const CONFIG_TEMPLATE: &str = r#"# Krypto hub configuration. Every ke
 # listen = "192.168.1.20:47801"   # hub-to-hub listener (off by default; needed to create invites)
 # accept_intents = true           # false = paired machines can watch but never act here
 # start_roots = ["E:/work"]       # paired machines may also start agents under these folders
+# accept_roster_intros = true     # add the phones and machines a paired machine introduces
 #
 # [repos]
 # paths = ["E:/work/api"]          # also offered as repos ("in repo api"), besides folders sessions used

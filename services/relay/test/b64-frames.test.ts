@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { RELAY_MAX_ALLOWED } from "@krypto/protocol";
+import { RELAY_MAX_ALLOWED, type RelayClientFrame } from "@krypto/protocol";
 import { decodeStd, decodeUrl, encodeStd, encodeUrl, randomBytes } from "../src/b64";
 import {
   decodePk,
   errorFrame,
+  isConfigFrame,
   isValidPk,
   isValidToken,
   messageBytes,
@@ -114,7 +115,26 @@ describe("parseClientFrame", () => {
     expect(ok({ t: "send", to: pk(), env: env() }).ok).toBe(true);
     expect(ok({ t: "send", to: pk(), env: env(), pairing: token() }).ok).toBe(true);
     expect(ok({ t: "register_push", expoToken: "ExponentPushToken[abc]" }).ok).toBe(true);
+    expect(ok({ t: "unregister_push" }).ok).toBe(true);
     expect(ok({ t: "ping", ts: 1 }).ok).toBe(true);
+  });
+
+  test("unregister_push carries nothing else; it counts as a config frame", () => {
+    expect(ok({ t: "unregister_push", expoToken: "ExponentPushToken[abc]", junk: 1 })).toEqual({
+      ok: true,
+      frame: { t: "unregister_push" },
+    });
+    for (const f of [
+      { t: "allow", pks: [] },
+      { t: "allow_pairing", token: token(), exp: 1 },
+      { t: "register_push", expoToken: "ExponentPushToken[abc]" },
+      { t: "unregister_push" },
+    ] satisfies RelayClientFrame[]) {
+      expect(isConfigFrame(f)).toBe(true);
+    }
+    expect(isConfigFrame({ t: "ping", ts: 1 })).toBe(false);
+    expect(isConfigFrame({ t: "send", to: pk(), env: env() as never })).toBe(false);
+    expect(isConfigFrame({ t: "auth", box: "" })).toBe(false);
   });
 
   test("dedupes allow and caps it", () => {

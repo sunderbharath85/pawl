@@ -1,4 +1,5 @@
 // Pure: turn a session's raw HubEvents into a readable feed (chunks merged, tool updates folded in).
+import { isTruncatedPayload } from "@krypto/protocol";
 import type {
   ErrorPayload,
   HookPayload,
@@ -80,6 +81,11 @@ export function buildFeed(events: readonly HubEvent[]): FeedItem[] {
   // Mutable copies so merges never touch earlier output objects held by React.
   for (const ev of events) {
     const last = out[out.length - 1];
+    if (isTruncatedPayload(ev.payload)) {
+      // Mirrored events above MIRROR_PAYLOAD_MAX_BYTES arrive without their payload.
+      out.push({ kind: "system", key: `e${ev.id}`, ts: ev.ts, text: "Large output — open the session on its computer to see it", tone: "info" });
+      continue;
+    }
     const p = obj(ev.payload);
     switch (ev.type) {
       case "agent_message_chunk":

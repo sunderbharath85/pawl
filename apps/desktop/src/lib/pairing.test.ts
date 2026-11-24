@@ -118,6 +118,14 @@ describe("inviteUsedBy", () => {
     expect(inviteUsedBy(invite({ knownDeviceIds: ["a"] }), [device("a", 500)])).toBeUndefined();
     expect(inviteUsedBy(invite({ ignoredDeviceIds: ["b"] }), [device("b", 2_000)])).toBeUndefined();
   });
+
+  test("a machine invite is not used by a phone; a phone (QR) invite only by a phone", () => {
+    const phone: Device = { ...device("p", 2_000), kind: "phone", os: "ios" };
+    expect(inviteUsedBy(invite(), [phone])).toBeUndefined();
+    expect(inviteUsedBy(invite({ forPhone: true }), [device("b", 2_000), phone])?.id).toBe("p");
+    // Devices another hub introduced arrive without an invite.
+    expect(inviteUsedBy(invite({ forPhone: true }), [{ ...phone, introducedBy: "macmini00002" }])).toBeUndefined();
+  });
 });
 
 describe("pairingErrorText", () => {

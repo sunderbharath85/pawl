@@ -3,7 +3,7 @@
 // crates/protocol/src/lib.rs and must stay byte-compatible (camelCase fields,
 // snake_case `type` tags). Change both together.
 
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 export const HUB_DEFAULT_PORT = 47800;
 export const HUB_HOST = "127.0.0.1";
 /** Folder name under the OS data dir (Win %APPDATA%, mac ~/Library/Application Support, linux ~/.local/share). */
@@ -23,7 +23,8 @@ export type UnixMs = number;
 export type MachineId = string;
 export const MACHINE_ID_RE = /^[a-z0-9]{12}$/;
 
-export type MachineOs = "windows" | "macos" | "linux" | "other";
+/** ios / android are phones (migration step 7); phones never appear in `machines`, only in `devices`. */
+export type MachineOs = "windows" | "macos" | "linux" | "ios" | "android" | "other";
 
 export interface Machine {
   id: MachineId;
@@ -356,6 +357,21 @@ export interface Device {
   addr?: string;
   /** Live link path (absent when offline). */
   path?: LinkPath;
+  /** Set when another paired hub introduced this device (group roster, migration step 7). */
+  introducedBy?: MachineId;
+  /** OS from the device's pair_request / hello / roster_intro, when known (phones: ios / android). */
+  os?: MachineOs;
+}
+
+/** A device announced through `roster_intro`. */
+export interface IntroDevice {
+  id: string;
+  kind: DeviceKind;
+  name: string;
+  /** Base64 (standard, padded) X25519 public key. */
+  publicKey: string;
+  addr?: string;
+  os?: MachineOs;
 }
 
 /** This hub's peer-link status. */
@@ -531,7 +547,13 @@ export type PeerBody =
    */
   | { type: "intent"; intentId: string; client: ClientKind; confirmed: boolean; intent: Intent; ts: UnixMs }
   /** Owner -> origin. `result` has the same shape as the matching ClientMsg ack result (start: `{session}`). */
-  | { type: "intent_ack"; intentId: string; status: "applied" | "rejected"; reason?: IntentRejectReason; result?: unknown };
+  | { type: "intent_ack"; intentId: string; status: "applied" | "rejected"; reason?: IntentRejectReason; result?: unknown }
+  /**
+   * Group roster (migration step 7). After pairing a new device a hub sends this to every other linked hub (the new
+   * device) and to the new device (the other hubs). Accepted only from a paired hub; never replaces an existing
+   * device's key; receivers audit it and tell the user.
+   */
+  | { type: "roster_intro"; devices: IntroDevice[] };
 
 export type PeerBodyType = PeerBody["type"];
 
@@ -592,6 +614,8 @@ export type RelayClientFrame =
   | { t: "send"; to: string; env: PeerEnvelope; pairing?: string }
   /** Phone only: content-free wake ("Your pet needs you") when a frame is queued while it is offline. */
   | { t: "register_push"; expoToken: string }
+  /** Phone only (step 7): forget this mailbox's push token (push turned off or phone unpaired). */
+  | { t: "unregister_push" }
   | { t: "ping"; ts: UnixMs };
 
 // ---------- settings (migration step 5b: everything configurable in the UI) ----------
@@ -618,8 +642,11 @@ export interface HubSettings {
   };
   bot: { model: string; anthropicApiKeySet: boolean; ollamaUrl: string | null; ollamaModel: string | null };
   watchdog: { waitingNudgeAfterMs: number; repeatEveryMs: number; tickSecs: number };
-  /** `listen` = peer-listener address ("ip:port") or null when off; `acceptIntents` = remote control on. */
-  peer: { listen: string | null; acceptIntents: boolean; startRoots: string[] };
+  /**
+   * `listen` = peer-listener address ("ip:port") or null when off; `acceptIntents` = remote control on;
+   * `acceptRosterIntros` = add devices another paired hub introduces (`roster_intro`, step 7; default true).
+   */
+  peer: { listen: string | null; acceptIntents: boolean; startRoots: string[]; acceptRosterIntros: boolean };
   repos: { paths: string[] };
   /** Relay URL (wss://...) or null when off (migration step 6); the access key is write-only. */
   relay: { url: string | null; accessKeySet: boolean };
@@ -696,9 +723,10 @@ export type ClientMsg =
   /**
    * One-time pairing invite (single use; ttlSecs 60..3600, default 600). Needs the peer listener on.
    * `addr` overrides the advertised "host:port" (required when the listener binds 0.0.0.0 / ::).
-   * Errors: peer_listener_off, invalid.
+   * `forPhone`: a relay-only invite for a phone's QR scanner (no addr); needs the relay (error `relay_off`).
+   * Errors: peer_listener_off, relay_off, invalid.
    */
-  | { type: "create_invite"; id: string; ttlSecs?: number; addr?: string }
+  | { type: "create_invite"; id: string; ttlSecs?: number; addr?: string; forPhone?: boolean }
   /** Pair with another hub from its invite URI. Errors: bad_uri, self_invite, unreachable, invite_rejected, timeout. */
   | { type: "join_peer"; id: string; uri: string }
   /** Unpair a device: its links close, it can no longer connect, and the peer is told. Errors: not_found. */
@@ -745,7 +773,8 @@ export interface AckResults {
   update_machine: { machine: Machine };
   create_invite: { uri: string; expiresAt: UnixMs };
   join_peer: { device: Device; machine: Machine };
-  revoke_device: Record<string, never>;
+  /** `introduced`: devices the revoked hub introduced that are still paired here (step 7), so the UI can offer to remove them too. */
+  revoke_device: { introduced?: Array<{ id: string; name: string; kind: DeviceKind }> };
   user_activity: Record<string, never>;
   list_repos: { repos: RepoRef[] };
   get_settings: { settings: HubSettings; restartRequired: string[]; configPath: string };

@@ -538,3 +538,57 @@
   border-width: 2px;
   vertical-align: -2px;
 }
+
+/* ---------- phones (step 7) ---------- */
+.intros-control {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1.5px dashed var(--line);
+}
+.section-hint {
+  margin: -6px 0 10px;
+}
+.phone-row {
+  grid-template-columns: auto auto 1fr auto;
+}
+.phone-icon {
+  display: inline-flex;
+  color: var(--ink-2);
+}
+.phone-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* A QR code stays dark on light in both themes, with its own quiet zone, so phone cameras can read it. */
+.qr-frame {
+  align-self: center;
+  width: min(260px, 100%);
+  padding: 8px;
+  border-radius: var(--radius-s);
+  background: #fff;
+  box-shadow: 0 0 0 1.5px var(--line);
+}
+.qr-code {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.qr-warning {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-s);
+  border: 1.5px solid var(--honey);
+  background: var(--honey-soft);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.qr-warning svg {
+  flex: none;
+  margin-top: 1px;
+}

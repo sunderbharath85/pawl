@@ -4,6 +4,7 @@ import { SPECIES_META } from "@krypto/pet-engine";
 import { DEFAULT_SPECIES } from "@krypto/protocol";
 import { presenceLabel } from "../shared/machine";
 import type { HubConnection } from "./connection";
+import { phonesTooltipLine } from "./machineList";
 import { ACTIVITY_LABEL, petViewsOf, primaryView } from "./petViews";
 import { agentName, isBusy } from "./util";
 
@@ -65,7 +66,8 @@ export class PetStatusBar implements vscode.Disposable {
       .map((m) => `${m.id}:${m.name}:${m.online}:${m.online ? "" : m.lastSeen}`)
       .join(",");
     const petsKey = views.map((v) => `${v.petId}:${v.name}:${v.activity}:${v.visitor}:${v.away ?? ""}`).join(",");
-    const key = `on|${machineKey}|${species}|${activity}|${pendingCount}|${remotePending}|${busy}|${petsKey}`;
+    const phonesKey = phonesTooltipLine(state, true) ?? "";
+    const key = `on|${machineKey}|${phonesKey}|${species}|${activity}|${pendingCount}|${remotePending}|${busy}|${petsKey}`;
     if (key === this.lastKey) return;
     this.lastKey = key;
 
@@ -151,8 +153,10 @@ export class PetStatusBar implements vscode.Disposable {
     const { total, online } = machineCounts(state);
     if (total === 0) return;
     const show = "[$(list-flat) Machines](command:krypto.showMachines \"Show machines\")";
+    const phones = phonesTooltipLine(state, true);
     if (total === 1) {
       md.appendMarkdown(`$(remote-explorer) No other machines paired yet · ${show}\n\n`);
+      if (phones) md.appendMarkdown(`${phones}\n\n`);
       return;
     }
     md.appendMarkdown(`$(remote-explorer) **${machinesLine(total, online)}** · ${show}\n\n`);
@@ -167,6 +171,7 @@ export class PetStatusBar implements vscode.Disposable {
         `${dot} ${escapeMd(machineDisplayName(m))} _(${escapeMd(os)})_ — ${escapeMd(presenceLabel(m, now))}${via ? ` · **${via}**` : ""}\n\n`,
       );
     }
+    if (phones) md.appendMarkdown(`${phones}\n\n`);
   }
 
   dispose(): void {

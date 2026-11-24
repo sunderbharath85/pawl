@@ -127,14 +127,14 @@ async fn the_peer_listener_turns_on_and_off_at_runtime() {
     assert_eq!(settings_msgs(&msgs), 1);
     assert_eq!(HubConfig::load(f.hub.paths()).unwrap().peer.listen.as_deref(), Some(addr.as_str()), "written to config.toml");
     // Invites work now.
-    ok(f.hub.handle(ClientMsg::CreateInvite { id: "i".into(), ttl_secs: None, addr: None }, &desktop()).await);
+    ok(f.hub.handle(ClientMsg::CreateInvite { id: "i".into(), ttl_secs: None, addr: None, for_phone: None }, &desktop()).await);
 
     let v = ok(update(&f.hub, json!({ "peer": { "listen": null } })).await);
     assert_eq!(v["settings"]["peer"]["listen"], Value::Null);
     assert_eq!(f.hub.peer_status().listening, None);
     assert!(tokio::net::TcpStream::connect(&addr).await.is_err(), "refused once off");
     assert_eq!(HubConfig::load(f.hub.paths()).unwrap().peer.listen, None);
-    assert_eq!(err(f.hub.handle(ClientMsg::CreateInvite { id: "i".into(), ttl_secs: None, addr: None }, &desktop()).await), "peer_listener_off");
+    assert_eq!(err(f.hub.handle(ClientMsg::CreateInvite { id: "i".into(), ttl_secs: None, addr: None, for_phone: None }, &desktop()).await), "peer_listener_off");
 }
 
 #[tokio::test]
@@ -402,6 +402,8 @@ fn peer_surface_has_no_settings(body: &PeerBody, intent: &Intent) {
         | PeerBody::SyncDone { .. }
         | PeerBody::Intent { .. }
         | PeerBody::IntentAck { .. } => {}
+        // Step 7: may add roster devices (gated by peer.acceptRosterIntros); never reads or writes settings.
+        PeerBody::RosterIntro { .. } => {}
     }
     match intent {
         Intent::Approve { .. } | Intent::Deny { .. } | Intent::Prompt { .. } | Intent::Start { .. } | Intent::Cancel { .. } => {}
@@ -424,7 +426,7 @@ async fn nothing_a_paired_machine_sends_reaches_settings() {
     let db = tempfile::tempdir().unwrap();
     let b = hub_in(db.path(), OTHER, "Laptop", |_| {}).await;
     let mut arx = a.subscribe();
-    let uri = ok(a.handle(ClientMsg::CreateInvite { id: "i".into(), ttl_secs: None, addr: Some(bound.clone()) }, &desktop()).await)["uri"]
+    let uri = ok(a.handle(ClientMsg::CreateInvite { id: "i".into(), ttl_secs: None, addr: Some(bound.clone()), for_phone: None }, &desktop()).await)["uri"]
         .as_str()
         .unwrap()
         .to_string();

@@ -39,6 +39,7 @@ import {
 import { isAllowOption, remoteOptionBlocked } from "./intents";
 import { proposalProblem, repoIndexHas } from "./proposals";
 import { MACHINE_NAME_MAX, normalizeMachineName } from "./machine";
+import { isPhoneInvite, PHONE_PROTOCOL_VERSION, type IntroducedDevice, type RevokeManyResult } from "./devices";
 import { INVITE_TTL_MAX_SECS, INVITE_TTL_MIN_SECS, parseInviteUri } from "./peer";
 import { toHubWsUrl } from "./url";
 import { isEmptyPatch, isPanelView, parseSettingsError, settingsFieldLabel } from "./settings";
@@ -532,7 +533,7 @@ export class HubClient {
   async updateMachine(name: string): Promise<Machine> {
     const trimmed = normalizeMachineName(name);
     if (trimmed === null) {
-      throw new HubRequestError("invalid", "update_machine", `machine name must be 1–${MACHINE_NAME_MAX} characters`);
+      throw new HubRequestError("invalid", "update_machine", `machine name must be 1–${MACHINE_NAME_MAX} characters, without control or invisible characters`);
     }
     const machineId = await this.localMachineId("update_machine");
     const res = await this.request<"update_machine">({ type: "update_machine", machineId, name: trimmed });
@@ -542,10 +543,14 @@ export class HubClient {
   /**
    * Create a one-time pairing invite on this hub (needs its peer listener on). `ttlSecs` must be an
    * integer in 60..3600 (default 600 on the hub) and `addr` overrides the advertised "host:port";
-   * both are checked locally first (code `invalid`). Hub errors: `peer_listener_off`, `invalid`.
-   * The URI holds a one-time secret: show it, never log or store it.
+   * both are checked locally first (code `invalid`). Hub errors: `peer_listener_off`, `relay_off`, `invalid`.
+   * `forPhone` asks for a relay-only invite for a phone's QR scanner (protocol v8; no `addr`): an older hub is refused
+   * locally (`unsupported`), and so is an answer that is not relay-only.
+   * The URI holds secrets (the one-time code and, with a relay, its access key): show it, never log or store it.
    */
-  async createInvite(opts: { ttlSecs?: number | undefined; addr?: string | undefined } = {}): Promise<AckResults["create_invite"]> {
+  async createInvite(
+    opts: { ttlSecs?: number | undefined; addr?: string | undefined; forPhone?: boolean | undefined } = {},
+  ): Promise<AckResults["create_invite"]> {
     const msg: DistributiveOmit<Extract<ClientMsg, { type: "create_invite" }>, "id"> = { type: "create_invite" };
     if (opts.ttlSecs !== undefined) {
       const ttl = opts.ttlSecs;
@@ -556,10 +561,19 @@ export class HubClient {
     }
     const addr = opts.addr?.trim();
     if (addr) {
+      if (opts.forPhone) throw new HubRequestError("invalid", "create_invite", "a phone invite goes through the relay and has no address");
       if (/\s/.test(addr)) throw new HubRequestError("invalid", "create_invite", "invite address must be host:port");
       msg.addr = addr;
     }
-    return this.request<"create_invite">(msg);
+    if (!opts.forPhone) return this.request<"create_invite">(msg);
+    const v = this.state.protocolVersion;
+    if (v !== undefined && v < PHONE_PROTOCOL_VERSION) {
+      throw new HubRequestError("unsupported", "create_invite", "this hub is too old to pair phones");
+    }
+    msg.forPhone = true;
+    const res = await this.request<"create_invite">(msg);
+    if (!isPhoneInvite(res.uri)) throw new HubRequestError("unsupported", "create_invite", "the hub did not make a relay-only invite");
+    return res;
   }
 
   /**
@@ -578,9 +592,33 @@ export class HubClient {
     return this.request<"join_peer">({ type: "join_peer", uri: trimmed }, { timeoutMs: Math.max(JOIN_PEER_TIMEOUT_MS, this.opts.requestTimeoutMs) });
   }
 
-  /** Unpair a device (its links close and it can no longer connect; the peer is told). Hub error: `not_found`. */
-  async revokeDevice(deviceId: string): Promise<void> {
-    await this.request<"revoke_device">({ type: "revoke_device", deviceId });
+  /**
+   * Unpair a device (its links close and it can no longer connect; the peer is told). Hub error: `not_found`.
+   * For a hub, a v8 ack lists the devices it introduced that are still paired here (`introduced`; see
+   * `introducedByRevoked`), so the user can be asked whether to remove those too.
+   */
+  async revokeDevice(deviceId: string): Promise<AckResults["revoke_device"]> {
+    const res = await this.request<"revoke_device">({ type: "revoke_device", deviceId });
+    return res && typeof res === "object" ? res : {};
+  }
+
+  /**
+   * Revoke several devices one after another (e.g. the ones a revoked hub introduced). One failing does not stop the
+   * rest; a device that is already gone (`not_found`) counts as removed.
+   */
+  async revokeDevices(devices: readonly IntroducedDevice[]): Promise<RevokeManyResult> {
+    const out: RevokeManyResult = { removed: [], failed: [] };
+    for (const d of devices) {
+      try {
+        await this.revokeDevice(d.id);
+        out.removed.push(d);
+      } catch (err) {
+        const code = err instanceof HubRequestError ? err.code : "error";
+        if (code === "not_found") out.removed.push(d);
+        else out.failed.push({ ...d, code });
+      }
+    }
+    return out;
   }
 
   /**

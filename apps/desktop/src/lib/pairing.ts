@@ -1,12 +1,15 @@
-// Pairing + presence helpers for the Machines view (PLAN.md migration step 2).
-// An invite URI holds a one-time secret: it lives only in memory here (never logged, never in
-// localStorage) and is dropped the moment it expires.
+// Pairing + presence helpers for the Machines view (PLAN.md migration step 2; phones step 7).
+// An invite URI holds a one-time secret (and, with a relay, its access key): it lives only in memory here (never
+// logged, never in localStorage) and is dropped the moment it expires.
 import { useSyncExternalStore } from "react";
-import { PEER_DEFAULT_PORT, type Device, type Machine } from "@krypto/protocol";
+import { inviteUsedBy, type PendingInvite } from "@krypto/hub-client";
+import { PEER_DEFAULT_PORT, type Machine } from "@krypto/protocol";
 import { timeAgo } from "./format";
 
+export { inviteUsedBy };
+
 /** Request kinds whose failures we explain. */
-export type PairingAction = "create_invite" | "join_peer" | "revoke_device";
+export type PairingAction = "create_invite" | "create_phone_invite" | "join_peer" | "revoke_device";
 
 const NOT_CONNECTED = "Krypto isn't connected to the hub right now. Try again once it's back.";
 
@@ -22,6 +25,9 @@ const PAIRING_ERRORS: Record<string, string> = {
   timeout: "The other machine didn't answer in time. Make sure it's awake and on the same network, then try again.",
   not_found: "That machine isn't paired any more.",
   unauthorized: "The hub did not accept our token. Reconnect from Settings.",
+  relay_off:
+    "Phones pair through your relay, and this hub isn't connected to one. Set up the relay in Settings → Relay, then create the code again.",
+  unsupported: "This hub can't pair phones yet. Update krypto on this machine and restart the hub.",
   closed: NOT_CONNECTED,
   disconnected: NOT_CONNECTED,
 };
@@ -29,6 +35,7 @@ const PAIRING_ERRORS: Record<string, string> = {
 /** `invalid` means different things per request. */
 const INVALID_BY_ACTION: Record<PairingAction, string> = {
   create_invite: `The hub can't tell other machines where to find it (its listener binds every network). Enter this machine's LAN address and port, e.g. 192.168.1.20:${PEER_DEFAULT_PORT}.`,
+  create_phone_invite: "The hub turned down that phone invite. Try another lifetime, or update krypto on this machine.",
   join_peer: "That invite isn't valid. Ask for a new one.",
   revoke_device: "The hub refused to unpair that machine.",
 };
@@ -78,16 +85,8 @@ export const INVITE_TTL_CHOICES: ReadonlyArray<{ secs: number; label: string }> 
   { secs: 3600, label: "1 hour" },
 ];
 
-export interface ShownInvite {
-  uri: string;
-  expiresAt: number;
-  /** Local time the invite was created (to spot the pairing it led to). */
-  createdAt: number;
-  /** Roster ids before the invite existed: a new id afterwards means someone used it. */
-  knownDeviceIds: readonly string[];
-  /** Machines this hub joined while the invite was up (those pairings did not use it). */
-  ignoredDeviceIds: readonly string[];
-}
+/** An invite on screen (`forPhone` for a phone's QR code). */
+export type ShownInvite = PendingInvite;
 
 interface Timers {
   now(): number;
@@ -172,20 +171,13 @@ export class InviteHolder {
   }
 }
 
+/** The machine invite on screen. */
 export const inviteHolder = new InviteHolder();
+/** The phone (QR) invite on screen: kept apart, so pairing a phone and a machine at once works. */
+export const phoneInviteHolder = new InviteHolder();
 
 export function useShownInvite(holder: InviteHolder = inviteHolder): ShownInvite | null {
   return useSyncExternalStore(holder.subscribe, holder.get, holder.get);
-}
-
-/**
- * The device that paired using the shown invite, if any: one that is new since the invite was made
- * (or re-paired after it), and not one this hub joined itself. Invites are single use.
- */
-export function inviteUsedBy(invite: ShownInvite, devices: readonly Device[]): Device | undefined {
-  const known = new Set(invite.knownDeviceIds);
-  const ignored = new Set(invite.ignoredDeviceIds);
-  return devices.find((d) => !ignored.has(d.id) && (!known.has(d.id) || d.pairedAt >= invite.createdAt));
 }
 
 /**

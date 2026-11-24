@@ -137,3 +137,28 @@ export const Copy = (p: P) => (
     <path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5" />
   </svg>
 );
+
+/** A phone (OS unknown). */
+export const Phone = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="6.5" y="2.5" width="11" height="19" rx="2.4" />
+    <path d="M11 18.5h2" />
+  </svg>
+);
+
+/** An iPhone-style phone: a notch at the top, no buttons on the face. Not a brand logo. */
+export const PhoneIos = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="6.5" y="2.5" width="11" height="19" rx="3" />
+    <path d="M10.5 5h3" />
+  </svg>
+);
+
+/** An Android-style phone: a camera dot at the top and a navigation bar at the bottom. Not a brand logo. */
+export const PhoneAndroid = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="6.5" y="2.5" width="11" height="19" rx="1.8" />
+    <path d="M12 5.2h.01" />
+    <path d="M9.5 18.5h5" />
+  </svg>
+);

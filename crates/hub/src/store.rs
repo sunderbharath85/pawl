@@ -34,6 +34,7 @@ const MIGRATIONS: &[Migration] =
         Migration::Sql(SCHEMA_V5),
         Migration::Sql(SCHEMA_V6),
         Migration::Sql(SCHEMA_V7),
+        Migration::Sql(SCHEMA_V8),
     ];
 
 const SCHEMA_V1: &str = r#"
@@ -226,6 +227,18 @@ CREATE TABLE settings_audit (
 CREATE INDEX settings_audit_ts ON settings_audit(ts);
 "#;
 
+/// v8 (phone, group roster): which paired hub introduced a device (`roster_intro`), and the intros
+/// still owed to devices that were offline when they were due (sent on their next link).
+const SCHEMA_V8: &str = r#"
+ALTER TABLE devices ADD COLUMN introduced_by TEXT;
+CREATE TABLE roster_intro_pending (
+    recipient_id  TEXT NOT NULL,
+    device_id     TEXT NOT NULL,
+    queued_at     INTEGER NOT NULL,
+    PRIMARY KEY (recipient_id, device_id)
+);
+"#;
+
 /// settings_audit rows kept (oldest pruned first).
 pub const SETTINGS_AUDIT_MAX_ROWS: i64 = 10_000;
 
@@ -342,6 +355,13 @@ pub enum PairingAuditKind {
     Revoked,
     /// The device revoked us (`bye{revoked}`), so we revoked it too.
     RevokedByPeer,
+    /// A paired hub introduced a device (`roster_intro`) and we added it. actor = the introducer.
+    Introduced,
+    /// An introduced device clashed with one we know (same id, other key; same key, other id; or a
+    /// revoked one): skipped. detail = why.
+    IntroConflict,
+    /// An intro we did not apply: `[peer] accept_roster_intros = false`, or a malformed entry.
+    IntroIgnored,
 }
 
 /// One pairing event. Never holds invite codes or keys.
@@ -455,7 +475,16 @@ fn row_session(r: &Row<'_>) -> rusqlite::Result<Session> {
 const SESSION_COLS: &str = "data, last_event_at, ended_at";
 
 /// Columns read by [`row_roster_entry`].
-const DEVICE_COLS: &str = "id, kind, name, os, hub_version, public_key, addr, paired_at, last_seen";
+const DEVICE_COLS: &str = "id, kind, name, os, hub_version, public_key, addr, paired_at, last_seen, introduced_by";
+
+/// The OS stored for a roster entry: its machine view's, or the device's own (pair_request / hello
+/// / roster_intro) when the machine view does not say.
+fn device_os(e: &RosterEntry) -> MachineOs {
+    match (e.device.os, e.machine.os) {
+        (Some(os), MachineOs::Other) => os,
+        (_, os) => os,
+    }
+}
 
 /// A roster row: the device plus its last known machine view (offline; the hub adds live state).
 fn row_roster_entry(r: &Row<'_>) -> rusqlite::Result<RosterEntry> {
@@ -465,10 +494,11 @@ fn row_roster_entry(r: &Row<'_>) -> rusqlite::Result<RosterEntry> {
     let os: String = r.get(3)?;
     let paired_at: UnixMs = r.get(7)?;
     let last_seen: Option<UnixMs> = r.get(8)?;
+    let os: Option<MachineOs> = enum_from(&os);
     let machine = Machine {
         id: id.clone(),
         name: name.clone(),
-        os: enum_from(&os).unwrap_or(MachineOs::Other),
+        os: os.unwrap_or(MachineOs::Other),
         last_seen: last_seen.unwrap_or(paired_at),
         online: false,
         hub_version: r.get(4)?,
@@ -483,6 +513,8 @@ fn row_roster_entry(r: &Row<'_>) -> rusqlite::Result<RosterEntry> {
         last_seen,
         addr: r.get(6)?,
         path: None,
+        introduced_by: r.get(9)?,
+        os,
     };
     Ok(RosterEntry { device, machine })
 }
@@ -1080,29 +1112,96 @@ impl Store {
 
     /// Insert or re-pair a device: replaces its key and details and clears `revoked_at`. The receive
     /// counter restarts only when the key changed (frames under the old key can no longer be opened);
-    /// the send counter never goes back.
+    /// the send counter never goes back. `introduced_by` is taken as given (a direct pairing has none).
     pub fn upsert_device(&self, e: &RosterEntry) -> Result<()> {
         let d = &e.device;
         self.conn().execute(
-            "INSERT INTO devices (id, kind, name, os, hub_version, public_key, addr, paired_at, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO devices (id, kind, name, os, hub_version, public_key, addr, paired_at, last_seen, introduced_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 kind = excluded.kind, name = excluded.name, os = excluded.os, hub_version = excluded.hub_version,
                 last_rx_seq = CASE WHEN public_key = excluded.public_key THEN last_rx_seq ELSE 0 END,
                 public_key = excluded.public_key, addr = excluded.addr, paired_at = excluded.paired_at,
-                last_seen = excluded.last_seen, revoked_at = NULL",
+                last_seen = excluded.last_seen, introduced_by = excluded.introduced_by, revoked_at = NULL",
             params![
                 d.id,
                 enum_str(&d.kind),
                 d.name,
-                enum_str(&e.machine.os),
+                enum_str(&device_os(e)),
                 e.machine.hub_version,
                 d.public_key,
                 d.addr,
                 d.paired_at,
-                d.last_seen
+                d.last_seen,
+                d.introduced_by
             ],
         )?;
+        Ok(())
+    }
+
+    /// Add a device another hub introduced. Never replaces anything: a no-op (false) when the id or
+    /// the key is already stored, paired or revoked.
+    pub fn add_introduced_device(&self, e: &RosterEntry) -> Result<bool> {
+        let d = &e.device;
+        let n = self.conn().execute(
+            "INSERT INTO devices (id, kind, name, os, hub_version, public_key, addr, paired_at, last_seen, introduced_by)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+             WHERE NOT EXISTS (SELECT 1 FROM devices WHERE id = ?1 OR public_key = ?6)",
+            params![
+                d.id,
+                enum_str(&d.kind),
+                d.name,
+                enum_str(&device_os(e)),
+                e.machine.hub_version,
+                d.public_key,
+                d.addr,
+                d.paired_at,
+                d.last_seen,
+                d.introduced_by
+            ],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Every stored device, paired or revoked (`true` = revoked), oldest pairing first. Intros are
+    /// checked against all of them: a revoked id or key is never re-added by an intro.
+    pub fn roster_with_revoked(&self) -> Result<Vec<(RosterEntry, bool)>> {
+        let c = self.conn();
+        let sql = format!("SELECT {DEVICE_COLS}, revoked_at FROM devices ORDER BY paired_at, id");
+        let mut st = c.prepare(&sql)?;
+        let rows = st.query_map([], |r| Ok((row_roster_entry(r)?, r.get::<_, Option<UnixMs>>(10)?.is_some())))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Remember that `recipient` is owed an intro of each of `device_ids` (sent on its next link).
+    pub fn queue_roster_intros(&self, recipient: &str, device_ids: &[String], ts: UnixMs) -> Result<()> {
+        let c = self.conn();
+        let mut st = c.prepare(
+            "INSERT OR IGNORE INTO roster_intro_pending (recipient_id, device_id, queued_at) VALUES (?1, ?2, ?3)",
+        )?;
+        for id in device_ids.iter().filter(|id| id.as_str() != recipient) {
+            st.execute(params![recipient, id, ts])?;
+        }
+        Ok(())
+    }
+
+    /// The device ids `recipient` is still owed an intro of, oldest first.
+    pub fn pending_roster_intros(&self, recipient: &str) -> Result<Vec<String>> {
+        let c = self.conn();
+        let mut st = c.prepare(
+            "SELECT device_id FROM roster_intro_pending WHERE recipient_id = ?1 ORDER BY queued_at, device_id",
+        )?;
+        let rows = st.query_map([recipient], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
+
+    /// The intros of `device_ids` reached `recipient`.
+    pub fn clear_roster_intros(&self, recipient: &str, device_ids: &[String]) -> Result<()> {
+        let c = self.conn();
+        let mut st = c.prepare("DELETE FROM roster_intro_pending WHERE recipient_id = ?1 AND device_id = ?2")?;
+        for id in device_ids {
+            st.execute(params![recipient, id])?;
+        }
         Ok(())
     }
 
@@ -1118,11 +1217,12 @@ impl Store {
         Ok(())
     }
 
-    /// Mark a device revoked. True if it was paired (and not already revoked).
+    /// Mark a device revoked (and drop the intros owed to it or about it). True if it was paired
+    /// (and not already revoked).
     pub fn revoke_device(&self, device_id: &str, ts: UnixMs) -> Result<bool> {
-        let n = self
-            .conn()
-            .execute("UPDATE devices SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL", params![device_id, ts])?;
+        let c = self.conn();
+        let n = c.execute("UPDATE devices SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL", params![device_id, ts])?;
+        c.execute("DELETE FROM roster_intro_pending WHERE recipient_id = ?1 OR device_id = ?1", [device_id])?;
         Ok(n > 0)
     }
 
@@ -2339,6 +2439,8 @@ mod tests {
                 last_seen: Some(100),
                 addr: addr.map(Into::into),
                 path: None,
+                introduced_by: None,
+                os: Some(MachineOs::Macos),
             },
             machine: Machine {
                 id: id.into(),
@@ -2478,6 +2580,120 @@ mod tests {
         s.upsert_device(&roster_entry("zyxwvu987654", "Mac mini", "pk", None)).unwrap();
         assert_eq!(s.roster().unwrap().len(), 1);
         assert!(s.pairing_audit(5).unwrap().is_empty());
+    }
+
+    /// A v7 hub.db (step 5b) migrates to v8: its paired hubs keep everything and have no introducer.
+    #[test]
+    fn v8_migration_keeps_the_roster() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("hub.db");
+        {
+            let mut c = Connection::open(&p).unwrap();
+            for (i, step) in MIGRATIONS.iter().take(7).enumerate() {
+                let tx = c.transaction().unwrap();
+                match step {
+                    Migration::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                    Migration::Code(f) => f(&tx, MID).unwrap(),
+                }
+                tx.pragma_update(None, "user_version", (i + 1) as i64).unwrap();
+                tx.commit().unwrap();
+            }
+            c.execute(
+                "INSERT INTO devices (id, kind, name, os, hub_version, public_key, addr, paired_at, last_seen, last_tx_seq)
+                 VALUES ('zyxwvu987654', 'hub', 'Mac mini', 'macos', '0.1.0', 'pk-1', '10.0.0.2:47801', 100, 100, 42)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = Store::open(&p, MID).unwrap();
+        let v: i64 = s.conn().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        let e = s.roster_entry("zyxwvu987654").unwrap().unwrap();
+        assert_eq!((e.device.introduced_by, e.device.os), (None, Some(MachineOs::Macos)));
+        assert_eq!(e.device.addr.as_deref(), Some("10.0.0.2:47801"));
+        assert_eq!((&s as &dyn Roster).last_tx_seq("zyxwvu987654"), 42);
+        assert!(s.pending_roster_intros("zyxwvu987654").unwrap().is_empty());
+    }
+
+    fn phone_entry(id: &str, name: &str, pk: &str, os: MachineOs) -> RosterEntry {
+        let mut e = roster_entry(id, name, pk, None);
+        e.device.kind = DeviceKind::Phone;
+        e.device.os = Some(os);
+        e.machine.os = os;
+        e
+    }
+
+    #[test]
+    fn introduced_devices_never_replace_anything() {
+        const INTRODUCER: &str = "zyxwvu987654";
+        let s = Store::open_in_memory(MID).unwrap();
+        let phone = phone_entry("pppppp000001", "iPhone", "pk-phone", MachineOs::Ios);
+        s.upsert_device(&phone).unwrap();
+        assert_eq!(s.roster_entry("pppppp000001").unwrap(), Some(phone.clone()), "kind and os round-trip");
+
+        let mut pixel = phone_entry("pppppp000002", "Pixel", "pk-pixel", MachineOs::Android);
+        pixel.device.introduced_by = Some(INTRODUCER.into());
+        // An intro may only know the device's os: it is what gets stored.
+        pixel.machine.os = MachineOs::Other;
+        assert!(s.add_introduced_device(&pixel).unwrap());
+        let got = s.roster_entry("pppppp000002").unwrap().unwrap();
+        assert_eq!((got.device.introduced_by.as_deref(), got.device.os), (Some(INTRODUCER), Some(MachineOs::Android)));
+        assert_eq!((&s as &dyn Roster).last_rx_seq("pppppp000002"), 0);
+
+        // Same id with another key, a known key under another id, a revoked id or key: never added.
+        let other_key = phone_entry("pppppp000002", "Pixel", "pk-other", MachineOs::Android);
+        assert!(!s.add_introduced_device(&other_key).unwrap());
+        assert_eq!(s.roster_entry("pppppp000002").unwrap().unwrap().device.public_key, "pk-pixel");
+        assert!(!s.add_introduced_device(&phone_entry("tttttt000001", "Thief", "pk-phone", MachineOs::Ios)).unwrap());
+        s.revoke_device("pppppp000001", 5).unwrap();
+        assert!(!s.add_introduced_device(&phone).unwrap(), "a revoked id stays revoked");
+        assert!(!s.add_introduced_device(&phone_entry("nnnnnn000001", "New", "pk-phone", MachineOs::Ios)).unwrap(), "and its key");
+        let all: Vec<(String, bool)> = s.roster_with_revoked().unwrap().into_iter().map(|(e, r)| (e.device.id, r)).collect();
+        assert_eq!(all, [("pppppp000001".to_string(), true), ("pppppp000002".to_string(), false)]);
+
+        // Pairing directly with an introduced device makes it a direct pairing.
+        let mut direct = pixel.clone();
+        direct.device.introduced_by = None;
+        s.upsert_device(&direct).unwrap();
+        assert_eq!(s.roster_entry("pppppp000002").unwrap().unwrap().device.introduced_by, None);
+    }
+
+    /// Only a pairing (`upsert`) sets a device's kind: hellos and presence (`update_seen`) never do,
+    /// whatever os they claim.
+    #[test]
+    fn hellos_never_change_a_devices_kind() {
+        let s = Store::open_in_memory(MID).unwrap();
+        let r: &dyn Roster = &s;
+        let phone = phone_entry("pppppp000001", "iPhone", "pk-phone", MachineOs::Ios);
+        r.upsert(phone.clone());
+        let mut m = phone.machine.clone();
+        m.os = MachineOs::Macos;
+        r.update_seen("pppppp000001", &m, Some("192.168.1.9:47801"), 500);
+        let got = r.get("pppppp000001").unwrap();
+        assert_eq!(got.device.kind, DeviceKind::Phone);
+        let hub = roster_entry("zyxwvu987654", "Mac mini", "pk-hub", None);
+        r.upsert(hub.clone());
+        let mut m = hub.machine.clone();
+        m.os = MachineOs::Ios;
+        r.update_seen("zyxwvu987654", &m, None, 500);
+        assert_eq!(r.get("zyxwvu987654").unwrap().device.kind, DeviceKind::Hub);
+    }
+
+    #[test]
+    fn owed_intros_are_kept_per_recipient_until_sent_or_revoked() {
+        let s = Store::open_in_memory(MID).unwrap();
+        let ids = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        s.queue_roster_intros("hhhhhh000001", &ids(&["pppppp000001", "hhhhhh000002", "hhhhhh000001"]), 10).unwrap();
+        s.queue_roster_intros("hhhhhh000001", &ids(&["pppppp000001"]), 20).unwrap();
+        s.queue_roster_intros("pppppp000001", &ids(&["hhhhhh000001"]), 10).unwrap();
+        assert_eq!(s.pending_roster_intros("hhhhhh000001").unwrap(), ["hhhhhh000002", "pppppp000001"], "no repeats, never itself");
+        s.clear_roster_intros("hhhhhh000001", &ids(&["hhhhhh000002"])).unwrap();
+        assert_eq!(s.pending_roster_intros("hhhhhh000001").unwrap(), ["pppppp000001"]);
+        // Revoking a device drops what it is owed and what others are owed about it.
+        s.upsert_device(&phone_entry("pppppp000001", "iPhone", "pk", MachineOs::Ios)).unwrap();
+        s.revoke_device("pppppp000001", 30).unwrap();
+        assert!(s.pending_roster_intros("hhhhhh000001").unwrap().is_empty());
+        assert!(s.pending_roster_intros("pppppp000001").unwrap().is_empty());
     }
 
     const PEER: &str = "zyxwvu987654";

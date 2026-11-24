@@ -1,272 +1,395 @@
-# sde-peer — `krypto-peer`, step 6 phase A (relay transport)
+# sde-peer — `krypto-peer`, step 7 (phone)
 
-Status: **done**, including t13's follow-ups (the revoke gap and the transport security review; see the end).
-Branch `step-5b-settings-ui`, nothing committed.
+Steps 2–6 are committed (f19744a); their reports are in git history. This report covers step 7 only: protocol v8,
+the roster introduction, phone peers over the relay, the offline wake and the cross-language test vectors.
 
-- `cargo test -p krypto-peer`: 93 passed, 1 ignored (the real-relay smoke). Run 5× in a row.
-- Stress: 12 copies of the test binary in parallel. After the last race fix, 5 rounds were 60/60; after the final
-  queue-size change, 1 more round was 12/12.
-- `cargo clippy -p krypto-peer --all-targets -- -D warnings`: clean.
-- Smoke against the real relay (`wrangler dev` in services/relay, with the dev access key): passed.
-- `cargo test -p krypto-hub`: 158 passed with my hub patch spots.
+Status: done. `cargo test -p krypto-peer` passed 102 tests (+1 ignored) on each of 5 runs; 12 parallel copies × 3 passed 36/36. `cargo clippy -p krypto-peer --all-targets -- -D warnings`
+is clean. The vectors agree byte for byte with tweetnacl (72 checks, see "Test vectors").
 
-Contract: CONTRACTS.md "Step 6 — Relay", plus t13's follow-ups:
-- the access key;
-- `stop_listening` semantics;
-- protocol `LinkPath` / `RelayStatusInfo`;
-- sde-relay's notes.
+## 1. Protocol v8
 
-## API (all additive except `Invite.addr` and the new `PeerEvent` variants; hub patched, see below)
+- `Device` literals fill `introduced_by: None` and `os: Some(machine.os)` on both pairing sides.
+- `PeerBody::RosterIntro` is handled by the node (section 3). It never reaches the hub as a `PeerEvent::Body`.
+- The invite decides the kind (security review, section 12): a phone invite stores the joiner as `kind: phone`
+  and takes only an ios / android machine; a hub invite refuses one. The phone's addr is dropped there and from any
+  later hello: phones are reached over the relay only.
 
-- **`PeerNode::set_relay(&self, relay: Option<RelayConfig>) -> Result<(), RelayConfigError>`**
-  - Config: `RelayConfig { url, access_key: Option<String> }`. Its Debug redacts the key, and the key is never logged.
-  - URL rules: `wss://`/`https://` for any host; `ws://`/`http://` only for loopback (tests, `wrangler dev`). No user info, query, fragment or `%`.
-  - The URL is normalized: lowercase host, no default port, no trailing `/`. The key is 1..=256 base64url characters.
-  - Errors: `bad_url` / `bad_key`.
-  - Same config: no-op. A different config (or `None`) stops the client, so links on the relay path go down.
-- **`relay_status() -> RelayStatusInfo`** and **`PeerEvent::RelayStatus(RelayStatusInfo)`** on every change. These
-  are the protocol types, re-exported from krypto-peer.
-  - `last_error` codes:
-    - `unreachable`, `timeout`
-    - `bad_key` (HTTP 401/403), `unavailable` (503), `rate_limited` (429)
-    - `bad_auth`, `bad_frame`, `unsupported_version`
-    - `replaced` (close 4000: another socket with our key; reconnects at `backoff_max`)
-    - `closed`
-- **`PeerEvent::LinkPath { device_id, path }`** comes right after every `LinkUp`. `link_path(&str) -> Option<LinkPath>`
-  uses the protocol `LinkPath`.
-- **Path changes:**
-  - Every path change also emits `LinkUp` (LAN takeover, relay fallback, a peer that re-dialed over the relay).
-  - The hub's existing "resync on every LinkUp" covers frames lost in the switch. LinkDown happens only when the
-    logical link really ends.
-- **`stop_listening().await`** (as t13 pinned):
-  - No-op when the listener is off.
-  - On return the listener is closed and its port released. Every link it accepted has been closed: `LinkDown`,
-    awaited.
-  - Links this hub dialed, and relay links, stay up. `listen()` works again afterwards.
-- **`join_invite(&str) -> Result<Joined { device, machine, adopted_relay }, JoinError>`.** `join()` is unchanged (a
-  wrapper).
-  - The LAN addr goes first: 3 s when the URI names a relay, else the full 10 s. Then the relay.
-  - With no relay configured, the invite's `relay` + `rk` is turned on and kept: `adopted_relay: Some(..)`, so the
-    hub stores it or calls `set_relay(None)`. If the join fails it is turned off again.
-  - A different configured relay is never switched: `unreachable`.
-- **`Invite`:**
-  - `addr: Option<String>` is now optional; the URI may leave it out when `relay` is present.
-  - New fields `relay`, `relay_token` (`rt=`), `relay_key` (`rk=`), all `Option`.
-  - `rt` and `rk` are redacted in Debug.
-  - `parse` stays strict: `relay`+`rt` come together, `rk` needs `relay`, the URL is normalized, and duplicates are
-    refused.
-- **`create_invite`:**
-  - It also works with the listener off while the relay is connected (relay-only URI). `peer_listener_off` only
-    when neither is up.
-  - It registers `allow_pairing{rt, exp}` on the relay.
-  - At most 4 live relay invites; the oldest is dropped, as the relay drops its slot.
+## 2. Node API for the hub (final; sent to t13 as API READY)
 
-## Relay client (`node/relay.rs`)
+Everything is exported from `krypto_peer`.
 
-- **Connect and auth:**
-  - Connect to `{url}/v1/connect?pk=<b64url pk>&k=<key>`.
-  - Answer the challenge: a NaCl box of `krypto-relay-auth-v1:{nonce}:{host}`, where host is the Host header exactly
-    as tungstenite sends it.
-  - After `bad_auth` we close the socket ourselves.
-- **First frames:** then `allow` with every non-revoked roster key (resent when it changes) and `allow_pairing` for
-  every live relay invite.
-- **Liveness:** `ping` every `presence_interval`; the session is dead if nothing is heard for `offline_after`.
-- **Reconnect** with backoff 1 s → 60 s plus jitter.
-- **Inbound limit:** RELAY_FRAME_MAX_BYTES + 4 KiB (a msg is the frame + 64 bytes, per sde-relay).
-- **Pacing:** client-side token bucket at 40 frames/s, burst 150 (the relay allows 50/200).
-- **One outbound queue (256)** is shared by all relay-path links. A link pulls bodies only while there is room, so
-  the existing per-link queue, byte budget and `Backpressure` apply unchanged.
-- **Inbound `msg`** (all mismatches are dropped with a warning, never the payload):
-  - `from` must equal the roster key of `env.from`, or `env.pk` for a pair_request.
-  - Then the usual open, seq and direction checks.
-- **Handshake over the relay** (there is no socket per link):
-  - `hello` means "I just (re)connected, answer". The answer is a presence, which never asks for one, so there is
-    no ping-pong.
-  - Any fresh, authenticated frame from a paired device without a link registers one. If it was not the answer to
-    our own hello, we say hello, so the peer resyncs.
-  - A hello on a live relay link means the peer lost its state: `LinkUp` (resync) and presence.
-- **When the dial loop sends a hello:**
-  - Once per relay session per unlinked device, only after a LAN dial failed if there is an addr (LAN preferred).
-  - Again after a LinkDown or a cooldown.
-  - With backoff after `not_allowed`.
-  - Never periodically: mailboxes queue frames for an offline peer.
-- **LAN vs relay:**
-  - A LAN link replaces a relay link (register tie-break).
-  - **Fallback without LinkDown** when any of these happens and the relay is up:
-    - the LAN socket closes, or a send to it fails;
-    - it is quiet past `offline_after`;
-    - a relay hello arrives;
-    - relay frames arrive after the LAN has been quiet for a presence interval.
-  - After a fallback, the peer must be heard within `handshake_timeout`, else LinkDown.
-  - The relay session ending drops relay-only links at once.
-- **Relay pairing:**
-  - The joiner allows the inviter's key *before* sending its pair_request with `pairing = rt` (sde-relay note 1).
-  - The inviter allows the new device before its pair_accept, which goes out on the same queue.
-  - `not_allowed` for a pending join fails it fast with `invite_rejected` (the slot was used or expired).
-  - Pair requests through the relay get the same rate limiter, keyed by the sender's key, and
-    `PairRejected.remote_addr = "relay"`.
-  - A pair_request older than JOIN_TIMEOUT + 60 s is refused: it waited in our mailbox and its joiner gave up
-    (prevents one-sided pairings).
-- **Revoke, disconnect, shutdown:**
-  - Revoke sends `bye{revoked}` on the active path and then drops the peer from our allow list.
-  - A `bye{revoked}` that waited in our mailbox is honoured even without a link.
-  - `disconnect` cooldowns also drop relay frames.
-  - Shutdown flushes the links' byes through the relay before closing it.
-- **TLS:** the approved direct `rustls` dependency (std + tls12 + aws_lc_rs) installs the provider once before the
-  first `wss://` connect.
-
-## Flake review (t13 asked)
-
-The 58/59 flake was most likely a **real race, now fixed**. Three pre-existing bugs, all visible under load:
-
-1. **`io.rs` writer.**
-   - When a link queued `bye` + close and dropped its receiver, the socket reader exited on the peer's next frame.
-     The writer's `select!` then picked "reader finished" at random and could exit without sending the bye.
-   - Fix: queued frames come first (`biased`), and once the reader is gone the writer flushes what is queued.
-   - Regression test: the old code fails it 2 times in 3.
-2. **A failed LAN send ended the link without reading what the socket had already delivered.** The usual victim was
-   the peer's `bye{revoked}`, whose close had ended our writer.
-   - Fix: a failed send is handled like a lost socket. Drain the delivered frames (honour a bye), then fall back to
-     the relay or end.
-3. **A `bye{revoked}` arriving on a link that just lost a tie-break** (both sides dialed) was ignored during its
-   grace period.
-   - Fix: it now revokes, and closes the winning link first, so LinkDown still comes before Revoked.
-   - Deterministic regression test with raw sockets.
-
-Test timing fixes:
-- `fast()` handshake 500 ms → 2 s. It also bounds dial replies and the replaced-link grace.
-- Cooldown windows are measured from the disconnect, with longer cooldowns and `sleep_until`.
-- Stalled-peer tests use `offline_after = 30 s`.
-- A `link_works` helper is used where both sides dial: a body queued on a tie-break loser is dropped by design.
-- `settle()` waits before revoking, and the mock-relay tests wait for the pairing slot.
-
-## Hub patch spots (approved; sde-hub owns the rest)
-
-- `crates/hub/src/core/peers.rs` `create_invite` log line: `invite.addr.as_deref().unwrap_or("relay only")`.
-- `crates/hub/src/core/peers.rs` `on_peer_event`: two debug-log arms, `PeerEvent::LinkPath` and
-  `PeerEvent::RelayStatus`.
-- `crates/hub/src/core/tests.rs:991`: `.addr.as_deref() == Some(listening.as_str())`.
-
-Phase B for sde-hub:
-- persist `adopted_relay` (use `join_invite`);
-- wire `set_relay` / `relay_status` / `RelayStatus` into settings and `PeerStatus.relay`;
-- fill `Device.path` from `LinkPath`;
-- toggle the listener with `stop_listening()` / `listen()`.
-
-## Files (crates/peer unless noted)
-
-| File | Change |
+| Item | What it does |
 |---|---|
-| `Cargo.toml` | tokio-tungstenite `rustls-tls-webpki-roots`; `rustls` 0.23 (std, tls12, aws_lc_rs). Approved. Cargo.lock gains rustls/tokio-rustls/webpki-roots |
-| `src/relay.rs` (new) | `RelayConfig`, `RelayConfigError`, URL/key rules, relay addresses, auth answer, pacer, TLS provider; unit tests |
-| `src/node/relay.rs` (new) | relay client, session/auth/pump, inbound routing + key binding, first-frame registration, relay pairing, allow list, join over the relay + adoption |
-| `src/node.rs` | logical links with LAN/relay paths, fallback/relink, `PeerEvent::{LinkPath, RelayStatus}`, `Joined`/`join_invite`, `set_relay`/`relay_status`/`link_path`/`stop_listening`, relay-aware dial loop, invites with relay slots, the three race fixes |
-| `src/invite.rs` | `addr: Option`, `relay`/`rt`/`rk` params, `valid_host` |
-| `src/io.rs` | close codes (`close_code()`), `split()`/`WsTx`, `send_wait`, writer flush fix + test |
-| `src/limits.rs` | `PairKey` (IP or relay sender key) for the pair limiter |
-| `src/lib.rs` | exports; re-exports protocol `LinkPath`, `RelayStatusInfo` |
-| `src/node/tests.rs` | Option addr, timing fixes, `link_works`/`settle`, stop_listening and revoke-in-grace tests |
-| `src/node/tests/relay.rs` (new) | in-process mock relay (access key, Host-bound auth, allow, one-shot slots, queueing, 4000 replace) + 10 tests + ignored real-relay smoke |
+| `check_intro_device(&IntroDevice) -> Result<[u8; 32], &'static str>` | Structural check of one introduced device; returns its key. Codes: `bad_id` (not 12 `[a-z0-9]`), `bad_name` (fails `device_name_ok`), `bad_kind` (a phone without an ios / android os, or a hub with one), `bad_key` (canonical standard padded base64 of 32 bytes, not of small order), `bad_addr` (an addr that `peer_addr_ok` refuses, or any addr on a phone). It does not look at the roster. |
+| `public_key_ok(&str) -> Option<[u8; 32]>` | The key rule above, on its own. |
+| `device_name_ok(&str) -> bool` | 1..=64 chars after trimming, no control characters, no bidi embedding / override / isolate (U+202A–202E, U+2066–2069), zero-width or mark (U+200B–200F) or BOM (U+FEFF). Applied to every name a peer sends (pair_request, pair_accept, hello, presence, roster_intro); the hub should hold its own machine name to it too, or peers refuse its frames. |
+| `peer_addr_ok(&str) -> bool` | Private / LAN IP literal `ip:port` only (the rule pairing already used for peer-reported addrs). |
+| `MAX_INTRO_DEVICES = 32`, `MAX_INTRO_NAME_CHARS = 64` | Limits. |
+| `PeerEvent::RosterIntro { from, devices, invalid: Vec<(IntroDevice, &'static str)> }` | A `roster_intro` arrived on the live link of `from`, a paired device of kind hub, with at most 32 devices. `devices` passed the checks (in the sender's order); `invalid` failed, with a `check_intro_device` code or `own_device` / `sender_device` / `duplicate` (section 12). Nothing is stored. An intro from a phone, or one with more than 32 devices, is dropped whole without an event (logged without its payload). |
+| `PeerNode::send_roster_intro(&self, device_id, Vec<IntroDevice>) -> Result<(), SendError>` | `roster_intro` on the device's live link, like `send`. `TooLarge` above 32 devices (nothing sent). |
+| `PeerNode::roster_changed(&self)` | Same as `connect_known`: resend the relay allow list and keep a dial loop for every roster hub. Call it after storing introduced devices. LAN hellos and relay frames read the roster live, so stored devices are accepted from then on. |
+| `PeerNode::wake_phone(&self, device_id) -> Result<(), WakeError>` | Offline wake (section 5). |
+| `WakeError` | `NotPhone` "not_phone" (not a paired phone), `Linked` "linked" (send normally instead), `RelayOff` "relay_off" (no relay session, or a relay a running join adopted), `RateLimited` "rate_limited" (woken less than 60 s ago), `Disconnected` "disconnected" (the hub's `disconnect` cooldown is running), `Backpressure` "backpressure" (relay queue full, nothing queued; a retry is allowed). |
+| `PeerNode::create_phone_invite(&self, ttl) -> Result<Invite, InviteError>` | For `create_invite{forPhone: true}`: a relay-only invite (`relay`, `rt`, `rk`, no `addr`) even when the LAN listener is on, usable only by an ios / android joiner, who is stored as a phone. `InviteError::RelayOff` ("relay_off", new variant) when the relay is not connected. |
+| `PeerNode::create_invite(&self, advertise, ttl)` | Unchanged signature; now a hub-only invite (an ios / android joiner gets `pair_reject{invalid_invite}`). |
 
-## Tests added (59 → 80, +1 ignored)
+Agreed split (t13): the node checks the sender and the structure, then reports. The hub checks id and key
+conflicts, revoked ids and keys, its own key and the sender's, applies `accept_roster_intros`, stores what it
+accepts with `introduced_by = from`, audits and notifies, then calls `roster_changed()`.
 
-- **Unit:**
-  - URL rules, config/key rules (Debug redaction), strict addresses, auth answer opens on the relay side, pacer, TLS
-    provider idempotent.
-  - Invite relay params round trip / strictness.
-  - The io writer flush.
-- **Mock relay:**
-  - auth, status and config errors, same-config no-op, pings keep the session;
-  - bad key, bad auth (another Host), retry, `replaced`;
-  - relay-only pairing, link, bodies both ways, the largest body, allow lists, one-shot slot (a second join is
-    refused fast);
-  - relay restart → LinkDown then relink; relay off drops relay links;
-  - peer restart over the relay → relink without LinkDown;
-  - LAN takeover, LAN loss fallback and stop_listening fallback, no LinkDown on the dialer;
-  - `from` ≠ roster key dropped (the genuine copy passes), forged pair_request dropped;
-  - join with a dead LAN addr falls back and adopts the invite relay; a bad-key adoption is reverted; another
-    configured relay is not switched;
-  - revoke over the relay reaches the peer and both allow lists;
-  - disconnect cooldown drops relay frames, relink afterwards.
-- **Node:** `stop_listening_closes_accepted_links_only`, `bye_revoked_on_a_replaced_link_still_revokes`.
-- **Smoke:** `relay_smoke_against_a_real_relay`, ignored by default. Run it with
-  `KRYPTO_RELAY_SMOKE_URL=ws://127.0.0.1:8787 KRYPTO_RELAY_SMOKE_KEY=<key> cargo test -p krypto-peer -- --ignored relay_smoke`.
+The `Roster` trait is unchanged. `get_revoked` (still to be implemented in the hub store) also serves the hub's
+"revoked id" check.
 
-## Known gaps
+### What sde-hub has to do with it
 
-- **Frames in flight across a path switch or a LAN tie-break swap can be lost** (one seq counter, two paths). Every
-  switch emits LinkUp, and the hub resyncs.
-- **A revoked device learns it on its next hello** (fixed below), but only once the hub's store implements
-  `Roster::get_revoked` (sde-hub). Until then the default (None) only loses that answer.
-- **A relay blip drops relay-only links** (LinkDown, then a relink after reconnect).
-- **A half-open LAN socket** is detected by `offline_after` unless relay frames arrive first.
-- **If the peer drops our hello** (e.g. its cooldown), the next hello comes only after a LinkDown, the cooldown's
-  end, a reconnect, or a refusal backoff.
-- **Pasting an invite within milliseconds:** the slot travels on the inviter's socket, so the joiner can reach the
-  relay first and get `invite_rejected`.
-- **More than 64 paired devices:** the least recently seen are left out of the allow list.
-- **`join()` (old signature) also adopts a relay** but cannot report it. The hub should move to `join_invite`.
-- **aws-lc-rs builds for krypto-peer alone too** (build time). It is the provider the workspace already builds for
-  reqwest.
+- Add a `PeerEvent::RosterIntro` arm (the match in `core/peers.rs` is exhaustive).
+- Fill `introduced_by` and `os` in `Device` literals.
+- Store `os` from `Paired`, from hellos (`update_seen` gets the machine) and from intros.
+- Build `IntroDevice` from roster rows. Filter `addr` with `peer_addr_ok` and leave it out for phones.
+- Send intros with `send_roster_intro` per the fan-out rules, on pairing and on the recipient's next `LinkUp`.
+- Use `create_phone_invite` for `forPhone`.
+- Call `wake_phone` for a new local permission request when a paired phone is not linked. Ignore `Linked`,
+  `RateLimited` and `RelayOff`.
 
-## Commands run
+## 3. Roster introduction (node side, `node/phone.rs`)
 
-- `cargo test -p krypto-peer` ×5 (80 passed each).
-- The test binary 12× in parallel, many rounds (the last 5 rounds 60/60, then 12/12 after the final change).
-- `cargo clippy -p krypto-peer --all-targets -- -D warnings`, with and without `--no-deps`.
-- `cargo check -p krypto-hub --tests` and `cargo test -p krypto-hub` (152 passed).
-- The real-relay smoke via `bunx wrangler dev` (started and stopped by me; the access key was read from `.dev.vars`
-  into the environment only, never printed).
+`on_body` routes `roster_intro` to `Inner::roster_intro`. It reaches that function only from a link that is up.
+It applies these checks in order:
 
-## Follow-up 1: revoked devices are told (t13 approved)
+1. The roster entry of `from` must exist and be of kind hub.
+2. The intro holds at most 32 devices.
+3. Each device passes `check_intro_device`, or is listed in `invalid` with its code.
 
-- **New `Roster::get_revoked(&self, id) -> Option<RosterEntry>`.** It has a default impl returning None, so the hub
-  compiles; MemoryRoster implements it. **sde-hub: implement it in the store.**
-- **A revoked device's LAN hello gets `bye{revoked}`,** at most once per device per minute. The rate limit is checked
-  before any crypto. The hello must open with the stored key and pass the seq check, so a replay gets nothing.
-- **The relay path:** the same answer goes to a revoked device's relayed frames when they reach us (only while our
-  allow list lags). Otherwise the bye from the revoke itself waits in its mailbox and is honoured even without a link.
-- **The dialer side:** an authentic `bye{revoked}` in answer to our hello now revokes the peer here too (`Revoked`,
-  `by_peer: true`), and dialing stops.
-- **Tests:**
-  - `revoked_device_hello_is_answered_with_bye_once_a_minute`: forged and replayed hellos stay silent; then one bye;
-    then silent within the minute.
-  - `revoked_while_offline_peer_learns_it_when_it_comes_back`.
-  - `revoked_while_off_the_relay_the_peer_still_learns_it`: the queued bye, and the answer path through the relay,
-    with a forged sender ignored.
-  - Roster unit tests for MemoryRoster and the default.
+Then the node emits a single event. It never writes to the roster for an intro.
 
-## Follow-up 2: transport security review (t13)
+Low-order keys use libsodium's blocklist of 7 points, compared with bit 255 cleared. A test shows that each point
+is really weak: with any of them, two out of nine random secret keys get the same box key.
 
-1. **(HIGH) Auth nonce domain.**
-   - The auth box is made with our long-term key and a relay-chosen key and nonce. A hostile relay could pick a
-     peer's key and the nonce of an envelope we sent that peer, and learn its keystream.
-   - Fix: a challenge whose nonce byte 15 is 0/1 (the envelope direction domain) is refused. So is a `relay_pk` equal
-     to our own key, any roster key, or a pending join's inviter. Refusal means `bad_auth`, close, backoff.
-   - The Roster cannot list revoked keys; the nonce domain alone already rules out every envelope nonce.
-   - The mock relay now sends byte 15 >= 2, like the real one. The real-relay smoke was rerun 3×: passed.
-   - Tests: `auth_refuses_challenges_that_could_reuse_an_envelope_nonce` (unit, including real envelope nonces) and
-     `hostile_relay_challenges_are_refused`. For the envelope nonce, our own key and a peer key: no auth frame is
-     ever sent; then an honest challenge connects.
-2. **(MED) An adopted relay sees only the inviter.** While a join runs on the invite's relay (turned on because none
-   was configured), the allow list holds only the inviter's key and no hellos go out. Once the pairing succeeds, the
-   full allow list follows, then the hellos.
-   - Test: `an_adopted_relay_sees_only_the_inviter_until_pairing_succeeds` (an ordered log of everything the joiner
-     sent the relay).
-3. **(MED) Pair limiter.**
-   - All relay origins share one bucket, `PairKey::Relay`, kept outside the IP table, so relay traffic never evicts
-     an IP entry.
-   - Global cap: 60 pair attempts per minute across all origins, checked before any crypto.
-   - Tests: unit `relay_origins_share_one_bucket_that_never_evicts_ips` and `global_cap_on_pair_attempts`. Node test
-     `relay_pair_attempts_share_one_bucket_and_spare_the_lan`: 5 bad codes from 5 made-up relay senders block the
-     relay bucket; the right code over the relay is then dropped; the LAN listener still pairs.
-4. **(LOW)** A hello or presence stamped more than 1 h from our clock is dropped: link handshakes, live links and the
-   relay first frame.
-   - Test: `hello_and_presence_stamped_far_from_our_clock_are_dropped`.
-6. **Cheap seq check before `open()`** everywhere an envelope is opened: links, handshakes, dial reply, pair
-   request/reply, relay first frame, revoked answer.
-   - Test: `replayed_frames_are_dropped_before_decryption`, which counts decryptions (cfg(test)): replays and a stale
-     garbage box cost none.
+Note: crypto_box 0.9 reduces the clamped scalar mod ℓ, so its box key for a small-order point differs from the
+all-zero RFC 7748 result. It is still one of at most 8 values. For honest keys (prime-order subgroup), crypto_box and
+tweetnacl agree; the vectors prove it.
 
-Files touched by the follow-ups: `src/roster.rs`, `src/envelope.rs` (`RANDOM_LEN` is crate-visible), `src/relay.rs`,
-`src/limits.rs`, `src/node.rs`, `src/node/relay.rs`, tests.
+## 4. Phones over the relay
+
+### Hub side
+
+- **Phones are never dialed or greeted.** `dial_loop` exits at once for a phone row. A hub would otherwise send
+  hellos to an offline phone, and each frame queued for an offline phone makes the relay push to it.
+  - A test checks that the hub sends nothing to the phone's mailbox after LinkDown, and that no dial loop runs for
+    it.
+- **Pairing** uses the same wire as a hub joiner. A test pairs a `PeerNode` whose machine os is ios through
+  `create_phone_invite`. The hub listens on the LAN too, yet the invite has no addr. The test then checks:
+  - kind phone and os ios on the inviter;
+  - links on the relay path, and both allow lists;
+  - presence both ways;
+  - `sync_request` and an intent with `client: mobile` from the phone;
+  - `mirror_snapshot` and an `intent_ack` from the hub.
+
+### Wire summary for fe-mobile
+
+Every field format is in the vectors.
+
+1. **Connect:** `{relay}/v1/connect?pk=<own address>&k=<rk>`.
+   - Answer `challenge` with `auth{box}` (see `relay_auth.json`).
+   - Refuse a nonce whose byte 15 is below 2, and a relayPk equal to the phone's own key or a paired hub's key.
+2. **Pair:**
+   - Send `allow{[inviter address]}`.
+   - Then send `send{to: inviter address, env: pair_request (env.pk = own key), pairing: rt}`.
+   - Wait for `msg` with a `pair_accept` whose `reqSeq` equals the pair_request's seq, or a `pair_reject`, or
+     `error{not_allowed}`.
+   - Then store the hub, its last rx seq (the pair_accept's) and its last tx seq (the pair_request's).
+3. **Link:**
+   - Both sides treat the link as up after pairing.
+   - On every (re)connect the phone sends `hello` to each paired hub. The hub answers with a presence.
+   - Each hub sends a presence when the link comes up and then every `PRESENCE_INTERVAL_MS` (15 s). The phone
+     must send something at least that often, or the hub drops the link after `PRESENCE_OFFLINE_MS` (45 s).
+   - Retry a hello refused with `not_allowed` with backoff (1 s, 2 s, 5 s, then every 30 s; clarifications).
+4. **Every inbound `msg`:**
+   - `msg.from` must equal the stored key of `env.from` (for a pair_request: `env.pk`).
+   - Drop any `seq <= last rx seq` before opening.
+   - Then open (v, nonce length, direction byte, seq in nonce) and persist the new seq.
+   - Drop a hello or presence whose `ts` is more than 1 h from local time.
+5. **Outbound seq:** `max(last tx + 1, now_ms * 1000)`, persisted per hub. Every value stays below 2^53.
+6. **`roster_intro` from a hub:** same structural rules as `check_intro_device`, plus the conflict and revoked
+   rules. Phones never get phones.
+
+## 5. Offline wake
+
+`wake_phone(id)` runs under the node's gate (like `revoke`, so a revoke either finished before it or waits), and
+checks, in this order:
+
+1. The id is a paired phone (a revoked one is not).
+2. No `disconnect` cooldown runs for it (`Disconnected`).
+3. It has no live link.
+4. A relay session is up and not restricted to an adopted join.
+5. It was not woken in the last 60 s. The slot is taken before sealing and given back if the relay queue refuses
+   the frame.
+
+It then seals the current presence with `next_tx_seq` (seq rules intact) and queues
+`send{to: phone address, env}`. The relay stores it in the phone's mailbox and sends the content-free push.
+
+When the phone reconnects, the wake is the first frame it reads: an ordinary presence from that hub. A test checks
+that the returning phone's rx seq for the hub reaches the wake's seq, and that the link comes back.
+
+## 6. Test vectors (`crates/peer/tests/vectors/`)
+
+### Shared format
+
+- JSON, LF, object keys sorted; every file has a `description`.
+- Bytes are `…Hex` (lowercase hex), standard padded base64 (keys, nonces, boxes), or base64url without padding
+  (relay addresses, codes, tokens).
+- Keys are referred to by name: `hubA`, `hubB`, `phone`, `relay`.
+
+### `keys.json`
+
+`keys[]`: `{name, id, secretKeyHex, publicKeyHex, publicKey (std b64), relayAddress (b64url)}`.
+
+- Each secret is 32 consecutive bytes. The secrets are test data, never used for anything else.
+- `relay` is the relay's per-connection key; its `id` is null.
+
+### `base64.json`
+
+- `samples[]`: `{hex, std, url}`.
+- `invalidStd[]` and `invalidUrl[]` are strings a strict decoder must refuse: wrong length, misplaced or extra
+  `=`, non-zero trailing bits, the wrong alphabet, whitespace.
+
+### `envelopes.json`
+
+`vectors[]`: `{name, sender, receiver, seq, randomHex (15 bytes), dir, nonceHex (24 bytes), plaintext, body, envelope}`.
+
+- `nonce = random || dir || seq` (u64 big-endian). `dir` is 1 if the sender's pk is below the receiver's
+  (bytewise), else 0.
+- `plaintext` is the exact UTF-8 JSON that was boxed; `body` is the same value parsed.
+- `envelope` is the wire `PeerEnvelope` `{v, from, to, seq, nonce, box, pk?}`.
+- There are 12 vectors covering both directions:
+  - pairing: pair_request with pk, pair_accept;
+  - link: hello, presence both ways, bye;
+  - mirror and sync: sync_request, mirror_snapshot;
+  - intents: intent (approve, mobile), intent_ack;
+  - roster_intro hub→phone and hub→hub.
+- Producing: `nacl.box(utf8(plaintext), nonce, receiverPk, senderSk)` must equal `envelope.box`. Opening
+  `envelope` must give `plaintext`.
+
+`rejects[]`: `{name, receiver, sender, envelope, error}`, where `error` is the crate's `OpenError` code. There
+are 7 cases:
+
+| Case | Expected error |
+|---|---|
+| reflected to its sender | `bad_nonce` |
+| seq changed | `bad_nonce` |
+| box tampered | `decrypt_failed` |
+| random part of the nonce changed | `decrypt_failed` |
+| v = 2 | `bad_version` |
+| 23-byte nonce | `bad_encoding` |
+| wrong sender key | `decrypt_failed` |
+
+`replay`: `{receiver, sender, lastRxSeq, envelope, error: "replay"}`. The envelope opens fine; only the
+`seq <= lastRxSeq` rule refuses it.
+
+### `invites.json`
+
+`valid[]`: `{name, uri, machineId, publicKey (std b64), addr, code, expiresAt, relay (normalized), relayToken, relayKey}`.
+
+- Missing fields are null; `to_uri` of the parsed invite gives `uri` back.
+- There are 5: LAN only, LAN plus relay, relay only (the phone's QR), IPv6 plus a relay with port and path, ws on
+  loopback.
+
+`invalid[]`: `{name, uri}`. 14 URIs that must be refused:
+- scheme, version, upper-case id;
+- short or low-order key, 15-byte code, non-numeric expiry;
+- duplicate parameter, fragment;
+- neither addr nor relay, relay without rt, rk without relay;
+- ws relay off loopback, addr without port.
+
+### `relay_auth.json`
+
+`valid[]`: `{name, device, relayUrl, accessKey, connectUrl, host, challenge {type, nonce, relayPk, v}, plaintext, auth {type, box}}`.
+
+- `plaintext = "krypto-relay-auth-v1:" + nonce + ":" + host`.
+- `box = nacl.box(utf8(plaintext), nonce, relayPk, deviceSk)`; the relay opens it with its secret from
+  `keys.json`.
+- There are 2: a phone on `relay.example.com`, and a hub on `127.0.0.1:8787` (wrangler dev).
+
+`refused[]`: `{name, device, host, nonce, relayPk, error: "bad_auth"}`. There are 3: nonce byte 15 = 0, byte
+15 = 1, and relayPk equal to the device's own key.
+
+### `names.json` (added with the security review)
+
+- `maxChars`: 64.
+- `valid[]` and `invalid[]`: `{name, utf8Hex, note}`. `utf8Hex` is the exact name.
+- `introDevices[]`: `{device (IntroDevice), result ("ok" or a check_intro_device code), note}`.
+
+The name rule:
+1. Check the **untrimmed** name. No character anywhere may be a control character (Cc: U+0000–001F, U+007F–009F)
+   or one of U+061C, U+200B–200F, U+2028–202E, U+2060–2064, U+2066–2069, U+FEFF.
+2. Trim Unicode White_Space from both ends.
+3. Count Unicode scalar values (`Array.from(s).length` in JS, not `.length`); the count must be 1..=64.
+
+Cases cover:
+- astral characters (64 valid, 65 not);
+- NBSP and ideographic space, which are trimmed;
+- a leading BOM, which must be refused even though JS `trim()` would strip it;
+- C0 and C1 controls;
+- every forbidden code point, one each.
+
+The `introDevices` results come in code order `bad_id`, `bad_name`, `bad_kind`, `bad_key`, `bad_addr`. They
+cover:
+- every kind / os combination;
+- LAN, CGNAT, ULA, public, DNS and portless addrs;
+- ids, names and keys.
+
+Cross-checked with a JS implementation written only from the file's description: 46 of 46 names agree.
+
+### Rust side and regeneration
+
+| Test | What it checks |
+|---|---|
+| `vectors::vectors_match_this_crate` | Regenerates every file in memory and compares it with the committed one. |
+| `vectors::vector_files_hold` | Validates each committed vector independently: open, refuse, parse, auth box opened by the relay. |
+| `vectors::fixed_keys_cover_both_directions` | The fixed keys give both direction bytes. |
+
+To regenerate after a deliberate wire change:
+`KRYPTO_REGEN_VECTORS=1 cargo test -p krypto-peer vectors`.
+
+Cross-check done: a throwaway bun script loaded `apps/mobile/node_modules/tweetnacl` and passed 72 of 72 checks:
+- key derivation;
+- seal and open of all 12 envelopes, plaintext round-trip, direction and seq;
+- relay auth box from both sides.
+
+## 7. Other changes
+
+- **Small-order keys are refused:**
+  - in `pair_request`, where the request is dropped like one carrying our own key;
+  - in `Invite::parse`, which returns `bad_uri`.
+- **Envelope refactor:** `nonce_with` / `seal_with_nonce` split out of `seal_plaintext` so the vectors can fix the
+  random part. The wire is unchanged.
+- **`on_body`, `on_frame` and `drain_lan` take `self: &Arc<Self>`.**
+- **Line endings:** `envelope.rs`, `invite.rs`, `limits.rs`, `node.rs`, `node/relay.rs` and `relay.rs` were CRLF in
+  the index. They are LF now; that part of the diff is whitespace only (t13: keep crates/peer LF).
+
+## 8. Files
+
+- New:
+  - `src/intro.rs`
+  - `src/node/phone.rs`
+  - `src/vectors.rs` (cfg(test))
+  - `src/node/tests/relay/phone.rs`
+  - `tests/vectors/*.json` (5)
+- Changed:
+  - `src/node.rs`
+  - `src/node/relay.rs`
+  - `src/envelope.rs`
+  - `src/invite.rs`
+  - `src/lib.rs`
+  - `src/roster.rs` (test literal)
+  - `src/node/tests.rs` (literal)
+  - `src/node/tests/relay.rs` (`mod phone;`)
+- `crates/hub` is not touched; it needs the items in section 2.
+
+## 9. Tests added (93 → 105, +1 ignored; the last 3 with the security review)
+
+| Area | Tests |
+|---|---|
+| `intro` | `low_order_points_really_have_a_guessable_shared_secret`, `public_key_rules`, `intro_device_rules` |
+| `vectors` | `vectors_match_this_crate`, `vector_files_hold`, `fixed_keys_cover_both_directions` |
+| `node::tests::relay::phone` | `a_phone_pairs_through_a_relay_only_invite_and_talks_over_the_relay` |
+| | `introduced_hubs_are_reported_and_once_stored_they_link` |
+| | `roster_intros_are_checked_and_only_a_paired_hub_may_send_one` |
+| `invite` | `parse_rejects_bad` gained a case for a key of small order |
+| `node::tests::relay::phone` (review) | `the_invite_decides_whether_a_joiner_is_a_phone_or_a_hub`, `no_wake_for_a_disconnected_or_revoked_phone` |
+| `node::tests` (review) | `machine_names_with_control_or_invisible_characters_are_refused` |
+
+What the three `phone` tests cover:
+
+- **`a_phone_pairs_through_a_relay_only_invite_and_talks_over_the_relay`:** relay-only invite rules, phone kind and
+  os, bodies both ways, never dialed, the wake and its rate limit, the phone reading the wake, `RelayOff`.
+- **`introduced_hubs_are_reported_and_once_stored_they_link`:**
+  - the event carries the intro;
+  - nothing is stored, and nobody is let in, until the hub stores the devices;
+  - after storing, the allow lists take the new devices, and they link over the LAN;
+  - `introduced_by` is set, and the intro never shows up as a Body.
+- **`roster_intros_are_checked_and_only_a_paired_hub_may_send_one`:** every reason code, 32 devices accepted, 33
+  refused by the sender and dropped whole by the receiver, and an intro from a phone ignored.
+
+## 10. Known gaps
+
+- **Conflict checks run when the hub stores the devices, not inside the node** (t13's split). Two intros naming one
+  id with different keys are both reported. The hub store must refuse the second at write time, never replace the
+  key.
+- **The phone's link drop is noticed after `PRESENCE_OFFLINE_MS` (45 s) of silence** unless the phone says bye.
+  Presences sent in that window queue in its mailbox; the relay pushes at most once a minute.
+- **The wake carries the regular presence.** It holds agents, repos and pets, so it is as big as any presence
+  frame, well under the relay frame limit.
+- **A paired device with a mixed-order key** (prime-order point plus small-order point, which the blocklist cannot
+  see) could learn at most 3 bits of our scalar mod ℓ through crypto_box's reduction. Pairing needs an invite code,
+  and those 3 bits leave the key at well over 250 bits of strength.
+- **Step 6 gaps still apply:**
+  - frames in flight across a path switch can be lost;
+  - a relay blip drops relay links;
+  - with more than 64 paired devices, the least recently seen are left out of the allow list;
+  - `get_revoked` is still the hub store's to implement.
+
+## 11. Commands run
+
+- `cargo test -p krypto-peer` ×5: 102 passed, 1 ignored, each run.
+- Stress: the test binary 12 in parallel × 3 rounds: 36/36. A first round failed 2 of 36 on mock-relay timing:
+  - a frame handed to a socket the relay had not yet seen close was lost;
+  - frames still in flight were logged after the snapshot.
+  
+  Fixes: `a_phone_pairs…` and the step-6 `revoked_while_off_the_relay…` now wait for the relay to see the socket close (and for the relay log to go quiet) before acting. No product change.
+- `cargo clippy -p krypto-peer --all-targets -- -D warnings`: clean.
+- `KRYPTO_REGEN_VECTORS=1 cargo test -p krypto-peer vectors`, then twice without the variable: 3 passed each.
+- `bun <scratchpad>/check_vectors.cjs <apps/mobile tweetnacl> <vectors dir>`: tweetnacl agrees, 72 checks.
+- After the security review: `cargo test -p krypto-peer` ×5: 105 passed, 1 ignored; stress 12×3 = 36/36 (after widening the step-6 relay ping test's 800 ms window to 2 s); clippy clean; `cargo check -p krypto-hub --tests` passes; JS names check 46/46; tweetnacl still 72/72.
+
+## 12. Security review fixes (t13)
+
+1. **The invite decides the kind, not the joiner (important).**
+   - What was wrong: the kind came only from the joiner's claimed os. Anyone holding a "Pair a phone" QR code could
+     claim linux, be stored as a hub, then send roster_intro, get dialed and have a LAN addr stored.
+   - The fix: `LiveInvite` now records its kind. `create_phone_invite` makes phone
+     invites; `create_invite` makes hub invites. `consume_invite(code, os)` returns the invite's addr and kind, and
+     the device is stored with that kind.
+   - A phone invite takes only an ios / android joiner, and a hub invite refuses one. A mismatch is answered with
+     `pair_reject{invalid_invite}`, counts as a limiter failure, and leaves the invite live (no denial of service
+     on the real phone).
+   - Test: `the_invite_decides_whether_a_joiner_is_a_phone_or_a_hub`.
+2. **`bad_kind` in `check_intro_device`.**
+   - A phone needs os ios / android; a hub must not have one (its os may be unknown).
+   - Unit cases in `intro_device_rules`; node cases in `roster_intros_are_checked_and_only_a_paired_hub_may_send_one`.
+3. **A second layer in the node.** On top of the hub's checks, the node marks an intro device invalid when it names:
+   - our id or key: `own_device`;
+   - the sender's id or key: `sender_device`;
+   - an id or key already named earlier in the same intro: `duplicate`.
+
+   Tested in `roster_intros_are_checked_…`, which now uses 32 distinct devices for the size limit.
+4. **Names.** `device_name_ok` (exported) adds the invisible-format characters to the old rule (1..=64 chars
+   trimmed, no control characters).
+   - The set: t13's U+202A–202E, U+2066–2069, U+200B–200F and U+FEFF, plus U+061C (Arabic letter mark, a bidi
+     mark), U+2028–2029 (line and paragraph separators) and U+2060–2064 (word joiner and invisible operators).
+   - Specified exactly in `names.json`.
+
+   Where a bad name is now refused:
+
+   | Frame | What happens |
+   |---|---|
+   | `pair_request` | `pair_reject{bad_request}` |
+   | `pair_accept` | The joiner refuses: `invite_rejected` |
+   | hello opening a link (LAN, dial, relay) | Dropped |
+   | hello on a live link | Ignored (no roster update) |
+   | presence | Ignored (no update, no event) |
+   | roster_intro | `bad_name` |
+
+   - `set_machine` warns when our own name breaks the rule.
+   - Note for sde-hub: `machine::validate_name` should use `device_name_ok`. A machine renamed to a name with a
+     zero-width joiner (some emoji sequences) would otherwise be refused by peers.
+   - Test: `machine_names_with_control_or_invisible_characters_are_refused`.
+5. **`wake_phone` respects the revoke gate and `disconnect`.**
+   - It holds the gate, so a wake and a revoke cannot interleave.
+   - A revoked phone gives `NotPhone`; one under a disconnect cooldown gives the new `WakeError::Disconnected`
+     ("disconnected"). The hub's match has a catch-all arm, so it compiles.
+   - Test: `no_wake_for_a_disconnected_or_revoked_phone`.
+
+The five earlier vector files are unchanged (regenerating gives the same bytes) and still valid. `names.json` is
+new (t13).
+`cargo check -p krypto-hub --tests` passes.

@@ -22,7 +22,8 @@ The relay **can see**:
   (one-time tokens, at most 4, at most 1 hour).
 - Envelope metadata: `from` / `to` device ids, `seq`, the nonce, sizes, and when frames are sent and delivered.
 - Connection metadata Cloudflare sees for any Worker: client IP, time, TLS details.
-- For phones only: an Expo push token, used to send a fixed, content-free wake ("Your pet needs you").
+- For phones only: an Expo push token, used to send a fixed, content-free wake ("Your pet needs you"). The phone
+  removes it with `unregister_push` (push turned off, or unpaired).
 
 The relay **cannot see**: anything inside an envelope. Bodies are NaCl boxes (X25519 + XSalsa20-Poly1305) from the
 sender's long-term key to the receiver's; the relay never has either secret key. It does not parse `env` beyond its
@@ -47,6 +48,7 @@ device                                          relay
                                                         allowed sender or matching slot -> {t:"msg", from, env}
                                                         (live or queued), else {t:"error", code:"not_allowed", to}
   {t:"register_push", expoToken}                 ──►  phones: content-free wake when a frame is queued while offline
+  {t:"unregister_push"}                          ──►  phones: forget the push token; no wake until register_push again
   {t:"ping", ts}                                 ──►  {t:"pong", ts: relay clock}
 ```
 
@@ -93,9 +95,9 @@ device                                          relay
 | Unauthenticated sockets per mailbox | 8; to admit another, the oldest one older than 3 s is closed (younger ones may be mid-auth and are never evicted; if all are, 429) | `src/limits.ts`, `src/pending.ts` |
 | Rate limit per socket | 50 frames/s, burst 200; one `rate_limited` notice per second; closed after 5000 drops in 10 s | `src/limits.ts` |
 | Inbound per mailbox (all senders) | 100 frames/s, burst 400, checked before the allowlist | `src/limits.ts` |
-| Config frames per mailbox (`allow`, `allow_pairing`, `register_push`) | 5/s, burst 10; unchanged values are not rewritten | `src/limits.ts` |
+| Config frames per mailbox (`allow`, `allow_pairing`, `register_push`, `unregister_push`) | 5/s, burst 10; unchanged values are not rewritten | `src/limits.ts` |
 | In-flight forwards per mailbox | 256 frames / 8 MiB / 128 recipients, else `rate_limited` | `src/limits.ts` |
-| Push wakes | at most 1 per minute per mailbox, only when a frame is queued for an offline device that has authenticated before and has paired senders | `src/push.ts`, `src/inbox.ts` |
+| Push wakes | at most 1 per minute per mailbox (also across `unregister_push` / `register_push`), only when a frame is queued for an offline device that has authenticated before, has paired senders and has a registered token | `src/push.ts`, `src/inbox.ts` |
 
 ## Layout
 

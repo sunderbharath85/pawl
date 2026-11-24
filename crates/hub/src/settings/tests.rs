@@ -75,6 +75,7 @@ fn validation_table_names_camel_case_fields() {
         (json!({ "customAgents": [agent("ok", json!(["a"])), agent("two", json!([]))] }), "customAgents[1].command"),
         (json!({ "customAgents": [agent("ok", json!(["a"])), agent("two", json!(["  "]))] }), "customAgents[1].command"),
         (json!({ "customAgents": [agent("ok", json!(["a"])), json!({ "id": "two", "name": " ", "command": ["b"] })] }), "customAgents[1].name"),
+        (json!({ "customAgents": [json!({ "id": "two", "name": "Co\u{200B}dex", "command": ["b"] })] }), "customAgents[0].name"),
     ];
     // peer.startRoots[1] in the 4th root case is the "a" subfolder that does not exist.
     for (p, field) in table {
@@ -124,6 +125,24 @@ fn the_api_port_never_shares_the_listener_port() {
     // A LAN-only listener on that port does not collide with 127.0.0.1.
     cur.peer.listen = Some("192.168.1.20:47901".into());
     assert!(apply_patch(&cur, &patch(json!({ "hub": { "port": 47901 } })), &reserved()).is_ok());
+}
+
+#[test]
+fn roster_intros_are_a_peer_setting_applied_at_once() {
+    let cur = HubConfig::default();
+    assert!(cur.peer.accept_roster_intros, "default: on");
+    assert!(to_settings(&cur, &Overrides::default()).peer.accept_roster_intros);
+    let (next, changed) = apply_patch(&cur, &patch(json!({ "peer": { "acceptRosterIntros": false } })), &reserved()).unwrap();
+    assert_eq!(changed, [PEER_INTROS]);
+    assert!(!RESTART_KEYS.contains(&PEER_INTROS) && !SECRET_KEYS.contains(&PEER_INTROS));
+    assert!(!to_settings(&next, &Overrides::default()).peer.accept_roster_intros);
+    let text = edit_config(Some("[peer]
+accept_intents = true # keep me
+"), &next, &changed).unwrap();
+    assert!(text.contains("accept_intents = true # keep me") && text.contains("accept_roster_intros = false"), "{text}");
+    assert!(!HubConfig::parse(&text).unwrap().peer.accept_roster_intros);
+    // Not a bool: refused before anything is applied.
+    assert!(serde_json::from_value::<HubSettingsPatch>(json!({ "peer": { "acceptRosterIntros": "no" } })).is_err());
 }
 
 #[test]

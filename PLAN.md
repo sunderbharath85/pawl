@@ -4,7 +4,7 @@ Named dog pets that watch and drive your coding agents over ACP (Agent Client Pr
 
 - Whiteboard: https://claude.ai/artifact/E8zVPktys5q8qKw5AjmjtB
 - Last updated: 2026-11-23
-- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto, step 1 (machine identity), step 2 (pairing + LAN presence, protocol v3), step 3 (mirror events + visitors, protocol v4), step 4 (intents + acks, protocol v5), step 5 (remote commands by machine + repo, protocol v6), step 5b (settings in the UI, protocol v7), step 6 (relay, deployed). Next: step 7 (phone).
+- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto, step 1 (machine identity), step 2 (pairing + LAN presence, protocol v3), step 3 (mirror events + visitors, protocol v4), step 4 (intents + acks, protocol v5), step 5 (remote commands by machine + repo, protocol v6), step 5b (settings in the UI, protocol v7), step 6 (relay, deployed), step 7 (phone, protocol v8). Next: step 8 (later polish).
 
 ## Decisions
 
@@ -284,8 +284,12 @@ Each step can ship and be tested on its own.
    - Hardened after three security reviews: the relay is closed by an access key (Worker secret, carried in invite URIs as `rk=`); per-IP, per-socket and per-recipient limits; bounded queues; auth bound to the Host header; the auth nonce domain is disjoint from envelope nonces (byte 15 >= 2); clients refuse a relay key that is their own or a roster key; an adopted relay learns only the inviter until pairing succeeds; relay-origin pairing attempts share one limiter; a revoked device's hello gets `bye{revoked}`.
    - Settings hardening in the same pass: hub port test-bound before saving; hook writes use O_EXCL temp files without following symlinks; clients trust `runtime.json` only after `/health` returns this machine's id; no filesystem roots as start roots or repos.
    - Known limits: the per-IP connect limit is Cloudflare's approximate rate limiter; anyone who saw an invite has the relay access key until it is rotated.
-7. **Phone.**
+7. ✅ **Phone.** (done 2026-11-24; protocol v8, dep `qrcode` for the desktop QR)
    - QR pairing joins the group, with per-hub E2E channels and a merged multi-machine view.
    - Biometric approvals, push, and start-on-machine+repo.
-   - This reuses the frozen `apps/mobile` libs, adapted to multiple hubs.
+   - This reuses the frozen `apps/mobile` libs, adapted to multiple hubs. (The old relay libs were replaced by a platform-free peer core in `apps/mobile/src/lib/peer`, checked against cross-language test vectors in `crates/peer/tests/vectors`.)
+   - Group roster: a hub that pairs a device introduces it (`roster_intro`) to the other hubs and phones; receivers accept intros only from a paired hub, never replace a key, never re-add a revoked device, rate limit and cap them, and can turn them off (`[peer] accept_roster_intros`, in Settings). Revoking a hub offers to remove the devices it introduced.
+   - The invite decides the device kind: a phone invite (relay-only QR) admits only phones, a hub invite only hubs. Hubs never dial a phone. Device names with control, bidi or zero-width characters are refused everywhere.
+   - Tested against the deployed relay with two hubs and a headless phone: QR invite, intro to the second hub, both hubs' sessions and approvals on the phone, approve on hub A as `mobile@<phone>`, start on hub B in a known folder, refused in an unknown folder, no secrets in logs.
+   - Known limits: push needs an EAS project id (the user's Expo account) and stays off until one is set; a phone that just closed counts as linked until the link times out, so a request in that window reaches it as a queued frame (the relay's push) rather than a hub wake.
 8. **Later:** cat, bird and robot polish, moods and XP, chat-app bots, an MCP server, and the Zed/JetBrains wrapper.

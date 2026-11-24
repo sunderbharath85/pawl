@@ -13,6 +13,8 @@ import {
   msToMinutes,
   nudgesForm,
   nudgesPatch,
+  introsForm,
+  introsPatch,
   pairingForm,
   pairingPatch,
   relayPatch,
@@ -26,7 +28,7 @@ const s: HubSettings = {
   hub: { port: 47800, offline: false, hookSessionStaleHours: 12, ownedSessionIdleHours: 12, eventRetentionDays: 30, dailyReportTime: "18:00" },
   bot: { model: "claude-haiku-5-5", anthropicApiKeySet: true, ollamaUrl: null, ollamaModel: null },
   watchdog: { waitingNudgeAfterMs: 300_000, repeatEveryMs: 600_000, tickSecs: 30 },
-  peer: { listen: null, acceptIntents: true, startRoots: ["E:/work"] },
+  peer: { listen: null, acceptIntents: true, acceptRosterIntros: true, startRoots: ["E:/work"] },
   repos: { paths: ["E:/work/api"] },
   relay: { url: null, accessKeySet: false },
   customAgents: [{ id: "my-agent", name: "My Agent", command: ["my-agent", "--acp"] }],
@@ -102,6 +104,13 @@ describe("pairing, remote control, repos, relay", () => {
     expect(pairingPatch({ on: true, listen: "my-pc:47801" }, s).errors["peer.listen"]).toBeTruthy();
     const on = { ...s, peer: { ...s.peer, listen: "10.0.0.2:47801" } };
     expect(pairingPatch({ on: false, listen: "10.0.0.2:47801" }, on).patch).toEqual({ peer: { listen: null } });
+  });
+  test("devices introduced by paired hubs", () => {
+    expect(introsForm(s)).toEqual({ accept: true });
+    expect(introsPatch({ accept: true }, s).patch).toEqual({});
+    expect(introsPatch({ accept: false }, s).patch).toEqual({ peer: { acceptRosterIntros: false } });
+    const v7 = { ...s, peer: { listen: null, acceptIntents: false, startRoots: [] } } as unknown as HubSettings;
+    expect(introsForm(v7)).toBeNull();
   });
   test("start folders: per-item errors", () => {
     expect(remotePatch({ ...remoteForm(s), startRoots: ["E:/work", "E:/api"] }, s).patch).toEqual({ peer: { startRoots: ["E:/work", "E:/api"] } });

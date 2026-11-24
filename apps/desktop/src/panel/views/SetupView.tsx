@@ -1,19 +1,21 @@
 // First-run setup (PLAN.md migration step 5b): opens once by itself, reopened from Settings → This app.
 // Hub running? (start it) → name this machine → install hooks for the agents found (preview first) → optionally
-// turn on the peer listener and pair a machine.
+// turn on the peer listener and pair a machine → optionally pair a phone by QR code (step 7).
 import { useEffect, useState } from "react";
 import { machineDisplayName, pairingAllowsText } from "@krypto/hub-client";
 import { isTauri, native } from "../../lib/native";
 import { useSettings } from "../../lib/settings";
 import { usePanel } from "../context";
 import { PetAvatar } from "../PetAvatar";
+import { PhoneInviteCard } from "./PhonePairing";
 import { HooksPanel } from "./settings/AgentsSection";
 import { MachineNameForm } from "./settings/AppSections";
 import { ListenerControl } from "./settings/PairingSection";
 import { useHubSettings } from "./settings/shared";
 
-const STEPS = ["Hub", "Name", "Hooks", "Pair"] as const;
-type Step = 0 | 1 | 2 | 3 | 4;
+const STEPS = ["Hub", "Name", "Hooks", "Pair", "Phone"] as const;
+type Step = 0 | 1 | 2 | 3 | 4 | 5;
+const DONE: Step = 5;
 
 export function SetupView() {
   const { meta, navigate, state } = usePanel();
@@ -32,13 +34,13 @@ export function SetupView() {
     setSettings({ setupOffered: true });
     navigate({ view: "home" });
   };
-  const next = () => setStep((s) => Math.min(4, s + 1) as Step);
+  const next = () => setStep((s) => Math.min(DONE, s + 1) as Step);
   const back = () => setStep((s) => Math.max(0, s - 1) as Step);
 
   return (
     <section className="view setup-view">
       <header className="view-head setup-head">
-        <PetAvatar species="dog" activity={step === 4 ? "happy" : connected ? "idle" : "napping"} size={64} />
+        <PetAvatar species="dog" activity={step === DONE ? "happy" : connected ? "idle" : "napping"} size={64} />
         <div>
           <h1>Set up Krypto</h1>
           <p>A few steps so your pets can watch your coding agents. Everything here can be changed later in Settings.</p>
@@ -74,7 +76,8 @@ export function SetupView() {
           </>
         )}
         {step === 3 && <PairStep />}
-        {step === 4 && (
+        {step === 4 && <PhoneStep />}
+        {step === DONE && (
           <>
             <h2>All set{state.machine ? `, ${machineDisplayName(state.machine)}` : ""}!</h2>
             <p className="hint">Start a session from the panel, or keep using your agents as usual; their pets will show up on the strip.</p>
@@ -95,7 +98,7 @@ export function SetupView() {
           Skip setup
         </button>
         <span className="spacer" />
-        {step > 0 && step < 4 && (
+        {step > 0 && step < DONE && (
           <button className="pill" onClick={back}>
             Back
           </button>
@@ -105,9 +108,9 @@ export function SetupView() {
             Pair a machine now
           </button>
         )}
-        {step < 4 && (
+        {step < DONE && (
           <button className="pill pill-primary" onClick={next} disabled={step === 0 && !connected}>
-            {step === 3 ? "Finish" : step === 1 || step === 2 ? "Next" : "Continue"}
+            {step === 4 ? "Finish" : step === 0 ? "Continue" : "Next"}
           </button>
         )}
       </div>
@@ -175,6 +178,19 @@ function PairStep() {
       ) : (
         <p className="hint">{hs.connected ? (hs.loadError ?? "Loading…") : "Connect the hub first."}</p>
       )}
+    </>
+  );
+}
+
+function PhoneStep() {
+  return (
+    <>
+      <h2>Pair your phone (optional)</h2>
+      <p className="hint">
+        With the Krypto app on your phone you can check on your pets and answer approvals from anywhere. Phones connect through your relay;
+        you can pair one any time in Machines.
+      </p>
+      <PhoneInviteCard bare />
     </>
   );
 }

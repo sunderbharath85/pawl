@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Device, Machine } from "@krypto/protocol";
 import { machinesLine } from "@krypto/hub-client";
 import { presenceLabel } from "../shared/machine";
-import { machinePickItems } from "./machineList";
+import { machinePickItems, phonesTooltipLine } from "./machineList";
 
 const ME = "winpc0000001";
 const MAC = "macmini00002";
@@ -44,8 +44,30 @@ describe("machinePickItems", () => {
     expect(items[0]!.detail).toContain("peer listener off");
     expect(items[1]!.label).toContain("No other machines paired yet");
 
+    // A phone is not a machine: "no other machines" still shows, the phone comes after it.
     const phone = machinePickItems({ ...alone, devices: [dev("phone-1", { kind: "phone", name: "Pixel" })] }, true);
-    expect(phone.items[1]).toMatchObject({ label: "$(circle-outline) Pixel", description: "phone" });
+    expect(phone.items[1]!.label).toContain("No other machines paired yet");
+    expect(phone.items[2]).toMatchObject({ label: "$(circle-outline) $(device-mobile) Pixel", description: "phone" });
+  });
+
+  test("phones: OS, LAN / Relay link and who added them", () => {
+    const iphone = dev("iphone000001", { kind: "phone", name: "iPhone", os: "ios", path: "relay", lastSeen: 5 });
+    const pixel = dev("pixel0000001", { kind: "phone", name: "Pixel", os: "android", introducedBy: MAC });
+    const { items } = machinePickItems({ ...state, devices: [...state.devices, pixel, iphone] }, true);
+    const labels = items.map((i) => i.label);
+    expect(labels.slice(-2)).toEqual(["$(circle-filled) $(device-mobile) iPhone", "$(circle-outline) $(device-mobile) Pixel"]);
+    expect(items.at(-2)).toMatchObject({ description: "iOS phone · Relay", detail: "online" });
+    expect(items.at(-1)!.description).toBe("Android phone");
+    expect(items.at(-1)!.detail).toContain("Added by Mac mini");
+    // Phones never show among the machines.
+    expect(labels.filter((l) => l.includes("$(device-mobile)"))).toHaveLength(2);
+  });
+
+  test("phonesTooltipLine counts paired phones", () => {
+    expect(phonesTooltipLine({ devices: [dev(MAC)] }, true)).toBeNull();
+    const devices = [dev("p1", { kind: "phone", path: "relay" }), dev("p2", { kind: "phone" })];
+    expect(phonesTooltipLine({ devices }, true)).toBe("$(device-mobile) 2 phones paired · 1 online");
+    expect(phonesTooltipLine({ devices: devices.slice(1) }, false)).toBe("$(device-mobile) 1 phone paired");
   });
 
   test("online paired machines show how they are linked (LAN / Relay)", () => {

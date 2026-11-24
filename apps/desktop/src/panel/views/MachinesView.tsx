@@ -1,10 +1,11 @@
-// Machines: this hub and every paired hub (online state, OS, last seen, address, LAN / relay link), pairing by
-// invite, and revoking. PLAN.md migration steps 2, 3 and 6.
+// Machines: this hub and every paired hub (online state, OS, last seen, address, LAN / relay link), paired phones,
+// pairing by invite (a QR code for phones), and revoking. PLAN.md migration steps 2, 3, 6 and 7.
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   INVITE_TTL_DEFAULT_SECS,
   OS_LABEL,
   extractInviteUri,
+  introducedByText,
   inviteRoute,
   isUnspecifiedAddr,
   linkPathLabel,
@@ -21,7 +22,6 @@ import { PEER_DEFAULT_PORT, type Device, type LinkPath, type MachineOs } from "@
 import { clockTime, timeAgo } from "../../lib/format";
 import {
   INVITE_TTL_CHOICES,
-  copyText,
   formatCountdown,
   inviteHolder,
   inviteUsedBy,
@@ -32,11 +32,13 @@ import {
   type ShownInvite,
 } from "../../lib/pairing";
 import { usePanel } from "../context";
-import * as I from "../icons";
+import { CopyField } from "../CopyField";
+import { useRevokeDevice } from "../useRevokeDevice";
+import { PhoneInviteCard, PhoneList } from "./PhonePairing";
 import { ListenerControl } from "./settings/PairingSection";
 import { useHubSettings } from "./settings/shared";
 
-/** One row: this hub, a paired hub, or a roster device with no machine (a phone, later). */
+/** One row: this hub, a paired hub, or a paired hub not known as a machine yet. Phones have their own list. */
 interface Row {
   id: string;
   name: string;
@@ -50,6 +52,8 @@ interface Row {
   hubVersion?: string | undefined;
   /** How a paired machine is linked right now (absent when offline). */
   path?: LinkPath | undefined;
+  /** "Added by Mac mini" when another paired hub introduced it. */
+  addedBy?: string | null | undefined;
 }
 
 export function MachinesView() {
@@ -74,11 +78,24 @@ export function MachinesView() {
         pairedAt: device?.pairedAt,
         hubVersion: m.hubVersion,
         path: self ? undefined : device?.path,
+        addedBy: device ? introducedByText(device, state) : null,
       };
     });
     for (const d of state.devices) {
-      if (d.id in state.machines || d.id === ownId) continue;
-      out.push({ id: d.id, name: d.name, self: false, kind: d.kind, online: !!d.path, lastSeen: d.lastSeen, addr: d.addr, pairedAt: d.pairedAt, path: d.path });
+      // Phones are never machines (PhoneList shows them).
+      if (d.kind === "phone" || d.id in state.machines || d.id === ownId) continue;
+      out.push({
+        id: d.id,
+        name: d.name,
+        self: false,
+        kind: d.kind,
+        online: !!d.path,
+        lastSeen: d.lastSeen,
+        addr: d.addr,
+        pairedAt: d.pairedAt,
+        path: d.path,
+        addedBy: introducedByText(d, state),
+      });
     }
     return out;
   }, [state, ownId, connected]);
@@ -94,7 +111,7 @@ export function MachinesView() {
         <p>
           {counts.total > 0 ? `${machinesLine(counts.total, connected ? counts.online : undefined)}. ` : ""}
           Pair the Krypto hubs on your machines so they can see each other's sessions, pets and approvals. They link on your network,
-          or through your relay when one is set up.
+          or through your relay when one is set up. Phones pair with a QR code and link through the relay.
         </p>
       </header>
 
@@ -114,12 +131,18 @@ export function MachinesView() {
         )}
       </div>
 
+      {pairing && <PhoneList />}
+
       {pairing && (
         <>
           <h2 className="section-title">Pair a machine</h2>
           <div className="settings-grid pair-grid">
             <InviteCard />
             <JoinCard />
+          </div>
+          <h2 className="section-title">Pair a phone</h2>
+          <div className="settings-grid pair-grid">
+            <PhoneInviteCard />
           </div>
         </>
       )}
@@ -128,7 +151,7 @@ export function MachinesView() {
 }
 
 function MachineRow({ row, connected, now, stale }: { row: Row; connected: boolean; now: number; stale: boolean }) {
-  const { client, toast } = usePanel();
+  const revokeDevice = useRevokeDevice();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -149,9 +172,8 @@ function MachineRow({ row, connected, now, stale }: { row: Row; connected: boole
     setBusy(true);
     setError(null);
     try {
-      await client.revokeDevice(row.id);
-      toast(`Unpaired ${row.name}`);
-      // The row disappears with the hub's `machine_removed`.
+      // Toasts, then offers to remove the devices this hub introduced here. The row disappears with `machine_removed`.
+      await revokeDevice({ id: row.id, name: row.name });
     } catch (err) {
       setError(pairingErrorText(err, "revoke_device"));
       setBusy(false);
@@ -169,7 +191,6 @@ function MachineRow({ row, connected, now, stale }: { row: Row; connected: boole
         <div className="machine-row-title">
           <strong>{row.name}</strong>
           {row.self && <span className="chip">This machine</span>}
-          {row.kind === "phone" && <span className="chip chip-soft">Phone</span>}
           {row.os && <span className="chip chip-soft">{OS_LABEL[row.os] ?? row.os}</span>}
           {via && (
             <span
@@ -196,6 +217,14 @@ function MachineRow({ row, connected, now, stale }: { row: Row; connected: boole
             <>
               <span aria-hidden>·</span>
               <span className="muted">krypto {row.hubVersion}</span>
+            </>
+          )}
+          {row.addedBy && (
+            <>
+              <span aria-hidden>·</span>
+              <span className="muted" title="Another paired machine introduced this one">
+                {row.addedBy}
+              </span>
             </>
           )}
         </div>
@@ -525,38 +554,6 @@ function JoinCard() {
         </button>
         {busy && <span className="hint">Connecting to {info ? inviteRoute(info) : "the other machine"}… this can take up to 10 seconds.</span>}
       </div>
-    </div>
-  );
-}
-
-/** Read-only value with a copy button. `shown` (e.g. with the relay key masked) is displayed; `text` is copied. */
-function CopyField({ label, text, shown, primary, multiline }: { label: string; text: string; shown?: string; primary?: boolean; multiline?: boolean }) {
-  const masked = shown !== undefined && shown !== text;
-  const [copied, setCopied] = useState<boolean | null>(null);
-  useEffect(() => {
-    if (copied === null) return;
-    const t = setTimeout(() => setCopied(null), 1800);
-    return () => clearTimeout(t);
-  }, [copied]);
-  return (
-    <div className="copy-field">
-      <code
-        className={`copy-value${multiline ? " is-multiline" : ""}`}
-        aria-label={label}
-        tabIndex={0}
-        onFocus={(e) => {
-          if (!masked) window.getSelection()?.selectAllChildren(e.currentTarget);
-        }}
-      >
-        {shown ?? text}
-      </code>
-      <button
-        className={`pill${primary ? " pill-primary" : ""} copy-btn`}
-        title={`Copy ${label.toLowerCase()}`}
-        onClick={() => void copyText(text).then(setCopied)}
-      >
-        <I.Copy size={14} /> {copied === true ? "Copied" : copied === false ? (masked ? "Copy failed, try again" : "Select to copy") : "Copy"}
-      </button>
     </div>
   );
 }

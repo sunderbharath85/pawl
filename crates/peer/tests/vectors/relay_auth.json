@@ -1,0 +1,69 @@
+{
+  "description": "Relay auth: answer challenge{nonce, relayPk} with auth{box}, box = NaCl box of the UTF-8 plaintext `${RELAY_AUTH_CONTEXT}:${nonce}:${host}` (nonce exactly as received, host = the Host header sent) with the challenge nonce, from the device key to relayPk (relay secret: keys.json relay). nonce, relayPk and box are standard padded base64. Refuse (error bad_auth, close, back off) a nonce whose byte 15 is 0 or 1 and a relayPk equal to the device's own key or any paired device's key.",
+  "refused": [
+    {
+      "device": "phone",
+      "error": "bad_auth",
+      "host": "relay.example.com",
+      "name": "nonce byte 15 = 0 (envelope nonce domain)",
+      "nonce": "MDEyMzQ1Njc4OTo7PD0+AEBBQkNERUZH",
+      "relayPk": "OlU9dHktcn76m5pM3j2hrZPxotDAnLY5saPA/aFMviQ="
+    },
+    {
+      "device": "phone",
+      "error": "bad_auth",
+      "host": "relay.example.com",
+      "name": "nonce byte 15 = 1 (envelope nonce domain)",
+      "nonce": "MDEyMzQ1Njc4OTo7PD0+AUBBQkNERUZH",
+      "relayPk": "OlU9dHktcn76m5pM3j2hrZPxotDAnLY5saPA/aFMviQ="
+    },
+    {
+      "device": "phone",
+      "error": "bad_auth",
+      "host": "relay.example.com",
+      "name": "relayPk is the device's own key",
+      "nonce": "MDEyMzQ1Njc4OTo7PD0+AkBBQkNERUZH",
+      "relayPk": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc="
+    }
+  ],
+  "valid": [
+    {
+      "accessKey": "k3y_example-123",
+      "auth": {
+        "box": "RSTewv6s4JcU3oDKR93dsYUGMC6ZxkHs9p2LGOFpyH/WavQ/d/IFivLkvWK1lcuc/dHEJXrrYTVcSyFvEzrkmSpW2dYs0GSq+N11yQDrqb9AJpgwPnf/",
+        "type": "auth"
+      },
+      "challenge": {
+        "nonce": "MDEyMzQ1Njc4OTo7PD0+AkBBQkNERUZH",
+        "relayPk": "OlU9dHktcn76m5pM3j2hrZPxotDAnLY5saPA/aFMviQ=",
+        "type": "challenge",
+        "v": 1
+      },
+      "connectUrl": "wss://relay.example.com/v1/connect?pk=iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc&k=k3y_example-123",
+      "device": "phone",
+      "host": "relay.example.com",
+      "name": "phone on a deployed relay",
+      "plaintext": "krypto-relay-auth-v1:MDEyMzQ1Njc4OTo7PD0+AkBBQkNERUZH:relay.example.com",
+      "relayUrl": "wss://relay.example.com"
+    },
+    {
+      "accessKey": "devkey",
+      "auth": {
+        "box": "3ENG7q85k33XT6LeSkAdbMGH24A1vWBVaVzNjt1iqbwdGxuLWbPlZwiX5vAYFNHp3wnYLEmItoFzo1obSTbhIUwRYscT11pIK2X/ch24mrWJ9D9n",
+        "type": "auth"
+      },
+      "challenge": {
+        "nonce": "MDEyMzQ1Njc4OTo7PD0+yEBBQkNERUZH",
+        "relayPk": "OlU9dHktcn76m5pM3j2hrZPxotDAnLY5saPA/aFMviQ=",
+        "type": "challenge",
+        "v": 1
+      },
+      "connectUrl": "ws://127.0.0.1:8787/v1/connect?pk=B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw&k=devkey",
+      "device": "hubA",
+      "host": "127.0.0.1:8787",
+      "name": "hub on wrangler dev",
+      "plaintext": "krypto-relay-auth-v1:MDEyMzQ1Njc4OTo7PD0+yEBBQkNERUZH:127.0.0.1:8787",
+      "relayUrl": "ws://127.0.0.1:8787"
+    }
+  ]
+}

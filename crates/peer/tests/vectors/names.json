@@ -1,0 +1,469 @@
+{
+  "description": "Name and introduced-device rules (crates/peer intro.rs). A name is valid iff (1) no character anywhere in the untrimmed name is a control character (general category Cc: U+0000-001F, U+007F-009F) or one of U+061C, U+200B-200F, U+2028-202E, U+2060-2064, U+2066-2069, U+FEFF, and (2) after trimming Unicode White_Space from both ends it has 1..=maxChars Unicode scalar values (code points, not UTF-16 units). utf8Hex is the exact name. introDevices: check_intro_device(device) gives result (ok or a code); codes are checked in the order bad_id, bad_name, bad_kind, bad_key, bad_addr. bad_kind: kind phone iff os is ios / android (a hub may have no os; a phone must have one). The receiving node also refuses own_device / sender_device / duplicate, which depend on context and are not listed here.",
+  "introDevices": [
+    {
+      "device": {
+        "addr": "192.168.1.21:47801",
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "os": "windows",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+      },
+      "note": "hub with a LAN addr",
+      "result": "ok"
+    },
+    {
+      "device": {
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+      },
+      "note": "hub, os unknown",
+      "result": "ok"
+    },
+    {
+      "device": {
+        "addr": "100.101.102.103:47801",
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "os": "linux",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+      },
+      "note": "Tailscale CGNAT addr",
+      "result": "ok"
+    },
+    {
+      "device": {
+        "addr": "[fd00::1]:47801",
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "os": "macos",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+      },
+      "note": "IPv6 ULA addr",
+      "result": "ok"
+    },
+    {
+      "device": {
+        "id": "dev000000001",
+        "kind": "phone",
+        "name": "Test iPhone",
+        "os": "ios",
+        "publicKey": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc="
+      },
+      "note": "phone on iOS",
+      "result": "ok"
+    },
+    {
+      "device": {
+        "id": "dev000000001",
+        "kind": "phone",
+        "name": "Test iPhone",
+        "os": "android",
+        "publicKey": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc="
+      },
+      "note": "phone on Android",
+      "result": "ok"
+    },
+    {
+      "device": {
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "os": "ios",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+      },
+      "note": "a hub claiming iOS",
+      "result": "bad_kind"
+    },
+    {
+      "device": {
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "os": "android",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+      },
+      "note": "a hub claiming Android",
+      "result": "bad_kind"
+    },
+    {
+      "device": {
+        "id": "dev000000001",
+        "kind": "phone",
+        "name": "Test iPhone",
+        "publicKey": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc="
+      },
+      "note": "a phone without os",
+      "result": "bad_kind"
+    },
+    {
+      "device": {
+        "id": "dev000000001",
+        "kind": "phone",
+        "name": "Test iPhone",
+        "os": "linux",
+        "publicKey": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc="
+      },
+      "note": "a phone claiming Linux",
+      "result": "bad_kind"
+    },
+    {
+      "device": {
+        "addr": "192.168.1.30:47801",
+        "id": "dev000000001",
+        "kind": "phone",
+        "name": "Test iPhone",
+        "os": "ios",
+        "publicKey": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc="
+      },
+      "note": "a phone with an addr",
+      "result": "bad_addr"
+    },
+    {
+      "device": {
+        "addr": "8.8.8.8:47801",
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "os": "linux",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+      },
+      "note": "public IP addr",
+      "result": "bad_addr"
+    },
+    {
+      "device": {
+        "addr": "studio.local:47801",
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "os": "linux",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+      },
+      "note": "DNS name addr",
+      "result": "bad_addr"
+    },
+    {
+      "device": {
+        "addr": "192.168.1.21",
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "os": "linux",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+      },
+      "note": "addr without port",
+      "result": "bad_addr"
+    },
+    {
+      "device": {
+        "id": "Dev000000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+      },
+      "note": "upper-case id",
+      "result": "bad_id"
+    },
+    {
+      "device": {
+        "id": "dev00000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+      },
+      "note": "11-character id",
+      "result": "bad_id"
+    },
+    {
+      "device": {
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "Studio‮PC",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+      },
+      "note": "bidi override in the name",
+      "result": "bad_name"
+    },
+    {
+      "device": {
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+      },
+      "note": "65-character name",
+      "result": "bad_name"
+    },
+    {
+      "device": {
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "publicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "note": "key of small order",
+      "result": "bad_key"
+    },
+    {
+      "device": {
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "publicKey": "ZLEBsdC-WocEvQePmJUAH8A-jp-VIvGI3RKNmEbUhGY"
+      },
+      "note": "key in base64url",
+      "result": "bad_key"
+    },
+    {
+      "device": {
+        "id": "dev000000001",
+        "kind": "hub",
+        "name": "Studio PC",
+        "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhA=="
+      },
+      "note": "31-byte key",
+      "result": "bad_key"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "",
+      "note": "empty",
+      "utf8Hex": ""
+    },
+    {
+      "name": "   ",
+      "note": "only spaces",
+      "utf8Hex": "202020"
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "note": "65 characters",
+      "utf8Hex": "6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161"
+    },
+    {
+      "name": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "note": "65 astral characters",
+      "utf8Hex": "f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880"
+    },
+    {
+      "name": "\tMac",
+      "note": "control character, even where trimming would remove it",
+      "utf8Hex": "094d6163"
+    },
+    {
+      "name": "Mac\n",
+      "note": "trailing line feed",
+      "utf8Hex": "4d61630a"
+    },
+    {
+      "name": "a\u0007b",
+      "note": "BEL",
+      "utf8Hex": "610762"
+    },
+    {
+      "name": "ab",
+      "note": "DEL",
+      "utf8Hex": "617f62"
+    },
+    {
+      "name": "ab",
+      "note": "NEL (C1 control)",
+      "utf8Hex": "61c28562"
+    },
+    {
+      "name": "ab",
+      "note": "CSI (C1 control)",
+      "utf8Hex": "61c29b62"
+    },
+    {
+      "name": "﻿Mac",
+      "note": "leading BOM (check before trimming: JS trim() removes it)",
+      "utf8Hex": "efbbbf4d6163"
+    },
+    {
+      "name": "Mac​",
+      "note": "trailing zero-width space (not White_Space, so not trimmed)",
+      "utf8Hex": "4d6163e2808b"
+    },
+    {
+      "name": "Mac؜mini",
+      "note": "U+061C inside",
+      "utf8Hex": "4d6163d89c6d696e69"
+    },
+    {
+      "name": "Mac​mini",
+      "note": "U+200B inside",
+      "utf8Hex": "4d6163e2808b6d696e69"
+    },
+    {
+      "name": "Mac‌mini",
+      "note": "U+200C inside",
+      "utf8Hex": "4d6163e2808c6d696e69"
+    },
+    {
+      "name": "Mac‍mini",
+      "note": "U+200D inside",
+      "utf8Hex": "4d6163e2808d6d696e69"
+    },
+    {
+      "name": "Mac‎mini",
+      "note": "U+200E inside",
+      "utf8Hex": "4d6163e2808e6d696e69"
+    },
+    {
+      "name": "Mac‏mini",
+      "note": "U+200F inside",
+      "utf8Hex": "4d6163e2808f6d696e69"
+    },
+    {
+      "name": "Mac mini",
+      "note": "U+2028 inside",
+      "utf8Hex": "4d6163e280a86d696e69"
+    },
+    {
+      "name": "Mac mini",
+      "note": "U+2029 inside",
+      "utf8Hex": "4d6163e280a96d696e69"
+    },
+    {
+      "name": "Mac‪mini",
+      "note": "U+202A inside",
+      "utf8Hex": "4d6163e280aa6d696e69"
+    },
+    {
+      "name": "Mac‫mini",
+      "note": "U+202B inside",
+      "utf8Hex": "4d6163e280ab6d696e69"
+    },
+    {
+      "name": "Mac‬mini",
+      "note": "U+202C inside",
+      "utf8Hex": "4d6163e280ac6d696e69"
+    },
+    {
+      "name": "Mac‭mini",
+      "note": "U+202D inside",
+      "utf8Hex": "4d6163e280ad6d696e69"
+    },
+    {
+      "name": "Mac‮mini",
+      "note": "U+202E inside",
+      "utf8Hex": "4d6163e280ae6d696e69"
+    },
+    {
+      "name": "Mac⁠mini",
+      "note": "U+2060 inside",
+      "utf8Hex": "4d6163e281a06d696e69"
+    },
+    {
+      "name": "Mac⁡mini",
+      "note": "U+2061 inside",
+      "utf8Hex": "4d6163e281a16d696e69"
+    },
+    {
+      "name": "Mac⁢mini",
+      "note": "U+2062 inside",
+      "utf8Hex": "4d6163e281a26d696e69"
+    },
+    {
+      "name": "Mac⁣mini",
+      "note": "U+2063 inside",
+      "utf8Hex": "4d6163e281a36d696e69"
+    },
+    {
+      "name": "Mac⁤mini",
+      "note": "U+2064 inside",
+      "utf8Hex": "4d6163e281a46d696e69"
+    },
+    {
+      "name": "Mac⁦mini",
+      "note": "U+2066 inside",
+      "utf8Hex": "4d6163e281a66d696e69"
+    },
+    {
+      "name": "Mac⁧mini",
+      "note": "U+2067 inside",
+      "utf8Hex": "4d6163e281a76d696e69"
+    },
+    {
+      "name": "Mac⁨mini",
+      "note": "U+2068 inside",
+      "utf8Hex": "4d6163e281a86d696e69"
+    },
+    {
+      "name": "Mac⁩mini",
+      "note": "U+2069 inside",
+      "utf8Hex": "4d6163e281a96d696e69"
+    },
+    {
+      "name": "Mac﻿mini",
+      "note": "U+FEFF inside",
+      "utf8Hex": "4d6163efbbbf6d696e69"
+    }
+  ],
+  "maxChars": 64,
+  "valid": [
+    {
+      "name": "Mac mini",
+      "note": "plain",
+      "utf8Hex": "4d6163206d696e69"
+    },
+    {
+      "name": "x",
+      "note": "one character",
+      "utf8Hex": "78"
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "note": "64 characters",
+      "utf8Hex": "61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161"
+    },
+    {
+      "name": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+      "note": "64 two-byte characters",
+      "utf8Hex": "c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9"
+    },
+    {
+      "name": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "note": "64 astral characters (128 UTF-16 units): count code points",
+      "utf8Hex": "f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880"
+    },
+    {
+      "name": "  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  ",
+      "note": "64 characters once trimmed",
+      "utf8Hex": "2020616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161612020"
+    },
+    {
+      "name": "　aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ",
+      "note": "ideographic space and NBSP are trimmed (White_Space)",
+      "utf8Hex": "e3808061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161c2a0"
+    },
+    {
+      "name": "Sam’s Mac 😀",
+      "note": "visible punctuation and emoji",
+      "utf8Hex": "53616de2809973204d616320f09f9880"
+    },
+    {
+      "name": "Büro-PC 工作站",
+      "note": "Latin-1 and CJK",
+      "utf8Hex": "42c3bc726f2d504320e5b7a5e4bd9ce7ab99"
+    },
+    {
+      "name": "حاسوب",
+      "note": "right-to-left letters (no explicit bidi control)",
+      "utf8Hex": "d8add8a7d8b3d988d8a8"
+    },
+    {
+      "name": "Mac  mini",
+      "note": "inner spaces are kept",
+      "utf8Hex": "4d616320206d696e69"
+    }
+  ]
+}

@@ -67,6 +67,35 @@ new check asserts every challenge nonce seen in the run is in the challenge doma
 bullet. Re-run: `bunx tsc --noEmit` exit 0, `bunx tsc --noEmit -p tsconfig.bun.json` exit 0, `bun test` 83/83,
 local smoke 23/23 (19 challenges checked). Needs a redeploy.
 
+**Step 7 (branch `step-7-phone`): `unregister_push`.** The protocol now has `RelayClientFrame { t: "unregister_push" }`
+(push turned off, or phone unpaired). Changes:
+
+- `src/frames.ts`: `parseClientFrame` accepts it (extra fields dropped); new `isConfigFrame(f)` (allow, allow_pairing,
+  register_push, unregister_push), used by the mailbox for the per-mailbox config budget (5/s, burst 10 →
+  `rate_limited`), so unregister_push counts like register_push.
+- `src/push.ts`: `PushRegistry.clear(now)` removes the token, so `claim` returns null and no wake is sent afterwards.
+  If no token is stored it writes nothing (returns false). If the last push was under a minute ago it keeps only
+  `{lastAt}`, so toggling push off and on cannot beat the once-per-minute throttle; otherwise the key is deleted.
+  `PushState.token` is optional, and `shouldPush` requires a token.
+- `src/inbox.ts`: `unregisterPush(now)`. `src/mailbox.ts`: handles the frame silently (no reply, no log; tokens are never
+  logged).
+- A wake whose Expo request was already sent before the unregister arrived cannot be recalled. A late
+  `DeviceNotRegistered` for the old token is a no-op (`unregister(token)` only matches the stored token).
+- Tests (4 new): parse plus `isConfigFrame` (`b64-frames.test.ts`); `PushRegistry.clear` with no write when empty,
+  throttle kept, key removed after the window, late DeviceNotRegistered a no-op (`ratelimit-push.test.ts`); inbox: no
+  wake after unregister, no write when already off, wakes again after re-register, off/on keeps the throttle
+  (`inbox.test.ts`).
+- Also fixed a flaky round 4 test: "byte 15 of every challenge nonce" made 2000 `createChallenge()` calls (pure-JS
+  X25519 each), and on a busy machine it sometimes ran past bun's 5 s timeout (seen 2 of about 12 runs, 5.8 s). It now
+  checks 5000 `challengeNonce()` plus 200 `createChallenge()`. The suite went from about 1.8 s to 0.3 s, and was
+  clean 10 of 10 runs.
+- Smoke: new check "register_push then unregister_push (twice) accepted without errors". README: frame list,
+  "what the relay sees", and the config-frame and push rows in the limits table.
+
+Gate, in `services/relay/`: `bunx tsc --noEmit -p .` exit 0, `bunx tsc --noEmit -p tsconfig.bun.json` exit 0,
+`bun test` 87 pass / 0 fail (9 files), local smoke (`bunx wrangler dev` plus `bun run scripts/smoke.ts`) 24/24.
+Not deployed. Needs a redeploy.
+
 ## Security fixes (round 2) — each with its test
 
 | # | Fix | Code | Test |
@@ -109,8 +138,8 @@ Notes on the fixes:
   per-IP budget or mailbox busy (honour `Retry-After`), 503 = relay has no key configured.
 - The joiner must `allow` the inviter's pk before sending the `pair_request` (else the `pair_accept` is refused).
 - Auth host = the `Host` header the client sends (URL authority as dialled, lowercase, no default port).
-- `allow` / `allow_pairing` / `register_push` share a 5/s (burst 10) budget per mailbox: on reconnect send one
-  `allow` plus at most the live invites (≤ 4 slots), not a burst per roster change.
+- `allow` / `allow_pairing` / `register_push` / `unregister_push` share a 5/s (burst 10) budget per mailbox: on
+  reconnect send one `allow` plus at most the live invites (≤ 4 slots), not a burst per roster change.
 - After `error{bad_auth}` close the socket yourself (local alarm-initiated closes arrive ~10 s late).
 - `msg` frames are at most `RELAY_FRAME_MAX_BYTES + 64` bytes.
 

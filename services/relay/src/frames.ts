@@ -133,6 +133,8 @@ export function parseClientFrame(text: string): ParseResult {
       if (typeof raw.expoToken !== "string") return BAD;
       return { ok: true, frame: { t: "register_push", expoToken: raw.expoToken } };
     }
+    case "unregister_push":
+      return { ok: true, frame: { t: "unregister_push" } };
     case "ping": {
       if (typeof raw.ts !== "number" || !Number.isFinite(raw.ts)) return BAD;
       return { ok: true, frame: { t: "ping", ts: raw.ts } };
@@ -140,6 +142,11 @@ export function parseClientFrame(text: string): ParseResult {
     default:
       return BAD;
   }
+}
+
+/** Frames that change mailbox config; they share the per-mailbox config budget (`Inbox.takeConfig`). */
+export function isConfigFrame(f: RelayClientFrame): boolean {
+  return f.t === "allow" || f.t === "allow_pairing" || f.t === "register_push" || f.t === "unregister_push";
 }
 
 // ---------- server frames ----------

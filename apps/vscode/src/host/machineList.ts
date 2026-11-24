@@ -1,5 +1,17 @@
 // Items for "Krypto: Show Machines" (read-only). Pure: no runtime `vscode` import, so it is unit-tested.
-import { OS_LABEL, linkPathLabel, machineCounts, machineDisplayName, machinesLine, sortedMachines, type HubState } from "@krypto/hub-client";
+import {
+  OS_LABEL,
+  groupDevices,
+  introducedByText,
+  linkPathLabel,
+  machineCounts,
+  machineDisplayName,
+  machinesLine,
+  phoneCounts,
+  phoneOs,
+  sortedMachines,
+  type HubState,
+} from "@krypto/hub-client";
 import { presenceLabel } from "../shared/machine";
 
 export interface MachinePickItem {
@@ -31,18 +43,34 @@ export function machinePickItems(
       detail: [presence, addr, m.hubVersion ? `krypto ${m.hubVersion}` : undefined].filter(Boolean).join(" · "),
     };
   });
-  // Roster entries without a machine (phones, from a later step) are listed too.
-  for (const d of state.devices) {
+  const { hubs, phones, other } = groupDevices(state.devices);
+  // Paired hubs not known as machines yet, and kinds from a newer hub.
+  for (const d of [...hubs, ...other]) {
     if (d.id === own || d.id in state.machines) continue;
-    items.push({
-      label: `$(circle-outline) ${d.name}`,
-      description: d.kind === "phone" ? "phone" : "paired",
-      detail: d.addr,
-    });
+    items.push({ label: `$(circle-outline) ${d.name}`, description: "paired", detail: d.addr });
   }
   const { total, online } = machineCounts(state);
   const title = total === 0 ? "Krypto: Machines" : `Krypto: ${connected ? machinesLine(total, online) : `${total} machine${total === 1 ? "" : "s"} · hub offline`}`;
   if (items.length === 0) items.push({ label: "$(info) The hub has not introduced this machine yet." });
   else if (items.length === 1) items.push({ label: "$(info) No other machines paired yet", detail: "Pair one from the Krypto desktop app (Machines) or with `krypto peer invite`." });
+  // Phones are devices, never machines: listed after them.
+  for (const p of phones) {
+    const linked = connected && !!p.path;
+    const os = phoneOs(p);
+    items.push({
+      label: `${linked ? "$(circle-filled)" : "$(circle-outline)"} $(device-mobile) ${p.name}`,
+      description: [os ? `${OS_LABEL[os]} phone` : "phone", linked ? linkPathLabel(p.path) : null].filter(Boolean).join(" · "),
+      detail: [!connected ? "hub offline" : presenceLabel({ online: !!p.path, lastSeen: p.lastSeen ?? 0 }, now), introducedByText(p, state)]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  }
   return { title, items };
+}
+
+/** The status bar tooltip's phone line ("$(device-mobile) 2 phones paired · 1 online"), or null when none is paired. */
+export function phonesTooltipLine(state: Pick<HubState, "devices">, connected: boolean): string | null {
+  const { total, online } = phoneCounts(state);
+  if (total === 0) return null;
+  return `$(device-mobile) ${total} phone${total === 1 ? "" : "s"} paired${connected ? ` · ${online} online` : ""}`;
 }

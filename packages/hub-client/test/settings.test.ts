@@ -52,7 +52,7 @@ const base: HubSettings = {
   hub: { port: 47800, offline: false, hookSessionStaleHours: 12, ownedSessionIdleHours: 12, eventRetentionDays: 30, dailyReportTime: "18:00" },
   bot: { model: "claude-haiku-5-5", anthropicApiKeySet: false, ollamaUrl: null, ollamaModel: null },
   watchdog: { waitingNudgeAfterMs: 300_000, repeatEveryMs: 600_000, tickSecs: 30 },
-  peer: { listen: null, acceptIntents: false, startRoots: ["E:/work"] },
+  peer: { listen: null, acceptIntents: false, acceptRosterIntros: true, startRoots: ["E:/work"] },
   repos: { paths: [] },
   relay: { url: null, accessKeySet: false },
   customAgents: [{ id: "my-agent", name: "My Agent", command: ["my-agent", "--acp"] }],
@@ -656,5 +656,39 @@ describe("very broad folders (start roots and repo paths)", () => {
     expect(c!.body).toContain("your home folder");
     expect(c!.body).toContain("any paired machine could start agents anywhere under this folder");
     expect(c!.body).toContain("once remote control is on");
+  });
+});
+
+describe("accept devices introduced by paired hubs (peer.acceptRosterIntros)", () => {
+  test("draft and patch carry it; only a change is sent", () => {
+    const d = editableSettings(base);
+    expect(d.peer.acceptRosterIntros).toBe(true);
+    expect(settingsPatch(base, d)).toEqual({});
+    d.peer.acceptRosterIntros = false;
+    expect(settingsPatch(base, d)).toEqual({ peer: { acceptRosterIntros: false } });
+    expect(settingsFieldLabel("peer.accept_roster_intros")).toBe("Accept introduced devices");
+  });
+
+  test("a protocol v7 hub (no field) never gets it in a patch", () => {
+    const v7 = { ...base, peer: { listen: null, acceptIntents: false, startRoots: ["E:/work"] } } as unknown as HubSettings;
+    const d = editableSettings(v7);
+    expect(settingsPatch(v7, d)).toEqual({});
+    d.peer.startRoots = [];
+    expect(settingsPatch(v7, d)).toEqual({ peer: { startRoots: [] } });
+  });
+
+  test("turning it on asks first; turning it off does not", () => {
+    const off = { ...base, peer: { ...base.peer, acceptRosterIntros: false } };
+    const [c] = riskyChanges(off, { peer: { acceptRosterIntros: true } }, { machineName: "Windows PC" });
+    expect(c!.key).toBe("peer.acceptRosterIntros");
+    expect(c!.title).toBe("Let paired machines add devices to Windows PC?");
+    expect(c!.confirm).toBe("Accept introductions");
+    expect(c!.body).toContain("without an invite from Windows PC");
+    expect(c!.body).toContain("never replaces a device already paired here");
+    expect(c!.body).not.toContain("remote control is on");
+    const withRemote = riskyChanges({ ...off, peer: { ...off.peer, acceptIntents: true } }, { peer: { acceptRosterIntros: true } });
+    expect(withRemote[0]!.body).toContain("because remote control is on");
+    expect(riskyChanges(base, { peer: { acceptRosterIntros: false } })).toEqual([]);
+    expect(riskyChanges(base, { peer: { acceptRosterIntros: true } })).toEqual([]); // already on
   });
 });

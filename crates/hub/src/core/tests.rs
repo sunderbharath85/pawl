@@ -947,7 +947,7 @@ fn is_machine(m: &ServerMsg, id: &str, online: bool) -> bool {
 }
 
 async fn invite(hub: &Hub, ttl_secs: Option<u32>, addr: Option<&str>) -> ServerMsg {
-    hub.handle(ClientMsg::CreateInvite { id: "i".into(), ttl_secs, addr: addr.map(Into::into) }, &actor()).await
+    hub.handle(ClientMsg::CreateInvite { id: "i".into(), ttl_secs, addr: addr.map(Into::into), for_phone: None }, &actor()).await
 }
 
 async fn join(hub: &Hub, uri: &str) -> ServerMsg {
@@ -1162,6 +1162,8 @@ async fn roster_peer(hub: &Hub, peer: &str) {
         last_seen: None,
         addr: None,
         path: None,
+        introduced_by: None,
+        os: None,
     };
     let machine = Machine {
         id: peer.into(),
@@ -2586,3 +2588,5 @@ async fn a_chat_on_one_hub_proposes_a_command_on_the_other() {
     assert_eq!(a_fake.calls().iter().filter(|c| c.starts_with("start codex")).count(), 1, "only A's own start: the chats ran nothing");
     assert!(!a_fake.calls().iter().any(|c| c.starts_with("prompt")), "nor prompted anything");
 }
+
+mod phones;

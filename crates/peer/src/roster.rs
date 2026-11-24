@@ -154,6 +154,8 @@ mod tests {
                 last_seen: None,
                 addr: None,
                 path: None,
+                introduced_by: None,
+                os: None,
             },
             machine: Machine {
                 id: id.into(),

@@ -1,3 +1,254 @@
+# sde-hub report: step 7 (phone), protocol v8
+
+Branch `step-7-phone`, nothing committed. Owned paths only: `crates/hub/`. No new dependencies. All files LF.
+
+## Gate
+
+| Command | Result |
+|---|---|
+| `cargo test -p krypto-hub` | **177 passed** (was 158) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| Live smoke: local relay (`wrangler dev` on 127.0.0.1:8797), two scratch hubs, fe-mobile's `headless-phone.ts` | all PASS (below) |
+
+## Security review fixes (t13)
+
+| # | Fix | Tests |
+|---|---|---|
+| 1 | `on_roster_intro` is rate-limited per sender. A token bucket gives a burst of 3, then 1 per 10 s (`take_intro`). Drops are audited at most once per 60 s, with a count of the quiet ones, and never notify. The bucket is checked before anything else, including the "not a paired hub" path. | `intros_are_rate_limited_per_sender_and_drops_noted_once_a_minute` (pure); flood part of `received_intros_add_new_devices_once_and_never_replace` |
+| 1 | Roster caps for intros: no Add past **64 stored devices** (paired + revoked rows), nor past **32 added by one introducer** (paired + revoked). Refusals go into the intro's single report. | `intros_never_grow_the_roster_past_its_caps` |
+| 1 | Coalesced reporting. Each added device keeps its own `introduced` row; everything not added is **one audit row + one notification per intro**. The row is `intro_conflict` if any conflict, else `intro_ignored`; its detail is grouped as "conflict: ...; malformed: ...; full: ...; off: ..." with at most 8 named per group, then "and N more". It names a device only when exactly one entry was skipped. So at most 2 notifications per intro, and intros are rate-limited. The >32 refusal is audit-only. | `not_added_outcomes_make_one_report` (pure); `received_intros_...` |
+| 2 | `revoke_device` ack result now lists the devices the revoked one introduced that are **still paired** (sorted by name). They are not revoked automatically. `krypto peer revoke` prints "Laptop added Pixel (phone), Studio here; they stay paired. Revoke them too with ...". | `revoking_an_introducer_lists_what_it_added`; CLI `a_revoke_names_the_devices_it_had_added` |
+| 3 | `create_invite{forPhone}` now calls the node's `create_phone_invite(ttl)` (purpose-bound: only an ios / android joiner, stored as kind phone). The hub never infers a kind. `update_device_seen` never writes `kind` (hellos may change os, never kind). | `hellos_never_change_a_devices_kind` (store); real-link test: a phone (os ios) joining a **hub** invite gets `invite_rejected`, and a hello from a paired phone keeps kind phone |
+
+**Names (t13 follow-up):**
+- `krypto_peer::device_name_ok` now applies to every name the hub accepts from the UI or CLI that reaches peers:
+  - the machine name: `machine::validate_name`, used by `update_machine`, `krypto machine --name` and machine.toml loading,
+    on top of the 1-40 char limit;
+  - pet names: `validate_pet_name`;
+  - custom agent names: `invalid:customAgents[i].name`.
+- Bidi controls and zero-width / invisible formatting characters are refused with a clear reason ("... must not contain
+  invisible characters (bidi controls, zero-width ...)"). The ack code stays `invalid`.
+- The OS host name used as the default machine name has those characters dropped.
+- `WakeError::Disconnected` (our flood cooldown) is logged at debug level. On `Backpressure` (nothing queued) the hub
+  forgets that wake, so the next request retries.
+- Tests:
+  - `machine::names_are_validated` (bidi / zero-width / BOM / word-joiner refused; visible Unicode such as emoji, umlauts
+    and CJK accepted and accepted by the peers' rule);
+  - `host_names_are_cleaned`;
+  - `pet_names_follow_the_device_name_rule`;
+  - a new row in the settings validation table.
+- Gate: hub **184 passed**, workspace clippy clean.
+
+**`revoke_device` ack result** (for fe-settings):
+
+```json
+{ "introduced": [ { "id": "pppppp000002", "name": "Pixel", "kind": "phone" },
+                  { "id": "ssssss000001", "name": "Studio", "kind": "hub" } ] }
+```
+
+`introduced` is always present: `[]` when the device introduced nothing that is still paired, which matches t13's TS
+shape `introduced?: [...]`. Entries are sorted by name and are devices still paired here whose `introducedBy` = the
+revoked id. Revoke each with `revoke_device` to remove them.
+
+The real-link test changed because of the node's invite purpose binding: a phone can no longer pair through a LAN hub
+invite. The test now seeds both rosters, and the phone's LAN hello brings the link up. It still checks the snapshot,
+`sync_done`, live updates, the owed intro and `intent_ack` as mobile.
+
+Gate after the fixes: `cargo test -p krypto-hub` **183 passed**; `cargo clippy --workspace --all-targets -- -D warnings`
+clean.
+
+## What was built
+
+### 1. Phones in the roster
+- Phones are roster devices with `kind: phone`. The kind always comes from the node's `Paired` / `RosterIntro` result; the
+  hub never infers it.
+- They are listed in `devices` with online / offline state and `path` (from `LinkUp` / `LinkPath` / `LinkDown`).
+- They never appear in `machines` or the `machine` / `machine_removed` messages, so they are never the active machine.
+- A phone's `presence` is only a keepalive. Its repos, agents, pets and activity are never stored or used (no pickers, no
+  brain context, no active machine).
+- `Device.os` comes from the stored os. `Device.introducedBy` is a new store column.
+- `krypto machines` prints a separate PHONE table: os, status, last seen, path, and "here" or "introduced by Mac mini".
+
+### 2. `create_invite{forPhone: true}`
+- Calls the node's `create_phone_invite(ttl)` (was `create_relay_invite`): a relay-only, purpose-bound invite (no
+  `addr`), even when the LAN listener is on.
+- Same TTL range (60-3600 s, default 600) and single use as other invites.
+- Errors:
+  - `relay_off` while the relay is not connected;
+  - `invalid` when an `addr` is given with forPhone, or for a bad TTL.
+- `krypto peer invite --phone` prints the URI plus a short how-to. `--phone` conflicts with `--addr`.
+  - `relay_off` gets readable CLI text.
+  - No ASCII QR: there is no QR crate in the workspace, and adding one would be a new dependency.
+
+### 3. Group roster (`crates/hub/src/core/peers/intro.rs`)
+
+**Fan-out.** On every `Paired`, `intro_group` picks the group:
+- a new hub's group is every other hub and every phone;
+- a new phone's group is every other hub (phones never meet phones).
+
+The intros owed go into a new table `roster_intro_pending(recipient_id, device_id)`. That covers each group member being
+owed the new device, and the new device being owed the group. They are sent right away to linked devices and on every
+`LinkUp` otherwise, so offline devices get them on their next hello. Phones hello first, so a phone gets its intros as
+soon as it connects.
+- Intros go out with `send_roster_intro` in chunks of at most 32.
+- They are built with `intro_device`: a hub's addr only if it passes `peer_addr_ok`, never an addr for a phone, and the
+  os.
+- An intro is cleared when it is queued on a link.
+- Revoking a device deletes what it was owed and what others were owed about it.
+
+**Receiving** (`PeerEvent::RosterIntro{from, devices, invalid}`). The node already checked that the sender is a linked
+paired hub, the count and the structure. The hub then:
+- re-checks that the sender is a paired hub (anything else is audited `intro_ignored`);
+- runs `judge_intro` against every stored row, revoked rows included:
+
+| Case | Outcome |
+|---|---|
+| Listed twice in the intro | Invalid |
+| This machine's id or key | Invalid |
+| The sender's id or key | Invalid |
+| Known id with the same key and kind | Known (nothing done, nothing audited) |
+| Known id with another key | Conflict |
+| Known id as another kind | Conflict |
+| Known key under another id | Conflict |
+| Revoked id or key | Conflict |
+| Anything else | Add (canonical key) |
+
+- `invalid` entries from the node are audited as `intro_ignored` with the node's code.
+- With `[peer] accept_roster_intros = false`, new devices are audited `intro_ignored` ("accept_roster_intros is off") and
+  shown, never added.
+- Added devices are stored with `introduced_by = sender` and audited `introduced` (detail "introduced by Mac mini (id)").
+  Then the hub calls `roster_changed()`, which updates the relay allow list and dial loops.
+- Pairing audit kinds `introduced` / `intro_conflict` / `intro_ignored` hold the id, name and reason, never keys.
+- Clients get a local `HubNotification` for each outcome:
+
+| Outcome | Example title |
+|---|---|
+| Added (success) | "Laptop added Pixel and Studio" |
+| Setting off (info) | "Laptop introduced Pixel" |
+| Conflict (warning) | "... : not added" |
+| Malformed entries (warning) | "Laptop sent an intro that was not used" |
+
+  A `devices` broadcast always follows (it comes from the roster sync when something was added).
+
+**Store.** `add_introduced_device` is one `INSERT ... SELECT ... WHERE NOT EXISTS (id = ? OR public_key = ?)`. It is
+atomic in SQLite, and it never replaces a key or id and never re-adds a revoked one, even if a pairing races the intro.
+This is sde-peer's report item (a). A direct (re-)pairing `upsert_device` clears `introduced_by`.
+
+### 4. Setting `peer.acceptRosterIntros`
+- `[peer] accept_roster_intros` (default true) appears in `HubSettings.peer.acceptRosterIntros` and in the
+  `update_settings` patch.
+- It applies at once (no restart), is written with toml_edit, is audited like any setting (key `peer.acceptRosterIntros`),
+  and is shown in `krypto settings` and the config template.
+
+### 5. Mirror and intents for phone links (`core/mirror.rs`)
+- `on_peer_body` accepts bodies from any paired device. Phone bodies are limited to:
+  - `sync_request`, answered like a hub's: this hub's own sessions, pets and pending requests, then `sync_done`;
+  - `intent`, always run as client `mobile`, whatever the phone claims.
+- Everything else from a phone is dropped, including mirror bodies, so a phone never feeds the mirror. The hub never
+  sends a phone a `sync_request`.
+- Live mirror updates go to every linked paired device (hubs and phones), still only this hub's own items.
+- The step-4 owner rules are unchanged:
+  - approve and start need `confirmed`;
+  - approve is allow_once only;
+  - only known folders;
+  - remote-driven sessions never auto-approve;
+  - the per-device rate limit applies.
+- Audit and messages name the phone:
+  - audit actor `mobile@<phone name>`, origin `{client: mobile, name: <phone name>}`;
+  - intent_log `client = mobile`;
+  - `permission_resolved.byMachineId = <phone id>`, so clients can show the name from `devices`;
+  - notification "Approved from <phone name>".
+- `krypto start` now prints "answered allow from iPhone" instead of "by you" when `byMachineId` is set.
+
+### 6. Offline wake
+- `on_permission_request` (a new local request that asks a human) calls `wake_offline_phones()`.
+- For each paired phone without a live link, it calls `node.wake_phone(id)`, at most once per phone per 60 s on the hub
+  side (`take_wake`).
+- The node keeps its own once-a-minute limit too. `Linked`, `RelayOff` and `RateLimited` are logged at debug level, any
+  other error at warn.
+
+### t13 / sde-peer follow-ups
+- **(a)** The store refuses a second key for an id, a second id for a key, and any revoked id or key in one statement.
+  Tests:
+  - `store::introduced_devices_never_replace_anything`;
+  - `core::tests::phones::received_intros_add_new_devices_once_and_never_replace`.
+- **(b)** `Roster::get_revoked` has been in the hub store since step 6: `revoked_roster_entry`, test
+  `store::revoked_devices_keep_their_key_for_a_bye`.
+- **Invite purpose:** the hub takes the device kind only from the node (`Paired.device.kind`). When sde-peer renames or
+  changes the phone-invite constructor, only `Hub::create_invite` (`core/peers.rs`) needs to change.
+
+## Tests added (19)
+- **Store:**
+  - `v8_migration_keeps_the_roster` (v7 db -> v8, counters kept);
+  - `introduced_devices_never_replace_anything`;
+  - `owed_intros_are_kept_per_recipient_until_sent_or_revoked`.
+- **Pure rules (`core/peers/intro/tests.rs`):**
+  - `intro_groups_follow_the_fan_out_rules`;
+  - `intro_devices_carry_only_what_receivers_take`;
+  - `intros_are_judged_against_what_this_hub_knows` (every outcome);
+  - `name_lists_read_naturally`;
+  - `wakes_are_rate_limited_per_phone`.
+- **Hub (`core/tests/phones.rs`):**
+  - `phones_are_devices_never_machines`: not in machines or `machine` msgs, presence ignored, path online / offline;
+  - `pairing_a_device_introduces_its_group`: fan-out table for a new phone and a new hub, offline kept, revoke clears;
+  - `received_intros_add_new_devices_once_and_never_replace`: added + audit + notification + wire shape, repeat is a
+    no-op, conflicts, revoked never re-added;
+  - `intros_wait_for_the_setting_and_never_come_from_phones`: setting off, then on via `update_settings` (config,
+    audit), phone sender refused;
+  - `a_phone_reads_the_mirror_and_acts_as_mobile`: mirror bodies dropped, client forced to mobile, unconfirmed refused,
+    confirmed applied with `mobile@iPhone` audit, `byMachineId`, "Approved from iPhone";
+  - `phone_invites_are_relay_only`: `relay_off`, `invalid` with addr or bad TTL;
+  - `local_requests_wake_offline_phones_once_a_minute`: phones only, rate limit, revoked forgotten;
+  - `a_linked_phone_gets_this_hubs_items_only`: a real LAN link with a peer node that says iOS. It checks that the phone
+    is stored as a phone with no addr, gets this hub's snapshot (never another machine's mirrored session), `sync_done`,
+    live mirror updates and the intro listing the other hub, and gets an `intent_ack` with client mobile.
+- **Settings:** `roster_intros_are_a_peer_setting_applied_at_once`.
+- **CLI:**
+  - `phones_are_listed_apart_from_machines`;
+  - `remote_decisions_name_the_device`;
+  - `--phone` parsing (conflicts with `--addr`).
+- Existing tests updated for v8: `for_phone`, the new Device fields, and `RosterIntro` in the compile-time
+  peer-surface guard.
+
+## Live smoke (scratch dirs, local relay, real binaries)
+Setup:
+- `wrangler dev --port 8797` serves the relay locally. Its key was read from `services/relay/.dev.vars` and never printed.
+- Hubs A and B run with scratch `--data-dir`, scratch `HOME` / `USERPROFILE`, `[relay] url = ws://127.0.0.1:8797` and LAN
+  listeners on 127.0.0.1.
+- fe-mobile's `apps/mobile/scripts/headless-phone.ts` plays the phone.
+- Invite URIs stayed in shell variables and were never printed.
+
+| Check | Result |
+|---|---|
+| A and B relay status | `connected` (`krypto settings`) |
+| B `peer join` A's LAN invite | paired |
+| `krypto peer invite --phone` on A | PASS: no `addr`, has `relay` / `rt` / `rk` |
+| Headless phone pairs from that URI | paired with Hub a |
+| Phone status | Hub a online (relay) synced; **Hub b online (relay) synced `introducedBy=Hub a`**: the intro worked and B let the phone in over the relay |
+| `krypto machines` on A | Hub b in machines; PHONE table: Smoke phone, ios, online, relay, "here" |
+| `krypto machines` on B | PHONE table: Smoke phone ... "introduced by Hub a" |
+| B pairing_audit / devices | `introduced` "introduced by Hub a (id)"; the phone stored as kind phone, os ios, `introduced_by` = A, no addr |
+| Mock ACP agent on A asks a permission, phone offline | log `woke an offline phone`; a 2nd request within 60 s: no 2nd wake |
+| Phone `status` | sees A's session `waiting_permission` and the pending request (mirror over the relay) |
+| Phone `approve <id>` | `applied`; the agent got `allow`; A audit_log `mobile@Smoke phone`, origin client `mobile`; intent_log `approve mobile Smoke phone applied` |
+| Pending intros on A afterwards | empty |
+
+The smoke hubs, the local relay and its wrapper shells were stopped by PID afterwards; only scratch-path / port-8797
+processes were touched. The real `~/.claude` was never touched (no hooks were installed).
+
+## Notes for others
+- fe-mobile: `headless-phone.ts status` without `--os` reported the phone as "android". Each hello's os updates the
+  roster (`update_seen`), so a phone app must always send its real os. The headless script defaults to android unless
+  `--os` is passed on every command.
+
+## Known gaps
+- No ASCII QR in the CLI (that would need a new dependency); the desktop draws the QR (fe-settings, `qrcode`).
+- Revocation stays per hub (contract): no "revoke everywhere" yet.
+- A queued intro counts as delivered once the link accepts it. If that link drops before the frame leaves, the next
+  re-pairing or the next intro covers it, but there is no resend on its own.
+
+---
+
 # sde-hub report — step 5b (settings in the UI) + step 6 phase B (relay wiring)
 
 Branch `step-5b-settings-ui`, nothing committed. Owned paths only: `crates/hub/`, `crates/discovery/` (hook status + remove).

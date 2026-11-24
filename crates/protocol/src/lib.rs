@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 pub const HUB_DEFAULT_PORT: u16 = 47800;
 pub const HUB_HOST: &str = "127.0.0.1";
 pub const HUB_DATA_DIR_NAME: &str = "krypto";
@@ -31,6 +31,9 @@ pub enum MachineOs {
     Windows,
     Macos,
     Linux,
+    /// Phones (migration step 7) never appear in `machines`, only in `devices`.
+    Ios,
+    Android,
     Other,
 }
 
@@ -117,6 +120,27 @@ pub struct Device {
     /// Live link path (absent when offline).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<LinkPath>,
+    /// Set when another paired hub introduced this device (group roster, migration step 7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introduced_by: Option<MachineId>,
+    /// OS from the device's pair_request / hello / roster_intro, when known (phones: ios / android).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<MachineOs>,
+}
+
+/// A device announced through `roster_intro`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntroDevice {
+    pub id: String,
+    pub kind: DeviceKind,
+    pub name: String,
+    /// Base64 (standard, padded) X25519 public key.
+    pub public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<MachineOs>,
 }
 
 /// This hub's peer-link status.
@@ -390,6 +414,9 @@ pub enum PeerBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<Value>,
     },
+    /// Group roster (migration step 7): sent after pairing a new device to every other linked hub (the new device) and
+    /// to the new device (the other hubs). Accepted only from a paired hub; never replaces an existing device's key.
+    RosterIntro { devices: Vec<IntroDevice> },
 }
 
 // ---------- agents ----------
@@ -922,6 +949,8 @@ pub enum RelayClientFrame {
     },
     /// Phone only: content-free wake when a frame is queued while it is offline.
     RegisterPush { expo_token: String },
+    /// Phone only (step 7): forget this mailbox's push token (push turned off or phone unpaired).
+    UnregisterPush,
     Ping { ts: UnixMs },
 }
 
@@ -964,13 +993,15 @@ pub struct HubSettingsWatchdog {
     pub tick_secs: u64,
 }
 
-/// `listen` = peer-listener address ("ip:port") or None when off; `accept_intents` = remote control on.
+/// `listen` = peer-listener address ("ip:port") or None when off; `accept_intents` = remote control on;
+/// `accept_roster_intros` = add devices another paired hub introduces (`roster_intro`, step 7; default true).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HubSettingsPeer {
     pub listen: Option<String>,
     pub accept_intents: bool,
     pub start_roots: Vec<String>,
+    pub accept_roster_intros: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1064,6 +1095,8 @@ pub struct HubSettingsPeerPatch {
     pub accept_intents: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_roots: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept_roster_intros: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1254,6 +1287,9 @@ pub enum ClientMsg {
         ttl_secs: Option<u32>,
         #[serde(default)]
         addr: Option<String>,
+        /// A relay-only invite for a phone's QR scanner (no addr); needs the relay (error `relay_off`).
+        #[serde(default)]
+        for_phone: Option<bool>,
     },
     /// Pair with another hub from its invite URI. Ack result `{device, machine}`.
     /// Errors: bad_uri, self_invite, unreachable, invite_rejected, timeout.
@@ -1418,7 +1454,7 @@ mod tests {
         let st = PeerStatus { listening: None, public_key: "k".into(), relay: RelayStatusInfo::default() };
         assert_eq!(serde_json::to_value(&st).unwrap(), serde_json::json!({"listening":null,"publicKey":"k","relay":{"url":null,"connected":false}}));
         let m: ClientMsg = serde_json::from_str(r#"{"type":"create_invite","id":"1"}"#).unwrap();
-        assert_eq!(m, ClientMsg::CreateInvite { id: "1".into(), ttl_secs: None, addr: None });
+        assert_eq!(m, ClientMsg::CreateInvite { id: "1".into(), ttl_secs: None, addr: None, for_phone: None });
         let b = PeerBody::SyncRequest { since_seq: 5 };
         assert_eq!(serde_json::to_value(&b).unwrap(), serde_json::json!({"type":"sync_request","sinceSeq":5}));
         let m: ClientMsg = serde_json::from_str(r#"{"type":"user_activity","id":"9"}"#).unwrap();

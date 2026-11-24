@@ -1,0 +1,463 @@
+{
+  "description": "PeerEnvelope = NaCl box (XSalsa20-Poly1305, tweetnacl nacl.box) of the UTF-8 plaintext (the JSON PeerBody, byte for byte as given) from the sender's key to the receiver's. nonce = random (15 bytes) || dir (1 byte: 1 if senderPk < receiverPk bytewise, else 0) || seq (u64 big-endian). Sealing `plaintext` with nonceHex must give envelope.box exactly; opening envelope must give body. A receiver checks v == 1, nonce length 24, dir and seq against the nonce, then opens; it drops any seq <= its last accepted seq from that sender before opening. Error codes are crates/peer OpenError.",
+  "rejects": [
+    {
+      "envelope": {
+        "box": "0WP4X4KpnS1cSF8PbS3w6hkHvOAD/RaDjyibpTdRtEaL1vxnfCW14w2aVd+43jxHs0CiuxNqpSYBK/I0gJa5mnsVN3cHYCTErxxSm1QKAXqOzREoTz8wKRyCjG+DtV5T2UgEFkLZ2V5xiM9T41WUtoDrlZBNBOqSJQQ5ggCMvbRshWbhL33VihyCCVQcdqigRYYV5kopks46dlqAqz3x6wG523Bbkue8nbAAwSAoclEu3lTcAo+R8UKVG/vwTTaRZAPFO68iAilYlCYHDAPo7b+NPQkPGEVX3GUG7jGWeg==",
+        "from": "phone0000001",
+        "nonce": "maSvusXQ2+bx/AcSHSgzAQAGRFlBYkAE",
+        "seq": 1764000000000004,
+        "to": "hubaaaaaaaaa",
+        "v": 1
+      },
+      "error": "bad_nonce",
+      "name": "reflected back to its sender (direction byte)",
+      "receiver": "hubA",
+      "sender": "phone"
+    },
+    {
+      "envelope": {
+        "box": "0WP4X4KpnS1cSF8PbS3w6hkHvOAD/RaDjyibpTdRtEaL1vxnfCW14w2aVd+43jxHs0CiuxNqpSYBK/I0gJa5mnsVN3cHYCTErxxSm1QKAXqOzREoTz8wKRyCjG+DtV5T2UgEFkLZ2V5xiM9T41WUtoDrlZBNBOqSJQQ5ggCMvbRshWbhL33VihyCCVQcdqigRYYV5kopks46dlqAqz3x6wG523Bbkue8nbAAwSAoclEu3lTcAo+R8UKVG/vwTTaRZAPFO68iAilYlCYHDAPo7b+NPQkPGEVX3GUG7jGWeg==",
+        "from": "hubaaaaaaaaa",
+        "nonce": "maSvusXQ2+bx/AcSHSgzAQAGRFlBYkAE",
+        "seq": 1764000000000005,
+        "to": "phone0000001",
+        "v": 1
+      },
+      "error": "bad_nonce",
+      "name": "seq changed (no longer the one in the nonce)",
+      "receiver": "phone",
+      "sender": "hubA"
+    },
+    {
+      "envelope": {
+        "box": "0WP4X4KpnS1cSF8PbS3w6hkHvOAC/RaDjyibpTdRtEaL1vxnfCW14w2aVd+43jxHs0CiuxNqpSYBK/I0gJa5mnsVN3cHYCTErxxSm1QKAXqOzREoTz8wKRyCjG+DtV5T2UgEFkLZ2V5xiM9T41WUtoDrlZBNBOqSJQQ5ggCMvbRshWbhL33VihyCCVQcdqigRYYV5kopks46dlqAqz3x6wG523Bbkue8nbAAwSAoclEu3lTcAo+R8UKVG/vwTTaRZAPFO68iAilYlCYHDAPo7b+NPQkPGEVX3GUG7jGWeg==",
+        "from": "hubaaaaaaaaa",
+        "nonce": "maSvusXQ2+bx/AcSHSgzAQAGRFlBYkAE",
+        "seq": 1764000000000004,
+        "to": "phone0000001",
+        "v": 1
+      },
+      "error": "decrypt_failed",
+      "name": "box tampered",
+      "receiver": "phone",
+      "sender": "hubA"
+    },
+    {
+      "envelope": {
+        "box": "0WP4X4KpnS1cSF8PbS3w6hkHvOAD/RaDjyibpTdRtEaL1vxnfCW14w2aVd+43jxHs0CiuxNqpSYBK/I0gJa5mnsVN3cHYCTErxxSm1QKAXqOzREoTz8wKRyCjG+DtV5T2UgEFkLZ2V5xiM9T41WUtoDrlZBNBOqSJQQ5ggCMvbRshWbhL33VihyCCVQcdqigRYYV5kopks46dlqAqz3x6wG523Bbkue8nbAAwSAoclEu3lTcAo+R8UKVG/vwTTaRZAPFO68iAilYlCYHDAPo7b+NPQkPGEVX3GUG7jGWeg==",
+        "from": "hubaaaaaaaaa",
+        "nonce": "mKSvusXQ2+bx/AcSHSgzAQAGRFlBYkAE",
+        "seq": 1764000000000004,
+        "to": "phone0000001",
+        "v": 1
+      },
+      "error": "decrypt_failed",
+      "name": "random part of the nonce changed",
+      "receiver": "phone",
+      "sender": "hubA"
+    },
+    {
+      "envelope": {
+        "box": "0WP4X4KpnS1cSF8PbS3w6hkHvOAD/RaDjyibpTdRtEaL1vxnfCW14w2aVd+43jxHs0CiuxNqpSYBK/I0gJa5mnsVN3cHYCTErxxSm1QKAXqOzREoTz8wKRyCjG+DtV5T2UgEFkLZ2V5xiM9T41WUtoDrlZBNBOqSJQQ5ggCMvbRshWbhL33VihyCCVQcdqigRYYV5kopks46dlqAqz3x6wG523Bbkue8nbAAwSAoclEu3lTcAo+R8UKVG/vwTTaRZAPFO68iAilYlCYHDAPo7b+NPQkPGEVX3GUG7jGWeg==",
+        "from": "hubaaaaaaaaa",
+        "nonce": "maSvusXQ2+bx/AcSHSgzAQAGRFlBYkAE",
+        "seq": 1764000000000004,
+        "to": "phone0000001",
+        "v": 2
+      },
+      "error": "bad_version",
+      "name": "unknown envelope version",
+      "receiver": "phone",
+      "sender": "hubA"
+    },
+    {
+      "envelope": {
+        "box": "0WP4X4KpnS1cSF8PbS3w6hkHvOAD/RaDjyibpTdRtEaL1vxnfCW14w2aVd+43jxHs0CiuxNqpSYBK/I0gJa5mnsVN3cHYCTErxxSm1QKAXqOzREoTz8wKRyCjG+DtV5T2UgEFkLZ2V5xiM9T41WUtoDrlZBNBOqSJQQ5ggCMvbRshWbhL33VihyCCVQcdqigRYYV5kopks46dlqAqz3x6wG523Bbkue8nbAAwSAoclEu3lTcAo+R8UKVG/vwTTaRZAPFO68iAilYlCYHDAPo7b+NPQkPGEVX3GUG7jGWeg==",
+        "from": "hubaaaaaaaaa",
+        "nonce": "mKSvusXQ2+bx/AcSHSgzAQAGRFlBYkA=",
+        "seq": 1764000000000004,
+        "to": "phone0000001",
+        "v": 1
+      },
+      "error": "bad_encoding",
+      "name": "nonce of 23 bytes",
+      "receiver": "phone",
+      "sender": "hubA"
+    },
+    {
+      "envelope": {
+        "box": "0WP4X4KpnS1cSF8PbS3w6hkHvOAD/RaDjyibpTdRtEaL1vxnfCW14w2aVd+43jxHs0CiuxNqpSYBK/I0gJa5mnsVN3cHYCTErxxSm1QKAXqOzREoTz8wKRyCjG+DtV5T2UgEFkLZ2V5xiM9T41WUtoDrlZBNBOqSJQQ5ggCMvbRshWbhL33VihyCCVQcdqigRYYV5kopks46dlqAqz3x6wG523Bbkue8nbAAwSAoclEu3lTcAo+R8UKVG/vwTTaRZAPFO68iAilYlCYHDAPo7b+NPQkPGEVX3GUG7jGWeg==",
+        "from": "hubaaaaaaaaa",
+        "nonce": "maSvusXQ2+bx/AcSHSgzAQAGRFlBYkAE",
+        "seq": 1764000000000004,
+        "to": "phone0000001",
+        "v": 1
+      },
+      "error": "decrypt_failed",
+      "name": "opened with the wrong sender key",
+      "receiver": "phone",
+      "sender": "hubB"
+    }
+  ],
+  "replay": {
+    "envelope": {
+      "box": "0WP4X4KpnS1cSF8PbS3w6hkHvOAD/RaDjyibpTdRtEaL1vxnfCW14w2aVd+43jxHs0CiuxNqpSYBK/I0gJa5mnsVN3cHYCTErxxSm1QKAXqOzREoTz8wKRyCjG+DtV5T2UgEFkLZ2V5xiM9T41WUtoDrlZBNBOqSJQQ5ggCMvbRshWbhL33VihyCCVQcdqigRYYV5kopks46dlqAqz3x6wG523Bbkue8nbAAwSAoclEu3lTcAo+R8UKVG/vwTTaRZAPFO68iAilYlCYHDAPo7b+NPQkPGEVX3GUG7jGWeg==",
+      "from": "hubaaaaaaaaa",
+      "nonce": "maSvusXQ2+bx/AcSHSgzAQAGRFlBYkAE",
+      "seq": 1764000000000004,
+      "to": "phone0000001",
+      "v": 1
+    },
+    "error": "replay",
+    "lastRxSeq": 1764000000000004,
+    "name": "replay: the receiver's last accepted seq from this sender is the envelope's own",
+    "receiver": "phone",
+    "sender": "hubA"
+  },
+  "vectors": [
+    {
+      "body": {
+        "code": "ESIzRFVmd4iZqrvM3e7_AA",
+        "machine": {
+          "id": "phone0000001",
+          "lastSeen": 1764000000000,
+          "name": "Test iPhone",
+          "online": true,
+          "os": "ios"
+        },
+        "ts": 1764000000000,
+        "type": "pair_request"
+      },
+      "dir": 0,
+      "envelope": {
+        "box": "LB2snb6Xa7dbOZL3sEJKAPRNarJXbRKxtpiVwnQgHqI0skff5yArsrSM4s2NSJo3Fp1cOhHP5pyKwY+58Y0TlFatbyY9YcH7KFKQ/aQ3XecV6vYqB5mjgCuPZxK0xcQSBePkZBZDwZ9j3srVCzLsvxrZkgDlh2Y+ckITH2fZYUH9/QzrkAlNPfax3Hq9EWTRQYHyGTk7AhD6W3VbIpU3A/BU+dFQly80tkolcoaFe57NOmz04ktqUbDwYU+ZFii78A==",
+        "from": "phone0000001",
+        "nonce": "KjVAS1ZhbHeCjZijrrnEAAAGRFlBYkAB",
+        "pk": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc=",
+        "seq": 1764000000000001,
+        "to": "hubaaaaaaaaa",
+        "v": 1
+      },
+      "name": "pair_request phone to hub (carries pk)",
+      "nonceHex": "2a35404b56616c77828d98a3aeb9c4000006445941624001",
+      "plaintext": "{\"type\":\"pair_request\",\"code\":\"ESIzRFVmd4iZqrvM3e7_AA\",\"machine\":{\"id\":\"phone0000001\",\"name\":\"Test iPhone\",\"os\":\"ios\",\"lastSeen\":1764000000000,\"online\":true},\"ts\":1764000000000}",
+      "randomHex": "2a35404b56616c77828d98a3aeb9c4",
+      "receiver": "hubA",
+      "sender": "phone",
+      "seq": 1764000000000001
+    },
+    {
+      "body": {
+        "machine": {
+          "hubVersion": "0.7.0",
+          "id": "hubaaaaaaaaa",
+          "lastSeen": 1764000000000,
+          "name": "Mac mini",
+          "online": true,
+          "os": "macos"
+        },
+        "reqSeq": 1764000000000001,
+        "ts": 1764000000001,
+        "type": "pair_accept"
+      },
+      "dir": 1,
+      "envelope": {
+        "box": "J9TmcLXAmIH5jzmuQpPATUniR4c+d3uvg4T0lXR+EsV+9wH5igJOd2o9A049dWzk0pg/G3zKhpEWT/W5+oNAIhngVpvA29iYsV7pHvlWiyHDoxenvohbYNOXolQ8sU7WcHFPQvoHYvwVRMADVAJ26NxhuV1KMqvARRrzUH3NziN+9x02+D/vxj4ANDNuriAiZ1S28pbKP1KxcDfr4aFHD2uw98GWBeMlAgqdcNySe8x5qGMmr4dHxkCieHp0i/3Caa/RWIehXfr3MYyWMPs=",
+        "from": "hubaaaaaaaaa",
+        "nonce": "T1plcHuGkZynsr3I097pAQAGRFlBYkAC",
+        "seq": 1764000000000002,
+        "to": "phone0000001",
+        "v": 1
+      },
+      "name": "pair_accept hub to phone",
+      "nonceHex": "4f5a65707b86919ca7b2bdc8d3dee9010006445941624002",
+      "plaintext": "{\"type\":\"pair_accept\",\"machine\":{\"id\":\"hubaaaaaaaaa\",\"name\":\"Mac mini\",\"os\":\"macos\",\"lastSeen\":1764000000000,\"online\":true,\"hubVersion\":\"0.7.0\"},\"reqSeq\":1764000000000001,\"ts\":1764000000001}",
+      "randomHex": "4f5a65707b86919ca7b2bdc8d3dee9",
+      "receiver": "phone",
+      "sender": "hubA",
+      "seq": 1764000000000002
+    },
+    {
+      "body": {
+        "machine": {
+          "id": "phone0000001",
+          "lastSeen": 1764000000000,
+          "name": "Test iPhone",
+          "online": true,
+          "os": "ios"
+        },
+        "ts": 1764000000002,
+        "type": "hello"
+      },
+      "dir": 0,
+      "envelope": {
+        "box": "jfW9W495jC2f+TuGeleM4sz14ao65a4+cxM3ZKsSO7VWS3pqw1gKAgF3d7AbF5tA4ybsgSoXLFT/snWWoVjlVOX9AJYZyAm1WigClp9/VcqXsX2kZaxM+aZwch3UIkhbJd9EG/XV7S29Y7c34XVCO6/h4/XxSRCMu7U4BOPVulAUw5wDLu0yNzyko2dYGidmamVo4xQAldQD8g==",
+        "from": "phone0000001",
+        "nonce": "dH+KlaCrtsHM1+Lt+AMOAAAGRFlBYkAD",
+        "seq": 1764000000000003,
+        "to": "hubaaaaaaaaa",
+        "v": 1
+      },
+      "name": "hello phone to hub",
+      "nonceHex": "747f8a95a0abb6c1ccd7e2edf8030e000006445941624003",
+      "plaintext": "{\"type\":\"hello\",\"machine\":{\"id\":\"phone0000001\",\"name\":\"Test iPhone\",\"os\":\"ios\",\"lastSeen\":1764000000000,\"online\":true},\"ts\":1764000000002}",
+      "randomHex": "747f8a95a0abb6c1ccd7e2edf8030e",
+      "receiver": "hubA",
+      "sender": "phone",
+      "seq": 1764000000000003
+    },
+    {
+      "body": {
+        "presence": {
+          "agents": [],
+          "machine": {
+            "hubVersion": "0.7.0",
+            "id": "hubaaaaaaaaa",
+            "lastSeen": 1764000000000,
+            "name": "Mac mini",
+            "online": true,
+            "os": "macos"
+          },
+          "pets": [],
+          "repos": [],
+          "ts": 1764000000002
+        },
+        "type": "presence"
+      },
+      "dir": 1,
+      "envelope": {
+        "box": "0WP4X4KpnS1cSF8PbS3w6hkHvOAD/RaDjyibpTdRtEaL1vxnfCW14w2aVd+43jxHs0CiuxNqpSYBK/I0gJa5mnsVN3cHYCTErxxSm1QKAXqOzREoTz8wKRyCjG+DtV5T2UgEFkLZ2V5xiM9T41WUtoDrlZBNBOqSJQQ5ggCMvbRshWbhL33VihyCCVQcdqigRYYV5kopks46dlqAqz3x6wG523Bbkue8nbAAwSAoclEu3lTcAo+R8UKVG/vwTTaRZAPFO68iAilYlCYHDAPo7b+NPQkPGEVX3GUG7jGWeg==",
+        "from": "hubaaaaaaaaa",
+        "nonce": "maSvusXQ2+bx/AcSHSgzAQAGRFlBYkAE",
+        "seq": 1764000000000004,
+        "to": "phone0000001",
+        "v": 1
+      },
+      "name": "presence hub to phone",
+      "nonceHex": "99a4afbac5d0dbe6f1fc07121d2833010006445941624004",
+      "plaintext": "{\"type\":\"presence\",\"presence\":{\"machine\":{\"id\":\"hubaaaaaaaaa\",\"name\":\"Mac mini\",\"os\":\"macos\",\"lastSeen\":1764000000000,\"online\":true,\"hubVersion\":\"0.7.0\"},\"agents\":[],\"repos\":[],\"pets\":[],\"ts\":1764000000002}}",
+      "randomHex": "99a4afbac5d0dbe6f1fc07121d2833",
+      "receiver": "phone",
+      "sender": "hubA",
+      "seq": 1764000000000004
+    },
+    {
+      "body": {
+        "presence": {
+          "agents": [],
+          "machine": {
+            "id": "phone0000001",
+            "lastSeen": 1764000000000,
+            "name": "Test iPhone",
+            "online": true,
+            "os": "ios"
+          },
+          "pets": [],
+          "repos": [],
+          "ts": 1764000000002
+        },
+        "type": "presence"
+      },
+      "dir": 0,
+      "envelope": {
+        "box": "2Pisk7BJOIwWFTgmy9jVYzf9KSfYoUiBF1cJW+akugo8X5eyrOds3xEqK6X7d4M08zD7znBnZ9qsYLuUK0SzZeIIbKRBTEk0Bcr4UPPRSeBxkz9yexTXey5SWq5U+e5a/e6TV/BZFYPFjeE1VGCJVlddfaUwLmgnVLdgFLng7zJ4E50QLnqgyGElUNG6TSsDzd2DT+zVsJmVxVc14yP8jY2iz4Hga3xDLyMw67CkJMBjCUdo5cblzDWG6w6Eemf9LCw8dZqIyeVofoI=",
+        "from": "phone0000001",
+        "nonce": "vsnU3+r1AAsWISw3Qk1YAAAGRFlBYkAF",
+        "seq": 1764000000000005,
+        "to": "hubaaaaaaaaa",
+        "v": 1
+      },
+      "name": "presence phone to hub",
+      "nonceHex": "bec9d4dfeaf5000b16212c37424d58000006445941624005",
+      "plaintext": "{\"type\":\"presence\",\"presence\":{\"machine\":{\"id\":\"phone0000001\",\"name\":\"Test iPhone\",\"os\":\"ios\",\"lastSeen\":1764000000000,\"online\":true},\"agents\":[],\"repos\":[],\"pets\":[],\"ts\":1764000000002}}",
+      "randomHex": "bec9d4dfeaf5000b16212c37424d58",
+      "receiver": "hubA",
+      "sender": "phone",
+      "seq": 1764000000000005
+    },
+    {
+      "body": {
+        "sinceSeq": 0,
+        "type": "sync_request"
+      },
+      "dir": 0,
+      "envelope": {
+        "box": "IVa2Kvqq1ydpqV0bQZkvKLEmpAGVKlC2X3cn3Bu09BmmANlWlLcJumVCR9QXIO1weS1anQ==",
+        "from": "phone0000001",
+        "nonce": "4+75BA8aJTA7RlFcZ3J9AAAGRFlBYkAG",
+        "seq": 1764000000000006,
+        "to": "hubaaaaaaaaa",
+        "v": 1
+      },
+      "name": "sync_request phone to hub",
+      "nonceHex": "e3eef9040f1a25303b46515c67727d000006445941624006",
+      "plaintext": "{\"type\":\"sync_request\",\"sinceSeq\":0}",
+      "randomHex": "e3eef9040f1a25303b46515c67727d",
+      "receiver": "hubA",
+      "sender": "phone",
+      "seq": 1764000000000006
+    },
+    {
+      "body": {
+        "pendingPermissions": [],
+        "pets": [],
+        "sessions": [],
+        "type": "mirror_snapshot"
+      },
+      "dir": 1,
+      "envelope": {
+        "box": "XRByKmZL4NaAL7N65fI9XtsTB0h8GYyzC+TxLsHk890nNPfKW0Kq3q7AFGFzi/fA92S08UQGUk7GjeKgiyHL7hibAzgHg6goXnJhlyss1VfCLej9eoOiAgaT",
+        "from": "hubaaaaaaaaa",
+        "nonce": "CBMeKTQ/SlVga3aBjJeiAQAGRFlBYkAH",
+        "seq": 1764000000000007,
+        "to": "phone0000001",
+        "v": 1
+      },
+      "name": "mirror_snapshot hub to phone",
+      "nonceHex": "08131e29343f4a55606b76818c97a2010006445941624007",
+      "plaintext": "{\"type\":\"mirror_snapshot\",\"sessions\":[],\"pets\":[],\"pendingPermissions\":[]}",
+      "randomHex": "08131e29343f4a55606b76818c97a2",
+      "receiver": "phone",
+      "sender": "hubA",
+      "seq": 1764000000000007
+    },
+    {
+      "body": {
+        "client": "mobile",
+        "confirmed": true,
+        "intent": {
+          "kind": "approve",
+          "optionId": "allow_once",
+          "requestId": "req-42"
+        },
+        "intentId": "01JD7Q8ZK3M5N7P9R1T3V5X7Z9",
+        "ts": 1764000000003,
+        "type": "intent"
+      },
+      "dir": 0,
+      "envelope": {
+        "box": "MlDkVVW5Nn2qavFAf1qC7UiezJ1hLbhQdD13PEsEX21aqMibGm/vCw06MTlJWkfoDLgF7YSPiRP1Hy6K/DyGHc727zXU+3VB3O7cB72/ojW5GVDCuN0QA3Icz6E8y/gwGbmGLhH1yocpyqZjOycgmKlL5o5/Av6QQHMVdat3CTGvYe0I+lygy05Z8L7Y3f9UtewoSLR9EyBpt6Kd/gWHxdY8p0RkPHy+mb7zD8cwcggLRyXflf/eKvMH202wFGLUrkrnFCMMSxY=",
+        "from": "phone0000001",
+        "nonce": "LThDTllkb3qFkJumsbzHAAAGRFlBYkAI",
+        "seq": 1764000000000008,
+        "to": "hubaaaaaaaaa",
+        "v": 1
+      },
+      "name": "intent phone to hub (approve)",
+      "nonceHex": "2d38434e59646f7a85909ba6b1bcc7000006445941624008",
+      "plaintext": "{\"type\":\"intent\",\"intentId\":\"01JD7Q8ZK3M5N7P9R1T3V5X7Z9\",\"client\":\"mobile\",\"confirmed\":true,\"intent\":{\"kind\":\"approve\",\"requestId\":\"req-42\",\"optionId\":\"allow_once\"},\"ts\":1764000000003}",
+      "randomHex": "2d38434e59646f7a85909ba6b1bcc7",
+      "receiver": "hubA",
+      "sender": "phone",
+      "seq": 1764000000000008
+    },
+    {
+      "body": {
+        "intentId": "01JD7Q8ZK3M5N7P9R1T3V5X7Z9",
+        "status": "applied",
+        "type": "intent_ack"
+      },
+      "dir": 1,
+      "envelope": {
+        "box": "N5iqH6n/HR8jx46BE9FptJtIlOY1NffnNgf7dyhk/TFcB25zs3NRoqUFpAJ8PGGfcaq3WlrU3YfVl636ab3FSM9YAcZjZ7zG273OReCP6z/HXTHKkRkAop5a6UKx3Vpy",
+        "from": "hubaaaaaaaaa",
+        "nonce": "Ul1oc36JlJ+qtcDL1uHsAQAGRFlBYkAJ",
+        "seq": 1764000000000009,
+        "to": "phone0000001",
+        "v": 1
+      },
+      "name": "intent_ack hub to phone",
+      "nonceHex": "525d68737e89949faab5c0cbd6e1ec010006445941624009",
+      "plaintext": "{\"type\":\"intent_ack\",\"intentId\":\"01JD7Q8ZK3M5N7P9R1T3V5X7Z9\",\"status\":\"applied\"}",
+      "randomHex": "525d68737e89949faab5c0cbd6e1ec",
+      "receiver": "phone",
+      "sender": "hubA",
+      "seq": 1764000000000009
+    },
+    {
+      "body": {
+        "devices": [
+          {
+            "addr": "192.168.1.21:47801",
+            "id": "hubbbbbbbbbb",
+            "kind": "hub",
+            "name": "Studio PC",
+            "os": "windows",
+            "publicKey": "ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY="
+          }
+        ],
+        "type": "roster_intro"
+      },
+      "dir": 1,
+      "envelope": {
+        "box": "EZxYg3w8FNSPeHbgasuMKF35y0PP4mjN5bNnK6rsIyssFWB9aTDLwwKZcbXiecu7ipd69aSFKZqozOeImTQT4nJoBawMm76Qhw9uYIryZHH0E9duM52ZCyYl67T8HNZSDRWNEE4SoUAQT6fCjEuNjT6qbUrPKP7blGZ9PaTJ6kb5dizmE0aLh+23kvPD3b2d3mzqoSvzm7BR+M8ZbebNl6QZc56F7kEGRWCebPRliQEB5c/VuEWdPEtt5hkw6xe5hAydickI8BWQfG5zBo+Y",
+        "from": "hubaaaaaaaaa",
+        "nonce": "d4KNmKOuucTP2uXw+wYRAQAGRFlBYkAK",
+        "seq": 1764000000000010,
+        "to": "phone0000001",
+        "v": 1
+      },
+      "name": "roster_intro hub to phone (the other hubs)",
+      "nonceHex": "77828d98a3aeb9c4cfdae5f0fb061101000644594162400a",
+      "plaintext": "{\"type\":\"roster_intro\",\"devices\":[{\"id\":\"hubbbbbbbbbb\",\"kind\":\"hub\",\"name\":\"Studio PC\",\"publicKey\":\"ZLEBsdC+WocEvQePmJUAH8A+jp+VIvGI3RKNmEbUhGY=\",\"addr\":\"192.168.1.21:47801\",\"os\":\"windows\"}]}",
+      "randomHex": "77828d98a3aeb9c4cfdae5f0fb0611",
+      "receiver": "phone",
+      "sender": "hubA",
+      "seq": 1764000000000010
+    },
+    {
+      "body": {
+        "devices": [
+          {
+            "id": "phone0000001",
+            "kind": "phone",
+            "name": "Test iPhone",
+            "os": "ios",
+            "publicKey": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc="
+          }
+        ],
+        "type": "roster_intro"
+      },
+      "dir": 1,
+      "envelope": {
+        "box": "qjEYLgm0UD3RNq4WV/n4aEQIGMX1Hu7/RdGKVAvW/6vfi9Qp94y1/FeOv/QKzPjNCjAkL1L33I0JnntdSdKBn7ggAGhui84MSDho9pNW22j2iV8zi4T4TA5ePW8+zOJnzV3HpZaHlYC36MX/a7Mh2v3WpT8nF1zyEoTrg3+U80kM1F4EMwbesShKGWSX2zV+xw10x0yPh+h8Fvl+52pCA4rcqUbEo75qz08Dz382MMGQw9Q=",
+        "from": "hubaaaaaaaaa",
+        "nonce": "nKeyvcjT3un0/woVICs2AQAGRFlBYkAL",
+        "seq": 1764000000000011,
+        "to": "hubbbbbbbbbb",
+        "v": 1
+      },
+      "name": "roster_intro hub to hub (the new phone)",
+      "nonceHex": "9ca7b2bdc8d3dee9f4ff0a15202b3601000644594162400b",
+      "plaintext": "{\"type\":\"roster_intro\",\"devices\":[{\"id\":\"phone0000001\",\"kind\":\"phone\",\"name\":\"Test iPhone\",\"publicKey\":\"iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc=\",\"os\":\"ios\"}]}",
+      "randomHex": "9ca7b2bdc8d3dee9f4ff0a15202b36",
+      "receiver": "hubB",
+      "sender": "hubA",
+      "seq": 1764000000000011
+    },
+    {
+      "body": {
+        "reason": "shutdown",
+        "ts": 1764000000004,
+        "type": "bye"
+      },
+      "dir": 0,
+      "envelope": {
+        "box": "svBR5xBd3FjeVOMnFRIcgkJ2vEtZfE6BRcJa3B8koQoAji6lIY4kcd4GB/T4K0JRD2q2aScU3nEuEX3zIF3fpmG2bYHb",
+        "from": "phone0000001",
+        "nonce": "wczX4u34Aw4ZJC86RVBbAAAGRFlBYkAM",
+        "seq": 1764000000000012,
+        "to": "hubaaaaaaaaa",
+        "v": 1
+      },
+      "name": "bye phone to hub",
+      "nonceHex": "c1ccd7e2edf8030e19242f3a45505b00000644594162400c",
+      "plaintext": "{\"type\":\"bye\",\"reason\":\"shutdown\",\"ts\":1764000000004}",
+      "randomHex": "c1ccd7e2edf8030e19242f3a45505b",
+      "receiver": "hubA",
+      "sender": "phone",
+      "seq": 1764000000000012
+    }
+  ]
+}

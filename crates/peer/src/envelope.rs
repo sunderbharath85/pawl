@@ -47,7 +47,7 @@ impl fmt::Display for OpenError {
 
 impl std::error::Error for OpenError {}
 
-const NONCE_LEN: usize = 24;
+pub(crate) const NONCE_LEN: usize = 24;
 /// Index of the direction byte (after the random prefix). The relay auth nonce domain uses it too.
 pub(crate) const RANDOM_LEN: usize = 15;
 /// Poly1305 tag.
@@ -58,8 +58,15 @@ fn direction(sender_pk: &[u8; 32], receiver_pk: &[u8; 32]) -> u8 {
 }
 
 fn make_nonce(sender_pk: &[u8; 32], receiver_pk: &[u8; 32], seq: u64) -> [u8; NONCE_LEN] {
+    let mut random = [0u8; RANDOM_LEN];
+    getrandom::fill(&mut random).expect("OS random number generator unavailable");
+    nonce_with(&random, sender_pk, receiver_pk, seq)
+}
+
+/// The nonce layout with a given random part.
+pub(crate) fn nonce_with(random: &[u8; RANDOM_LEN], sender_pk: &[u8; 32], receiver_pk: &[u8; 32], seq: u64) -> [u8; NONCE_LEN] {
     let mut n = [0u8; NONCE_LEN];
-    getrandom::fill(&mut n[..RANDOM_LEN]).expect("OS random number generator unavailable");
+    n[..RANDOM_LEN].copy_from_slice(random);
     n[RANDOM_LEN] = direction(sender_pk, receiver_pk);
     n[RANDOM_LEN + 1..].copy_from_slice(&seq.to_be_bytes());
     n
@@ -91,16 +98,31 @@ pub(crate) fn seal_plaintext(
     include_pk: bool,
 ) -> PeerEnvelope {
     let nonce = make_nonce(&keys.public_key(), to_pk, seq);
+    seal_with_nonce(keys, from, to, to_pk, seq, plaintext, include_pk, &nonce)
+}
+
+/// `seal_plaintext` with a given nonce (test vectors). The nonce must follow the layout above.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn seal_with_nonce(
+    keys: &DeviceKeys,
+    from: &str,
+    to: &str,
+    to_pk: &[u8; 32],
+    seq: u64,
+    plaintext: &[u8],
+    include_pk: bool,
+    nonce: &[u8; NONCE_LEN],
+) -> PeerEnvelope {
     let ciphertext = keys
         .salsa_box(to_pk)
-        .encrypt(crypto_box::Nonce::from_slice(&nonce), plaintext)
+        .encrypt(crypto_box::Nonce::from_slice(nonce), plaintext)
         .expect("crypto_box encryption cannot fail for in-memory buffers");
     PeerEnvelope {
         v: PEER_PROTOCOL_VERSION,
         from: from.to_string(),
         to: to.to_string(),
         seq,
-        nonce: b64::encode(&nonce),
+        nonce: b64::encode(nonce),
         ciphertext: b64::encode(&ciphertext),
         pk: include_pk.then(|| keys.public_b64()),
     }

@@ -908,3 +908,84 @@ keeping comments). Nothing else without asking t13.
   install hooks for the agents found (preview + apply) -> optional: turn on the listener and pair a machine.
 - VS Code: command "Krypto: Open Settings" -> `openPanel("settings")`; if no desktop app is connected, say
   "Open the Krypto desktop app to change settings". Desktop handles `open_panel` by showing the panel at that view.
+
+## Step 7 — Phone (PLAN.md migration step 7) — protocol v8
+
+Protocol already updated by the orchestrator (PROTOCOL_VERSION = 8): `MachineOs` gains `ios` / `android`;
+PeerBody `roster_intro{devices: IntroDevice[]}` (the sender is the introducer); `Device.introducedBy?`; ClientMsg
+`create_invite.forPhone?` (relay-only, QR-friendly; error `relay_off` when no relay is connected). Read the doc comments.
+
+Goal: the phone pairs once by scanning a QR code on any hub, then reaches every paired hub over the relay, sees all
+machines' sessions, pets and pending approvals, approves with biometrics, gets a content-free push when a pet needs
+it, and can start / prompt on machine + repo (step-5 proposals or a picker).
+
+### Ownership (step 7)
+| Role | Owns |
+|---|---|
+| fe-mobile (new) | `apps/mobile/` (unfrozen) |
+| sde-peer | `crates/peer/` (roster introduction, phone peers, cross-language test vectors) |
+| sde-hub | `crates/hub/` (phones in the roster, mirror + intents for phones, roster intro, QR invites) |
+| fe-settings | desktop + VS Code + hub-client (QR pairing screen, phones in the devices list) |
+
+Dependencies approved by the user ("use recommended choices"): `qrcode` (+ `@types/qrcode` dev) in apps/desktop to draw
+the pairing QR. apps/mobile already has expo-camera, expo-local-authentication, expo-notifications, expo-secure-store,
+tweetnacl. Nothing else without asking t13.
+
+### Pairing a phone
+- Desktop "Pair a phone": `create_invite{forPhone: true}` -> relay-only invite (`relay=`, `rk=`, `rt=`, no `addr`), shown
+  as a QR code plus the URI; expires like other invites; single use.
+- The phone scans it, generates its long-term X25519 key (expo-secure-store; never leaves the device), a device id
+  (12 chars [a-z0-9]), connects to the relay with `rk`, `allow`s the inviter pk, sends `pair_request` with
+  `pairing = rt` (machine: id, name = device name, os ios/android). The hub adds it to the roster as `kind: phone`.
+- **Roster introduction (group roster):** after pairing a new device, the hub sends `roster_intro` with that device to
+  every other linked hub, and sends the new device a `roster_intro` listing the other hubs (id, kind, name, pk, addr?).
+  Receivers accept `roster_intro` only from a paired hub, never let it replace an existing device's key, notify the
+  user ("Mac mini added iPhone"), audit it, and add the devices with `introducedBy`. Revoking a device on one hub sends
+  `bye{revoked}` to it and a `roster_intro`-style revocation is NOT propagated automatically (each hub keeps its own
+  decision; the UI offers "revoke everywhere", which revokes locally and asks each linked hub through an intent-like
+  request in a later step) — for step 7 revocation stays per hub.
+- Phones never appear in `machines`; they are `devices` with kind `phone`.
+
+### Phone as a peer
+- Over the relay only. After hello the phone sends `sync_request` to every hub and keeps a mirror (reuse
+  @krypto/hub-client reducers: MirrorUpdate variants match ServerMsg variants).
+- Intents from a phone use `client: "mobile"`. Approve requires a successful biometric check
+  (expo-local-authentication) on the phone before `confirmed: true`; no biometrics available -> device passcode; neither ->
+  approvals disabled with an explanation. The step-4 owner rules apply unchanged.
+- `register_push` with the Expo push token after pairing; the relay sends the content-free wake when a frame (e.g. a
+  mirrored permission_request) is queued while the phone is offline.
+- Presence: the phone sends hello on connect; hubs treat a phone link like any link (online / offline) but phones do
+  not take part in "active machine" (step 3) and do not send repos / agents.
+
+### Cross-language compatibility (sde-peer)
+- Commit test vectors in `crates/peer/tests/vectors/` (JSON): fixed keys, envelopes for several bodies with known
+  nonce/seq/direction, base64 / base64url samples, invite URIs (LAN, relay-only), relay auth plaintext + box. A Rust test
+  regenerates/validates them; fe-mobile's bun tests must open/produce byte-identical results.
+
+### Mobile app (fe-mobile)
+- Screens (expo-router): Pair (scanner + paste URI), Machines (online, path), Sessions by machine (status, transcript
+  read-only + prompt / cancel), Approvals (biometric approve / deny, "Approved from <device>"), Pets (names, activity),
+  Start (machine -> repo -> agent, confirm), Settings (relay status, paired hubs, unpair this phone, push on/off).
+- Libraries: peer envelope + nonce layout, seq persistence + replay guard, relay client (auth, allow, send, queue
+  handling, reconnect), invite parsing, pairing flow, roster intro handling, per-hub mirror state.
+- Tests (bun test, runnable without a device): vectors, envelope seal/open both ways, replay + direction rejection,
+  invite parsing, relay auth, reducers, biometric gate logic (mocked). `bunx tsc --noEmit` and `bun test` must pass;
+  `bunx expo export --platform android` (or `expo-doctor`) as a build check if it works offline.
+
+### Step 7 clarifications (orchestrator)
+- **Intro fan-out:** after pairing device N, the hub sends `roster_intro{[N]}` to every other linked paired hub, and to
+  every linked paired phone when N is a hub. N gets `roster_intro` listing the other paired hubs, plus the paired phones
+  when N is a hub. Phones are never introduced to phones. Offline recipients get the intro on their next hello.
+- **Validation of a received intro:** sender must be a paired, linked device of kind `hub`; at most 32 devices; ids,
+  names and addr checked like pairing; public key = 32 bytes, not low-order, not ours, not the sender's; an id or key
+  that already exists with a different key / id is a conflict (skipped, audited, user notified), never a replacement;
+  a revoked id or key is never re-added by an intro. Accepted devices get `introducedBy = sender`.
+- **Setting:** `[peer] accept_roster_intros` (default true) = `HubSettings.peer.acceptRosterIntros` (protocol v8),
+  editable in the desktop Settings view; when false, intros are audited and shown as a notification but not added.
+- **Offline phone wake:** when a new local permission request appears and a paired phone is not linked, the hub queues
+  one small envelope (a `presence` body) to the phone's relay mailbox so the relay sends the content-free push; at most
+  one per phone per 60 s. The node exposes a "send through the relay mailbox while not linked" path for this only.
+- **Phone retries:** a phone that just learned a hub from an intro may reach it before that hub has processed its own
+  intro (relay `not_allowed`); the phone retries hello with backoff (1 s, 2 s, 5 s, then every 30 s).
+- **Notifications:** intro accepted / conflict / ignored use `ServerMsg notification` (HubNotification) plus a `devices`
+  broadcast; text like "Mac mini added iPhone".

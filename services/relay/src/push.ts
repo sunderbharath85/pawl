@@ -17,13 +17,14 @@ export function isValidExpoToken(s: unknown): s is string {
 }
 
 export interface PushState {
-  token: string;
+  /** Absent after `unregister_push` while the throttle window is still open (see `PushRegistry.clear`). */
+  token?: string;
   /** Last push attempt (ms); 0 = never. */
   lastAt: number;
 }
 
-export function shouldPush(state: PushState | undefined, now: number): state is PushState {
-  return !!state && now - state.lastAt >= PUSH_MIN_INTERVAL_MS;
+export function shouldPush(state: PushState | undefined, now: number): state is PushState & { token: string } {
+  return !!state?.token && now - state.lastAt >= PUSH_MIN_INTERVAL_MS;
 }
 
 /** The request for one wake. `accessToken` = optional Expo access token (enhanced push security). */
@@ -83,6 +84,19 @@ export class PushRegistry {
   /** Forget the token if it is still the one that failed. */
   unregister(token: string): void {
     if (this.get()?.token === token) this.kv.delete(PUSH_KEY);
+  }
+
+  /**
+   * `unregister_push`: forget the stored token so no wake is sent afterwards. Returns false (and writes nothing)
+   * when no token is stored. While the throttle window of the last push is still open, only `lastAt` is kept, so
+   * toggling push off and on cannot send more than one wake per minute.
+   */
+  clear(now: number): boolean {
+    const state = this.get();
+    if (!state?.token) return false;
+    if (now - state.lastAt >= PUSH_MIN_INTERVAL_MS) this.kv.delete(PUSH_KEY);
+    else this.kv.put<PushState>(PUSH_KEY, { lastAt: state.lastAt });
+    return true;
   }
 }
 

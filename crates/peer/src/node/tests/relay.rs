@@ -389,12 +389,13 @@ async fn relay_auth_status_and_config_rules() {
     a.expect_none(Duration::from_millis(300), "a status change", |e| matches!(e, PeerEvent::RelayStatus(_))).await;
     assert_eq!(relay.auths(&a.pk()), 1);
 
-    // Pings keep the session alive well past offline_after.
-    let t = PeerTimings { offline_after: Duration::from_millis(800), ..fast() };
+    // Pings (every presence_interval) keep the session alive well past offline_after. The margin is
+    // generous: a loaded machine can be slow to schedule a pong.
+    let t = PeerTimings { offline_after: Duration::from_secs(2), ..fast() };
     let mut b = node(B, t);
     b.node.set_relay(Some(relay.config())).unwrap();
     b.expect("connected", is_relay_up).await;
-    b.expect_none(Duration::from_millis(2000), "a disconnect", is_relay_down).await;
+    b.expect_none(Duration::from_secs(4), "a disconnect", is_relay_down).await;
     assert_eq!(relay.auths(&b.pk()), 1);
 
     // Off.
@@ -776,6 +777,8 @@ async fn revoked_while_off_the_relay_the_peer_still_learns_it() {
     pair_relay(&relay, &mut a, &mut b).await;
     b.node.set_relay(None).unwrap();
     b.expect("LinkDown", is_link_down(A)).await;
+    // Once the relay saw b's socket close, the bye is queued, not handed to the closing socket.
+    eventually("b off the relay", || !relay.online(&b.pk())).await;
     a.node.revoke(B).await;
     b.node.set_relay(Some(relay.config())).unwrap();
     b.expect("Revoked by peer", |e| matches!(e, PeerEvent::Revoked { device_id, by_peer: true } if device_id == A))
@@ -898,3 +901,5 @@ async fn relay_pair_attempts_share_one_bucket_and_spare_the_lan() {
     a.expect("Paired over the LAN", |e| matches!(e, PeerEvent::Paired { device, .. } if device.id == B)).await;
     b.expect("LAN path", is_path(A, LinkPath::Lan)).await;
 }
+
+mod phone;

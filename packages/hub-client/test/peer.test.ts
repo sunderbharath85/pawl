@@ -121,6 +121,7 @@ test("maskInviteSecrets hides the relay access key only", () => {
 
 test("pairingAllowsText depends on remote control", () => {
   expect(pairingAllowsText(true)).toContain("start agents");
+  expect(pairingAllowsText(false, "phone")).toMatch(/^A paired phone sees .*cannot act on this machine/);
   expect(pairingAllowsText(true)).toContain("remote control is on");
   expect(pairingAllowsText(false)).toContain("cannot act");
   expect(pairingAllowsText(undefined)).toContain("with remote control on");

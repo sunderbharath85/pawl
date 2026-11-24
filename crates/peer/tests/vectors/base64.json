@@ -1,0 +1,79 @@
+{
+  "description": "std = RFC 4648 base64, padded; url = base64url, no padding. Decoders are strict: the invalid strings must be refused.",
+  "invalidStd": [
+    "Zg",
+    "Zg=",
+    "Zh==",
+    "Zm9=",
+    "Z===",
+    "Zm9v=",
+    "-_8=",
+    "Zm 9v",
+    "Zm9v\n"
+  ],
+  "invalidUrl": [
+    "Zg==",
+    "Zh",
+    "Zm9",
+    "+/8",
+    "Z",
+    "Zm 9v"
+  ],
+  "samples": [
+    {
+      "hex": "",
+      "std": "",
+      "url": ""
+    },
+    {
+      "hex": "66",
+      "std": "Zg==",
+      "url": "Zg"
+    },
+    {
+      "hex": "666f",
+      "std": "Zm8=",
+      "url": "Zm8"
+    },
+    {
+      "hex": "666f6f",
+      "std": "Zm9v",
+      "url": "Zm9v"
+    },
+    {
+      "hex": "666f6f62",
+      "std": "Zm9vYg==",
+      "url": "Zm9vYg"
+    },
+    {
+      "hex": "fbff",
+      "std": "+/8=",
+      "url": "-_8"
+    },
+    {
+      "hex": "fbffbf",
+      "std": "+/+/",
+      "url": "-_-_"
+    },
+    {
+      "hex": "00000000000000000000000000000000",
+      "std": "AAAAAAAAAAAAAAAAAAAAAA==",
+      "url": "AAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "hex": "00112233445566778899aabbccddeeff",
+      "std": "ABEiM0RVZneImaq7zN3u/w==",
+      "url": "ABEiM0RVZneImaq7zN3u_w"
+    },
+    {
+      "hex": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8",
+      "std": "//79/Pv6+fj39vX08/Lx8O/u7ezr6uno",
+      "url": "__79_Pv6-fj39vX08_Lx8O_u7ezr6uno"
+    },
+    {
+      "hex": "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c",
+      "std": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=",
+      "url": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw"
+    }
+  ]
+}

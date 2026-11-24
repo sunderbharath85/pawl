@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { PeerEnvelope } from "@krypto/protocol";
 import { encodeStd, encodeUrl, randomBytes } from "../src/b64";
 import { DEFAULT_INBOX, Inbox, SEEN_KEY, type DeliverRequest } from "../src/inbox";
-import { PUSH_MIN_INTERVAL_MS } from "../src/push";
+import { PUSH_KEY, PUSH_MIN_INTERVAL_MS } from "../src/push";
 import { MemoryKv } from "../src/storage";
 
 const T0 = 1_800_000_000_000;
@@ -154,5 +154,49 @@ describe("security fixes", () => {
     expect(ib.setAllowed([c])).toEqual({ ok: true, changed: true, droppedQueued: 2 });
     const left = ib.onAuthenticated(T0).map((f) => JSON.parse(f.msg).from);
     expect(left).toEqual([c, joiner]); // the pairing frame is kept (its sender is not in any allowlist yet)
+  });
+});
+
+describe("unregister_push (step 7)", () => {
+  test("no wake after unregister_push; nothing written when no token is stored", () => {
+    const { kv, inbox: ib } = inbox();
+    const b = pk();
+    ib.onAuthenticated(T0);
+    ib.setAllowed([b]);
+    let writes = kv.writes;
+    expect(ib.unregisterPush(T0)).toBe(false); // nothing registered: no-op
+    expect(kv.writes).toBe(writes);
+
+    ib.registerPush(PUSH);
+    expect(ib.unregisterPush(T0)).toBe(true);
+    expect(kv.get(PUSH_KEY)).toBeUndefined(); // never pushed: no throttle state to keep
+    expect(ib.deliver({ from: b, env: env() }, T0 + 1, offline)).toMatchObject({ result: "queued", wake: null });
+    writes = kv.writes;
+    expect(ib.unregisterPush(T0 + 2)).toBe(false); // already off: no write
+    expect(kv.writes).toBe(writes);
+    // Turned back on: wakes again.
+    ib.registerPush(PUSH);
+    expect(ib.deliver({ from: b, env: env() }, T0 + 3, offline).wake).toBe(PUSH);
+  });
+
+  test("off/on within a minute keeps the once-per-minute throttle", () => {
+    const { kv, inbox: ib } = inbox();
+    const b = pk();
+    const I = PUSH_MIN_INTERVAL_MS;
+    ib.onAuthenticated(T0);
+    ib.setAllowed([b]);
+    ib.registerPush(PUSH);
+    expect(ib.deliver({ from: b, env: env() }, T0, offline).wake).toBe(PUSH);
+    expect(ib.unregisterPush(T0 + 1)).toBe(true);
+    expect(kv.get(PUSH_KEY)).toEqual({ lastAt: T0 }); // token gone, throttle kept
+    ib.registerPush(PUSH);
+    expect(ib.deliver({ from: b, env: env() }, T0 + 2, offline).wake).toBeNull(); // toggling does not reset it
+    expect(ib.deliver({ from: b, env: env() }, T0 + I, offline).wake).toBe(PUSH);
+    expect(ib.unregisterPush(T0 + I + 1)).toBe(true);
+    expect(ib.deliver({ from: b, env: env() }, T0 + 3 * I, offline).wake).toBeNull(); // window over, but no token
+    // Past the window the key is removed entirely.
+    ib.registerPush(PUSH);
+    expect(ib.unregisterPush(T0 + 3 * I + 1)).toBe(true);
+    expect(kv.get(PUSH_KEY)).toBeUndefined();
   });
 });
