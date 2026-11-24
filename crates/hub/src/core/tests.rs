@@ -2,7 +2,7 @@
 
 use super::host::fake::FakeHost;
 use super::*;
-use pet_protocol::{
+use krypto_protocol::{
     PermissionOption, PermissionOptionKind, RuleMatch, Species, ToolCallPayload, ToolKind, ToolLocation,
 };
 
@@ -98,7 +98,7 @@ fn permission(session_id: &str, kind: ToolKind) -> PermissionRequest {
             PermissionOption { option_id: "allow".into(), name: "Allow".into(), kind: PermissionOptionKind::AllowOnce },
             PermissionOption { option_id: "reject".into(), name: "Reject".into(), kind: PermissionOptionKind::RejectOnce },
         ],
-        created_at: pet_protocol::now_ms(),
+        created_at: krypto_protocol::now_ms(),
     }
 }
 
@@ -362,7 +362,7 @@ async fn startup_drops_invalid_rules_from_config() {
     assert!(f.hub.startup_notices().is_empty());
     let f = fixture(None).await;
     assert!(f.hub.startup_notices().is_empty());
-    assert_eq!(f.hub.rules(), pet_brain::rules::default_rules());
+    assert_eq!(f.hub.rules(), krypto_brain::rules::default_rules());
 }
 
 #[tokio::test]
@@ -382,7 +382,7 @@ async fn cancel_and_session_end_clear_pending() {
     f.hub.on_host_event(HostEvent::PermissionRequest(req2)).await;
     let mut ended = s.clone();
     ended.status = SessionStatus::Done;
-    ended.ended_at = Some(pet_protocol::now_ms());
+    ended.ended_at = Some(krypto_protocol::now_ms());
     f.hub.on_host_event(HostEvent::Session(ended)).await;
     assert!(f.hub.pending_permissions().is_empty());
     let err = ack_error(f.hub.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "x".into() }, &actor()).await);

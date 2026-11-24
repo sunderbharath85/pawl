@@ -1,4 +1,4 @@
-import type { Agent, PermissionRequest, Session, SessionStatus, ToolKind } from "@ai-pet/protocol";
+import type { Agent, PermissionRequest, Session, SessionStatus, ToolKind } from "@krypto/protocol";
 
 export const STATUS_META: Record<SessionStatus, { label: string; tone: string }> = {
   idle: { label: "Idle", tone: "idle" },
@@ -48,7 +48,7 @@ export function clockTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-/** Last 2 path segments: `C:\code\ai-pet\apps` → `ai-pet/apps`. */
+/** Last 2 path segments: `C:\code\krypto\apps` → `krypto/apps`. */
 export function shortPath(p: string, segments = 2): string {
   const parts = p.split(/[\/]+/).filter(Boolean);
   if (parts.length <= segments) return p;

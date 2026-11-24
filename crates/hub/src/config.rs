@@ -5,16 +5,16 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use pet_discovery::{CustomAgent, DiscoveryConfig};
-use pet_protocol::{Rule, HUB_DEFAULT_PORT, HUB_HOST, HUB_TOKEN_FILE};
+use krypto_discovery::{CustomAgent, DiscoveryConfig};
+use krypto_protocol::{Rule, HUB_DEFAULT_PORT, HUB_HOST, HUB_TOKEN_FILE};
 use serde::{Deserialize, Serialize};
 
 /// Env var: overrides the token (hub and clients).
-pub const ENV_TOKEN: &str = "AI_PET_HUB_TOKEN";
+pub const ENV_TOKEN: &str = "KRYPTO_HUB_TOKEN";
 /// Env var: hub URL for clients (`http://127.0.0.1:47800`, `ws://127.0.0.1:47800/ws`, ...).
-pub const ENV_URL: &str = "AI_PET_HUB_URL";
+pub const ENV_URL: &str = "KRYPTO_HUB_URL";
 /// Env var: alternative data dir (tests, portable installs). Clients must then also get the token via env.
-pub const ENV_DATA_DIR: &str = "AI_PET_HUB_DATA_DIR";
+pub const ENV_DATA_DIR: &str = "KRYPTO_HUB_DATA_DIR";
 /// Env var: Anthropic key for the pet brain (used when `brain.anthropic_api_key` is not set).
 pub const ENV_ANTHROPIC_KEY: &str = "ANTHROPIC_API_KEY";
 
@@ -47,13 +47,13 @@ impl Paths {
         }
     }
 
-    /// Explicit dir > `AI_PET_HUB_DATA_DIR` > `pet_protocol::data_dir()`.
+    /// Explicit dir > `KRYPTO_HUB_DATA_DIR` > `krypto_protocol::data_dir()`.
     pub fn resolve(explicit: Option<PathBuf>) -> Result<Self> {
         let dir = match explicit {
             Some(d) => d,
             None => match std::env::var_os(ENV_DATA_DIR).filter(|v| !v.is_empty()) {
                 Some(d) => PathBuf::from(d),
-                None => pet_protocol::data_dir().context("could not determine the OS data directory")?,
+                None => krypto_protocol::data_dir().context("could not determine the OS data directory")?,
             },
         };
         Ok(Self::in_dir(dir))
@@ -99,13 +99,13 @@ impl fmt::Debug for BrainSection {
 
 impl BrainSection {
     /// Config key, else `ANTHROPIC_API_KEY`.
-    pub fn to_brain_config(&self) -> pet_brain::chat::BrainConfig {
+    pub fn to_brain_config(&self) -> krypto_brain::chat::BrainConfig {
         let key = self
             .anthropic_api_key
             .clone()
             .filter(|k| !k.trim().is_empty())
             .or_else(|| std::env::var(ENV_ANTHROPIC_KEY).ok().filter(|k| !k.trim().is_empty()));
-        pet_brain::chat::BrainConfig {
+        krypto_brain::chat::BrainConfig {
             anthropic_api_key: key,
             model: if self.model.trim().is_empty() { BrainSection::default().model } else { self.model.clone() },
             ollama_url: self.ollama_url.clone().filter(|s| !s.trim().is_empty()),
@@ -132,8 +132,8 @@ impl Default for WatchdogSection {
 }
 
 impl WatchdogSection {
-    pub fn to_watchdog_config(&self) -> pet_brain::watchdog::WatchdogConfig {
-        pet_brain::watchdog::WatchdogConfig {
+    pub fn to_watchdog_config(&self) -> krypto_brain::watchdog::WatchdogConfig {
+        krypto_brain::watchdog::WatchdogConfig {
             waiting_nudge_after_ms: self.waiting_nudge_after_ms.max(1_000),
             repeat_every_ms: self.repeat_every_ms.max(10_000),
         }
@@ -179,7 +179,7 @@ impl Default for HubConfig {
     }
 }
 
-const CONFIG_TEMPLATE: &str = r#"# AI Pet Hub configuration. Every key is optional; defaults shown.
+const CONFIG_TEMPLATE: &str = r#"# Krypto hub configuration. Every key is optional; defaults shown.
 # port = 47800                 # the hub only ever binds 127.0.0.1
 # offline = false              # true = never fetch the ACP registry
 # daily_report_time = "18:00"  # local time, "off" to disable
@@ -272,7 +272,7 @@ fn valid_token(t: &str) -> bool {
     t.len() >= 32 && t.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// `AI_PET_HUB_TOKEN` if set, else the token file (None if missing/invalid). Never creates.
+/// `KRYPTO_HUB_TOKEN` if set, else the token file (None if missing/invalid). Never creates.
 pub fn read_token(paths: &Paths) -> Option<String> {
     if let Ok(t) = std::env::var(ENV_TOKEN) {
         let t = t.trim().to_string();
@@ -373,7 +373,7 @@ impl HubEndpoint {
         })
     }
 
-    /// `--port` > `AI_PET_HUB_URL` > config port.
+    /// `--port` > `KRYPTO_HUB_URL` > config port.
     pub fn resolve(port_flag: Option<u16>, config_port: u16) -> Self {
         if let Some(p) = port_flag {
             return Self::local(p);
@@ -390,7 +390,7 @@ impl HubEndpoint {
     }
 }
 
-/// Port the daemon binds: `--port` > port of `AI_PET_HUB_URL` > config.
+/// Port the daemon binds: `--port` > port of `KRYPTO_HUB_URL` > config.
 pub fn serve_port(port_flag: Option<u16>, cfg: &HubConfig) -> u16 {
     HubEndpoint::resolve(port_flag, cfg.port).port
 }

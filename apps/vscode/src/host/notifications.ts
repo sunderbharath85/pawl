@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { describePermission, SPECIES_META } from "@ai-pet/pet-engine";
+import { describePermission, SPECIES_META } from "@krypto/pet-engine";
 import {
   DEFAULT_SPECIES,
   type HubEvent,
@@ -8,7 +8,7 @@ import {
   type ServerMsg,
   type StopPayload,
   type ErrorPayload,
-} from "@ai-pet/protocol";
+} from "@krypto/protocol";
 import type { HubConnection } from "./connection";
 import { agentName, errorMessage, isInWorkspace } from "./util";
 
@@ -36,7 +36,7 @@ export class Notifier implements vscode.Disposable {
   }
 
   private get level(): NotifyLevel {
-    const v = vscode.workspace.getConfiguration("ai-pet").get<string>("notifications");
+    const v = vscode.workspace.getConfiguration("krypto").get<string>("notifications");
     return v === "off" || v === "permissions" ? v : "all";
   }
 
@@ -65,7 +65,7 @@ export class Notifier implements vscode.Disposable {
 
   /** Should this window speak up about the session? (Every VS Code window runs its own copy of the extension.) */
   private relevant(sessionId: string | undefined): boolean {
-    const only = vscode.workspace.getConfiguration("ai-pet").get<boolean>("notifyOnlyWorkspaceSessions") === true;
+    const only = vscode.workspace.getConfiguration("krypto").get<boolean>("notifyOnlyWorkspaceSessions") === true;
     const session = sessionId ? this.hub.state.sessions[sessionId] : undefined;
     const inWorkspace = session ? isInWorkspace(session.cwd) : false;
     if (only) return inWorkspace;
@@ -100,18 +100,18 @@ export class Notifier implements vscode.Disposable {
 
   private async resolve(requestId: string, approve: boolean): Promise<void> {
     if (!this.hub.connected) {
-      void vscode.window.showWarningMessage("AI Pet: the hub is offline; the request could not be answered.");
+      void vscode.window.showWarningMessage("Krypto: the hub is offline; the request could not be answered.");
       return;
     }
     if (!this.hub.state.pending[requestId]) {
-      void vscode.window.showInformationMessage("AI Pet: that request was already answered.");
+      void vscode.window.showInformationMessage("Krypto: that request was already answered.");
       return;
     }
     try {
       if (approve) await this.hub.api.approve(requestId);
       else await this.hub.api.deny(requestId);
     } catch (err) {
-      void vscode.window.showErrorMessage(`AI Pet: could not ${approve ? "approve" : "deny"}: ${errorMessage(err)}`);
+      void vscode.window.showErrorMessage(`Krypto: could not ${approve ? "approve" : "deny"}: ${errorMessage(err)}`);
     }
   }
 

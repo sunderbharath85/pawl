@@ -1,4 +1,4 @@
-import type { Agent, HubEvent, Pet, PermissionRequest, Session, Welcome } from "@ai-pet/protocol";
+import type { Agent, HubEvent, Pet, PermissionRequest, Session, Welcome } from "@krypto/protocol";
 
 export const agent: Agent = { id: "claude-code", name: "Claude Code", command: ["npx", "x"], installed: true, source: "registry" };
 

@@ -1,4 +1,4 @@
-// Parse the pairing QR / deep link: aipet://pair?relay=<https-url>&hub=<hubId>&pk=<hubPkB64>&code=<8 chars>
+// Parse the pairing QR / deep link: krypto://pair?relay=<https-url>&hub=<hubId>&pk=<hubPkB64>&code=<8 chars>
 import { decodePublicKey, encodeBase64 } from "./crypto";
 
 export interface PairingOffer {
@@ -66,11 +66,11 @@ export function parsePairingParams(params: Params): PairingParseResult {
   return { ok: true, offer: { relay: relay.replace(/\/+$/, ""), hubId, hubPk, code, insecure } };
 }
 
-/** Parse a scanned/opened link. Accepts `aipet://pair?...` (also `aipet:///pair?...` and `aipet:pair?...`). */
+/** Parse a scanned/opened link. Accepts `krypto://pair?...` (also `krypto:///pair?...` and `krypto:pair?...`). */
 export function parsePairingUrl(url: string): PairingParseResult {
   const trimmed = url.trim();
-  if (!/^aipet:(\/\/\/?)?pair(\/)?\?/i.test(trimmed)) {
-    return { ok: false, error: "That QR code is not an AI Pet Hub pairing code." };
+  if (!/^krypto:(\/\/\/?)?pair(\/)?\?/i.test(trimmed)) {
+    return { ok: false, error: "That QR code is not a Krypto pairing code." };
   }
   return parsePairingParams(queryParams(trimmed));
 }

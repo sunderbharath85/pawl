@@ -79,11 +79,11 @@ export function SettingsView() {
             <dt>Version</dt>
             <dd>{meta.hubVersion ?? "unknown"}</dd>
             <dt>Token</dt>
-            <dd>{creds ? (creds.tokenSource === "missing" ? "not created yet" : `from ${creds.tokenSource === "env" ? "AI_PET_HUB_TOKEN" : "data folder"}`) : "…"}</dd>
+            <dd>{creds ? (creds.tokenSource === "missing" ? "not created yet" : `from ${creds.tokenSource === "env" ? "KRYPTO_HUB_TOKEN" : "data folder"}`) : "…"}</dd>
             <dt>Data folder</dt>
             <dd className="mono">{creds?.dataDir ?? "…"}</dd>
-            <dt>pet-hub</dt>
-            <dd className="mono">{hubBin === undefined ? "…" : (hubBin ?? "not found (PATH, next to the app, or AI_PET_HUB_BIN)")}</dd>
+            <dt>krypto</dt>
+            <dd className="mono">{hubBin === undefined ? "…" : (hubBin ?? "not found (PATH, next to the app, or KRYPTO_HUB_BIN)")}</dd>
           </dl>
           <div className="form-actions">
             <button className="pill" onClick={() => void conn.refresh(true)}>
@@ -97,7 +97,7 @@ export function SettingsView() {
             <span className="spacer" />
             {isTauri && (
               <button className="pill pill-bad" onClick={() => void native.quit()}>
-                Quit AI Pet Hub
+                Quit Krypto
               </button>
             )}
           </div>

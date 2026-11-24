@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import type { Session } from "@ai-pet/protocol";
+import type { Session } from "@krypto/protocol";
 import { STATUS_META, SOURCE_LABEL, agentName, isActive, sessionTitle, timeAgo } from "../lib/format";
 import { usePanel, type Route } from "./context";
 import * as I from "./icons";

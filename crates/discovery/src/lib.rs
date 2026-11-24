@@ -1,11 +1,11 @@
-//! pet-discovery: finds ACP agents (ACP registry + built-ins + custom) and handles agent hooks
+//! krypto-discovery: finds ACP agents (ACP registry + built-ins + custom) and handles agent hooks
 //! (normalize, forward to the hub, install into agent configs).
 //!
 //! `discover()` order: built-ins (`claude-code`, `codex`, `gemini`, `copilot`, stable ids,
 //! enriched by their registry entries), then every other registry agent in registry order,
 //! then custom agents (a custom agent with an existing id replaces that entry).
 
-use pet_protocol::{Agent, AgentSource};
+use krypto_protocol::{Agent, AgentSource};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,8 +39,8 @@ pub struct DiscoveryConfig {
 /// Fetch the ACP registry (24h cache in `cache_dir/registry-cache.json`, fall back to cache,
 /// then to a built-in list), detect installed agents, merge custom agents.
 pub async fn discover(cfg: &DiscoveryConfig) -> anyhow::Result<Vec<Agent>> {
-    let url = std::env::var("AI_PET_REGISTRY_URL").unwrap_or_else(|_| registry::REGISTRY_URL.to_string());
-    let (doc, origin) = registry::load(&cfg.cache_dir, &url, cfg.offline, pet_protocol::now_ms()).await;
+    let url = std::env::var("KRYPTO_HUB_REGISTRY_URL").unwrap_or_else(|_| registry::REGISTRY_URL.to_string());
+    let (doc, origin) = registry::load(&cfg.cache_dir, &url, cfg.offline, krypto_protocol::now_ms()).await;
     tracing::debug!(?origin, "ACP registry loaded");
     let reg = doc.as_ref().map(registry::parse_registry).unwrap_or_default();
     let cfg = cfg.clone();

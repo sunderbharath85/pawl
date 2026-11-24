@@ -1,7 +1,8 @@
 {
-  "name": "@ai-pet/desktop",
+  "name": "@krypto/desktop",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,9 +15,9 @@
     "icons": "python scripts/make-icon.py && tauri icon src-tauri/icons/source.png"
   },
   "dependencies": {
-    "@ai-pet/hub-client": "workspace:*",
-    "@ai-pet/pet-engine": "workspace:*",
-    "@ai-pet/protocol": "workspace:*",
+    "@krypto/hub-client": "workspace:*",
+    "@krypto/pet-engine": "workspace:*",
+    "@krypto/protocol": "workspace:*",
     "@tauri-apps/api": "^2.12.5",
     "@tauri-apps/plugin-dialog": "^2.8.4",
     "@tauri-apps/plugin-notification": "^2.8.1",

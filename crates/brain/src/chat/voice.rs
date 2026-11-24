@@ -1,6 +1,6 @@
 //! Pet voice: short in-character sounds/actions per species and the LLM system prompt.
 
-use pet_protocol::{Pet, SessionStatus, Species};
+use krypto_protocol::{Pet, SessionStatus, Species};
 
 use crate::growth::DEFAULT_PERSONALITY;
 

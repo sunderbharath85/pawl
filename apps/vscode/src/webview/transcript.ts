@@ -12,7 +12,7 @@ import type {
   ToolCallStatus,
   ToolKind,
   ToolLocation,
-} from "@ai-pet/protocol";
+} from "@krypto/protocol";
 
 export type TranscriptItem =
   | { kind: "user"; key: string; text: string; ts: number }

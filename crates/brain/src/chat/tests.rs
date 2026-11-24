@@ -1,5 +1,5 @@
 use super::*;
-use pet_protocol::{
+use krypto_protocol::{
     AgentSource, EventType, PermissionOption, PermissionOptionKind, Species, ToolCallPayload, ToolKind,
 };
 use serde_json::json;

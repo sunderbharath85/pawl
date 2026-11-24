@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use pet_protocol::{
+use krypto_protocol::{
     Agent, ChatMessage, ChatRole, EventType, HubEvent, PermissionOptionKind, Pet, ResolvedBy, Rule, Session, SessionId,
     ToolKind, UnixMs,
 };
@@ -213,7 +213,7 @@ impl Store {
         let mut c = self.conn();
         let tx = c.transaction()?;
         tx.execute("DELETE FROM agents", [])?;
-        let now = pet_protocol::now_ms();
+        let now = krypto_protocol::now_ms();
         for a in agents {
             tx.execute("INSERT INTO agents (id, data, updated_at) VALUES (?1, ?2, ?3)", params![a.id, json(a)?, now])?;
         }
@@ -225,7 +225,7 @@ impl Store {
         self.conn().execute(
             "INSERT INTO agents (id, data, updated_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
-            params![a.id, json(a)?, pet_protocol::now_ms()],
+            params![a.id, json(a)?, krypto_protocol::now_ms()],
         )?;
         Ok(())
     }
@@ -528,7 +528,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let target = MIGRATIONS.len() as i64;
     if current > target {
-        anyhow::bail!("hub.db schema v{current} is newer than this pet-hub (v{target}); upgrade pet-hub");
+        anyhow::bail!("hub.db schema v{current} is newer than this krypto (v{target}); upgrade krypto");
     }
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
         let tx = conn.transaction()?;
@@ -542,7 +542,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pet_protocol::{AgentSource, PermissionOutcome, RuleAction, RuleMatch, SessionSource, SessionStatus, Species};
+    use krypto_protocol::{AgentSource, PermissionOutcome, RuleAction, RuleMatch, SessionSource, SessionStatus, Species};
     use serde_json::json;
 
     fn session(id: &str, last: UnixMs) -> Session {

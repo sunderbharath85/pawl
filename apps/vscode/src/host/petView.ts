@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { promises as fsp } from "node:fs";
-import type { HubState } from "@ai-pet/hub-client";
-import { parseSpriteManifest, type SpriteManifest } from "@ai-pet/pet-engine";
+import type { HubState } from "@krypto/hub-client";
+import { parseSpriteManifest, type SpriteManifest } from "@krypto/pet-engine";
 import {
   WEBVIEW_EVENTS_PER_SESSION,
   type HostToWebview,
@@ -12,8 +12,8 @@ import {
 import type { HubConnection } from "./connection";
 import { errorMessage, nonce } from "./util";
 
-export const PET_VIEW_ID = "ai-pet.petView";
-export const PET_PANEL_TYPE = "ai-pet.petPanel";
+export const PET_VIEW_ID = "krypto.petView";
+export const PET_PANEL_TYPE = "krypto.petPanel";
 
 /** Coalesce bursts of hub messages (streaming chunks) into one postMessage per frame-ish. */
 const PUSH_THROTTLE_MS = 80;
@@ -86,7 +86,7 @@ export class PetWebviews implements vscode.WebviewViewProvider, vscode.WebviewPa
     }
     const panel = vscode.window.createWebviewPanel(
       PET_PANEL_TYPE,
-      "AI Pet",
+      "Krypto",
       { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
       { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [this.distUri] },
     );
@@ -157,9 +157,9 @@ export class PetWebviews implements vscode.WebviewViewProvider, vscode.WebviewPa
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="ai-pet-nonce" content="${n}">
+<meta name="krypto-nonce" content="${n}">
 <link rel="stylesheet" href="${style}" nonce="${n}">
-<title>AI Pet</title>
+<title>Krypto</title>
 </head>
 <body>
 <div id="root"></div>

@@ -15,7 +15,7 @@ use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::fmt;
 
-use pet_protocol::{
+use krypto_protocol::{
     now_ms, Agent, AgentId, HubEvent, PermissionOptionKind, PermissionRequest, Pet, RequestId, Session, SessionId,
     SessionSource, SessionStatus, UnixMs,
 };
@@ -64,14 +64,14 @@ impl fmt::Debug for BrainConfig {
 }
 
 impl BrainConfig {
-    /// Read `ANTHROPIC_API_KEY`, `AI_PET_BRAIN_MODEL`, `AI_PET_OLLAMA_URL`, `AI_PET_OLLAMA_MODEL`.
+    /// Read `ANTHROPIC_API_KEY`, `KRYPTO_HUB_BRAIN_MODEL`, `KRYPTO_HUB_OLLAMA_URL`, `KRYPTO_HUB_OLLAMA_MODEL`.
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
         Self {
             anthropic_api_key: var("ANTHROPIC_API_KEY"),
-            model: var("AI_PET_BRAIN_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            ollama_url: var("AI_PET_OLLAMA_URL"),
-            ollama_model: var("AI_PET_OLLAMA_MODEL"),
+            model: var("KRYPTO_HUB_BRAIN_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            ollama_url: var("KRYPTO_HUB_OLLAMA_URL"),
+            ollama_model: var("KRYPTO_HUB_OLLAMA_MODEL"),
         }
     }
 

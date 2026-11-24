@@ -1,5 +1,5 @@
 //! Hub discovery for the desktop shell: credentials (URL + bearer token from the
-//! shared data dir), a tiny `/health` probe, and spawning `pet-hub serve` when the
+//! shared data dir), a tiny `/health` probe, and spawning `krypto serve` when the
 //! hub is not running.
 //!
 //! The hub only ever listens on localhost, so `/health` is probed with a minimal
@@ -14,8 +14,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Folder under the OS data dir. Mirrors `HUB_DATA_DIR_NAME` in `@ai-pet/protocol` / `pet-protocol`.
-pub const HUB_DATA_DIR_NAME: &str = "ai-pet-hub";
+/// Folder under the OS data dir. Mirrors `HUB_DATA_DIR_NAME` in `@krypto/protocol` / `krypto-protocol`.
+pub const HUB_DATA_DIR_NAME: &str = "krypto";
 /// Token file inside the data dir. Mirrors `HUB_TOKEN_FILE`.
 pub const HUB_TOKEN_FILE: &str = "token";
 pub const HUB_DEFAULT_PORT: u16 = 47800;
@@ -63,7 +63,7 @@ struct HealthBody {
     version: Option<String>,
 }
 
-/// The `pet-hub serve` child we launched (if any). The hub is a background daemon:
+/// The `krypto serve` child we launched (if any). The hub is a background daemon:
 /// it keeps running after the desktop app quits, so we never kill it.
 #[derive(Default)]
 pub struct HubProcess {
@@ -74,10 +74,10 @@ pub fn data_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join(HUB_DATA_DIR_NAME))
 }
 
-/// Hub HTTP base URL: `AI_PET_HUB_URL` (http/ws, with or without `/ws`) or the default.
+/// Hub HTTP base URL: `KRYPTO_HUB_URL` (http/ws, with or without `/ws`) or the default.
 pub fn hub_http_url() -> String {
     let default = format!("http://{HUB_HOST}:{HUB_DEFAULT_PORT}");
-    let Ok(raw) = std::env::var("AI_PET_HUB_URL") else {
+    let Ok(raw) = std::env::var("KRYPTO_HUB_URL") else {
         return default;
     };
     let raw = raw.trim();
@@ -117,7 +117,7 @@ pub fn credentials() -> HubCredentials {
     let url = hub_http_url();
     let ws_url = ws_url_for(&url);
     let dir = data_dir();
-    let (token, token_source) = match std::env::var("AI_PET_HUB_TOKEN") {
+    let (token, token_source) = match std::env::var("KRYPTO_HUB_TOKEN") {
         Ok(t) if !t.trim().is_empty() => (t.trim().to_string(), "env"),
         _ => match dir
             .as_ref()
@@ -195,7 +195,7 @@ fn probe_health_inner(http_url: &str, timeout: Duration) -> Result<(bool, Option
     stream.set_write_timeout(Some(timeout)).ok();
     let host_header = if hp.host.contains(':') { format!("[{}]:{}", hp.host, hp.port) } else { format!("{}:{}", hp.host, hp.port) };
     let req = format!(
-        "GET /health HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: ai-pet-desktop\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        "GET /health HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: krypto-desktop\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
 
@@ -282,9 +282,9 @@ fn decode_chunked(mut data: &[u8]) -> Vec<u8> {
 
 fn hub_exe_name() -> &'static str {
     if cfg!(windows) {
-        "pet-hub.exe"
+        "krypto.exe"
     } else {
-        "pet-hub"
+        "krypto"
     }
 }
 
@@ -292,7 +292,7 @@ fn is_file(p: &Path) -> bool {
     p.metadata().map(|m| m.is_file()).unwrap_or(false)
 }
 
-/// Look for `pet-hub` in PATH (honours PATHEXT on Windows).
+/// Look for `krypto` in PATH (honours PATHEXT on Windows).
 fn which_in_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let exts: Vec<String> = if cfg!(windows) {
@@ -324,10 +324,10 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Where `pet-hub` lives: `AI_PET_HUB_BIN`, next to this executable (bundled installs),
+/// Where `krypto` lives: `KRYPTO_HUB_BIN`, next to this executable (bundled installs),
 /// on PATH, or (debug builds only) the repo's cargo target dirs.
 pub fn find_hub_binary() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("AI_PET_HUB_BIN") {
+    if let Ok(p) = std::env::var("KRYPTO_HUB_BIN") {
         let p = PathBuf::from(p);
         if is_file(&p) {
             return Some(p);
@@ -338,7 +338,7 @@ pub fn find_hub_binary() -> Option<PathBuf> {
         if is_file(&candidate) {
             return Some(candidate);
         }
-        // macOS bundles: Contents/MacOS/<app> → Contents/Resources/pet-hub
+        // macOS bundles: Contents/MacOS/<app> → Contents/Resources/krypto
         let resources = dir.join("../Resources").join(hub_exe_name());
         if is_file(&resources) {
             return Some(resources);
@@ -371,7 +371,7 @@ fn port_override(http_url: &str) -> Option<u16> {
     (hp.port != HUB_DEFAULT_PORT).then_some(hp.port)
 }
 
-/// Blocking: if the hub is healthy return immediately, otherwise spawn `pet-hub serve`
+/// Blocking: if the hub is healthy return immediately, otherwise spawn `krypto serve`
 /// detached and wait up to ~10 s for `/health`.
 pub fn start_hub_blocking(proc_state: &HubProcess) -> Result<StartHubResult, String> {
     let url = hub_http_url();
@@ -393,7 +393,7 @@ pub fn start_hub_blocking(proc_state: &HubProcess) -> Result<StartHubResult, Str
     } else {
         let bin = find_hub_binary().ok_or_else(|| {
             format!(
-                "Could not find `{}`. Install it on PATH, place it next to the desktop app, or set AI_PET_HUB_BIN.",
+                "Could not find `{}`. Install it on PATH, place it next to the desktop app, or set KRYPTO_HUB_BIN.",
                 hub_exe_name()
             )
         })?;
@@ -443,7 +443,7 @@ pub fn start_hub_blocking(proc_state: &HubProcess) -> Result<StartHubResult, Str
                 let log_hint = data_dir()
                     .map(|d| format!(" See {}.", d.join(SPAWN_LOG_FILE).display()))
                     .unwrap_or_default();
-                return Err(format!("pet-hub exited early ({status}).{log_hint}"));
+                return Err(format!("krypto exited early ({status}).{log_hint}"));
             }
         }
         if Instant::now() >= deadline {

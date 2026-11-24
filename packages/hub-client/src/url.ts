@@ -1,5 +1,5 @@
 // Browser-safe URL helpers (no Node imports).
-import { HUB_DEFAULT_PORT, HUB_HOST } from "@ai-pet/protocol";
+import { HUB_DEFAULT_PORT, HUB_HOST } from "@krypto/protocol";
 
 export const DEFAULT_HUB_HTTP_URL = `http://${HUB_HOST}:${HUB_DEFAULT_PORT}`;
 export const DEFAULT_HUB_WS_URL = `ws://${HUB_HOST}:${HUB_DEFAULT_PORT}/ws`;

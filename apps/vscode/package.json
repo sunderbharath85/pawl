@@ -1,11 +1,11 @@
 {
-  "name": "ai-pet-vscode",
-  "displayName": "Pet for VS Code",
-  "description": "A dog (or cat, bird, robot) that watches and drives your coding agents through the AI Pet Hub.",
+  "name": "krypto-vscode",
+  "displayName": "Krypto for VS Code",
+  "description": "A dog (or cat, bird, robot) that watches and drives your coding agents through the Krypto hub.",
   "version": "0.1.0",
-  "publisher": "ai-pet",
+  "publisher": "krypto",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.100.0"
   },
@@ -23,153 +23,153 @@
   "main": "./dist/extension.js",
   "activationEvents": [
     "onStartupFinished",
-    "onWebviewPanel:ai-pet.petPanel"
+    "onWebviewPanel:krypto.petPanel"
   ],
   "contributes": {
     "commands": [
       {
-        "command": "ai-pet.startSession",
+        "command": "krypto.startSession",
         "title": "Start Session",
-        "category": "AI Pet",
+        "category": "Krypto",
         "icon": "$(add)"
       },
       {
-        "command": "ai-pet.promptSession",
+        "command": "krypto.promptSession",
         "title": "Prompt Session",
-        "category": "AI Pet",
+        "category": "Krypto",
         "icon": "$(comment)"
       },
       {
-        "command": "ai-pet.cancelSession",
+        "command": "krypto.cancelSession",
         "title": "Cancel Session",
-        "category": "AI Pet",
+        "category": "Krypto",
         "icon": "$(debug-stop)"
       },
       {
-        "command": "ai-pet.approvePending",
+        "command": "krypto.approvePending",
         "title": "Approve Pending",
-        "category": "AI Pet",
+        "category": "Krypto",
         "icon": "$(check)"
       },
       {
-        "command": "ai-pet.denyPending",
+        "command": "krypto.denyPending",
         "title": "Deny Pending",
-        "category": "AI Pet",
+        "category": "Krypto",
         "icon": "$(close)"
       },
       {
-        "command": "ai-pet.showPet",
+        "command": "krypto.showPet",
         "title": "Show Pet",
-        "category": "AI Pet"
+        "category": "Krypto"
       },
       {
-        "command": "ai-pet.openPetPanel",
+        "command": "krypto.openPetPanel",
         "title": "Open Pet in Editor",
-        "category": "AI Pet",
+        "category": "Krypto",
         "icon": "$(open-preview)"
       },
       {
-        "command": "ai-pet.changeSpecies",
+        "command": "krypto.changeSpecies",
         "title": "Change Pet Species",
-        "category": "AI Pet",
+        "category": "Krypto",
         "icon": "$(symbol-color)"
       },
       {
-        "command": "ai-pet.installHooks",
+        "command": "krypto.installHooks",
         "title": "Install Agent Hooks",
-        "category": "AI Pet"
+        "category": "Krypto"
       },
       {
-        "command": "ai-pet.startHub",
+        "command": "krypto.startHub",
         "title": "Start Hub",
-        "category": "AI Pet",
+        "category": "Krypto",
         "icon": "$(play)"
       },
       {
-        "command": "ai-pet.reconnect",
+        "command": "krypto.reconnect",
         "title": "Reconnect to Hub",
-        "category": "AI Pet",
+        "category": "Krypto",
         "icon": "$(refresh)"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "ai-pet",
-          "title": "AI Pet",
+          "id": "krypto",
+          "title": "Krypto",
           "icon": "media/pet.svg"
         }
       ]
     },
     "views": {
-      "ai-pet": [
+      "krypto": [
         {
           "type": "webview",
-          "id": "ai-pet.petView",
+          "id": "krypto.petView",
           "name": "Pet",
           "icon": "media/pet.svg",
-          "contextualTitle": "AI Pet"
+          "contextualTitle": "Krypto"
         }
       ]
     },
     "menus": {
       "view/title": [
         {
-          "command": "ai-pet.startSession",
-          "when": "view == ai-pet.petView",
+          "command": "krypto.startSession",
+          "when": "view == krypto.petView",
           "group": "navigation@1"
         },
         {
-          "command": "ai-pet.openPetPanel",
-          "when": "view == ai-pet.petView",
+          "command": "krypto.openPetPanel",
+          "when": "view == krypto.petView",
           "group": "navigation@2"
         },
         {
-          "command": "ai-pet.changeSpecies",
-          "when": "view == ai-pet.petView",
+          "command": "krypto.changeSpecies",
+          "when": "view == krypto.petView",
           "group": "1_pet@1"
         },
         {
-          "command": "ai-pet.installHooks",
-          "when": "view == ai-pet.petView",
+          "command": "krypto.installHooks",
+          "when": "view == krypto.petView",
           "group": "1_pet@2"
         },
         {
-          "command": "ai-pet.reconnect",
-          "when": "view == ai-pet.petView",
+          "command": "krypto.reconnect",
+          "when": "view == krypto.petView",
           "group": "1_pet@3"
         }
       ],
       "commandPalette": [
         {
-          "command": "ai-pet.approvePending",
-          "when": "ai-pet.hasPending"
+          "command": "krypto.approvePending",
+          "when": "krypto.hasPending"
         },
         {
-          "command": "ai-pet.denyPending",
-          "when": "ai-pet.hasPending"
+          "command": "krypto.denyPending",
+          "when": "krypto.hasPending"
         }
       ]
     },
     "configuration": {
-      "title": "AI Pet",
+      "title": "Krypto",
       "properties": {
-        "ai-pet.hubUrl": {
+        "krypto.hubUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "WebSocket URL of the AI Pet Hub. Empty = `AI_PET_HUB_URL` env var, else `ws://127.0.0.1:47800/ws`."
+          "markdownDescription": "WebSocket URL of the Krypto hub. Empty = `KRYPTO_HUB_URL` env var, else `ws://127.0.0.1:47800/ws`."
         },
-        "ai-pet.hubToken": {
+        "krypto.hubToken": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Hub token override. Empty = `AI_PET_HUB_TOKEN` env var, else the `token` file in the hub data dir. Prefer leaving this empty."
+          "markdownDescription": "Hub token override. Empty = `KRYPTO_HUB_TOKEN` env var, else the `token` file in the hub data dir. Prefer leaving this empty."
         },
-        "ai-pet.hubExecutable": {
+        "krypto.hubExecutable": {
           "type": "string",
-          "default": "pet-hub",
-          "markdownDescription": "Command used for **AI Pet: Start Hub** and **AI Pet: Install Agent Hooks** (`pet-hub` on PATH by default)."
+          "default": "krypto",
+          "markdownDescription": "Command used for **Krypto: Start Hub** and **Krypto: Install Agent Hooks** (`krypto` on PATH by default)."
         },
-        "ai-pet.openEditedFiles": {
+        "krypto.openEditedFiles": {
           "type": "string",
           "enum": [
             "off",
@@ -184,7 +184,7 @@
           "default": "open",
           "markdownDescription": "What to do when an agent edits a file inside this workspace."
         },
-        "ai-pet.notifications": {
+        "krypto.notifications": {
           "type": "string",
           "enum": [
             "all",
@@ -199,15 +199,15 @@
           "default": "all",
           "markdownDescription": "Which events show a VS Code notification."
         },
-        "ai-pet.notifyOnlyWorkspaceSessions": {
+        "krypto.notifyOnlyWorkspaceSessions": {
           "type": "boolean",
           "default": false,
           "markdownDescription": "Only notify for sessions whose working directory is inside this workspace."
         },
-        "ai-pet.defaultAgent": {
+        "krypto.defaultAgent": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Agent id preselected by **AI Pet: Start Session** (e.g. `claude-code`). Empty = last used."
+          "markdownDescription": "Agent id preselected by **Krypto: Start Session** (e.g. `claude-code`). Empty = last used."
         }
       }
     }
@@ -219,9 +219,9 @@
     "package": "bun run build && bunx @vscode/vsce package --no-dependencies"
   },
   "devDependencies": {
-    "@ai-pet/hub-client": "workspace:*",
-    "@ai-pet/pet-engine": "workspace:*",
-    "@ai-pet/protocol": "workspace:*",
+    "@krypto/hub-client": "workspace:*",
+    "@krypto/pet-engine": "workspace:*",
+    "@krypto/protocol": "workspace:*",
     "@types/node": "^22",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

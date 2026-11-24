@@ -1,12 +1,12 @@
 [package]
-name = "pet-acp"
+name = "krypto-acp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ACP client host for AI Pet Hub: spawns ACP agents and normalizes their session updates"
+description = "ACP client host for Krypto: spawns ACP agents and normalizes their session updates"
 
 [dependencies]
-pet-protocol = { workspace = true }
+krypto-protocol = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

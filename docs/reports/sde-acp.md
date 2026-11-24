@@ -1,3 +1,5 @@
+Renamed to Krypto on 2026-11-23; names below are pre-rename.
+
 # sde-acp report: `crates/acp` (`pet-acp`)
 
 Status: **FROZEN** (per t13). Revision 2 (below) is complete and compiles. No code changes

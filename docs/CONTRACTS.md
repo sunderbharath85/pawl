@@ -1,4 +1,4 @@
-# AI Pet Hub — Contracts & Ownership (read before coding)
+# Krypto — Contracts & Ownership (read before coding)
 
 Plan: `PLAN.md`. This file fixes the interfaces so parallel engineers can build
 against each other without waiting. **Code against these APIs exactly.** If one
@@ -7,12 +7,12 @@ another owner's files.
 
 ## Ground rules (all engineers)
 
-- Repo root: `E:\workspace\ai-pet` (Windows; Git Bash + PowerShell available). Not a git repo.
+- Repo root: `E:\workspace\ai-pet` (Windows; Git Bash + PowerShell available). Git repo; work on the step branch the orchestrator names and never commit yourself.
 - Stay inside your owned paths (table below). Root files (`Cargo.toml`,
   `package.json`, `tsconfig.base.json`, `docs/CONTRACTS.md`,
   `packages/protocol`, `crates/protocol`) are orchestrator-owned: read-only for you.
 - Wire types: `packages/protocol/src/index.ts` (TS, source of truth) and
-  `crates/protocol/src/lib.rs` (Rust mirror, crate `pet-protocol`). Import them; never redefine.
+  `crates/protocol/src/lib.rs` (Rust mirror, crate `krypto-protocol`). Import them; never redefine.
 - E2E tests are out of scope for now. Write real, working code; keep it compiling
   (`cargo check -p <crate>` / `tsc --noEmit`). Small unit tests are welcome where cheap.
 - bun (TypeScript toolchain + package manager, workspaces in root package.json): never run bare `bun install`/`bun add` — parallel installs race on bun.lock and node_modules. Use `bash scripts/bun-locked.sh install` or
@@ -31,38 +31,38 @@ another owner's files.
 
 | Role | Owns | Package/crate |
 |---|---|---|
-| sde-acp | `crates/acp/` | `pet-acp` |
-| sde-hub | `crates/hub/` | `pet-hub` (bin + lib) |
-| sde-discovery | `crates/discovery/` | `pet-discovery` |
-| sde-brain | `crates/brain/` | `pet-brain` |
-| sde-relay (wave 2) | `crates/relay-link/`, `services/relay/` | `pet-relay-link`, `@ai-pet/relay` |
-| fe-engine | `packages/pet-engine/`, `packages/hub-client/` | `@ai-pet/pet-engine`, `@ai-pet/hub-client` |
-| fe-desktop | `apps/desktop/` (incl. `src-tauri/`) | `@ai-pet/desktop` |
-| fe-vscode | `apps/vscode/` | `ai-pet-vscode` |
-| fe-mobile (wave 2) | `apps/mobile/` | `@ai-pet/mobile` |
+| sde-acp | `crates/acp/` | `krypto-acp` |
+| sde-hub | `crates/hub/` | `krypto-hub` (lib + bin `krypto`) |
+| sde-discovery | `crates/discovery/` | `krypto-discovery` |
+| sde-brain | `crates/brain/` | `krypto-brain` |
+| sde-relay (wave 2) | `crates/relay-link/`, `services/relay/` | `krypto-relay-link`, `@krypto/relay` |
+| fe-engine | `packages/pet-engine/`, `packages/hub-client/` | `@krypto/pet-engine`, `@krypto/hub-client` |
+| fe-desktop | `apps/desktop/` (incl. `src-tauri/`) | `@krypto/desktop` |
+| fe-vscode | `apps/vscode/` | `krypto-vscode` |
+| fe-mobile (wave 2) | `apps/mobile/` | `@krypto/mobile` |
 | art-sprites | `assets/pets/`, `scripts/art/` | sprite sheets + manifest |
 
 ## Runtime facts
 
-- Hub binds **only** `127.0.0.1:47800` (override `AI_PET_HUB_URL` / `--port`).
-- Data dir: `pet_protocol::data_dir()` = `dirs::data_dir()/ai-pet-hub`
-  (Windows `%APPDATA%\ai-pet-hub`, macOS `~/Library/Application Support/ai-pet-hub`,
-  Linux `~/.local/share/ai-pet-hub`). Contains `hub.db` (SQLite), `token`,
+- Hub binds **only** `127.0.0.1:47800` (override `KRYPTO_HUB_URL` / `--port`).
+- Data dir: `krypto_protocol::data_dir()` = `dirs::data_dir()/krypto`
+  (Windows `%APPDATA%\krypto`, macOS `~/Library/Application Support/krypto`,
+  Linux `~/.local/share/krypto`). Contains `hub.db` (SQLite), `token`,
   `config.toml`, `registry-cache.json`.
 - `token`: 32 random bytes hex, created by the hub on first start. Clients read it
-  (env `AI_PET_HUB_TOKEN` overrides).
-- Endpoints (crate `pet-hub`):
+  (env `KRYPTO_HUB_TOKEN` overrides).
+- Endpoints (crate `krypto-hub`):
   - `GET  /health` → `{"ok":true,"version":"x"}` (no auth)
   - `GET  /ws` → WebSocket. First frame `hello{token}`. Reject non-empty `Origin`
     headers other than `vscode-webview://*`, `tauri://localhost`, `http://tauri.localhost`,
     `https://tauri.localhost`, `http://localhost:1420` (vite dev). Browsers can reach localhost; this blocks drive-by pages.
   - `POST /hooks/{claude|codex|copilot}` with `Authorization: Bearer <token>`, body = raw hook JSON → `{"ok":true}`.
-- Hook forwarding: agents' hook configs call `pet-hub hook <source>` which reads
+- Hook forwarding: agents' hook configs call `krypto hook <source>` which reads
   stdin JSON and POSTs it (fails silently in <2 s if the hub is down; never blocks the agent).
 
 ## Rust crate APIs
 
-### `pet-acp` (sde-acp) — ACP client host
+### `krypto-acp` (sde-acp) — ACP client host
 
 Uses the official `agent-client-protocol` crate (check docs.rs for the current API).
 Spawns agents as stdio subprocesses. If the crate's futures are `!Send`, run each
@@ -72,13 +72,13 @@ public API below MUST be `Send + Sync + Clone`.
 ```rust
 pub enum HostEvent {
     /// Upsert (status changes, title, ended).
-    Session(pet_protocol::Session),
+    Session(krypto_protocol::Session),
     /// Normalized ACP update for the event log. payload = protocol payload shapes
     /// (TextPayload, ToolCallPayload, PlanPayload, StopPayload, ErrorPayload).
-    Event { session_id: SessionId, kind: pet_protocol::EventType, payload: serde_json::Value },
+    Event { session_id: SessionId, kind: krypto_protocol::EventType, payload: serde_json::Value },
     /// Agent asked `session/request_permission`. Host waits for resolve_permission().
-    PermissionRequest(pet_protocol::PermissionRequest),
-    AgentCapabilities { agent_id: AgentId, capabilities: pet_protocol::AgentCapabilities },
+    PermissionRequest(krypto_protocol::PermissionRequest),
+    AgentCapabilities { agent_id: AgentId, capabilities: krypto_protocol::AgentCapabilities },
 }
 
 #[derive(Clone)]
@@ -108,7 +108,7 @@ stop end_turn → `done` (session stays open, idle for next prompt); refusal/err
 Client-side ACP capabilities: implement `fs/read_text_file` + `fs/write_text_file`
 (restricted to the session cwd), terminals optional (advertise false if not implemented).
 
-### `pet-discovery` (sde-discovery) — agents + hooks
+### `krypto-discovery` (sde-discovery) — agents + hooks
 
 ```rust
 pub struct CustomAgent { pub id: String, pub name: String, pub command: Vec<String>, pub env: Option<BTreeMap<String,String>> }
@@ -133,16 +133,16 @@ pub mod hooks {
         pub notification: Option<(NotificationLevel, String, String)>, // (level, title, body) worth surfacing
     }
     pub fn normalize(source: HookSource, raw: serde_json::Value) -> Option<NormalizedHook>;
-    /// Used by `pet-hub hook <source>`: read stdin JSON, POST to hub, 2s timeout, never error loudly.
+    /// Used by `krypto hook <source>`: read stdin JSON, POST to hub, 2s timeout, never error loudly.
     pub async fn forward(source: HookSource, raw: serde_json::Value, hub_url: &str, token: &str) -> anyhow::Result<()>;
-    /// Config snippets/merges for: ~/.claude/settings.json, ~/.codex/config.toml (notify), ~/.copilot/hooks/ai-pet.json,
-    /// .github/hooks/ai-pet.json. `apply=false` returns a dry-run diff text; `apply=true` merges (backup file first).
+    /// Config snippets/merges for: ~/.claude/settings.json, ~/.codex/config.toml (notify), ~/.copilot/hooks/krypto.json,
+    /// .github/hooks/krypto.json. `apply=false` returns a dry-run diff text; `apply=true` merges (backup file first).
     pub fn install(target: HookTarget, hub_exe: &Path, apply: bool) -> anyhow::Result<String>;
     pub enum HookTarget { Claude, Codex, CopilotCli, CopilotVscode { repo: PathBuf } }
 }
 ```
 
-### `pet-brain` (sde-brain) — rules, bot, watchdog, pet growth
+### `krypto-brain` (sde-brain) — rules, bot, watchdog, pet growth
 
 ```rust
 pub mod rules {
@@ -185,18 +185,18 @@ pub mod growth {
 Anthropic calls: plain `reqwest` POST `https://api.anthropic.com/v1/messages`,
 headers `x-api-key`, `anthropic-version: 2023-06-01`; model default `claude-haiku-5-5`.
 
-### `pet-hub` (sde-hub) — the daemon
+### `krypto-hub` (sde-hub) — the daemon
 
 Modules: `config` (data dir, token, config.toml: port, custom agents, rules, brain), `store` (rusqlite bundled; tables agents, sessions, events, pets, rules, chat, audit_log), `bus` (tokio broadcast of `ServerMsg`), `server` (axum: /health, /ws, /hooks/:source), `core` (owns AcpHost, discovery results, rules, brain, watchdog; merges ACP + hook feeds into sessions/events; applies rules to permission requests; writes audit log for every approval), `notify` (desktop notifications are a client concern — hub only emits `notification` msgs).
-CLI (`clap`): `pet-hub serve [--port]`, `agents [--refresh]`, `sessions`, `start <agent> --cwd <dir> [--prompt <text>]` (talks to a running hub over WS if up, else runs in-process and streams events to stdout), `hook <source>`, `install-hooks <claude|codex|copilot-cli|copilot-vscode> [--apply]`, `token`.
+CLI (`clap`): `krypto serve [--port]`, `agents [--refresh]`, `sessions`, `start <agent> --cwd <dir> [--prompt <text>]` (talks to a running hub over WS if up, else runs in-process and streams events to stdout), `hook <source>`, `install-hooks <claude|codex|copilot-cli|copilot-vscode> [--apply]`, `token`.
 Relay integration is wave 2 (sde-relay will add it behind a `relay` module).
 
 ## TypeScript package APIs
 
-### `@ai-pet/hub-client` (fe-engine) — works in browser, Tauri webview, VS Code webview and Node
+### `@krypto/hub-client` (fe-engine) — works in browser, Tauri webview, VS Code webview and Node
 
 ```ts
-import type { ClientMsg, ServerMsg, AckResults, ClientKind, Agent, Session, Pet, PermissionRequest, HubEvent, ChatMessage, HubNotification, Rule } from "@ai-pet/protocol";
+import type { ClientMsg, ServerMsg, AckResults, ClientKind, Agent, Session, Pet, PermissionRequest, HubEvent, ChatMessage, HubNotification, Rule } from "@krypto/protocol";
 export interface HubState {
   status: "disconnected" | "connecting" | "connected" | "unauthorized";
   agents: Agent[]; sessions: Record<string, Session>; pets: Record<string, Pet>;
@@ -226,20 +226,20 @@ export class HubClient {
   listHistory(agentId: string, cwd?: string): Promise<HistorySession[]>;
   resumeSession(agentId: string, acpSessionId: string, cwd: string): Promise<Session>;
 }
-// subpath "@ai-pet/hub-client/react"
+// subpath "@krypto/hub-client/react"
 export function useHubState(client: HubClient): HubState;
-// subpath "@ai-pet/hub-client/node" (Node only; never import from browser code)
+// subpath "@krypto/hub-client/node" (Node only; never import from browser code)
 export interface HubCredentials { url: string /* ws */; httpUrl: string; token: string; tokenSource: "env" | "file"; dataDir: string; tokenFile: string }
 export function readHubCredentials(opts?: HubCredentialsOptions): HubCredentials;   // sync; throws HubCredentialsError if no token
 export function tryReadHubCredentials(opts?: HubCredentialsOptions): HubCredentials | null;
-// Env AI_PET_HUB_TOKEN / AI_PET_HUB_URL (http or ws form) override. Extras (non-breaking): HubState.hubVersion/lastError,
+// Env KRYPTO_HUB_TOKEN / KRYPTO_HUB_URL (http or ws form) override. Extras (non-breaking): HubState.hubVersion/lastError,
 // HubClient.setToken/listSessions/setRules/wsUrl; PetStage/PetBubble callbacks may return Promise (buttons disabled while pending).
 ```
 
-### `@ai-pet/pet-engine` (fe-engine)
+### `@krypto/pet-engine` (fe-engine)
 
 ```ts
-import type { Species, Session, HubEvent, PermissionRequest, Pet } from "@ai-pet/protocol";
+import type { Species, Session, HubEvent, PermissionRequest, Pet } from "@krypto/protocol";
 export type PetActivity = "napping" | "idle" | "thinking" | "working" | "planning" | "alert" | "happy" | "sad";
 export interface PetView { petId: string; agentId: string; species: Species; name: string; activity: PetActivity; since: number;
   bubble?: { text: string; kind: "say" | "permission"; requestId?: string }; sessionId?: string; mood: number; }
@@ -250,7 +250,7 @@ export function activityForEvent(e: HubEvent): PetActivity | null;
 export function derivePetViews(input: { pets: Pet[]; sessions: Session[]; pending: PermissionRequest[]; lastEvents: Record<string, HubEvent | undefined>; now: number }): PetView[];
 export function petLine(species: Species, activity: PetActivity, seed?: number): string; // flavor text ("Woof! Need you!")
 export const SPECIES_META: Record<Species, { label: string; emoji: string; sound: string }>;
-// subpath "@ai-pet/pet-engine/react" — pure SVG + CSS keyframes, no assets needed (Rive later)
+// subpath "@krypto/pet-engine/react" — pure SVG + CSS keyframes, no assets needed (Rive later)
 export function PetSprite(props: { species: Species; activity: PetActivity; size?: number; facing?: "left" | "right"; walking?: boolean; skin?: string }): JSX.Element;
 export function PetBubble(props: { view: PetView; onApprove?: () => void; onDeny?: () => void; onClick?: () => void }): JSX.Element | null;
 export function PetStage(props: { views: PetView[]; width: number; onApprove(requestId: string): void; onDeny(requestId: string): void; onPetClick?(petId: string): void }): JSX.Element; // pets walk/idle along a strip
@@ -260,7 +260,7 @@ Both packages: `"type":"module"`, `main`/`types`/`exports` point at `src/*.ts(x)
 ## Relay (wave 2, sde-relay + fe-mobile)
 
 - Crypto: NaCl box (X25519 + XSalsa20-Poly1305, 24-byte nonce). Rust `crypto_box::SalsaBox`; TS `tweetnacl` `nacl.box`. Base64 (standard) on the wire.
-- Pairing QR: `aipet://pair?relay=<https-url>&hub=<hubId>&pk=<hubPkB64>&code=<8 chars>` (code one-time, 5 min).
+- Pairing QR: `krypto://pair?relay=<https-url>&hub=<hubId>&pk=<hubPkB64>&code=<8 chars>` (code one-time, 5 min).
 - Relay frames (JSON over WS `wss://<relay>/v1/connect?role=hub|device|pairing&hubId=..`):
   `{t:"msg", from, to, nonce, box}` (box = encrypted UTF-8 JSON of a protocol `ClientMsg`/`ServerMsg`),
   `{t:"pair_request", deviceId, devicePk, deviceName, code}`, `{t:"pair_ok", deviceId, nonce, box}`,

@@ -10,7 +10,7 @@ use tokio::io::AsyncBufReadExt as _;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 /// Environment variables never forwarded to agent processes.
-const SCRUBBED_ENV: &[&str] = &["AI_PET_HUB_TOKEN"];
+const SCRUBBED_ENV: &[&str] = &["KRYPTO_HUB_TOKEN"];
 
 /// How many trailing stderr lines to keep for error reports.
 const STDERR_TAIL_LINES: usize = 20;
@@ -122,7 +122,7 @@ pub(crate) fn spawn_agent(
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
-                        tracing::debug!(target: "pet_acp::agent_stderr", agent = %agent_id, "{line}");
+                        tracing::debug!(target: "krypto_acp::agent_stderr", agent = %agent_id, "{line}");
                         tail.push(line);
                     }
                     Ok(None) => break,
@@ -288,7 +288,7 @@ mod tests {
     fn path_override_is_used() {
         let cwd = std::env::current_dir().unwrap();
         let mut env = BTreeMap::new();
-        env.insert("PATH".to_string(), std::env::temp_dir().join("pet-acp-empty-path").to_string_lossy().into_owned());
+        env.insert("PATH".to_string(), std::env::temp_dir().join("krypto-acp-empty-path").to_string_lossy().into_owned());
         assert!(resolve_program("cargo", Some(&env), &cwd).is_err());
     }
 

@@ -1,3 +1,5 @@
+Renamed to Krypto on 2026-11-23; names below are pre-rename.
+
 # fe-engine report: `@ai-pet/hub-client` + `@ai-pet/pet-engine`
 
 Status: **DONE**. Both packages implement the CONTRACTS.md APIs. Both gates pass: `bun run typecheck` and `bun test`.

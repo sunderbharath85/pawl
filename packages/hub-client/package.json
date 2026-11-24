@@ -1,7 +1,8 @@
 {
-  "name": "@ai-pet/hub-client",
+  "name": "@krypto/hub-client",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -15,7 +16,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@ai-pet/protocol": "workspace:*"
+    "@krypto/protocol": "workspace:*"
   },
   "peerDependencies": {
     "react": ">=18"

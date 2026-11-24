@@ -1,4 +1,4 @@
-//! pet-hub: the AI Pet Hub daemon (library half; the `pet-hub` binary is a thin CLI on top).
+//! krypto-hub: the Krypto hub daemon (library half; the `krypto` binary is a thin CLI on top).
 pub mod bus;
 pub mod cli;
 pub mod config;

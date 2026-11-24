@@ -9,7 +9,7 @@ use std::time::Duration;
 use agent_client_protocol::v1::schema as acp;
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{self as sdk, Agent as AgentRole, Channel, Client};
-use pet_protocol as pp;
+use krypto_protocol as pp;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -22,7 +22,7 @@ fn j<T: serde::de::DeserializeOwned>(v: Value) -> T {
 struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
-        let p = std::env::temp_dir().join(format!("pet-acp-host-test-{}", uuid::Uuid::new_v4()));
+        let p = std::env::temp_dir().join(format!("krypto-acp-host-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(p.join("root")).unwrap();
         std::fs::write(p.join("outside.txt"), "secret").unwrap();
         TempDir(p)

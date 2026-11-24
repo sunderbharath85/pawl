@@ -1,4 +1,4 @@
-// HubClient: framework-free WebSocket client for the AI Pet Hub.
+// HubClient: framework-free WebSocket client for the Krypto hub.
 // Works with the browser/webview `WebSocket`, Node's global `WebSocket` (Node 22+) and the `ws` package
 // (pass it as `WebSocketImpl`). No DOM, Node or React imports here.
 import type {
@@ -15,7 +15,7 @@ import type {
   ServerMsg,
   Session,
   Welcome,
-} from "@ai-pet/protocol";
+} from "@krypto/protocol";
 import {
   applyAck,
   applyWelcome,

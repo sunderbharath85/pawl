@@ -1,7 +1,8 @@
 {
-  "name": "@ai-pet/pet-engine",
+  "name": "@krypto/pet-engine",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -15,7 +16,7 @@
     "preview": "bun scripts/preview.tsx"
   },
   "dependencies": {
-    "@ai-pet/protocol": "workspace:*"
+    "@krypto/protocol": "workspace:*"
   },
   "peerDependencies": {
     "react": ">=18"

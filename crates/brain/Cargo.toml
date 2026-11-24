@@ -1,12 +1,12 @@
 [package]
-name = "pet-brain"
+name = "krypto-brain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AI Pet Hub brain: permission rules, chat bot, watchdog and pet growth"
+description = "Krypto brain: permission rules, chat bot, watchdog and pet growth"
 
 [dependencies]
-pet-protocol = { workspace = true }
+krypto-protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

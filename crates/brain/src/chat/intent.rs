@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use pet_protocol::{Agent, AgentId, Session};
+use krypto_protocol::{Agent, AgentId, Session};
 
 use crate::util::{basename, path_key};
 
@@ -799,7 +799,7 @@ pub(crate) fn talk_kind(text: &str) -> Talk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pet_protocol::{AgentSource, SessionSource, SessionStatus};
+    use krypto_protocol::{AgentSource, SessionSource, SessionStatus};
 
     fn agent(id: &str, name: &str) -> Agent {
         Agent {

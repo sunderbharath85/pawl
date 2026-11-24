@@ -1,5 +1,5 @@
-// @ai-pet/hub-client — framework-free core. Browser/webview/Node safe: no React, no Node built-ins here.
-// React binding: "@ai-pet/hub-client/react". Node credential helpers: "@ai-pet/hub-client/node".
+// @krypto/hub-client — framework-free core. Browser/webview/Node safe: no React, no Node built-ins here.
+// React binding: "@krypto/hub-client/react". Node credential helpers: "@krypto/hub-client/node".
 export {
   HubClient,
   HubRequestError,

@@ -1,5 +1,5 @@
 // HubProvider: paired hubs (SecureStore), the active hub's HubClient running over a RelayLink, and app settings.
-import { HubClient, initialHubState, type HubState } from "@ai-pet/hub-client";
+import { HubClient, initialHubState, type HubState } from "@krypto/hub-client";
 import Constants from "expo-constants";
 import * as Device from "expo-device";
 import { createContext, use, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";

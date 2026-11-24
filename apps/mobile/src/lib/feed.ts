@@ -11,7 +11,7 @@ import type {
   ToolCallStatus,
   ToolKind,
   ToolLocation,
-} from "@ai-pet/protocol";
+} from "@krypto/protocol";
 
 export type FeedItem =
   | { kind: "user"; key: string; ts: number; text: string }

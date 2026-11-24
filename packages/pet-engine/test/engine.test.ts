@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { HubEvent, Pet, PermissionRequest, Session } from "@ai-pet/protocol";
+import type { HubEvent, Pet, PermissionRequest, Session } from "@krypto/protocol";
 import {
   activityForEvent,
   derivePetViews,

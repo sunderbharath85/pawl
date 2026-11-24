@@ -1,7 +1,7 @@
 import { usePanel } from "./context";
 import { PetAvatar } from "./PetAvatar";
 
-/** Shown whenever we're not connected: explains why and offers to start `pet-hub serve`. */
+/** Shown whenever we're not connected: explains why and offers to start `krypto serve`. */
 export function HubBanner() {
   const { meta, conn, toast } = usePanel();
   if (meta.phase === "connected") return null;
@@ -23,7 +23,7 @@ export function HubBanner() {
       break;
     case "starting":
       title = "Waking the hub…";
-      body = "Starting pet-hub serve in the background.";
+      body = "Starting krypto serve in the background.";
       break;
     case "connecting":
       title = "Sniffing for the hub…";
@@ -32,7 +32,7 @@ export function HubBanner() {
     case "unauthorized":
       title = "The hub did not accept our token";
       body =
-        "The token in the hub data folder (or AI_PET_HUB_TOKEN) does not match the running hub. Restart the hub, then retry.";
+        "The token in the hub data folder (or KRYPTO_HUB_TOKEN) does not match the running hub. Restart the hub, then retry.";
       action = true;
       break;
   }

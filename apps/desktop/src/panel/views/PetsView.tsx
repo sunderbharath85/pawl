@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { SPECIES_META } from "@ai-pet/pet-engine";
-import type { Pet, Species } from "@ai-pet/protocol";
+import { SPECIES_META } from "@krypto/pet-engine";
+import type { Pet, Species } from "@krypto/protocol";
 import { agentName, errorText } from "../../lib/format";
 import { usePanel } from "../context";
 import { ACTIVITY_LABEL, PetAvatar } from "../PetAvatar";

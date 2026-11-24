@@ -11,7 +11,7 @@ import { toFileUri } from "./host/util";
 let connection: HubConnection | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
-  const log = vscode.window.createOutputChannel("AI Pet", { log: true });
+  const log = vscode.window.createOutputChannel("Krypto", { log: true });
   const version = String(context.extension.packageJSON.version ?? "0.0.0");
   const hub = new HubConnection(version, log);
   connection = hub;
@@ -43,7 +43,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   hub.start();
-  log.info(`Pet for VS Code ${version} activated`);
+  log.info(`Krypto for VS Code ${version} activated`);
 }
 
 export function deactivate(): void {
@@ -52,12 +52,12 @@ export function deactivate(): void {
 }
 
 const WEBVIEW_COMMANDS = {
-  startSession: "ai-pet.startSession",
-  startHub: "ai-pet.startHub",
-  installHooks: "ai-pet.installHooks",
-  changeSpecies: "ai-pet.changeSpecies",
-  reconnect: "ai-pet.reconnect",
-  openPanel: "ai-pet.openPetPanel",
+  startSession: "krypto.startSession",
+  startHub: "krypto.startHub",
+  installHooks: "krypto.installHooks",
+  changeSpecies: "krypto.changeSpecies",
+  reconnect: "krypto.reconnect",
+  openPanel: "krypto.openPetPanel",
 } as const;
 
 async function handleWebviewMessage(msg: WebviewToHost, hub: HubConnection): Promise<void> {

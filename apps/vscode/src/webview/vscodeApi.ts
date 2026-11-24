@@ -38,5 +38,5 @@ export function savePersisted(state: PersistedState): void {
 
 /** CSP nonce of this document (for any <style> element we must create at runtime). */
 export function cspNonce(): string | undefined {
-  return document.querySelector<HTMLMetaElement>('meta[name="ai-pet-nonce"]')?.content || undefined;
+  return document.querySelector<HTMLMetaElement>('meta[name="krypto-nonce"]')?.content || undefined;
 }

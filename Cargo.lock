@@ -1367,6 +1367,98 @@ dependencies = [
 ]
 
 [[package]]
+name = "krypto-acp"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "chrono",
+ "dirs",
+ "futures",
+ "krypto-protocol",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "which",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "krypto-brain"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "globset",
+ "krypto-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "krypto-discovery"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "krypto-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "tokio",
+ "toml_edit",
+ "tracing",
+]
+
+[[package]]
+name = "krypto-hub"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "futures",
+ "getrandom 0.4.3",
+ "hex",
+ "krypto-acp",
+ "krypto-brain",
+ "krypto-discovery",
+ "krypto-protocol",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "krypto-protocol"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1557,98 +1649,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "pet-acp"
-version = "0.1.0"
-dependencies = [
- "agent-client-protocol",
- "anyhow",
- "chrono",
- "dirs",
- "futures",
- "libc",
- "pet-protocol",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "which",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "pet-brain"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "globset",
- "pet-protocol",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "pet-discovery"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "pet-protocol",
- "reqwest",
- "serde",
- "serde_json",
- "similar",
- "tempfile",
- "tokio",
- "toml_edit",
- "tracing",
-]
-
-[[package]]
-name = "pet-hub"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "clap",
- "futures",
- "getrandom 0.4.3",
- "hex",
- "pet-acp",
- "pet-brain",
- "pet-discovery",
- "pet-protocol",
- "rusqlite",
- "serde",
- "serde_json",
- "subtle",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-tungstenite",
- "toml",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "pet-protocol"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "pin-project"

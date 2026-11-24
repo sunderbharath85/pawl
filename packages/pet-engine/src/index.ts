@@ -1,4 +1,4 @@
-// @ai-pet/pet-engine — pure pet logic (no React, no DOM). React components: "@ai-pet/pet-engine/react".
+// @krypto/pet-engine — pure pet logic (no React, no DOM). React components: "@krypto/pet-engine/react".
 export {
   activityForEvent,
   activityForStatus,

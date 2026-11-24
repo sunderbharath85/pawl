@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use pet_acp::HostEvent;
-use pet_brain::chat::{Brain, BrainAction, BrainContext, BrainReply};
-use pet_brain::watchdog::Watchdog;
-use pet_protocol::{
+use krypto_acp::HostEvent;
+use krypto_brain::chat::{Brain, BrainAction, BrainContext, BrainReply};
+use krypto_brain::watchdog::Watchdog;
+use krypto_protocol::{
     Agent, AgentCapabilities, AgentId, AgentSource, ChatMessage, ChatRole, ClientKind, ClientMsg, ErrorPayload,
     EventType, HistorySession, HookSource, HubEvent, HubNotification, NotificationLevel, PermissionOptionKind, PermissionOutcome,
     PermissionRequest, PermissionResolvedPayload, Pet, PetId, PetPatch, RequestId, ResolvedBy, Rule, RuleAction,
@@ -79,7 +79,7 @@ pub struct HubOptions {
     pub config: HubConfig,
     pub token: String,
     /// Daemon mode: run initial discovery, the watchdog and the daily report.
-    /// In-process CLI use (`pet-hub start` without a running hub) passes false.
+    /// In-process CLI use (`krypto start` without a running hub) passes false.
     pub background: bool,
 }
 
@@ -184,7 +184,7 @@ impl Hub {
 
     async fn build(opts: HubOptions, store: Store, host: Host) -> Result<Hub> {
         let HubOptions { paths, config, token, background } = opts;
-        let now = pet_protocol::now_ms();
+        let now = krypto_protocol::now_ms();
         let retention_days = config.event_retention_days;
         let (agents, mut sessions, pets, db_rules) = store
             .run(move |s| {
@@ -222,7 +222,7 @@ impl Hub {
         let (rules_source, loaded) = match (db_rules, config.rules.clone()) {
             (Some(r), _) => ("hub.db", r),
             (None, Some(r)) => ("config.toml", r),
-            (None, None) => ("the built-in defaults", pet_brain::rules::default_rules()),
+            (None, None) => ("the built-in defaults", krypto_brain::rules::default_rules()),
         };
         let (rules, dropped) = sanitize_rules(loaded);
         let mut startup_notices = Vec::new();
@@ -337,7 +337,7 @@ impl Hub {
     }
 
     pub fn welcome(&self) -> Welcome {
-        let now = pet_protocol::now_ms();
+        let now = krypto_protocol::now_ms();
         let st = self.st();
         Welcome {
             protocol_version: PROTOCOL_VERSION,
@@ -502,7 +502,7 @@ impl Hub {
         self.inner.host.close_session(session_id).await?;
         let mut ended = self.session(session_id).unwrap_or(s);
         if ended.ended_at.is_none() {
-            ended.ended_at = Some(pet_protocol::now_ms());
+            ended.ended_at = Some(krypto_protocol::now_ms());
             if ended.status != SessionStatus::Error {
                 ended.status = SessionStatus::Done;
             }
@@ -588,7 +588,7 @@ impl Hub {
 
     /// Validate (security floor first), then persist and apply. Any error changes nothing.
     pub async fn set_rules(&self, rules: Vec<Rule>) -> Result<Vec<Rule>> {
-        pet_brain::rules::validate_rules(&rules).map_err(|e| anyhow!("invalid_rule: {e}"))?;
+        krypto_brain::rules::validate_rules(&rules).map_err(|e| anyhow!("invalid_rule: {e}"))?;
         let mut seen = HashSet::new();
         for r in &rules {
             if r.id.trim().is_empty() {
@@ -677,7 +677,7 @@ impl Hub {
 
     // ------------------------------------------------------------ pets
 
-    /// Every agent with activity gets a dog (pet_brain::growth::default_pet).
+    /// Every agent with activity gets a dog (krypto_brain::growth::default_pet).
     async fn ensure_pet(&self, agent_id: &str) {
         let created = {
             let mut st = self.st();
@@ -685,7 +685,7 @@ impl Hub {
                 None
             } else {
                 let agent = st.agents.iter().find(|a| a.id == agent_id).cloned().unwrap_or_else(|| placeholder_agent(agent_id));
-                let mut pet = pet_brain::growth::default_pet(&agent);
+                let mut pet = krypto_brain::growth::default_pet(&agent);
                 pet.agent_id = agent_id.to_string();
                 if pet.id.trim().is_empty() || st.pets.contains_key(&pet.id) {
                     pet.id = format!("pet-{}", uuid::Uuid::new_v4());
@@ -782,7 +782,7 @@ impl Hub {
 
     /// Store + broadcast an event, bump the session's `lastEventAt` and grow its pet.
     async fn record_event(&self, session_id: &str, kind: EventType, payload: Value) -> Result<HubEvent> {
-        let ts = pet_protocol::now_ms();
+        let ts = krypto_protocol::now_ms();
         let sid = session_id.to_string();
         let p = payload.clone();
         let event = self.inner.store.run(move |s| s.insert_event(&sid, kind, &p, ts)).await?;
@@ -794,7 +794,7 @@ impl Hub {
             });
             if let Some(agent_id) = agent_id {
                 if let Some(pet) = st.pet_for_agent_mut(&agent_id) {
-                    if pet_brain::growth::on_event(pet, kind, &payload) {
+                    if krypto_brain::growth::on_event(pet, kind, &payload) {
                         let id = pet.id.clone();
                         st.dirty_pets.insert(id);
                     }
@@ -864,7 +864,7 @@ impl Hub {
     /// Rule decision for a request. Relative tool paths are judged against the session's cwd.
     fn rule_action(&self, rules: &[Rule], req: &PermissionRequest) -> RuleAction {
         let cwd = self.session(&req.session_id).map(|s| s.cwd).filter(|c| !c.is_empty());
-        pet_brain::rules::evaluate_in(rules, req, cwd.as_deref())
+        krypto_brain::rules::evaluate_in(rules, req, cwd.as_deref())
     }
 
     /// The host cancelled a pending request itself (turn cancelled/ended, agent withdrew it,
@@ -1025,7 +1025,7 @@ impl Hub {
     ) {
         let entry = AuditEntry {
             id: 0,
-            ts: pet_protocol::now_ms(),
+            ts: krypto_protocol::now_ms(),
             request_id: req.request_id.clone(),
             session_id: req.session_id.clone(),
             agent_id: req.agent_id.clone(),
@@ -1053,10 +1053,10 @@ impl Hub {
 
     /// Merge one raw hook payload (`POST /hooks/{source}`) into the session/event feed.
     pub async fn ingest_hook(&self, source: HookSource, raw: Value) -> Result<()> {
-        let Some(n) = pet_discovery::hooks::normalize(source, raw) else {
+        let Some(n) = krypto_discovery::hooks::normalize(source, raw) else {
             return Ok(());
         };
-        let now = pet_protocol::now_ms();
+        let now = krypto_protocol::now_ms();
         let session = {
             let mut st = self.st();
             let key = (n.agent_id.clone(), n.external_session_id.clone());
@@ -1140,7 +1140,7 @@ impl Hub {
             pet_id: pet.as_ref().map(|p| p.id.clone()),
             role: ChatRole::User,
             text,
-            ts: pet_protocol::now_ms(),
+            ts: krypto_protocol::now_ms(),
             session_id: None,
         };
         let m2 = msg.clone();
@@ -1165,7 +1165,7 @@ impl Hub {
     async fn brain_context(&self, pet: Option<Pet>) -> BrainContext {
         let (agents, sessions, pending) = {
             let st = self.st();
-            let now = pet_protocol::now_ms();
+            let now = krypto_protocol::now_ms();
             (
                 st.agents.clone(),
                 st.sessions_sorted(|s| s.ended_at.is_none() || now - s.last_event_at <= DAY_MS),
@@ -1210,7 +1210,7 @@ impl Hub {
             pet_id: pet.map(|p| p.id),
             role: ChatRole::Pet,
             text,
-            ts: pet_protocol::now_ms(),
+            ts: krypto_protocol::now_ms(),
             session_id,
         };
         let m2 = msg.clone();
@@ -1255,7 +1255,7 @@ impl Hub {
     }
 
     pub(crate) async fn watchdog_tick(&self) {
-        let now = pet_protocol::now_ms();
+        let now = krypto_protocol::now_ms();
         let (sessions, pending) = {
             let st = self.st();
             (st.sessions_sorted(|s| s.ended_at.is_none()), st.sorted_pending())
@@ -1374,7 +1374,7 @@ impl Hub {
 
     /// End-of-day report of every session active in the last 24h, as a notification + pet chat line.
     pub async fn send_daily_report(&self) {
-        let since = pet_protocol::now_ms() - DAY_MS;
+        let since = krypto_protocol::now_ms() - DAY_MS;
         let data = self
             .inner
             .store
@@ -1407,7 +1407,7 @@ impl Hub {
             pet_id: pet.map(|p| p.id),
             role: ChatRole::Pet,
             text,
-            ts: pet_protocol::now_ms(),
+            ts: krypto_protocol::now_ms(),
             session_id: None,
         };
         let m2 = msg.clone();
@@ -1420,7 +1420,7 @@ impl Hub {
 
 /// Rule decision → option to send. None = no suitable option (fall back to asking).
 fn auto_option(req: &PermissionRequest, action: RuleAction) -> Option<Option<String>> {
-    match (action, pet_brain::rules::pick_option(req, action)) {
+    match (action, krypto_brain::rules::pick_option(req, action)) {
         (RuleAction::Ask, _) => None,
         (_, Some(o)) => Some(Some(o)),
         // Deny without a reject option: answering `cancelled` still refuses the tool call.
@@ -1429,14 +1429,14 @@ fn auto_option(req: &PermissionRequest, action: RuleAction) -> Option<Option<Str
     }
 }
 
-/// Load-time guard: keep rules that pass `pet_brain::rules::validate_rules` (the security floor)
+/// Load-time guard: keep rules that pass `krypto_brain::rules::validate_rules` (the security floor)
 /// and have a unique, non-empty id. Returns the kept rules and `(id, reason)` for each dropped one.
 pub fn sanitize_rules(rules: Vec<Rule>) -> (Vec<Rule>, Vec<(String, String)>) {
     let mut kept = Vec::with_capacity(rules.len());
     let mut dropped = Vec::new();
     let mut seen = HashSet::new();
     for r in rules {
-        if let Err(e) = pet_brain::rules::validate_rules(std::slice::from_ref(&r)) {
+        if let Err(e) = krypto_brain::rules::validate_rules(std::slice::from_ref(&r)) {
             dropped.push((r.id.clone(), e.to_string()));
         } else if r.id.trim().is_empty() {
             dropped.push((r.id.clone(), "empty rule id".into()));
@@ -1471,18 +1471,18 @@ fn fallback_report(sessions: &[Session]) -> String {
 pub async fn discover_agents(paths: &Paths, cfg: &HubConfig, force: bool) -> Result<Vec<Agent>> {
     let dcfg = cfg.discovery_config(paths);
     if !force || cfg.offline {
-        return pet_discovery::discover(&dcfg).await;
+        return krypto_discovery::discover(&dcfg).await;
     }
     let cache = paths.registry_cache.clone();
     let backup = cache.with_extension("json.bak");
     let moved = cache.exists() && std::fs::rename(&cache, &backup).is_ok();
-    let result = pet_discovery::discover(&dcfg).await;
+    let result = krypto_discovery::discover(&dcfg).await;
     if moved {
         if cache.exists() {
             let _ = std::fs::remove_file(&backup);
         } else {
             let _ = std::fs::rename(&backup, &cache);
-            return pet_discovery::discover(&dcfg).await;
+            return krypto_discovery::discover(&dcfg).await;
         }
     }
     result

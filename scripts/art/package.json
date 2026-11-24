@@ -1,9 +1,10 @@
 {
-  "name": "@ai-pet/art",
+  "name": "@krypto/art",
   "private": true,
+  "license": "MIT",
   "version": "0.1.0",
   "type": "module",
-  "description": "Gemini-driven sprite pipeline for AI Pet Hub pets (assets/pets).",
+  "description": "Gemini-driven sprite pipeline for Krypto pets (assets/pets).",
   "scripts": {
     "generate": "bun run generate.ts",
     "process": "bun run process.ts",

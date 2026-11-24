@@ -1,10 +1,10 @@
-//! Thin seam over `pet_acp::AcpHost` so the core's message handling can be unit-tested with a fake.
+//! Thin seam over `krypto_acp::AcpHost` so the core's message handling can be unit-tested with a fake.
 
 use std::path::PathBuf;
 
 use anyhow::Result;
-use pet_acp::{AcpHost, HostEvent};
-use pet_protocol::{Agent, HistorySession, Session, SessionId};
+use krypto_acp::{AcpHost, HostEvent};
+use krypto_protocol::{Agent, HistorySession, Session, SessionId};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Clone)]
@@ -93,7 +93,7 @@ impl Host {
 #[cfg(test)]
 pub(crate) mod fake {
     use super::*;
-    use pet_protocol::{SessionSource, SessionStatus};
+    use krypto_protocol::{SessionSource, SessionStatus};
     use std::sync::{Arc, Mutex};
 
     /// Records every call; sessions start instantly in `idle`.
@@ -114,7 +114,7 @@ pub(crate) mod fake {
 
         pub(crate) fn start_session(&self, agent: &Agent, cwd: PathBuf, id: SessionId, prompt: Option<String>) -> Result<Session> {
             self.record(format!("start {} {}", agent.id, prompt.unwrap_or_default()))?;
-            let now = pet_protocol::now_ms();
+            let now = krypto_protocol::now_ms();
             Ok(Session {
                 id,
                 agent_id: agent.id.clone(),

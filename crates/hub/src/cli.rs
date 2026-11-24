@@ -1,4 +1,4 @@
-//! `pet-hub` command line.
+//! `krypto` command line.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -9,8 +9,8 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use futures::{SinkExt, StreamExt};
-use pet_discovery::hooks::HookTarget;
-use pet_protocol::{
+use krypto_discovery::hooks::HookTarget;
+use krypto_protocol::{
     Agent, ClientKind, ClientMsg, EventType, HubEvent, PermissionOptionKind, PermissionOutcome,
     PermissionRequest, PlanPayload, ResolvedBy, ServerMsg, Session, ToolCallPayload, Welcome,
 };
@@ -23,12 +23,12 @@ use crate::core::{self as hubcore, Actor, Hub, HubOptions};
 use crate::{logging, server, HUB_VERSION};
 
 #[derive(Parser, Debug)]
-#[command(name = "pet-hub", version, about = "AI Pet Hub: dog pets that watch and drive your coding agents over ACP")]
+#[command(name = "krypto", version, about = "Krypto: dog pets that watch and drive your coding agents over ACP")]
 pub struct Cli {
-    /// Hub data directory (default: <OS data dir>/ai-pet-hub)
+    /// Hub data directory (default: <OS data dir>/krypto)
     #[arg(long, global = true, env = config::ENV_DATA_DIR)]
     pub data_dir: Option<PathBuf>,
-    /// Hub port (default: AI_PET_HUB_URL, then config.toml, then 47800)
+    /// Hub port (default: KRYPTO_HUB_URL, then config.toml, then 47800)
     #[arg(long, global = true)]
     pub port: Option<u16>,
     #[command(subcommand)]
@@ -56,7 +56,7 @@ pub enum Command {
     },
     /// Start an ACP session and stream its events (via the running hub, else in-process)
     Start {
-        /// Agent id, e.g. claude-code or codex (see `pet-hub agents`)
+        /// Agent id, e.g. claude-code or codex (see `krypto agents`)
         agent: String,
         /// Working directory for the agent
         #[arg(long, default_value = ".")]
@@ -188,8 +188,8 @@ fn run_install_hooks(target: HookTargetArg, apply: bool, repo: Option<PathBuf>) 
             HookTarget::CopilotVscode { repo: std::path::absolute(&repo)? }
         }
     };
-    let exe = std::env::current_exe().context("locate the pet-hub executable")?;
-    let out = pet_discovery::hooks::install(target, &exe, apply)?;
+    let exe = std::env::current_exe().context("locate the krypto executable")?;
+    let out = krypto_discovery::hooks::install(target, &exe, apply)?;
     println!("{out}");
     if !apply {
         eprintln!("(dry run: nothing written; re-run with --apply)");
@@ -199,14 +199,14 @@ fn run_install_hooks(target: HookTargetArg, apply: bool, repo: Option<PathBuf>) 
 
 // ---------------------------------------------------------------- hook
 
-/// `pet_discovery::hooks::run_hook_cli` reads argv/stdin JSON, prints the stdout reply some agents
+/// `krypto_discovery::hooks::run_hook_cli` reads argv/stdin JSON, prints the stdout reply some agents
 /// require (even when the hub is down or no token exists yet), and forwards with a 2 s cap.
 async fn run_hook(paths: &Paths, port_flag: Option<u16>, source: &str, args: Vec<String>) {
-    let Some(source) = pet_discovery::hooks::parse_hook_source(source) else { return };
+    let Some(source) = krypto_discovery::hooks::parse_hook_source(source) else { return };
     let token = config::read_token(paths).unwrap_or_default();
     let cfg = HubConfig::load(paths).unwrap_or_default();
     let ep = HubEndpoint::resolve(port_flag, cfg.port);
-    pet_discovery::hooks::run_hook_cli(source, &args, &ep.http_base, &token).await;
+    krypto_discovery::hooks::run_hook_cli(source, &args, &ep.http_base, &token).await;
 }
 
 // ---------------------------------------------------------------- hub connection
@@ -241,7 +241,7 @@ impl RemoteHub {
         let result = tokio::time::timeout(Duration::from_secs(5), hub.request_raw(hello))
             .await
             .map_err(|_| anyhow!("hub at {} did not answer hello", ep.ws_url))?
-            .map_err(|e| anyhow!("hub at {} refused the connection: {e:#} (token mismatch? check AI_PET_HUB_TOKEN)", ep.ws_url))?;
+            .map_err(|e| anyhow!("hub at {} refused the connection: {e:#} (token mismatch? check KRYPTO_HUB_TOKEN)", ep.ws_url))?;
         hub.welcome = serde_json::from_value(result).context("parse welcome")?;
         Ok(Some(hub))
     }
@@ -287,7 +287,7 @@ impl RemoteHub {
 
 fn empty_welcome() -> Welcome {
     Welcome {
-        protocol_version: pet_protocol::PROTOCOL_VERSION,
+        protocol_version: krypto_protocol::PROTOCOL_VERSION,
         hub_version: String::new(),
         agents: vec![],
         sessions: vec![],
@@ -409,7 +409,7 @@ async fn run_sessions(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
         println!("No sessions yet.");
         return Ok(());
     }
-    let now = pet_protocol::now_ms();
+    let now = krypto_protocol::now_ms();
     let rows: Vec<Vec<String>> = sessions
         .iter()
         .map(|s| {
@@ -825,7 +825,7 @@ impl Printer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pet_protocol::PermissionOption;
+    use krypto_protocol::PermissionOption;
 
     fn req() -> PermissionRequest {
         PermissionRequest {
@@ -856,13 +856,13 @@ mod tests {
 
     #[test]
     fn cli_parses() {
-        let c = Cli::try_parse_from(["pet-hub", "start", "codex", "--cwd", ".", "--prompt", "run tests"]).unwrap();
+        let c = Cli::try_parse_from(["krypto", "start", "codex", "--cwd", ".", "--prompt", "run tests"]).unwrap();
         assert!(matches!(c.command, Command::Start { ref agent, .. } if agent == "codex"));
-        let c = Cli::try_parse_from(["pet-hub", "hook", "codex", r#"{"type":"agent-turn-complete"}"#]).unwrap();
+        let c = Cli::try_parse_from(["krypto", "hook", "codex", r#"{"type":"agent-turn-complete"}"#]).unwrap();
         assert!(matches!(c.command, Command::Hook { ref source, ref args } if source == "codex" && args.len() == 1));
-        let c = Cli::try_parse_from(["pet-hub", "install-hooks", "copilot-vscode", "--apply"]).unwrap();
+        let c = Cli::try_parse_from(["krypto", "install-hooks", "copilot-vscode", "--apply"]).unwrap();
         assert!(matches!(c.command, Command::InstallHooks { target: HookTargetArg::CopilotVscode, apply: true, .. }));
-        let c = Cli::try_parse_from(["pet-hub", "--port", "48000", "serve"]).unwrap();
+        let c = Cli::try_parse_from(["krypto", "--port", "48000", "serve"]).unwrap();
         assert_eq!(c.port, Some(48000));
     }
 

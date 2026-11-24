@@ -1,6 +1,6 @@
 // RelayLink: carries the normal hub protocol (ClientMsg/ServerMsg JSON) through the E2E-encrypted relay.
 //
-// `HubClient` from @ai-pet/hub-client only needs a WebSocket-shaped constructor (`WebSocketImpl`). RelayLink
+// `HubClient` from @krypto/hub-client only needs a WebSocket-shaped constructor (`WebSocketImpl`). RelayLink
 // hands it `SocketImpl`, a class whose instances look like a WebSocket to HubClient but actually:
 //   - dial `wss://<relay>/v1/connect?role=device&hubId=..&deviceId=..`
 //   - wrap every outgoing protocol frame in `{t:"msg", from: deviceId, to: hubId, nonce, box}` (nacl.box)

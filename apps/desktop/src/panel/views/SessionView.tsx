@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { HubEvent } from "@ai-pet/protocol";
+import type { HubEvent } from "@krypto/protocol";
 import {
   SOURCE_LABEL,
   STATUS_META,

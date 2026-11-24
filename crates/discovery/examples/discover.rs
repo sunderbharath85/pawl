@@ -1,6 +1,6 @@
 //! Print discovered agents as JSON.
-//! `cargo run -p pet-discovery --example discover -- [cache_dir] [--offline]`
-use pet_discovery::{discover, DiscoveryConfig};
+//! `cargo run -p krypto-discovery --example discover -- [cache_dir] [--offline]`
+use krypto_discovery::{discover, DiscoveryConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -10,7 +10,7 @@ async fn main() -> anyhow::Result<()> {
         .iter()
         .find(|a| !a.starts_with("--"))
         .map(std::path::PathBuf::from)
-        .or_else(pet_protocol::data_dir)
+        .or_else(krypto_protocol::data_dir)
         .ok_or_else(|| anyhow::anyhow!("no cache dir"))?;
     let agents = discover(&DiscoveryConfig { cache_dir, custom_agents: vec![], offline }).await?;
     println!("{}", serde_json::to_string_pretty(&agents)?);

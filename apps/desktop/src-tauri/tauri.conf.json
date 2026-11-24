@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AI Pet Hub",
+  "productName": "Krypto",
   "version": "0.1.0",
-  "identifier": "dev.aipet.hub.desktop",
+  "identifier": "dev.krypto.desktop",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -15,7 +15,7 @@
     "windows": [
       {
         "label": "panel",
-        "title": "AI Pet Hub",
+        "title": "Krypto",
         "url": "panel.html",
         "width": 1120,
         "height": 740,

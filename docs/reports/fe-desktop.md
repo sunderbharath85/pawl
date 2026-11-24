@@ -1,3 +1,5 @@
+Renamed to Krypto on 2026-11-23; names below are pre-rename.
+
 # fe-desktop report: `apps/desktop` (@ai-pet/desktop)
 
 Tauri 2 + React 19 + TypeScript + Vite 8 desktop dog (PLAN.md "Desktop dog", build-order step 2).

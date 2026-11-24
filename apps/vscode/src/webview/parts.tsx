@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { SPECIES_META } from "@ai-pet/pet-engine";
+import { SPECIES_META } from "@krypto/pet-engine";
 import {
   DEFAULT_SPECIES,
   type Agent,
@@ -11,7 +11,7 @@ import {
   type Session,
   type SessionStatus,
   type ToolLocation,
-} from "@ai-pet/protocol";
+} from "@krypto/protocol";
 import type { ConnInfo } from "../shared/messages";
 import { buildTranscript, type TranscriptItem } from "./transcript";
 import { post } from "./vscodeApi";

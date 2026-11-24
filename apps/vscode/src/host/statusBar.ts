@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
-import type { HubState } from "@ai-pet/hub-client";
-import { SPECIES_META } from "@ai-pet/pet-engine";
-import { DEFAULT_SPECIES } from "@ai-pet/protocol";
+import type { HubState } from "@krypto/hub-client";
+import { SPECIES_META } from "@krypto/pet-engine";
+import { DEFAULT_SPECIES } from "@krypto/protocol";
 import type { HubConnection } from "./connection";
 import { ACTIVITY_LABEL, petViewsOf, primaryView } from "./petViews";
 import { agentName, isBusy } from "./util";
@@ -17,9 +17,9 @@ export class PetStatusBar implements vscode.Disposable {
   private lastHasPending: boolean | null = null;
 
   constructor(private readonly hub: HubConnection) {
-    this.item = vscode.window.createStatusBarItem("ai-pet.status", vscode.StatusBarAlignment.Right, 100);
-    this.item.name = "AI Pet";
-    this.item.command = "ai-pet.showPet";
+    this.item = vscode.window.createStatusBarItem("krypto.status", vscode.StatusBarAlignment.Right, 100);
+    this.item.name = "Krypto";
+    this.item.command = "krypto.showPet";
     this.disposables.push(this.item, hub.onState(() => this.render()));
     this.timer = setInterval(() => this.render(), TICK_MS);
     this.render();
@@ -33,7 +33,7 @@ export class PetStatusBar implements vscode.Disposable {
     const hasPending = conn.status === "connected" && pendingCount > 0;
     if (hasPending !== this.lastHasPending) {
       this.lastHasPending = hasPending;
-      void vscode.commands.executeCommand("setContext", "ai-pet.hasPending", hasPending);
+      void vscode.commands.executeCommand("setContext", "krypto.hasPending", hasPending);
     }
 
     if (conn.status !== "connected") {
@@ -46,7 +46,7 @@ export class PetStatusBar implements vscode.Disposable {
         this.item.tooltip = this.offlineTooltip(conn.status === "unauthorized", conn.missingToken);
       } else {
         this.item.text = `$(sync~spin) ${SPECIES_META[DEFAULT_SPECIES].emoji}`;
-        this.item.tooltip = "AI Pet: connecting to the hub…";
+        this.item.tooltip = "Krypto: connecting to the hub…";
       }
       return;
     }
@@ -69,12 +69,12 @@ export class PetStatusBar implements vscode.Disposable {
 
   private offlineTooltip(unauthorized: boolean, missingToken: boolean): vscode.MarkdownString {
     const md = new vscode.MarkdownString(undefined, true);
-    md.isTrusted = { enabledCommands: ["ai-pet.startHub", "ai-pet.reconnect", "ai-pet.showPet"] };
-    md.appendMarkdown("**AI Pet — hub offline**\n\n");
+    md.isTrusted = { enabledCommands: ["krypto.startHub", "krypto.reconnect", "krypto.showPet"] };
+    md.appendMarkdown("**Krypto — hub offline**\n\n");
     if (unauthorized) md.appendMarkdown("The hub rejected our token. It may have been regenerated.\n\n");
     else if (missingToken) md.appendMarkdown("No hub token yet — the hub has never run on this machine.\n\n");
     else md.appendMarkdown("Reconnecting quietly in the background.\n\n");
-    md.appendMarkdown("[$(play) Start hub](command:ai-pet.startHub) · [$(refresh) Retry](command:ai-pet.reconnect) · [Show pet](command:ai-pet.showPet)");
+    md.appendMarkdown("[$(play) Start hub](command:krypto.startHub) · [$(refresh) Retry](command:krypto.reconnect) · [Show pet](command:krypto.showPet)");
     return md;
   }
 
@@ -85,8 +85,8 @@ export class PetStatusBar implements vscode.Disposable {
     busy: number,
   ): vscode.MarkdownString {
     const md = new vscode.MarkdownString(undefined, true);
-    md.isTrusted = { enabledCommands: ["ai-pet.showPet", "ai-pet.approvePending", "ai-pet.denyPending", "ai-pet.startSession"] };
-    md.appendMarkdown("**AI Pet**\n\n");
+    md.isTrusted = { enabledCommands: ["krypto.showPet", "krypto.approvePending", "krypto.denyPending", "krypto.startSession"] };
+    md.appendMarkdown("**Krypto**\n\n");
     if (views.length === 0) md.appendMarkdown(`${SPECIES_META[DEFAULT_SPECIES].emoji} No pets yet — start a session.\n\n`);
     for (const v of views) {
       const name = agentName(state.agents, v.agentId);
@@ -95,11 +95,11 @@ export class PetStatusBar implements vscode.Disposable {
     md.appendMarkdown(`${busy} busy session${busy === 1 ? "" : "s"}`);
     if (pendingCount > 0) {
       md.appendMarkdown(` · **${pendingCount} waiting for approval**\n\n`);
-      md.appendMarkdown("[$(check) Approve](command:ai-pet.approvePending) · [$(close) Deny](command:ai-pet.denyPending) · ");
+      md.appendMarkdown("[$(check) Approve](command:krypto.approvePending) · [$(close) Deny](command:krypto.denyPending) · ");
     } else {
       md.appendMarkdown("\n\n");
     }
-    md.appendMarkdown("[Show pet](command:ai-pet.showPet) · [$(add) Start session](command:ai-pet.startSession)");
+    md.appendMarkdown("[Show pet](command:krypto.showPet) · [$(add) Start session](command:krypto.startSession)");
     return md;
   }
 

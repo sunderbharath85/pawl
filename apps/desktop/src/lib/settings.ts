@@ -11,7 +11,7 @@ export interface DesktopSettings {
   lastAgentId: string;
 }
 
-const KEY = "aipet.desktop.settings.v1";
+const KEY = "krypto.desktop.settings.v1";
 
 export const DEFAULT_SETTINGS: DesktopSettings = {
   notifyPermissions: true,
@@ -40,7 +40,7 @@ export function writeSettings(patch: Partial<DesktopSettings>): DesktopSettings 
   } catch {
     /* storage full/disabled: keep in-memory only */
   }
-  window.dispatchEvent(new CustomEvent("aipet-settings", { detail: next }));
+  window.dispatchEvent(new CustomEvent("krypto-settings", { detail: next }));
   return next;
 }
 
@@ -53,10 +53,10 @@ export function useSettings(): [DesktopSettings, (patch: Partial<DesktopSettings
     };
     const onLocal = () => setSettings(readSettings());
     window.addEventListener("storage", onStorage);
-    window.addEventListener("aipet-settings", onLocal);
+    window.addEventListener("krypto-settings", onLocal);
     return () => {
       window.removeEventListener("storage", onStorage);
-      window.removeEventListener("aipet-settings", onLocal);
+      window.removeEventListener("krypto-settings", onLocal);
     };
   }, []);
   const update = useCallback((patch: Partial<DesktopSettings>) => setSettings(writeSettings(patch)), []);

@@ -1,14 +1,14 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
-import { SPECIES_META } from "@ai-pet/pet-engine";
-import type { Agent, PermissionRequest, Pet, Session, Species } from "@ai-pet/protocol";
+import { SPECIES_META } from "@krypto/pet-engine";
+import type { Agent, PermissionRequest, Pet, Session, Species } from "@krypto/protocol";
 import { HubOfflineError, type HubConnection } from "./connection";
 import { installHooks, startHub, type HookTargetId } from "./hubProcess";
 import type { PetWebviews } from "./petView";
 import { agentName, errorMessage, isBusy, isInWorkspace, isOpen, relativeTime, sessionLabel } from "./util";
 
-const LAST_AGENT_KEY = "ai-pet.lastAgentId";
-const LAST_CWD_KEY = "ai-pet.lastCwd";
+const LAST_AGENT_KEY = "krypto.lastAgentId";
+const LAST_CWD_KEY = "krypto.lastCwd";
 
 type SessionItem = vscode.QuickPickItem & { session: Session };
 type RequestItem = vscode.QuickPickItem & { request: PermissionRequest };
@@ -31,29 +31,29 @@ export class Commands {
         }
       });
     return [
-      reg("ai-pet.startSession", (agentId?: string, cwd?: string, prompt?: string) => this.startSession(agentId, cwd, prompt)),
-      reg("ai-pet.promptSession", (sessionId?: string, text?: string) => this.promptSession(sessionId, text)),
-      reg("ai-pet.cancelSession", (sessionId?: string) => this.cancelSession(sessionId)),
-      reg("ai-pet.approvePending", (requestId?: string) => this.resolvePending(true, requestId)),
-      reg("ai-pet.denyPending", (requestId?: string) => this.resolvePending(false, requestId)),
-      reg("ai-pet.showPet", (sessionId?: string) => this.showPet(sessionId)),
-      reg("ai-pet.openPetPanel", () => this.views.openPanel()),
-      reg("ai-pet.changeSpecies", (petId?: string, species?: Species) => this.changeSpecies(petId, species)),
-      reg("ai-pet.installHooks", (target?: HookTargetId) => installHooks(this.log, target)),
-      reg("ai-pet.startHub", () => startHub(this.hub, this.log)),
-      reg("ai-pet.reconnect", () => this.hub.restart()),
+      reg("krypto.startSession", (agentId?: string, cwd?: string, prompt?: string) => this.startSession(agentId, cwd, prompt)),
+      reg("krypto.promptSession", (sessionId?: string, text?: string) => this.promptSession(sessionId, text)),
+      reg("krypto.cancelSession", (sessionId?: string) => this.cancelSession(sessionId)),
+      reg("krypto.approvePending", (requestId?: string) => this.resolvePending(true, requestId)),
+      reg("krypto.denyPending", (requestId?: string) => this.resolvePending(false, requestId)),
+      reg("krypto.showPet", (sessionId?: string) => this.showPet(sessionId)),
+      reg("krypto.openPetPanel", () => this.views.openPanel()),
+      reg("krypto.changeSpecies", (petId?: string, species?: Species) => this.changeSpecies(petId, species)),
+      reg("krypto.installHooks", (target?: HookTargetId) => installHooks(this.log, target)),
+      reg("krypto.startHub", () => startHub(this.hub, this.log)),
+      reg("krypto.reconnect", () => this.hub.restart()),
     ];
   }
 
   reportError(err: unknown): void {
     if (err instanceof HubOfflineError) {
       void vscode.window.showWarningMessage(err.message, "Start Hub").then((pick) => {
-        if (pick === "Start Hub") void vscode.commands.executeCommand("ai-pet.startHub");
+        if (pick === "Start Hub") void vscode.commands.executeCommand("krypto.startHub");
       });
       return;
     }
     this.log.error(errorMessage(err));
-    void vscode.window.showErrorMessage(`AI Pet: ${errorMessage(err)}`);
+    void vscode.window.showErrorMessage(`Krypto: ${errorMessage(err)}`);
   }
 
   async showPet(sessionId?: string): Promise<void> {
@@ -72,7 +72,7 @@ export class Commands {
     let text = typeof prompt === "string" ? prompt : undefined;
     if (text === undefined) {
       text = await vscode.window.showInputBox({
-        title: `AI Pet: Start ${agent.name} in ${path.basename(dir) || dir}`,
+        title: `Krypto: Start ${agent.name} in ${path.basename(dir) || dir}`,
         prompt: "What should the agent do? (leave empty to start an idle session)",
         placeHolder: "e.g. run the tests and fix what fails",
         ignoreFocusOut: true,
@@ -82,7 +82,7 @@ export class Commands {
     await this.context.globalState.update(LAST_AGENT_KEY, agent.id);
     await this.context.globalState.update(LAST_CWD_KEY, dir);
     const session = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `AI Pet: starting ${agent.name}…` },
+      { location: vscode.ProgressLocation.Notification, title: `Krypto: starting ${agent.name}…` },
       () => api.startSession(agent.id, dir, text?.trim() ? text.trim() : undefined),
     );
     this.log.info(`started session ${session.id} (${agent.id}) in ${dir}`);
@@ -102,11 +102,11 @@ export class Commands {
       agents.push(...refreshed);
     }
     if (agents.length === 0) {
-      void vscode.window.showWarningMessage("AI Pet: the hub found no agents. Install an ACP agent (e.g. Claude Code or Codex) and try again.");
+      void vscode.window.showWarningMessage("Krypto: the hub found no agents. Install an ACP agent (e.g. Claude Code or Codex) and try again.");
       return undefined;
     }
     const preferred =
-      vscode.workspace.getConfiguration("ai-pet").get<string>("defaultAgent")?.trim() ||
+      vscode.workspace.getConfiguration("krypto").get<string>("defaultAgent")?.trim() ||
       this.context.globalState.get<string>(LAST_AGENT_KEY);
     agents.sort((a, b) => {
       if (a.id === preferred) return -1;
@@ -125,7 +125,7 @@ export class Commands {
       };
     });
     const pick = await vscode.window.showQuickPick(items, {
-      title: "AI Pet: Start Session",
+      title: "Krypto: Start Session",
       placeHolder: "Which agent?",
       matchOnDescription: true,
       matchOnDetail: true,
@@ -146,7 +146,7 @@ export class Commands {
       canSelectFolders: true,
       canSelectMany: false,
       openLabel: "Use as working directory",
-      title: "AI Pet: working directory for the agent",
+      title: "Krypto: working directory for the agent",
       defaultUri: last ? vscode.Uri.file(last) : undefined,
     });
     return chosen?.[0]?.fsPath;
@@ -174,7 +174,7 @@ export class Commands {
   private async pickSession(title: string, filter: (s: Session) => boolean, empty: string): Promise<Session | undefined> {
     const items = this.sessionItems(filter);
     if (items.length === 0) {
-      void vscode.window.showInformationMessage(`AI Pet: ${empty}`);
+      void vscode.window.showInformationMessage(`Krypto: ${empty}`);
       return undefined;
     }
     if (items.length === 1) return items[0].session;
@@ -188,9 +188,9 @@ export class Commands {
       typeof sessionId === "string" && sessionId
         ? this.hub.state.sessions[sessionId]
         : await this.pickSession(
-            "AI Pet: Prompt Session",
+            "Krypto: Prompt Session",
             (s) => s.source === "owned" && isOpen(s),
-            "no open sessions started by the pet. Use “AI Pet: Start Session” first.",
+            "no open sessions started by the pet. Use “Krypto: Start Session” first.",
           );
     if (!session) return;
     if (session.source !== "owned") {
@@ -199,7 +199,7 @@ export class Commands {
     let message = typeof text === "string" ? text : undefined;
     if (message === undefined) {
       message = await vscode.window.showInputBox({
-        title: `AI Pet: Prompt ${sessionLabel(session, this.hub.state.agents)}`,
+        title: `Krypto: Prompt ${sessionLabel(session, this.hub.state.agents)}`,
         prompt: isBusy(session) ? "The agent is busy; your message is sent as the next prompt." : undefined,
         placeHolder: "Message for the agent",
         ignoreFocusOut: true,
@@ -214,10 +214,10 @@ export class Commands {
     const session =
       typeof sessionId === "string" && sessionId
         ? this.hub.state.sessions[sessionId]
-        : await this.pickSession("AI Pet: Cancel Session", (s) => s.source === "owned" && isBusy(s), "nothing to cancel — no busy sessions.");
+        : await this.pickSession("Krypto: Cancel Session", (s) => s.source === "owned" && isBusy(s), "nothing to cancel — no busy sessions.");
     if (!session) return;
     await api.cancel(session.id);
-    void vscode.window.setStatusBarMessage(`AI Pet: cancelled ${agentName(this.hub.state.agents, session.agentId)}`, 3000);
+    void vscode.window.setStatusBarMessage(`Krypto: cancelled ${agentName(this.hub.state.agents, session.agentId)}`, 3000);
   }
 
   // ---------------- approvals ----------------
@@ -230,7 +230,7 @@ export class Commands {
     if (!req) {
       const pending = Object.values(state.pending).sort((a, b) => a.createdAt - b.createdAt);
       if (pending.length === 0) {
-        void vscode.window.showInformationMessage("AI Pet: nothing is waiting for approval.");
+        void vscode.window.showInformationMessage("Krypto: nothing is waiting for approval.");
         return;
       }
       if (pending.length === 1) req = pending[0];
@@ -242,7 +242,7 @@ export class Commands {
           detail: request.toolCall.locations?.map((l) => l.path).join(", "),
         }));
         const pick = await vscode.window.showQuickPick(items, {
-          title: approve ? "AI Pet: Approve Pending" : "AI Pet: Deny Pending",
+          title: approve ? "Krypto: Approve Pending" : "Krypto: Deny Pending",
           placeHolder: approve ? "Approve which request?" : "Deny which request?",
           matchOnDetail: true,
         });
@@ -263,7 +263,7 @@ export class Commands {
     let pet: Pet | undefined = typeof petId === "string" && petId ? state.pets[petId] : undefined;
     if (!pet) {
       if (pets.length === 0) {
-        void vscode.window.showInformationMessage("AI Pet: no pets yet — each agent gets one when the hub discovers it.");
+        void vscode.window.showInformationMessage("Krypto: no pets yet — each agent gets one when the hub discovers it.");
         return;
       }
       if (pets.length === 1) pet = pets[0];
@@ -274,7 +274,7 @@ export class Commands {
             label: `${SPECIES_META[p.species].emoji} ${p.name}`,
             description: agentName(state.agents, p.agentId),
           })),
-          { title: "AI Pet: Change Pet Species", placeHolder: "Which pet?" },
+          { title: "Krypto: Change Pet Species", placeHolder: "Which pet?" },
         );
         pet = pick?.pet;
       }
@@ -289,12 +289,12 @@ export class Commands {
           label: `${SPECIES_META[s].emoji} ${SPECIES_META[s].label}`,
           description: s === chosen.species ? "current" : undefined,
         })),
-        { title: `AI Pet: ${chosen.name} should be a…`, placeHolder: "Pick a species" },
+        { title: `Krypto: ${chosen.name} should be a…`, placeHolder: "Pick a species" },
       );
       next = pick?.species;
     }
     if (!next || next === chosen.species) return;
     const updated = await api.updatePet(chosen.id, { species: next });
-    void vscode.window.setStatusBarMessage(`AI Pet: ${updated.name} is now a ${SPECIES_META[updated.species].label.toLowerCase()} ${SPECIES_META[updated.species].emoji}`, 4000);
+    void vscode.window.setStatusBarMessage(`Krypto: ${updated.name} is now a ${SPECIES_META[updated.species].label.toLowerCase()} ${SPECIES_META[updated.species].emoji}`, 4000);
   }
 }

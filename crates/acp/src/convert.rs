@@ -1,7 +1,7 @@
-//! Pure conversions from ACP v1 schema types to `pet-protocol` wire payloads.
+//! Pure conversions from ACP v1 schema types to `krypto-protocol` wire payloads.
 
 use agent_client_protocol::v1::schema as acp;
-use pet_protocol as pp;
+use krypto_protocol as pp;
 
 /// Render one content block as plain text for the event log.
 ///

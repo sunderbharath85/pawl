@@ -1,3 +1,5 @@
+Renamed to Krypto on 2026-11-23; names below are pre-rename.
+
 # sde-hub report: `crates/hub` (`pet-hub`, binary and lib)
 
 Status: **DONE**.

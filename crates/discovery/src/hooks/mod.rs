@@ -3,10 +3,10 @@
 //!
 //! Flow: agent fires a hook -> runs `<hub_exe> hook <source>` (stdin JSON, or for Codex
 //! `notify` the JSON as the last argv) -> [`run_hook_cli`] / [`forward`] adds a small
-//! `_ai_pet` block (origin hints from the hook process env, never secrets) and POSTs to
+//! `_krypto` block (origin hints from the hook process env, never secrets) and POSTs to
 //! `{hub}/hooks/{source}` -> the hub calls [`normalize`].
 
-use pet_protocol::{AgentId, EventType, HookPayload, HookSource, NotificationLevel, SessionSource, SessionStatus};
+use krypto_protocol::{AgentId, EventType, HookPayload, HookSource, NotificationLevel, SessionSource, SessionStatus};
 use serde_json::{json, Map, Value};
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
@@ -18,9 +18,9 @@ mod normalize;
 pub use install::{install_with_home, InstallEnv};
 
 /// Key of the metadata object `forward` adds to the raw hook JSON.
-pub const META_KEY: &str = "_ai_pet";
+pub const META_KEY: &str = "_krypto";
 /// Env var the Copilot hook entries set so camelCase payloads (no event name) stay identifiable.
-pub const HOOK_EVENT_ENV: &str = "AI_PET_HOOK_EVENT";
+pub const HOOK_EVENT_ENV: &str = "KRYPTO_HUB_HOOK_EVENT";
 /// Hard cap on hook input read from stdin.
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
@@ -54,14 +54,14 @@ pub enum HookTarget {
     Claude,
     /// `~/.codex/config.toml` `notify` (+ Codex lifecycle hooks), `$CODEX_HOME` honoured
     Codex,
-    /// `~/.copilot/hooks/ai-pet.json` (`$COPILOT_HOME` honoured)
+    /// `~/.copilot/hooks/krypto.json` (`$COPILOT_HOME` honoured)
     CopilotCli,
-    /// `<repo>/.github/hooks/ai-pet.json` (VS Code Copilot agent hooks)
+    /// `<repo>/.github/hooks/krypto.json` (VS Code Copilot agent hooks)
     CopilotVscode { repo: PathBuf },
 }
 
 impl HookTarget {
-    /// Parse the `pet-hub install-hooks <target>` argument; `repo` is used by `copilot-vscode`.
+    /// Parse the `krypto install-hooks <target>` argument; `repo` is used by `copilot-vscode`.
     pub fn from_cli(name: &str, repo: impl Into<PathBuf>) -> Option<HookTarget> {
         match name.trim().to_ascii_lowercase().as_str() {
             "claude" | "claude-code" => Some(HookTarget::Claude),
@@ -128,14 +128,14 @@ fn env_meta_from(get: impl Fn(&str) -> Option<String>) -> Value {
     Value::Object(m)
 }
 
-/// Add the `_ai_pet` block (unless the payload already has one).
+/// Add the `_krypto` block (unless the payload already has one).
 pub fn enrich(raw: &mut Value) {
     if let Value::Object(m) = raw {
         m.entry(META_KEY.to_string()).or_insert_with(env_meta);
     }
 }
 
-/// Used by `pet-hub hook <source>`: POST raw hook JSON to `{hub_url}/hooks/{source}` with the
+/// Used by `krypto hook <source>`: POST raw hook JSON to `{hub_url}/hooks/{source}` with the
 /// bearer token, 2s total timeout. Errors are returned for logging; callers must not fail the
 /// agent because of them.
 pub async fn forward(source: HookSource, raw: serde_json::Value, hub_url: &str, token: &str) -> anyhow::Result<()> {
@@ -187,7 +187,7 @@ pub fn stdout_reply(source: HookSource, raw: &Value) -> Option<&'static str> {
     }
 }
 
-/// Complete `pet-hub hook <source> [payload...]` behaviour: read input, forward with the 2s
+/// Complete `krypto hook <source> [payload...]` behaviour: read input, forward with the 2s
 /// timeout, print the expected stdout reply. Never returns an error: hooks must not break or
 /// block the agent when the hub is down.
 pub async fn run_hook_cli(source: HookSource, extra_args: &[String], hub_url: &str, token: &str) {

@@ -1,4 +1,4 @@
-//! pet-protocol: Rust mirror of `packages/protocol/src/index.ts` (the source of truth).
+//! krypto-protocol: Rust mirror of `packages/protocol/src/index.ts` (the source of truth).
 //! JSON must be identical: struct fields camelCase, enum tags/values snake_case.
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const HUB_DEFAULT_PORT: u16 = 47800;
 pub const HUB_HOST: &str = "127.0.0.1";
-pub const HUB_DATA_DIR_NAME: &str = "ai-pet-hub";
+pub const HUB_DATA_DIR_NAME: &str = "krypto";
 pub const HUB_TOKEN_FILE: &str = "token";
 
 pub type AgentId = String;
@@ -24,7 +24,7 @@ pub fn now_ms() -> UnixMs {
         .unwrap_or(0)
 }
 
-/// `dirs::data_dir()/ai-pet-hub` (Win %APPDATA%\ai-pet-hub). Callers create it.
+/// `dirs::data_dir()/krypto` (Win %APPDATA%\krypto). Callers create it.
 pub fn data_dir() -> Option<std::path::PathBuf> {
     dirs::data_dir().map(|d| d.join(HUB_DATA_DIR_NAME))
 }

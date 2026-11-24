@@ -1,5 +1,5 @@
 // Pure ACP/hook event -> pet activity mapping (PLAN.md "Pet engine" table).
-import type { HookPayload, HubEvent, SessionStatus, StopPayload, ToolCallPayload, ToolKind } from "@ai-pet/protocol";
+import type { HookPayload, HubEvent, SessionStatus, StopPayload, ToolCallPayload, ToolKind } from "@krypto/protocol";
 
 export type PetActivity = "napping" | "idle" | "thinking" | "working" | "planning" | "alert" | "happy" | "sad";
 

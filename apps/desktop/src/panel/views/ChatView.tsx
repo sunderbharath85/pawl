@@ -1,5 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { SPECIES_META } from "@ai-pet/pet-engine";
+import { SPECIES_META } from "@krypto/pet-engine";
 import { agentName, clockTime, errorText } from "../../lib/format";
 import { petList } from "../../lib/pets";
 import { usePanel } from "../context";

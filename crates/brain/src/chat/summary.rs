@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use pet_protocol::{
+use krypto_protocol::{
     Agent, EventType, HookPayload, HubEvent, PermissionOutcome, PermissionRequest, PermissionResolvedPayload,
     PlanEntryStatus, PlanPayload, Session, SessionStatus, StopPayload, StopReason, ToolCallPayload, ToolCallStatus,
     ToolKind, UnixMs,
@@ -483,7 +483,7 @@ pub(crate) fn daily_report_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pet_protocol::SessionSource;
+    use krypto_protocol::SessionSource;
     use serde_json::json;
 
     fn ev(id: i64, kind: EventType, payload: Value) -> HubEvent {
@@ -496,7 +496,7 @@ mod tests {
             agent_id: "codex".into(),
             acp_session_id: None,
             external_id: None,
-            cwd: "E:\\work\\ai-pet".into(),
+            cwd: "E:\\work\\krypto".into(),
             title: Some("Fix tests".into()),
             source: SessionSource::Owned,
             status,
@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(f.last_message.as_deref(), Some("Running the tests now."));
         assert_eq!(f.plan, Some((1, 2, Some("fix failures".into()))));
         let s = deterministic_summary(&sess(SessionStatus::Working), &f, &[], &[], 10);
-        assert!(s.starts_with("Codex in ai-pet (“Fix tests”) is working on: Run cargo test."), "{s}");
+        assert!(s.starts_with("Codex in krypto (“Fix tests”) is working on: Run cargo test."), "{s}");
         assert!(s.contains("Plan: 1/2 done, next: fix failures."), "{s}");
         let digest = event_digest(&refs, 10);
         assert_eq!(digest[0], "user: run the tests");

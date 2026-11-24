@@ -1,4 +1,4 @@
-# AI Pet Hub — Plan v2.0 (multi-machine)
+# Krypto — Plan v2.0 (multi-machine)
 
 Named dog pets that watch and drive your coding agents over ACP (Agent Client Protocol), on every machine you code on.
 
@@ -14,7 +14,7 @@ Named dog pets that watch and drive your coding agents over ACP (Agent Client Pr
 - **End-to-end encryption.** Every hub↔hub and hub↔phone payload is encrypted; the relay only routes ciphertext.
 - **The dog is the default pet.** There is one pet per agent per machine. Cat, bird and robot are optional skins (art and SVG already exist; keep them, low priority).
 - **Every pet has a name.** It is auto-picked, unique across paired machines and user-editable. It shows above the pet everywhere and can be used in commands ("tell Biscuit to run the tests").
-- **The editor is VS Code.** VS Code has no native ACP support, so VS Code sessions are tracked through agent hooks plus the "Pet for VS Code" extension. A Zed/JetBrains wrapper is optional, later.
+- **The editor is VS Code.** VS Code has no native ACP support, so VS Code sessions are tracked through agent hooks plus the "Krypto for VS Code" extension. A Zed/JetBrains wrapper is optional, later.
 - **TypeScript toolchain: bun.** The hub is Rust, the desktop app is Tauri 2 + React, the phone app is Expo, and the relay runs on Cloudflare Workers + Durable Objects.
 
 ## Goal
@@ -62,7 +62,7 @@ Local ACP agents run as subprocesses of the client and talk JSON-RPC over stdio,
   - Your own dogs walk on the left; a **visitors** area on the right shows other machines' dogs, labelled "Biscuit · Mac mini".
   - When any dog's session needs approval, that dog runs onto whichever screen you're using (see Pet engine).
   - It also has a panel window for sessions, the feed, chat, approvals, pets and rules.
-- **Pet for VS Code (TypeScript extension):** shows pets in the status bar and a webview, handles approvals and commands, and opens edited files or diffs.
+- **Krypto for VS Code (TypeScript extension):** shows pets in the status bar and a webview, handles approvals and commands, and opens edited files or diffs.
   - It talks to its own machine's hub only; remote sessions show up through the hub's mirror.
 - **Phone app (Expo):** pairs by QR, gets push notifications, approves with biometrics, starts sessions on machine + repo, and chats with pets.
 - **Relay (Cloudflare Worker + Durable Object per pairing group):** routes encrypted frames between hubs and phones, and sends content-free push wakes (APNs/FCM via Expo).
@@ -82,7 +82,7 @@ Local ACP agents run as subprocesses of the client and talk JSON-RPC over stdio,
    - Copilot agent hooks in `.github/hooks/*.json`; Copilot CLI hooks in `~/.copilot/hooks/*.json`.
    - Codex hooks or `notify`.
    - Sessions in the vendors' own extensions can alert you, but their approvals stay in VS Code.
-3. **Terminal CLIs, including VS Code's integrated terminal:** Claude Code and Codex hooks POST to the hub on localhost through `pet-hub hook <source>`.
+3. **Terminal CLIs, including VS Code's integrated terminal:** Claude Code and Codex hooks POST to the hub on localhost through `krypto hook <source>`.
 4. **History:** `session/list` and `session/resume` (falling back to `session/load`), used only when the agent advertises the capability.
 
 ## Ownership and intents
@@ -182,24 +182,24 @@ One state machine with four skins, and one pet per agent per machine. Every pet 
 
 - **Hub:** Rust, using the official `agent-client-protocol` crate (5.x), axum 0.8, rusqlite and tokio.
 - **Desktop:** Tauri 2 + React 19 + Vite. **VS Code:** a TypeScript extension bundled with bun. **Phone:** Expo SDK 58 (Expo Router).
-- **Shared TS packages:** `@ai-pet/protocol` (wire types), `@ai-pet/hub-client`, `@ai-pet/pet-engine`.
+- **Shared TS packages:** `@krypto/protocol` (wire types), `@krypto/hub-client`, `@krypto/pet-engine`.
 - **Relay:** Cloudflare Workers + Durable Objects, with push through the Expo Push API (APNs/FCM).
 
 ## Repo layout (actual)
 
 ```
-ai-pet/
+ai-pet/                  # repo folder (name kept after the Krypto rename)
   apps/desktop/          # Tauri 2 shell + React (pet strip + panel + tray)
-  apps/vscode/           # Pet for VS Code
+  apps/vscode/           # Krypto for VS Code
   apps/mobile/           # Expo app (scaffold + relay/crypto libs; screens not built)
-  crates/protocol/       # pet-protocol: Rust mirror of the wire types
-  crates/acp/            # pet-acp: ACP client host (spawns agents, permission flow)
-  crates/discovery/      # pet-discovery: registry + install detection + hook normalize/forward/install
-  crates/brain/          # pet-brain: rules, chat intents, watchdog, pet growth
-  crates/hub/            # pet-hub: daemon + CLI (SQLite, core, axum server)
-  packages/protocol/     # @ai-pet/protocol: TS wire types (source of truth)
-  packages/hub-client/   # @ai-pet/hub-client: WS client + state (+ /react, /node)
-  packages/pet-engine/   # @ai-pet/pet-engine: activity logic + SVG/sprite pets (+ /react)
+  crates/protocol/       # krypto-protocol: Rust mirror of the wire types
+  crates/acp/            # krypto-acp: ACP client host (spawns agents, permission flow)
+  crates/discovery/      # krypto-discovery: registry + install detection + hook normalize/forward/install
+  crates/brain/          # krypto-brain: rules, chat intents, watchdog, pet growth
+  crates/hub/            # krypto-hub: daemon + `krypto` CLI (SQLite, core, axum server)
+  packages/protocol/     # @krypto/protocol: TS wire types (source of truth)
+  packages/hub-client/   # @krypto/hub-client: WS client + state (+ /react, /node)
+  packages/pet-engine/   # @krypto/pet-engine: activity logic + SVG/sprite pets (+ /react)
   assets/pets/           # sprite strips + manifest.json (dog, cat, bird, robot)
   scripts/art/           # Gemini sprite pipeline
   docs/CONTRACTS.md      # interface contracts (v1; to be revised in migration step 1)
@@ -225,18 +225,18 @@ ai-pet/
 
 Each step can ship and be tested on its own.
 
-0. **Baseline.** `git init` and a first commit of the v1 tree. Run every gate. Do one live smoke run of `pet-hub agents` and `pet-hub start claude-code` on the Windows PC. Also enforce the rules hard floor: execute, delete and fetch are never auto-allowed, and `set_rules` rejects rules that try.
+0. **Baseline.** `git init` and a first commit of the v1 tree. Run every gate. Do one live smoke run of `krypto agents` and `krypto start claude-code` on the Windows PC. Also enforce the rules hard floor: execute, delete and fetch are never auto-allowed, and `set_rules` rejects rules that try.
 1. **Machine identity (one hub, no networking).**
    - Add `Machine` and `machineId` to the protocol (TS + Rust) on Session, Event, Pet, PermissionRequest, Notification and Chat.
    - Make wire ids global. Run a store migration that adds `machine_id` and backfills the local machine.
-   - Add `pet-hub machine [--name "Windows PC"]`.
+   - Add `krypto machine [--name "Windows PC"]`.
    - Seed pet names from `machineId + agentId`.
    - Clients key everything by global id. The pet engine matches pets to sessions by `(machineId, agentId)`. Desktop shows names by default.
    - Test: unit tests, plus the existing desktop and VS Code working against one hub with no visible change except names.
 2. **Pairing + presence over the LAN (no relay).**
-   - Long-term device keys. `pet-hub peer invite` prints a one-time URI; `pet-hub peer join <uri>` on the other hub.
+   - Long-term device keys. `krypto peer invite` prints a one-time URI; `krypto peer join <uri>` on the other hub.
    - An opt-in peer listener on the LAN or Tailscale interface carries encrypted `presence` heartbeats both ways.
-   - Hubs show `machines` (online, lastSeen) in Welcome, the CLI (`pet-hub machines`) and the desktop panel.
+   - Hubs show `machines` (online, lastSeen) in Welcome, the CLI (`krypto machines`) and the desktop panel.
    - Test: two hubs on one PC (separate data dirs and ports), then the Mac mini and the Windows PC.
 3. **Mirror events + visitors.**
    - Owners stream `event` messages to peers, and peers keep a read-only mirror.

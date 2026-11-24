@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Agent } from "@ai-pet/protocol";
+import type { Agent } from "@krypto/protocol";
 import { errorText, shortPath } from "../../lib/format";
 import { isTauri } from "../../lib/native";
 import { useSettings } from "../../lib/settings";

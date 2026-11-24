@@ -1,5 +1,5 @@
 import { useCallback, useSyncExternalStore } from "react";
-import type { HubClient } from "@ai-pet/hub-client";
+import type { HubClient } from "@krypto/hub-client";
 import { getConnection, type ConnectionMeta, type HubConnection } from "./connection";
 
 export interface UseConnection {

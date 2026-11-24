@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { derivePetViews, lastSignificantEvents, type PetView } from "@ai-pet/pet-engine";
-import { PetStage } from "@ai-pet/pet-engine/react";
-import { DEFAULT_SPECIES, type Session } from "@ai-pet/protocol";
+import { derivePetViews, lastSignificantEvents, type PetView } from "@krypto/pet-engine";
+import { PetStage } from "@krypto/pet-engine/react";
+import { DEFAULT_SPECIES, type Session } from "@krypto/protocol";
 import type { ConnInfo, HostToWebview, SpritesInfo, WebviewHubState } from "../shared/messages";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ApprovalCard, ChatPanel, ConnBanner, SessionDetail, SessionList, Toasts, type Toast } from "./parts";
@@ -20,7 +20,7 @@ const EMPTY_STATE: WebviewHubState = {
 
 /** Shown while offline or before any pet exists: the default dog, asleep in its bed. */
 const SLEEPY_DOG: PetView = {
-  petId: "__ai-pet-placeholder",
+  petId: "__krypto-placeholder",
   agentId: "",
   species: DEFAULT_SPECIES,
   name: "Pet",
@@ -121,7 +121,7 @@ export function App() {
       const derived = derivePetViews({ pets, sessions, pending, lastEvents, now });
       return derived.length > 0 ? derived : [SLEEPY_DOG];
     } catch (err) {
-      console.error("[ai-pet] derivePetViews failed", err);
+      console.error("[krypto] derivePetViews failed", err);
       return [SLEEPY_DOG];
     }
   }, [connected, pets, sessions, pending, lastEvents, now]);

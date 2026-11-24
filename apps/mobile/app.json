@@ -1,22 +1,22 @@
 {
   "expo": {
-    "name": "AI Pet Hub",
-    "slug": "ai-pet-hub",
+    "name": "Krypto",
+    "slug": "krypto",
     "version": "0.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "aipet",
+    "scheme": "krypto",
     "userInterfaceStyle": "automatic",
     "platforms": ["ios", "android"],
     "ios": {
-      "bundleIdentifier": "dev.aipet.hub",
+      "bundleIdentifier": "dev.krypto.mobile",
       "supportsTablet": true,
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
-      "package": "dev.aipet.hub",
+      "package": "dev.krypto.mobile",
       "adaptiveIcon": {
         "backgroundColor": "#FFF4E6",
         "foregroundImage": "./assets/images/adaptive-icon.png"
@@ -40,7 +40,7 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "AI Pet Hub uses the camera to scan the pairing QR code shown by your desktop hub.",
+          "cameraPermission": "Krypto uses the camera to scan the pairing QR code shown by your desktop hub.",
           "microphonePermission": false,
           "recordAudioAndroid": false
         }
@@ -48,7 +48,7 @@
       [
         "expo-local-authentication",
         {
-          "faceIDPermission": "AI Pet Hub asks for Face ID before approving an agent's request from your phone."
+          "faceIDPermission": "Krypto asks for Face ID before approving an agent's request from your phone."
         }
       ],
       [

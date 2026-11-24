@@ -1,23 +1,23 @@
 [package]
-name = "pet-hub"
+name = "krypto-hub"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AI Pet Hub daemon: ACP host, session store, rules, WebSocket + hook endpoints, CLI"
+description = "Krypto hub daemon: ACP host, session store, rules, WebSocket + hook endpoints, CLI"
 
 [lib]
-name = "pet_hub"
+name = "krypto_hub"
 path = "src/lib.rs"
 
 [[bin]]
-name = "pet-hub"
+name = "krypto"
 path = "src/main.rs"
 
 [dependencies]
-pet-protocol = { workspace = true }
-pet-acp = { workspace = true }
-pet-discovery = { workspace = true }
-pet-brain = { workspace = true }
+krypto-protocol = { workspace = true }
+krypto-acp = { workspace = true }
+krypto-discovery = { workspace = true }
+krypto-brain = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

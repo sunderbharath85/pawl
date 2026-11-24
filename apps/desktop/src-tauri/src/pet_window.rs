@@ -77,7 +77,7 @@ fn apply_geometry<R: Runtime>(win: &WebviewWindow<R>, geo: Geometry) {
 /// Create the pet window (hidden until anchored) and start the cursor poller.
 pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let win = WebviewWindowBuilder::new(app, PET_LABEL, WebviewUrl::App("index.html".into()))
-        .title("AI Pet")
+        .title("Krypto")
         .transparent(true)
         .decorations(false)
         .shadow(false)

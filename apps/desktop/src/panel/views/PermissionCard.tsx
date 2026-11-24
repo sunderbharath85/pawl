@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { PermissionOption, PermissionRequest } from "@ai-pet/protocol";
+import type { PermissionOption, PermissionRequest } from "@krypto/protocol";
 import {
   TOOL_KIND_ICON,
   agentName,

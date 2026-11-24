@@ -1,6 +1,6 @@
 //! Small shared helpers: hashing, paths, text and time formatting, agent names.
 
-use pet_protocol::{Agent, UnixMs};
+use krypto_protocol::{Agent, UnixMs};
 
 /// Stable 64-bit FNV-1a hash (std's `DefaultHasher` is not stable across releases).
 pub(crate) fn fnv1a(s: &str) -> u64 {

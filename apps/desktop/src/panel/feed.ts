@@ -12,7 +12,7 @@ import type {
   ToolCallStatus,
   ToolKind,
   ToolLocation,
-} from "@ai-pet/protocol";
+} from "@krypto/protocol";
 
 export type FeedItem =
   | { kind: "text"; key: string; role: "agent" | "thought" | "user"; text: string; ts: number }

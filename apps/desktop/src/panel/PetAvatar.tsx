@@ -1,6 +1,6 @@
-import { PetSprite } from "@ai-pet/pet-engine/react";
-import { SPECIES_META, petLine, type PetActivity } from "@ai-pet/pet-engine";
-import type { Species } from "@ai-pet/protocol";
+import { PetSprite } from "@krypto/pet-engine/react";
+import { SPECIES_META, petLine, type PetActivity } from "@krypto/pet-engine";
+import type { Species } from "@krypto/protocol";
 import { ErrorBoundary } from "../lib/ErrorBoundary";
 import { usePanel } from "./context";
 

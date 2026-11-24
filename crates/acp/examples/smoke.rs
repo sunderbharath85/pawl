@@ -1,21 +1,21 @@
-//! Smoke test for pet-acp against a real ACP agent.
+//! Smoke test for krypto-acp against a real ACP agent.
 //!
 //! Starts the given agent command in a working directory, sends one prompt,
 //! prints every `HostEvent` as it arrives and cancels all permission requests
 //! (so the agent cannot change anything). Exits when the turn ends.
 //!
 //! ```text
-//! cargo run -p pet-acp --example smoke -- [--cwd DIR] [--prompt TEXT] [--timeout SECS] -- <command> [args...]
-//! cargo run -p pet-acp --example smoke -- --cwd . --prompt "Say hi" -- npx -y @agentclientprotocol/claude-agent-acp
+//! cargo run -p krypto-acp --example smoke -- [--cwd DIR] [--prompt TEXT] [--timeout SECS] -- <command> [args...]
+//! cargo run -p krypto-acp --example smoke -- --cwd . --prompt "Say hi" -- npx -y @agentclientprotocol/claude-agent-acp
 //! ```
 //!
-//! Set `RUST_LOG=pet_acp=debug` to see the agent's stderr.
+//! Set `RUST_LOG=krypto_acp=debug` to see the agent's stderr.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use pet_acp::{AcpHost, HostEvent};
-use pet_protocol::{Agent, AgentSource, EventType};
+use krypto_acp::{AcpHost, HostEvent};
+use krypto_protocol::{Agent, AgentSource, EventType};
 
 struct Args {
     cwd: PathBuf,
@@ -80,7 +80,7 @@ fn describe(ev: &HostEvent) -> String {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "pet_acp=info".into()))
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "krypto_acp=info".into()))
         .with_writer(std::io::stderr)
         .init();
     let args = parse_args();

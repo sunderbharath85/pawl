@@ -241,7 +241,7 @@ async fn fetch(url: &str, etag: Option<&str>) -> anyhow::Result<FetchOutcome> {
     let client = reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
         .connect_timeout(Duration::from_secs(5))
-        .user_agent(concat!("ai-pet-hub/", env!("CARGO_PKG_VERSION"), " (pet-discovery)"))
+        .user_agent(concat!("krypto/", env!("CARGO_PKG_VERSION"), " (krypto-discovery)"))
         .build()?;
     let mut req = client.get(url).header(reqwest::header::ACCEPT, "application/json");
     if let Some(tag) = etag {

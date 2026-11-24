@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@ai-pet/art",
+      "name": "@krypto/art",
       "dependencies": {
         "sharp": "^0.35.5",
       },

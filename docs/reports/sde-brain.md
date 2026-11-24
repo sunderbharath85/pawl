@@ -1,3 +1,5 @@
+Renamed to Krypto on 2026-11-23; names below are pre-rename.
+
 # sde-brain report — crate `pet-brain` (`crates/brain/`)
 
 Status: **DONE** (rev 3: security floor). Gate `cargo test -p pet-brain` passes (54 tests); `cargo clippy -p pet-brain --all-targets` is clean; `cargo check -p pet-hub` builds (it already calls `validate_rules`). No new dependencies.

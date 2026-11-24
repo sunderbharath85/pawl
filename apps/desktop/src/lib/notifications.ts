@@ -1,9 +1,9 @@
 // OS notifications (tauri-plugin-notification) for permission requests, turn
 // completions and hub `notification` messages. Attached once, in the pet window.
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import type { HubClient } from "@ai-pet/hub-client";
-import { SPECIES_META } from "@ai-pet/pet-engine";
-import type { StopPayload } from "@ai-pet/protocol";
+import type { HubClient } from "@krypto/hub-client";
+import { SPECIES_META } from "@krypto/pet-engine";
+import type { StopPayload } from "@krypto/protocol";
 import { isTauri } from "./native";
 import { readSettings } from "./settings";
 import { agentName, permissionSummary, sessionTitle } from "./format";

@@ -1,3 +1,5 @@
+Renamed to Krypto on 2026-11-23; names below are pre-rename.
+
 # sde-discovery report: `crates/discovery` (`pet-discovery`)
 
 Status: **DONE**. `cargo test -p pet-discovery` passes: 31 tests. `cargo clippy -p pet-discovery --all-targets` is clean. No `todo!()` stubs are left.

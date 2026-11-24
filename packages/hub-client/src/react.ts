@@ -1,4 +1,4 @@
-// @ai-pet/hub-client/react — React binding (React >= 18).
+// @krypto/hub-client/react — React binding (React >= 18).
 import { useCallback, useSyncExternalStore } from "react";
 import type { HubClient } from "./client";
 import type { HubState } from "./state";

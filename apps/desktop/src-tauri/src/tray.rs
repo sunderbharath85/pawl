@@ -21,11 +21,11 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let pause = CheckMenuItem::with_id(app, ID_PAUSE, "Pause pets", true, false, None::<&str>)?;
     let start_hub = MenuItem::with_id(app, ID_START_HUB, "Start hub", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, ID_QUIT, "Quit AI Pet Hub", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, ID_QUIT, "Quit Krypto", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &pause, &start_hub, &sep, &quit])?;
 
     let mut builder = TrayIconBuilder::with_id("main")
-        .tooltip("AI Pet Hub")
+        .tooltip("Krypto")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {

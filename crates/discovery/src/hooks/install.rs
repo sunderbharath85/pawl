@@ -80,12 +80,21 @@ const COPILOT_EVENTS: &[&str] = &[
 
 // ---------- hub command rendering ----------
 
+/// Hub binary name. A hook entry whose command mentions it counts as ours even when the hub
+/// running `install-hooks` now has another file name (e.g. a renamed dev copy).
+const HUB_BIN_NAME: &str = "krypto";
+
 struct HubCmd {
     exe: PathBuf,
     stem: String,
 }
 
 impl HubCmd {
+    /// Does this (lowercased, `/`-separated) command text invoke a hub executable?
+    fn names_hub(&self, text: &str) -> bool {
+        text.contains(&self.stem) || text.contains(HUB_BIN_NAME)
+    }
+
     fn new(hub_exe: &Path) -> anyhow::Result<Self> {
         let exe = std::path::absolute(hub_exe).with_context(|| format!("resolving {}", hub_exe.display()))?;
         let stem = exe
@@ -139,8 +148,7 @@ impl HubCmd {
             }
         }
         let text = text.replace('\\', "/").to_lowercase();
-        let exe_match = text.contains(&self.stem) || text.contains("pet-hub");
-        exe_match && text.contains(&format!(" hook {source}"))
+        self.names_hub(&text) && text.contains(&format!(" hook {source}"))
     }
 }
 
@@ -453,7 +461,7 @@ fn notify_is_ours(item: &Item, cmd: &HubCmd) -> bool {
     let Some(arr) = v.as_array() else { return false };
     let parts: Vec<String> = arr.iter().filter_map(Value::as_str).map(|s| s.replace('\\', "/").to_lowercase()).collect();
     let joined = format!(" {}", parts.join(" "));
-    (joined.contains(&cmd.stem) || joined.contains("pet-hub")) && joined.contains(" hook codex")
+    cmd.names_hub(&joined) && joined.contains(" hook codex")
 }
 
 // ---------- plans ----------
@@ -642,7 +650,7 @@ fn write_atomic(path: &Path, content: &str) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let tmp = path.with_file_name(format!(
-        ".{}.ai-pet-tmp",
+        ".{}.krypto-tmp",
         path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
     ));
     std::fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
@@ -659,8 +667,8 @@ fn render_diff(c: &FileChange) -> String {
 
 fn run(changes: Vec<FileChange>, notes: Vec<String>, apply: bool, title: &str) -> anyhow::Result<String> {
     let mut out = String::new();
-    out.push_str(&format!("AI Pet hooks for {title}{}\n", if apply { "" } else { " (dry run: nothing written; re-run with --apply)" }));
-    let stamp = utc_stamp(pet_protocol::now_ms() / 1000);
+    out.push_str(&format!("Krypto hooks for {title}{}\n", if apply { "" } else { " (dry run: nothing written; re-run with --apply)" }));
+    let stamp = utc_stamp(krypto_protocol::now_ms() / 1000);
     let mut any_change = false;
     for c in &changes {
         let changed = c.old.as_deref() != Some(c.new.as_str());
@@ -708,14 +716,14 @@ pub fn install_with_home(target: HookTarget, hub_exe: &Path, apply: bool, home: 
         }
         HookTarget::CopilotCli => {
             let dir = env.copilot_home.clone().unwrap_or_else(|| home.join(".copilot"));
-            let (c, n) = copilot_plan(&cmd, dir.join("hooks").join("ai-pet.json"), "Copilot CLI hooks", false)?;
+            let (c, n) = copilot_plan(&cmd, dir.join("hooks").join("krypto.json"), "Copilot CLI hooks", false)?;
             (c, n, "GitHub Copilot CLI".to_string())
         }
         HookTarget::CopilotVscode { repo } => {
             if !repo.is_dir() {
                 bail!("repository folder {} does not exist", repo.display());
             }
-            let (c, n) = copilot_plan(&cmd, repo.join(".github").join("hooks").join("ai-pet.json"), "Copilot agent hooks (VS Code)", true)?;
+            let (c, n) = copilot_plan(&cmd, repo.join(".github").join("hooks").join("krypto.json"), "Copilot agent hooks (VS Code)", true)?;
             (c, n, format!("Copilot in VS Code ({})", repo.display()))
         }
     };

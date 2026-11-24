@@ -12,7 +12,7 @@ import type {
   ServerMsg,
   Session,
   Welcome,
-} from "@ai-pet/protocol";
+} from "@krypto/protocol";
 
 /** `Omit` that distributes over unions (keeps discriminated unions intact). */
 export type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;

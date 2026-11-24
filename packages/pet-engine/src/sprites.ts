@@ -1,5 +1,5 @@
 // Sprite-sheet manifest (assets/pets/manifest.json, written by art-sprites). Browser-safe; no DOM required.
-import type { Species } from "@ai-pet/protocol";
+import type { Species } from "@krypto/protocol";
 import type { PetActivity } from "./activity";
 
 export type SpriteAnimationName = PetActivity | "walk";

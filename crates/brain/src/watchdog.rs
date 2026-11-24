@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use pet_protocol::{
+use krypto_protocol::{
     HubNotification, NotificationLevel, PermissionRequest, Session, SessionSource, SessionStatus, UnixMs,
 };
 
@@ -225,7 +225,7 @@ fn done_nudge(s: &Session, waited: i64, count: u32, key: &str, now: UnixMs) -> H
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pet_protocol::{PermissionOption, PermissionOptionKind, ToolCallPayload};
+    use krypto_protocol::{PermissionOption, PermissionOptionKind, ToolCallPayload};
 
     const MIN: i64 = 60_000;
 

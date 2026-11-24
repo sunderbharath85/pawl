@@ -3,7 +3,7 @@
 //! Mood is clamped to 0..=100, xp only grows (saturating). Finished turns and plans make
 //! the pet happy and earn xp; errors, refusals and failed tools make it droop.
 
-use pet_protocol::{
+use krypto_protocol::{
     Agent, EventType, HookPayload, PermissionResolvedPayload, Pet, ResolvedBy, Species, StopPayload,
     StopReason, ToolCallStatus,
 };
@@ -131,7 +131,7 @@ pub fn on_event(pet: &mut Pet, kind: EventType, payload: &serde_json::Value) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pet_protocol::{AgentSource, HookSource, PermissionOutcome};
+    use krypto_protocol::{AgentSource, HookSource, PermissionOutcome};
     use serde_json::json;
 
     fn agent(id: &str) -> Agent {

@@ -12,7 +12,7 @@ use agent_client_protocol::v1::schema as acp;
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{self as sdk, Agent as AgentRole, ByteStreams, Client, ConnectTo};
 use anyhow::{anyhow, bail, Context as _};
-use pet_protocol as pp;
+use krypto_protocol as pp;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
@@ -734,7 +734,7 @@ impl Inner {
         let (w_w, s_w) = (weak.clone(), shared.clone());
         let builder = Client
             .v1()
-            .name("ai-pet-hub")
+            .name("krypto")
             .on_receive_notification(
                 async move |n: acp::SessionNotification, _cx: ConnectionTo<AgentRole>| {
                     if let Some(inner) = w_n.upgrade() {
@@ -862,7 +862,7 @@ impl Inner {
                     .fs(acp::FileSystemCapabilities::new().read_text_file(true).write_text_file(true))
                     .terminal(false),
             )
-            .client_info(acp::Implementation::new("ai-pet-hub", env!("CARGO_PKG_VERSION")));
+            .client_info(acp::Implementation::new("krypto", env!("CARGO_PKG_VERSION")));
         let init = tokio::time::timeout(INIT_TIMEOUT, cx.send_request(init_req).block_task()).await;
         let init = match init {
             Ok(Ok(resp)) => resp,

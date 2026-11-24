@@ -1,7 +1,7 @@
 //! Notifications. Desktop/phone notifications are a client concern: the hub only emits
 //! `notification` messages on the bus; clients decide how to surface them.
 
-use pet_protocol::{
+use krypto_protocol::{
     AgentId, HubNotification, NotificationLevel, Session, SessionId, StopPayload, StopReason,
 };
 
@@ -19,7 +19,7 @@ pub fn make(
         body: body.into(),
         session_id,
         agent_id,
-        ts: pet_protocol::now_ms(),
+        ts: krypto_protocol::now_ms(),
     }
 }
 
@@ -82,7 +82,7 @@ pub fn for_permission(agent_name: &str, pet_name: Option<&str>, title: &str, ses
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pet_protocol::{SessionSource, SessionStatus};
+    use krypto_protocol::{SessionSource, SessionStatus};
 
     #[test]
     fn labels() {

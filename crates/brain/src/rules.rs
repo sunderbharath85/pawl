@@ -7,7 +7,7 @@
 //! - Sensitive paths (`.env*`, keys/certs, `id_rsa*`, `.ssh/**`, `.aws/**`, `.npmrc`,
 //!   `*credential*`, the hub's own token, ...) are guarded in code: a request that touches
 //!   one is never auto-approved, whatever the rules say (a deny rule still denies).
-//! - Security hard floor ([`pet_protocol::NEVER_AUTO_ALLOW`]): a request whose tool kind is
+//! - Security hard floor ([`krypto_protocol::NEVER_AUTO_ALLOW`]): a request whose tool kind is
 //!   not auto-allowable (`execute`, `delete`, `fetch`, `other`, or missing) is **never**
 //!   auto-approved, whatever the rules say (Deny still wins). [`validate_rules`] rejects
 //!   AutoAllow rules without a `toolKind` or with a floor kind; [`default_rules`] passes it.
@@ -30,7 +30,7 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use globset::{GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
-use pet_protocol::{
+use krypto_protocol::{
     is_auto_allowable, PermissionOptionKind, PermissionRequest, Rule, RuleAction, RuleMatch, ToolKind,
     NEVER_AUTO_ALLOW,
 };
@@ -43,7 +43,7 @@ pub const SENSITIVE_FILES_GLOB: &str = "**/{.env*,*.env,*.pem,*.key,*.p12,*.pfx,
 /// Contents of directories that hold secrets.
 pub const SENSITIVE_DIRS_GLOB: &str = "**/{.ssh,.aws,.azure,.gnupg,.kube,.docker,gcloud,secrets}/**";
 /// The hub's own token/config/db: an agent that reads the token could approve itself.
-pub const HUB_SECRETS_GLOB: &str = "**/ai-pet-hub/{token,config.toml,hub.db,hub.db-*}";
+pub const HUB_SECRETS_GLOB: &str = "**/krypto/{token,config.toml,hub.db,hub.db-*}";
 
 const CASE_INSENSITIVE: bool = cfg!(any(windows, target_os = "macos"));
 
@@ -480,7 +480,7 @@ pub fn pick_option(req: &PermissionRequest, action: RuleAction) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pet_protocol::{PermissionOption, ToolCallPayload, ToolLocation};
+    use krypto_protocol::{PermissionOption, ToolCallPayload, ToolLocation};
     use serde_json::json;
 
     const ALL_KINDS: [ToolKind; 10] = [
@@ -628,7 +628,7 @@ mod tests {
             "/work/repo/.npmrc",
             "/work/repo/credentials.json",
             "/work/repo/config/secrets/prod.yaml",
-            "C:\\Users\\me\\AppData\\Roaming\\ai-pet-hub\\token",
+            "C:\\Users\\me\\AppData\\Roaming\\krypto\\token",
         ] {
             assert!(is_sensitive_path(p), "{p}");
             let r = req(Some(ToolKind::Read), &[p]);
@@ -694,7 +694,7 @@ mod tests {
 
     #[test]
     fn floor_kinds_are_never_auto_approved() {
-        // Kinds outside the floor per pet_protocol.
+        // Kinds outside the floor per krypto_protocol.
         for kind in ALL_KINDS {
             assert_eq!(is_auto_allowable(Some(kind)), !NEVER_AUTO_ALLOW.contains(&kind), "{kind:?}");
         }

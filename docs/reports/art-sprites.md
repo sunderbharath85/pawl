@@ -1,3 +1,5 @@
+Renamed to Krypto on 2026-11-23; names below are pre-rename.
+
 # art-sprites report
 
 Status: **DONE**. All four species have the full set of 9 animations (36 strips): dog, cat, bird

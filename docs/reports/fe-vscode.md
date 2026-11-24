@@ -1,3 +1,5 @@
+Renamed to Krypto on 2026-11-23; names below are pre-rename.
+
 # fe-vscode report — Pet for VS Code (`apps/vscode`, package `ai-pet-vscode`)
 
 Status: **DONE**. Gate: `bunx tsc --noEmit` PASS, `bun run build` PASS (in `apps/vscode`).

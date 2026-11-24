@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
-use pet_protocol::{ClientMsg, HookSource, ServerMsg, HUB_HOST};
+use krypto_protocol::{ClientMsg, HookSource, ServerMsg, HUB_HOST};
 use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc};
@@ -69,8 +69,8 @@ pub async fn serve(hub: Hub, port: u16, shutdown: impl std::future::Future<Outpu
     let addr: SocketAddr = format!("{HUB_HOST}:{port}").parse().context("hub address")?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .with_context(|| format!("could not listen on {addr} (is another pet-hub already running?)"))?;
-    tracing::info!("pet-hub {} listening on http://{addr}", crate::HUB_VERSION);
+        .with_context(|| format!("could not listen on {addr} (is another krypto already running?)"))?;
+    tracing::info!("krypto {} listening on http://{addr}", crate::HUB_VERSION);
     axum::serve(listener, router(hub)).with_graceful_shutdown(shutdown).await.context("server error")
 }
 
@@ -140,7 +140,7 @@ fn salvage_id(raw: &str) -> String {
 }
 
 enum First {
-    Hello(String, pet_protocol::ClientKind, String),
+    Hello(String, krypto_protocol::ClientKind, String),
     Reject(Option<String>, &'static str),
     Gone,
 }

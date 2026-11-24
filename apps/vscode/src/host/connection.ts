@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
 import WebSocket from "ws";
-import { DEFAULT_HUB_WS_URL, HubClient, toHubWsUrl, type HubState } from "@ai-pet/hub-client";
-import { readHubCredentials } from "@ai-pet/hub-client/node";
-import type { ServerMsg } from "@ai-pet/protocol";
+import { DEFAULT_HUB_WS_URL, HubClient, toHubWsUrl, type HubState } from "@krypto/hub-client";
+import { readHubCredentials } from "@krypto/hub-client/node";
+import type { ServerMsg } from "@krypto/protocol";
 import type { ConnInfo } from "../shared/messages";
 import { errorMessage } from "./util";
 
@@ -32,7 +32,7 @@ export function emptyHubState(status: HubState["status"] = "disconnected"): HubS
 
 export class HubOfflineError extends Error {
   constructor() {
-    super("The AI Pet hub is offline. Run “AI Pet: Start Hub” and try again.");
+    super("The Krypto hub is offline. Run “Krypto: Start Hub” and try again.");
     this.name = "HubOfflineError";
   }
 }
@@ -61,7 +61,7 @@ export class HubConnection implements vscode.Disposable {
   ) {
     this.disposables.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration("ai-pet.hubUrl") || e.affectsConfiguration("ai-pet.hubToken")) {
+        if (e.affectsConfiguration("krypto.hubUrl") || e.affectsConfiguration("krypto.hubToken")) {
           this.log.info("hub settings changed; reconnecting");
           this.restart();
         }
@@ -148,10 +148,10 @@ export class HubConnection implements vscode.Disposable {
   }
 
   private resolveCredentials(): Credentials {
-    const cfg = vscode.workspace.getConfiguration("ai-pet");
+    const cfg = vscode.workspace.getConfiguration("krypto");
     const urlSetting = cfg.get<string>("hubUrl")?.trim() || "";
     const tokenSetting = cfg.get<string>("hubToken")?.trim() || "";
-    let url = urlSetting || process.env.AI_PET_HUB_URL?.trim() || DEFAULT_HUB_WS_URL;
+    let url = urlSetting || process.env.KRYPTO_HUB_URL?.trim() || DEFAULT_HUB_WS_URL;
     let token: string | null = tokenSetting || null;
     if (!token || !urlSetting) {
       try {
@@ -263,7 +263,7 @@ export class HubConnection implements vscode.Disposable {
   }
 }
 
-/** Port the hub should listen on for this URL (for `pet-hub serve --port`), or null for the default. */
+/** Port the hub should listen on for this URL (for `krypto serve --port`), or null for the default. */
 export function portOf(url: string): number | null {
   try {
     const u = new URL(url);

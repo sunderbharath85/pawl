@@ -1,7 +1,7 @@
 import { useMemo } from "react";
-import { lastEventsBySession, type HubState } from "@ai-pet/hub-client";
-import { derivePetViews, type PetView } from "@ai-pet/pet-engine";
-import { DEFAULT_SPECIES, type Pet } from "@ai-pet/protocol";
+import { lastEventsBySession, type HubState } from "@krypto/hub-client";
+import { derivePetViews, type PetView } from "@krypto/pet-engine";
+import { DEFAULT_SPECIES, type Pet } from "@krypto/protocol";
 
 /** Shown when the hub has no pets yet (or is offline) so the strip is never empty. */
 export const FALLBACK_PET: Pet = {

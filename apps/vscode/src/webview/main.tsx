@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { configurePetStyles } from "@ai-pet/pet-engine/react";
+import { configurePetStyles } from "@krypto/pet-engine/react";
 import { App } from "./App";
 import { cspNonce } from "./vscodeApi";
 

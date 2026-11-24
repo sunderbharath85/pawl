@@ -3,19 +3,19 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "ai-pet-hub",
+      "name": "krypto",
       "devDependencies": {
         "@types/bun": "latest",
         "typescript": "^5.9.0",
       },
     },
     "apps/desktop": {
-      "name": "@ai-pet/desktop",
+      "name": "@krypto/desktop",
       "version": "0.1.0",
       "dependencies": {
-        "@ai-pet/hub-client": "workspace:*",
-        "@ai-pet/pet-engine": "workspace:*",
-        "@ai-pet/protocol": "workspace:*",
+        "@krypto/hub-client": "workspace:*",
+        "@krypto/pet-engine": "workspace:*",
+        "@krypto/protocol": "workspace:*",
         "@tauri-apps/api": "^2.12.5",
         "@tauri-apps/plugin-dialog": "^2.8.4",
         "@tauri-apps/plugin-notification": "^2.8.1",
@@ -33,12 +33,12 @@
       },
     },
     "apps/mobile": {
-      "name": "@ai-pet/mobile",
+      "name": "@krypto/mobile",
       "version": "0.1.0",
       "dependencies": {
-        "@ai-pet/hub-client": "workspace:*",
-        "@ai-pet/pet-engine": "workspace:*",
-        "@ai-pet/protocol": "workspace:*",
+        "@krypto/hub-client": "workspace:*",
+        "@krypto/pet-engine": "workspace:*",
+        "@krypto/protocol": "workspace:*",
         "expo": "~58.0.26",
         "expo-camera": "~58.0.14",
         "expo-constants": "~58.0.16",
@@ -71,12 +71,12 @@
       },
     },
     "apps/vscode": {
-      "name": "ai-pet-vscode",
+      "name": "krypto-vscode",
       "version": "0.1.0",
       "devDependencies": {
-        "@ai-pet/hub-client": "workspace:*",
-        "@ai-pet/pet-engine": "workspace:*",
-        "@ai-pet/protocol": "workspace:*",
+        "@krypto/hub-client": "workspace:*",
+        "@krypto/pet-engine": "workspace:*",
+        "@krypto/protocol": "workspace:*",
         "@types/node": "^22",
         "@types/react": "^19.3.0",
         "@types/react-dom": "^19.3.0",
@@ -88,10 +88,10 @@
       },
     },
     "packages/hub-client": {
-      "name": "@ai-pet/hub-client",
+      "name": "@krypto/hub-client",
       "version": "0.1.0",
       "dependencies": {
-        "@ai-pet/protocol": "workspace:*",
+        "@krypto/protocol": "workspace:*",
       },
       "devDependencies": {
         "@types/react": "^19.3.0",
@@ -106,10 +106,10 @@
       ],
     },
     "packages/pet-engine": {
-      "name": "@ai-pet/pet-engine",
+      "name": "@krypto/pet-engine",
       "version": "0.1.0",
       "dependencies": {
-        "@ai-pet/protocol": "workspace:*",
+        "@krypto/protocol": "workspace:*",
       },
       "devDependencies": {
         "@types/react": "^19.3.0",
@@ -126,7 +126,7 @@
       ],
     },
     "packages/protocol": {
-      "name": "@ai-pet/protocol",
+      "name": "@krypto/protocol",
       "version": "0.1.0",
       "devDependencies": {
         "typescript": "^5.9.0",
@@ -135,16 +135,6 @@
   },
   "packages": {
     "2g": ["2g@1.0.1", "", { "peerDependencies": { "typescript": ">=5.8.0" }, "optionalPeers": ["typescript"], "bin": { "2g": "bin/cli.js" } }, "sha512-+uViadKOS/wwR4pFu5g8TPn3QHpKqoX19JHCnp8k/3cLpImdcXozwvZA6Q/5PeW3AcU8neL8faaMidBcv7o8CA=="],
-
-    "@ai-pet/desktop": ["@ai-pet/desktop@workspace:apps/desktop"],
-
-    "@ai-pet/hub-client": ["@ai-pet/hub-client@workspace:packages/hub-client"],
-
-    "@ai-pet/mobile": ["@ai-pet/mobile@workspace:apps/mobile"],
-
-    "@ai-pet/pet-engine": ["@ai-pet/pet-engine@workspace:packages/pet-engine"],
-
-    "@ai-pet/protocol": ["@ai-pet/protocol@workspace:packages/protocol"],
 
     "@babel/code-frame": ["@babel/code-frame@7.29.7", "", { "dependencies": { "@babel/helper-validator-identifier": "^7.29.7", "js-tokens": "^4.0.0", "picocolors": "^1.1.1" } }, "sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw=="],
 
@@ -388,6 +378,16 @@
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
+    "@krypto/desktop": ["@krypto/desktop@workspace:apps/desktop"],
+
+    "@krypto/hub-client": ["@krypto/hub-client@workspace:packages/hub-client"],
+
+    "@krypto/mobile": ["@krypto/mobile@workspace:apps/mobile"],
+
+    "@krypto/pet-engine": ["@krypto/pet-engine@workspace:packages/pet-engine"],
+
+    "@krypto/protocol": ["@krypto/protocol@workspace:packages/protocol"],
+
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.2.6", "", { "dependencies": { "@tybys/wasm-util": "^0.10.3" }, "peerDependencies": { "@emnapi/core": "^1.7.1 || 2.0.0-beta.2", "@emnapi/runtime": "^1.7.1 || 2.0.0-beta.2" } }, "sha512-mRyDmEw9/fCDXCGfL1sbgIw/GUK0PVxRW4YwgPN61F3LQ+fSyoBFarJVzgGyhF6kRzEQZ0FejDqm4WLXSeqQmw=="],
 
     "@noxcturnal/noxcturnal-darwin-arm64": ["@noxcturnal/noxcturnal-darwin-arm64@0.1.14", "", { "os": "darwin", "cpu": "arm64" }, "sha512-5g1fvtfmDsaDzNoqZicO7UKUUaGm9HOTJy30KNxXbSJRreLOQwK0fd0wuAA0OEbBgJSQAvVdAovpjT5HvYRIWw=="],
@@ -579,8 +579,6 @@
     "agent-base": ["agent-base@7.1.4", "", {}, "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="],
 
     "agent-cli-detector": ["agent-cli-detector@0.1.7", "", { "bin": { "agent-cli-detector": "dist/cli.js" } }, "sha512-d8OWDVdZMgjhLUT9ZPgSv/BdFFF9pVuscC0JdUSz3bjwE15gcp6u/o0/JooM2yyAWC49KThFhXlgTXRa9B7yng=="],
-
-    "ai-pet-vscode": ["ai-pet-vscode@workspace:apps/vscode"],
 
     "anser": ["anser@1.4.10", "", {}, "sha512-hCv9AqTQ8ycjpSd3upOJd7vFwW1JaoYQ7tpham03GJ1ca8/65rqn0RpaWpItOAd6ylW9wAw6luXYPJIyPFVOww=="],
 
@@ -877,6 +875,8 @@
     "json5": ["json5@2.2.3", "", { "bin": { "json5": "lib/cli.js" } }, "sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg=="],
 
     "kleur": ["kleur@3.0.3", "", {}, "sha512-eTIzlVOSUR+JxdDFepEYcBMtZ9Qqdef+rnzWdRZuMbOywu5tO2w2N7rqjoANZ5k9vywhL6Br1VRjUIgTQx4E8w=="],
+
+    "krypto-vscode": ["krypto-vscode@workspace:apps/vscode"],
 
     "lan-network": ["lan-network@0.2.1", "", { "bin": { "lan-network": "dist/lan-network-cli.js" } }, "sha512-ONPnazC96VKDntab9j9JKwIWhZ4ZUceB4A9Epu4Ssg0hYFmtHZSeQ+n15nIwTFmcBUKtExOer8WTJ4GF9MO64A=="],
 
@@ -1234,10 +1234,6 @@
 
     "zxing-wasm": ["zxing-wasm@3.1.7", "", { "dependencies": { "@types/emscripten": "^1.41.6", "type-fest": "^5.10.0" } }, "sha512-LI94ndlOY+xoqlkNcc0EwByrMpUXKrCX171EQ38kGWqpiRq/gcnC+ZrbRipvxI3uV4LaDtNlKo1p9Uayg1sesQ=="],
 
-    "@ai-pet/mobile/react": ["react@19.3.0", "", {}, "sha512-E8LUcbtBWt20bbl2YoHfx4ZDBdxVTfOKtCZn9cDSJ4l6/nuoApcpIBcj47t2wZoVX8g2ZHuMHbiShgCR1T5Sog=="],
-
-    "@ai-pet/mobile/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
-
     "@babel/core/semver": ["semver@6.3.2", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-GYrCADwpu6yV5OAvchkQ27Z5wwMxWAEMg5NNWjyHh/5DboFFqbdbvYNIvZouQpxXyeMPoTOh0vdPYKlf0ZswdQ=="],
 
     "@babel/helper-compilation-targets/semver": ["semver@6.3.2", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-GYrCADwpu6yV5OAvchkQ27Z5wwMxWAEMg5NNWjyHh/5DboFFqbdbvYNIvZouQpxXyeMPoTOh0vdPYKlf0ZswdQ=="],
@@ -1253,6 +1249,10 @@
     "@expo/metro/metro-source-map": ["metro-source-map@0.87.1", "", { "dependencies": { "@babel/traverse": "^7.29.0", "@babel/types": "^7.29.0", "flow-enums-runtime": "^0.0.6", "invariant": "^2.2.4", "metro-symbolicate": "0.87.1", "nullthrows": "^1.1.1", "ob1": "0.87.1", "source-map": "^0.5.6", "vlq": "^1.0.0" } }, "sha512-Bqpm0PBGdy53pigIJb4HRF7QxD2pUOdgSmVh/4AWbP635kSCv+Y6ltVxUZgSnzS/QbSmzyCGijmRPlXMj2/qHw=="],
 
     "@expo/plist/xmlbuilder": ["xmlbuilder@15.1.1", "", {}, "sha512-yMqGBqtXyeN1e3TGYvgNgDVZ3j84W4cwkOXQswghol6APgZWaff9lnbvN7MHYJOiXsvGPXtjTYJEiC9J2wv9Eg=="],
+
+    "@krypto/mobile/react": ["react@19.3.0", "", {}, "sha512-E8LUcbtBWt20bbl2YoHfx4ZDBdxVTfOKtCZn9cDSJ4l6/nuoApcpIBcj47t2wZoVX8g2ZHuMHbiShgCR1T5Sog=="],
+
+    "@krypto/mobile/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
 
     "@react-native/community-cli-plugin/commander": ["commander@12.1.0", "", {}, "sha512-Vw8qHK3bZM9y/P10u3Vib8o/DdkvA2OtPtZvD871QKjy74Wj1WSKFILMPRPSdUSx5RFK1arlJzEtA4PkFgnbuA=="],
 

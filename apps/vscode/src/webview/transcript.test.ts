@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { HubEvent } from "@ai-pet/protocol";
+import type { HubEvent } from "@krypto/protocol";
 import { buildTranscript } from "./transcript";
 
 let nextId = 1;

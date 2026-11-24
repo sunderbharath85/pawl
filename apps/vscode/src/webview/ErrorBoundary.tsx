@@ -20,7 +20,7 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo): void {
-    console.error("[ai-pet] render failed", error, info.componentStack);
+    console.error("[krypto] render failed", error, info.componentStack);
   }
 
   componentDidUpdate(prev: Props): void {

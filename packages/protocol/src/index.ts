@@ -1,4 +1,4 @@
-// @ai-pet/protocol — wire types shared by hub, desktop, VS Code, mobile.
+// @krypto/protocol — wire types shared by hub, desktop, VS Code, mobile.
 // SOURCE OF TRUTH for hub <-> client messages. The Rust mirror lives in
 // crates/protocol/src/lib.rs and must stay byte-compatible (camelCase fields,
 // snake_case `type` tags). Change both together.
@@ -7,8 +7,8 @@ export const PROTOCOL_VERSION = 1;
 export const HUB_DEFAULT_PORT = 47800;
 export const HUB_HOST = "127.0.0.1";
 /** Folder name under the OS data dir (Win %APPDATA%, mac ~/Library/Application Support, linux ~/.local/share). */
-export const HUB_DATA_DIR_NAME = "ai-pet-hub";
-/** Plain-text bearer token file inside the data dir. Env override: AI_PET_HUB_TOKEN. URL override: AI_PET_HUB_URL. */
+export const HUB_DATA_DIR_NAME = "krypto";
+/** Plain-text bearer token file inside the data dir. Env override: KRYPTO_HUB_TOKEN. URL override: KRYPTO_HUB_URL. */
 export const HUB_TOKEN_FILE = "token";
 
 // ---------- primitives ----------

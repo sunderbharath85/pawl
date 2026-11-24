@@ -1,5 +1,5 @@
 use super::*;
-use pet_protocol::{EventType, HookSource, NotificationLevel, SessionSource, SessionStatus};
+use krypto_protocol::{EventType, HookSource, NotificationLevel, SessionSource, SessionStatus};
 use serde_json::json;
 
 fn n(source: HookSource, raw: Value) -> NormalizedHook {
@@ -198,7 +198,7 @@ fn env_meta_reads_only_known_vars() {
     assert_eq!(m["claude_entrypoint"], "cli");
     assert_eq!(m["vscode_ext_host"], false);
     assert!(!m.to_string().contains("sk-secret"));
-    assert_eq!(normalize(HookSource::Claude, json!({ "hook_event_name": "Stop", "_ai_pet": m })).unwrap().source, SessionSource::CliHook);
+    assert_eq!(normalize(HookSource::Claude, json!({ "hook_event_name": "Stop", "_krypto": m })).unwrap().source, SessionSource::CliHook);
 
     // Extension host (e.g. Copilot agent hooks in VS Code).
     let ext = std::collections::HashMap::from([
@@ -209,7 +209,7 @@ fn env_meta_reads_only_known_vars() {
     let m = env_meta_from(|k| ext.get(k).map(|v| v.to_string()));
     assert_eq!(m["vscode_ext_host"], true);
     assert_eq!(m["vscode_process_type"], "extensionHost");
-    assert_eq!(normalize(HookSource::Copilot, json!({ "hook_event_name": "Stop", "_ai_pet": m })).unwrap().source, SessionSource::VscodeHook);
+    assert_eq!(normalize(HookSource::Copilot, json!({ "hook_event_name": "Stop", "_krypto": m })).unwrap().source, SessionSource::VscodeHook);
     let mut raw = json!({ "a": 1 });
     enrich(&mut raw);
     assert!(raw.get(META_KEY).is_some());
@@ -372,7 +372,7 @@ fn target_and_source_parsing() {
 // ---------- install (temp dirs only; never the real user config) ----------
 
 fn hub_exe(dir: &Path) -> PathBuf {
-    dir.join("bin").join(if cfg!(windows) { "pet-hub.exe" } else { "pet-hub" })
+    dir.join("bin").join(if cfg!(windows) { "krypto.exe" } else { "krypto" })
 }
 
 fn backups(dir: &Path, prefix: &str) -> Vec<PathBuf> {
@@ -446,12 +446,40 @@ fn install_claude_merges_without_clobbering() {
     assert_eq!(backups(&settings_dir, "settings.json.").len(), 1);
 
     // Hub moved: our entry is replaced in place, user hooks untouched, still one of ours.
-    let moved = tmp.path().join("other").join(if cfg!(windows) { "pet-hub.exe" } else { "pet-hub" });
+    let moved = tmp.path().join("other").join(if cfg!(windows) { "krypto.exe" } else { "krypto" });
     install_with_home(HookTarget::Claude, &moved, true, &home, &env).unwrap();
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     let stop = v["hooks"]["Stop"].as_array().unwrap();
     assert_eq!(stop.len(), 2);
     assert!(stop[1]["hooks"][0]["command"].as_str().unwrap().contains("/other/"));
+}
+
+#[test]
+fn install_claude_replaces_entry_written_by_other_hub_copy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let settings_dir = home.join(".claude");
+    std::fs::create_dir_all(&settings_dir).unwrap();
+    let settings = settings_dir.join("settings.json");
+    let old = json!({
+        "hooks": {
+            "Stop": [
+                { "hooks": [ { "type": "command", "command": "say done" } ] },
+                { "hooks": [ { "type": "command", "command": "C:/tools/krypto.exe hook claude" } ] }
+            ]
+        }
+    });
+    std::fs::write(&settings, serde_json::to_string_pretty(&old).unwrap()).unwrap();
+    // Running from a copy with another file name: the entry is still recognised by the
+    // `krypto` binary name and replaced, not duplicated.
+    let exe = tmp.path().join("dev").join(if cfg!(windows) { "hub-dev.exe" } else { "hub-dev" });
+    install_with_home(HookTarget::Claude, &exe, true, &home, &InstallEnv::default()).unwrap();
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    let stop = v["hooks"]["Stop"].as_array().unwrap();
+    assert_eq!(stop.len(), 2, "old entry replaced, not duplicated: {stop:?}");
+    assert_eq!(stop[0]["hooks"][0]["command"], "say done");
+    let cmd = stop[1]["hooks"][0]["command"].as_str().unwrap();
+    assert!(cmd.contains("/dev/hub-dev") && cmd.ends_with("hook claude") && !cmd.contains("C:/tools/"), "{cmd}");
 }
 
 #[test]
@@ -469,7 +497,7 @@ fn install_claude_creates_file_and_respects_config_dir() {
 #[test]
 fn install_claude_exec_form_for_paths_with_spaces() {
     let tmp = tempfile::tempdir().unwrap();
-    let exe = tmp.path().join("Program Files").join("AI Pet").join("pet-hub.exe");
+    let exe = tmp.path().join("Program Files").join("Krypto").join("krypto.exe");
     install_with_home(HookTarget::Claude, &exe, true, tmp.path(), &InstallEnv::default()).unwrap();
     let v: Value = serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".claude/settings.json")).unwrap()).unwrap();
     let h = &v["hooks"]["Stop"][0]["hooks"][0];
@@ -549,7 +577,7 @@ fn install_copilot_cli_and_vscode() {
     let exe = hub_exe(tmp.path());
     let out = install_with_home(HookTarget::CopilotCli, &exe, true, tmp.path(), &InstallEnv::default()).unwrap();
     assert!(out.contains("created"), "{out}");
-    let path = tmp.path().join(".copilot").join("hooks").join("ai-pet.json");
+    let path = tmp.path().join(".copilot").join("hooks").join("krypto.json");
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(v["version"], 1);
     let pre = &v["hooks"]["PreToolUse"][0];
@@ -575,15 +603,15 @@ fn install_copilot_cli_and_vscode() {
     assert!(out.contains(".gitignore"), "{out}");
     assert!(!repo.join(".github").exists(), "dry run writes nothing");
     install_with_home(HookTarget::CopilotVscode { repo: repo.clone() }, &exe, true, tmp.path(), &InstallEnv::default()).unwrap();
-    assert!(repo.join(".github").join("hooks").join("ai-pet.json").is_file());
+    assert!(repo.join(".github").join("hooks").join("krypto.json").is_file());
 }
 
 #[test]
 fn powershell_and_posix_quoting() {
     let tmp = tempfile::tempdir().unwrap();
-    let exe = tmp.path().join("it's here").join("pet-hub.exe");
+    let exe = tmp.path().join("it's here").join("krypto.exe");
     install_with_home(HookTarget::CopilotCli, &exe, true, tmp.path(), &InstallEnv::default()).unwrap();
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".copilot/hooks/ai-pet.json")).unwrap()).unwrap();
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".copilot/hooks/krypto.json")).unwrap()).unwrap();
     let h = &v["hooks"]["Stop"][0];
     assert!(h["powershell"].as_str().unwrap().contains("it''s here"));
     assert!(h["bash"].as_str().unwrap().contains(r"it'\''s here"));

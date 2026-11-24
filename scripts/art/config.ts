@@ -1,5 +1,5 @@
 /**
- * Shared configuration for the AI Pet Hub sprite pipeline.
+ * Shared configuration for the Krypto sprite pipeline.
  *
  * Contract (docs/CONTRACTS.md "Pet sprite assets"):
  *   assets/pets/<species>/<activity>.png  horizontal strip, RGBA, square frames of
@@ -7,16 +7,16 @@
  *   assets/pets/manifest.json lists only the animations that exist.
  */
 import { join, resolve } from "node:path";
-import type { Species } from "@ai-pet/protocol";
+import type { Species } from "@krypto/protocol";
 
-// `Species` comes from @ai-pet/protocol (type-only import, resolved via tsconfig "paths"
+// `Species` comes from @krypto/protocol (type-only import, resolved via tsconfig "paths"
 // because scripts/art is outside the root workspaces). The runtime list below must cover
 // every Species: the assertion fails typechecking if the protocol adds one.
 export const SPECIES = ["dog", "cat", "bird", "robot"] as const satisfies readonly Species[];
 type _SpeciesCovered = Exclude<Species, (typeof SPECIES)[number]> extends never ? true : never;
 export const SPECIES_COVERED: _SpeciesCovered = true;
 
-/** `PetActivity` from @ai-pet/pet-engine plus "walk". Order = manifest order. */
+/** `PetActivity` from @krypto/pet-engine plus "walk". Order = manifest order. */
 export const ACTIVITIES = [
   "idle",
   "walk",

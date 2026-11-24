@@ -29,7 +29,7 @@ export function HomeView() {
       <div className="home-hero">
         <div className="home-hero-text">
           <span className="eyebrow">
-            <I.Paw size={12} /> AI Pet Hub
+            <I.Paw size={12} /> Krypto
           </span>
           <h1>
             {greeting()}! {active.length > 0 ? `${active.length} agent${active.length > 1 ? "s are" : " is"} busy.` : "The pack is resting."}

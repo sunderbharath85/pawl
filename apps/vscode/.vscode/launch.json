@@ -2,12 +2,12 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Run Pet for VS Code",
+      "name": "Run Krypto for VS Code",
       "type": "extensionHost",
       "request": "launch",
       "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
-      "preLaunchTask": "ai-pet: build"
+      "preLaunchTask": "krypto: build"
     }
   ]
 }

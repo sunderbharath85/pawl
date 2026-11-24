@@ -26,7 +26,7 @@ const MIME: Record<string, string> = {
 function petAssets(): Plugin {
   let outDir = resolve(here, "dist");
   return {
-    name: "ai-pet-assets",
+    name: "krypto-assets",
     configResolved(cfg) {
       outDir = resolve(cfg.root, cfg.build.outDir);
     },

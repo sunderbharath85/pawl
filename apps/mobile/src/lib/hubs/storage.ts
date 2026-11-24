@@ -14,9 +14,9 @@ export interface AppSettings {
   expoPushToken?: string;
 }
 
-const HUBS_KEY = "aipet.hubs.v1";
-const SETTINGS_KEY = "aipet.settings.v1";
-const SK_PREFIX = "aipet.sk.v1.";
+const HUBS_KEY = "krypto.hubs.v1";
+const SETTINGS_KEY = "krypto.settings.v1";
+const SK_PREFIX = "krypto.sk.v1.";
 
 const DEFAULT_SETTINGS: AppSettings = { notificationsEnabled: true };
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { HubRequestError } from "@ai-pet/hub-client";
-import { NEVER_AUTO_ALLOW, isAutoAllowable, type Rule, type RuleAction, type ToolKind } from "@ai-pet/protocol";
+import { HubRequestError } from "@krypto/hub-client";
+import { NEVER_AUTO_ALLOW, isAutoAllowable, type Rule, type RuleAction, type ToolKind } from "@krypto/protocol";
 import { TOOL_KINDS, TOOL_KIND_ICON, errorText } from "../../lib/format";
 import { usePanel } from "../context";
 import * as I from "../icons";

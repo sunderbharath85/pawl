@@ -12,7 +12,7 @@
 //!   for PascalCase event names.
 
 use super::{NormalizedHook, META_KEY};
-use pet_protocol::{EventType, HookPayload, HookSource, NotificationLevel, SessionSource, SessionStatus};
+use krypto_protocol::{EventType, HookPayload, HookSource, NotificationLevel, SessionSource, SessionStatus};
 use serde_json::Value;
 
 const MAX_MESSAGE: usize = 500;

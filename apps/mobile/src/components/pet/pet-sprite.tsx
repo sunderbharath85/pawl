@@ -1,7 +1,7 @@
 // Animated pet: plays the art-sprites PNG strip (copied by scripts/copy-pets.ts) with a stepped,
 // native-driven translateX; falls back to the react-native-svg pet when the strip is missing or fails.
-import type { PetActivity, SpriteAnimationName } from "@ai-pet/pet-engine";
-import type { Species } from "@ai-pet/protocol";
+import type { PetActivity, SpriteAnimationName } from "@krypto/pet-engine";
+import type { Species } from "@krypto/protocol";
 import { Image } from "expo-image";
 import { useEffect, useMemo, useState } from "react";
 import { Animated, Easing, View, type StyleProp, type ViewStyle } from "react-native";

@@ -1,4 +1,4 @@
-# @ai-pet/art — pet sprite pipeline
+# @krypto/art — pet sprite pipeline
 
 Generates the animated pet sprite strips in `assets/pets/` (contract: `docs/CONTRACTS.md`,
 "Pet sprite assets") with Google Gemini image generation, then keys, aligns and packs them.

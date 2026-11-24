@@ -1,9 +1,9 @@
-// @ai-pet/hub-client/node — Node-only helpers (VS Code extension host, CLIs, tests).
+// @krypto/hub-client/node — Node-only helpers (VS Code extension host, CLIs, tests).
 // Never import this from browser/webview code: it uses node:fs/os/path.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { HUB_DATA_DIR_NAME, HUB_TOKEN_FILE } from "@ai-pet/protocol";
+import { HUB_DATA_DIR_NAME, HUB_TOKEN_FILE } from "@krypto/protocol";
 import { toHubHttpUrl, toHubWsUrl } from "./url";
 
 export interface HubCredentials {
@@ -14,7 +14,7 @@ export interface HubCredentials {
   token: string;
   /** Where the token came from. */
   tokenSource: "env" | "file";
-  /** Hub data dir (`<os data dir>/ai-pet-hub`). */
+  /** Hub data dir (`<os data dir>/krypto`). */
   dataDir: string;
   /** Token file path (`<dataDir>/token`), even if the token came from env. */
   tokenFile: string;
@@ -60,7 +60,7 @@ export function osDataDir(opts: HubCredentialsOptions = {}): string {
   return join(home, ".local", "share");
 }
 
-/** `<os data dir>/ai-pet-hub` — holds `hub.db`, `token`, `config.toml`. */
+/** `<os data dir>/krypto` — holds `hub.db`, `token`, `config.toml`. */
 export function hubDataDir(opts: HubCredentialsOptions = {}): string {
   return opts.dataDir ?? join(osDataDir(opts), HUB_DATA_DIR_NAME);
 }
@@ -71,7 +71,7 @@ export function hubTokenFile(opts: HubCredentialsOptions = {}): string {
 }
 
 /**
- * Resolve the hub URL and token. `AI_PET_HUB_TOKEN` / `AI_PET_HUB_URL` env vars override the token
+ * Resolve the hub URL and token. `KRYPTO_HUB_TOKEN` / `KRYPTO_HUB_URL` env vars override the token
  * file and the default `127.0.0.1:47800`. Throws `HubCredentialsError` when no token can be found
  * (typically: the hub has never been started on this machine).
  */
@@ -79,11 +79,11 @@ export function readHubCredentials(opts: HubCredentialsOptions = {}): HubCredent
   const env = opts.env ?? process.env;
   const dataDir = hubDataDir(opts);
   const tokenFile = join(dataDir, HUB_TOKEN_FILE);
-  const rawUrl = nonEmpty(env["AI_PET_HUB_URL"]);
+  const rawUrl = nonEmpty(env["KRYPTO_HUB_URL"]);
   const url = toHubWsUrl(rawUrl);
   const httpUrl = toHubHttpUrl(rawUrl);
 
-  const envToken = nonEmpty(env["AI_PET_HUB_TOKEN"]);
+  const envToken = nonEmpty(env["KRYPTO_HUB_TOKEN"]);
   if (envToken) return { url, httpUrl, token: envToken, tokenSource: "env", dataDir, tokenFile };
 
   let text: string;
@@ -92,10 +92,10 @@ export function readHubCredentials(opts: HubCredentialsOptions = {}): HubCredent
   } catch (err) {
     const code = (err as { code?: string }).code;
     const why = code === "ENOENT" ? "not found (has the hub been started?)" : `unreadable (${code ?? String(err)})`;
-    throw new HubCredentialsError(`AI Pet Hub token file ${why}: ${tokenFile}`, tokenFile, { cause: err });
+    throw new HubCredentialsError(`Krypto hub token file ${why}: ${tokenFile}`, tokenFile, { cause: err });
   }
   const token = text.replace(/^\uFEFF/, "").trim();
-  if (!token) throw new HubCredentialsError(`AI Pet Hub token file is empty: ${tokenFile}`, tokenFile);
+  if (!token) throw new HubCredentialsError(`Krypto hub token file is empty: ${tokenFile}`, tokenFile);
   return { url, httpUrl, token, tokenSource: "file", dataDir, tokenFile };
 }
 

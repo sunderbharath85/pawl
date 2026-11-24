@@ -1,5 +1,5 @@
 import type { CSSProperties, JSX } from "react";
-import type { Species } from "@ai-pet/protocol";
+import type { Species } from "@krypto/protocol";
 import type { PetActivity } from "../activity";
 import { SPECIES_META } from "../lines";
 import { resolveSpriteAnimation, spriteUrl, type PetSpritesConfig, type SpriteAnimation } from "../sprites";

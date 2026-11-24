@@ -1,7 +1,8 @@
 {
-  "name": "@ai-pet/mobile",
+  "name": "@krypto/mobile",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "main": "expo-router/entry",
   "scripts": {
     "start": "bun run copy-pets && expo start",
@@ -13,9 +14,9 @@
     "doctor": "expo-doctor"
   },
   "dependencies": {
-    "@ai-pet/hub-client": "workspace:*",
-    "@ai-pet/pet-engine": "workspace:*",
-    "@ai-pet/protocol": "workspace:*",
+    "@krypto/hub-client": "workspace:*",
+    "@krypto/pet-engine": "workspace:*",
+    "@krypto/protocol": "workspace:*",
     "expo": "~58.0.26",
     "expo-camera": "~58.0.14",
     "expo-constants": "~58.0.16",

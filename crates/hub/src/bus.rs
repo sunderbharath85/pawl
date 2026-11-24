@@ -1,6 +1,6 @@
 //! In-process event bus: every `ServerMsg` broadcast to connected clients goes through here.
 
-use pet_protocol::ServerMsg;
+use krypto_protocol::ServerMsg;
 use tokio::sync::broadcast;
 
 /// Buffered messages per subscriber before it counts as lagging.

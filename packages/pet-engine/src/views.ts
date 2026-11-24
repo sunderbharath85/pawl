@@ -1,5 +1,5 @@
 // Pure derivation of what every pet is doing right now. Time-driven decays use `now` only (no timers).
-import type { ErrorPayload, HubEvent, Pet, PermissionRequest, Session, SessionStatus, Species, ToolCallPayload } from "@ai-pet/protocol";
+import type { ErrorPayload, HubEvent, Pet, PermissionRequest, Session, SessionStatus, Species, ToolCallPayload } from "@krypto/protocol";
 import { activityForEvent, activityForStatus, HAPPY_DECAY_MS, NAP_AFTER_MS, SAD_DECAY_MS, type PetActivity } from "./activity";
 import { hashString, petLine } from "./lines";
 

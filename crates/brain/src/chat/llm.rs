@@ -81,7 +81,7 @@ impl Llm {
         }
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
-            .user_agent(concat!("ai-pet-hub-brain/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("krypto-brain/", env!("CARGO_PKG_VERSION")))
             .build();
         match http {
             Ok(http) => Some(Self { http, providers }),

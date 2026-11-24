@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { Species } from "@ai-pet/protocol";
+import type { Species } from "@krypto/protocol";
 import { PET_ACTIVITIES, parseSpriteManifest, type PetView } from "../src/index";
 import { bubblePlacement, computeLanes, PET_CSS, PetBubble, PetSprite, PetStage } from "../src/react/index";
 import { currentX, haltMotion, planWander, restingMotion } from "../src/react/stage-logic";

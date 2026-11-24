@@ -1,3 +1,5 @@
+Renamed to Krypto on 2026-11-23; names below are pre-rename.
+
 # fe-mobile report: `apps/mobile` (`@ai-pet/mobile`)
 
 Status: **FROZEN** at the orchestrator's request (t13, 2026-11-23). The user is moving to multi-machine hubs and the relay/pairing design will change. I stopped mid-build. No code changes were made after the freeze, except a one-line type fix in `src/lib/feed.ts` so the file I was in typechecks.
