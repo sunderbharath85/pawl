@@ -4,18 +4,24 @@ import {
   checkPetName,
   isLocal,
   MACHINE_NAME_MAX,
+  machineDisplayName,
   normalizeMachineName,
   OS_LABEL,
   petFor,
   petRenameErrorText,
   readOnlyReason,
+  recentCwds,
   renameErrorText,
+  sortedMachines,
+  startNeedsConfirmation,
 } from "@krypto/hub-client";
 import { SPECIES_META } from "@krypto/pet-engine";
 import type { Agent, Machine, PermissionRequest, Pet, Session, Species } from "@krypto/protocol";
 import { HubOfflineError, type HubConnection } from "./connection";
 import { installHooks, startHub, type HookTargetId } from "./hubProcess";
 import { machinePickItems } from "./machineList";
+import { answerRequest, confirmModal, remoteError } from "./remote";
+import { machineSuffix, remoteStartText } from "./remoteText";
 import type { PetWebviews } from "./petView";
 import { agentName, errorMessage, isBusy, isInWorkspace, isOpen, relativeTime, sessionLabel } from "./util";
 
@@ -43,7 +49,9 @@ export class Commands {
         }
       });
     return [
-      reg("krypto.startSession", (agentId?: string, cwd?: string, prompt?: string) => this.startSession(agentId, cwd, prompt)),
+      reg("krypto.startSession", (agentId?: string, cwd?: string, prompt?: string, machineId?: string) =>
+        this.startSession(agentId, cwd, prompt, machineId),
+      ),
       reg("krypto.promptSession", (sessionId?: string, text?: string) => this.promptSession(sessionId, text)),
       reg("krypto.cancelSession", (sessionId?: string) => this.cancelSession(sessionId)),
       reg("krypto.approvePending", (requestId?: string) => this.resolvePending(true, requestId)),
@@ -78,47 +86,116 @@ export class Commands {
 
   // ---------------- sessions ----------------
 
-  async startSession(agentId?: string, cwd?: string, prompt?: string): Promise<void> {
+  /**
+   * Start a session on this machine or, with the machine picker, on an online paired machine (PLAN.md
+   * migration step 4): its agents come from its presence, the folder from its recent sessions (or typed), and
+   * a modal asks "Start Claude Code on Mac mini in /repo?" before anything runs there.
+   */
+  async startSession(agentId?: string, cwd?: string, prompt?: string, machineId?: string): Promise<void> {
     const api = this.hub.api;
-    const agent = typeof agentId === "string" && agentId ? this.agentById(agentId) : await this.pickAgent();
+    const target = typeof machineId === "string" && machineId ? machineId : await this.pickMachine();
+    if (!target) return;
+    const remote = startNeedsConfirmation(this.hub.state, target);
+    const where = remote ? ` on ${machineDisplayName(this.hub.state.machines[target])}` : "";
+    const agents = remote ? await api.listAgents({ machineId: target }).catch((err) => Promise.reject(remoteError(this.hub, target, "start", err))) : undefined;
+    const agent =
+      typeof agentId === "string" && agentId ? this.agentById(agentId, agents) : await this.pickAgent(agents, where);
     if (!agent) return;
-    const dir = typeof cwd === "string" && cwd ? cwd : await this.pickCwd();
+    const dir = typeof cwd === "string" && cwd ? cwd : remote ? await this.pickRemoteCwd(target) : await this.pickCwd();
     if (!dir) return;
     let text = typeof prompt === "string" ? prompt : undefined;
     if (text === undefined) {
       text = await vscode.window.showInputBox({
-        title: `Krypto: Start ${agent.name} in ${path.basename(dir) || dir}`,
+        title: `Krypto: Start ${agent.name}${where} in ${path.basename(dir) || dir}`,
         prompt: "What should the agent do? (leave empty to start an idle session)",
         placeHolder: "e.g. run the tests and fix what fails",
         ignoreFocusOut: true,
       });
       if (text === undefined) return; // Esc
     }
-    await this.context.globalState.update(LAST_AGENT_KEY, agent.id);
-    await this.context.globalState.update(LAST_CWD_KEY, dir);
+    // Starting on another machine runs code there: confirm on this device first.
+    if (remote && !(await confirmModal(remoteStartText(this.hub.state, target, agent, dir)))) return;
+    if (!remote) {
+      await this.context.globalState.update(LAST_AGENT_KEY, agent.id);
+      await this.context.globalState.update(LAST_CWD_KEY, dir);
+    }
     const session = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `Krypto: starting ${agent.name}…` },
-      () => api.startSession(agent.id, dir, text?.trim() ? text.trim() : undefined),
+      { location: vscode.ProgressLocation.Notification, title: `Krypto: starting ${agent.name}${where}…` },
+      () =>
+        api
+          .startSession({
+            agentId: agent.id,
+            cwd: dir,
+            prompt: text?.trim() ? text.trim() : undefined,
+            machineId: remote ? target : undefined,
+            confirmed: remote ? true : undefined,
+          })
+          .catch((err) => Promise.reject(remoteError(this.hub, target, "start", err))),
     );
-    this.log.info(`started session ${session.id} (${agent.id}) in ${dir}`);
+    this.log.info(`started session ${session.id} (${agent.id})${remote ? ` on ${target}` : ""}`);
     await this.showPet(session.id);
   }
 
-  private agentById(id: string): Agent {
-    const agent = this.hub.state.agents.find((a) => a.id === id);
+  /** This machine, or a QuickPick of it and the online paired machines. Undefined on Esc. */
+  private async pickMachine(): Promise<string | undefined> {
+    const state = this.hub.state;
+    const own = state.machine?.id ?? "";
+    const machines = sortedMachines(state).filter((m) => m.id === own || m.online);
+    if (machines.length <= 1) return own;
+    const pick = await vscode.window.showQuickPick(
+      machines.map((m) => ({
+        id: m.id,
+        label: `$(device-desktop) ${machineDisplayName(m)}`,
+        description: m.id === own ? "this machine" : OS_LABEL[m.os] ?? m.os,
+      })),
+      { title: "Krypto: Start Session", placeHolder: "Where should the agent run?" },
+    );
+    return pick?.id;
+  }
+
+  /** A folder on another machine: its recent session folders, or one typed in. */
+  private async pickRemoteCwd(machineId: string): Promise<string | undefined> {
+    const name = machineDisplayName(this.hub.state.machines[machineId]);
+    const recent = recentCwds(this.hub.state, machineId);
+    const TYPE = `$(edit) Enter another folder ${name} already uses…`;
+    if (recent.length > 0) {
+      const pick = await vscode.window.showQuickPick([...recent.map((cwd) => ({ label: cwd })), { label: TYPE }], {
+        title: `Krypto: working folder on ${name}`,
+        placeHolder: `Only folders ${name} already uses`,
+      });
+      if (!pick) return undefined;
+      if (pick.label !== TYPE) return pick.label;
+    }
+    const typed = await vscode.window.showInputBox({
+      title: `Krypto: working folder on ${name}`,
+      prompt: `Only folders ${name} already uses (absolute path); it refuses others.`,
+      placeHolder: "/home/me/code/project or C:\\code\\project",
+      ignoreFocusOut: true,
+      validateInput: (v) => (v.trim() ? null : "Enter a folder path."),
+    });
+    return typed?.trim() || undefined;
+  }
+
+  private agentById(id: string, agents: Agent[] = this.hub.state.agents.filter((a) => isLocal(this.hub.state, a.machineId))): Agent {
+    const agent = agents.find((a) => a.id === id);
     if (!agent) throw new Error(`unknown agent “${id}”`);
     return agent;
   }
 
-  private async pickAgent(): Promise<Agent | undefined> {
-    // Sessions start on this machine's hub, so only its own agents are offered.
-    const agents = this.hub.state.agents.filter((a) => isLocal(this.hub.state, a.machineId));
-    if (agents.length === 0) {
+  /** Pick one of `remoteAgents` (another machine's), else of this machine's agents. */
+  private async pickAgent(remoteAgents?: Agent[], where = ""): Promise<Agent | undefined> {
+    // Sessions start where the agent is installed: this machine's agents, or the chosen machine's.
+    const agents = remoteAgents ? [...remoteAgents] : this.hub.state.agents.filter((a) => isLocal(this.hub.state, a.machineId));
+    if (agents.length === 0 && !remoteAgents) {
       const refreshed = await this.hub.api.listAgents(true);
       agents.push(...refreshed.filter((a) => isLocal(this.hub.state, a.machineId)));
     }
     if (agents.length === 0) {
-      void vscode.window.showWarningMessage("Krypto: the hub found no agents. Install an ACP agent (e.g. Claude Code or Codex) and try again.");
+      void vscode.window.showWarningMessage(
+        remoteAgents
+          ? `Krypto: no agents reported${where}.`
+          : "Krypto: the hub found no agents. Install an ACP agent (e.g. Claude Code or Codex) and try again.",
+      );
       return undefined;
     }
     const preferred =
@@ -143,7 +220,7 @@ export class Commands {
       };
     });
     const pick = await vscode.window.showQuickPick(items, {
-      title: "Krypto: Start Session",
+      title: `Krypto: Start Session${where}`,
       placeHolder: "Which agent?",
       matchOnDescription: true,
       matchOnDetail: true,
@@ -170,18 +247,18 @@ export class Commands {
     return chosen?.[0]?.fsPath;
   }
 
-  /** Remote sessions, approvals and pets are read-only until remote control (migration step 4). */
+  /** Another machine's pets belong to its hub (sessions and approvals can be acted on since step 4). */
   private assertLocal(machineId: string): void {
     const why = readOnlyReason(this.hub.state, machineId);
     if (why) throw new Error(why);
   }
 
-  /** This machine's sessions matching `filter` (only those can be prompted or cancelled from here). */
+  /** Sessions of every machine matching `filter` (another machine's are forwarded to it). */
   private sessionItems(filter: (s: Session) => boolean): SessionItem[] {
     const state = this.hub.state;
     const now = Date.now();
     return Object.values(state.sessions)
-      .filter((s) => isLocal(state, s.machineId) && filter(s))
+      .filter((s) => filter(s) && (isLocal(state, s.machineId) || state.machines[s.machineId]?.online === true))
       .sort((a, b) => {
         const wa = isInWorkspace(a.cwd) ? 1 : 0;
         const wb = isInWorkspace(b.cwd) ? 1 : 0;
@@ -191,7 +268,7 @@ export class Commands {
       .map((session) => ({
         session,
         label: sessionLabel(session, state.agents),
-        description: `${session.status.replace("_", " ")} · ${relativeTime(session.lastEventAt, now)}`,
+        description: `${session.status.replace("_", " ")} · ${relativeTime(session.lastEventAt, now)}${machineSuffix(state, session.machineId)}`,
         detail: session.cwd,
       }));
   }
@@ -218,7 +295,6 @@ export class Commands {
             "no open sessions started by the pet. Use “Krypto: Start Session” first.",
           );
     if (!session) return;
-    this.assertLocal(session.machineId);
     if (session.source !== "owned") {
       throw new Error("only sessions started by the pet can be prompted (this one runs in another tool)");
     }
@@ -232,7 +308,7 @@ export class Commands {
       });
     }
     if (!message?.trim()) return;
-    await api.prompt(session.id, message.trim());
+    await api.prompt(session.id, message.trim()).catch((err) => Promise.reject(remoteError(this.hub, session.machineId, "prompt", err)));
   }
 
   async cancelSession(sessionId?: string): Promise<void> {
@@ -242,8 +318,7 @@ export class Commands {
         ? this.hub.state.sessions[sessionId]
         : await this.pickSession("Krypto: Cancel Session", (s) => s.source === "owned" && isBusy(s), "nothing to cancel — no busy sessions.");
     if (!session) return;
-    this.assertLocal(session.machineId);
-    await api.cancel(session.id);
+    await api.cancel(session.id).catch((err) => Promise.reject(remoteError(this.hub, session.machineId, "cancel", err)));
     void vscode.window.setStatusBarMessage(
       `Krypto: cancelled ${agentName(this.hub.state.agents, session.agentId, session.machineId)}`,
       3000,
@@ -252,23 +327,19 @@ export class Commands {
 
   // ---------------- approvals ----------------
 
+  /** Approve or deny a pending request of any machine (another machine's approval asks in a modal first). */
   async resolvePending(approve: boolean, requestId?: string): Promise<void> {
-    const api = this.hub.api;
+    void this.hub.api; // throws HubOfflineError while offline
     const state = this.hub.state;
     let req: PermissionRequest | undefined =
       typeof requestId === "string" && requestId ? state.pending[requestId] : undefined;
-    if (req) this.assertLocal(req.machineId);
     if (!req) {
+      // This machine's requests first, then other (online) machines'.
       const pending = Object.values(state.pending)
-        .filter((p) => isLocal(state, p.machineId))
-        .sort((a, b) => a.createdAt - b.createdAt);
+        .filter((p) => isLocal(state, p.machineId) || state.machines[p.machineId]?.online === true)
+        .sort((a, b) => Number(isLocal(state, b.machineId)) - Number(isLocal(state, a.machineId)) || a.createdAt - b.createdAt);
       if (pending.length === 0) {
-        const remote = Object.keys(state.pending).length;
-        void vscode.window.showInformationMessage(
-          remote > 0
-            ? `Krypto: nothing here is waiting for approval (${remote} on other machines; answer those there).`
-            : "Krypto: nothing is waiting for approval.",
-        );
+        void vscode.window.showInformationMessage("Krypto: nothing is waiting for approval.");
         return;
       }
       if (pending.length === 1) req = pending[0];
@@ -276,7 +347,7 @@ export class Commands {
         const items: RequestItem[] = pending.map((request) => ({
           request,
           label: `${agentName(state.agents, request.agentId, request.machineId)}: ${request.toolCall.title || request.toolCall.kind || "tool call"}`,
-          description: relativeTime(request.createdAt),
+          description: `${relativeTime(request.createdAt)}${machineSuffix(state, request.machineId)}`,
           detail: request.toolCall.locations?.map((l) => l.path).join(", "),
         }));
         const pick = await vscode.window.showQuickPick(items, {
@@ -288,8 +359,7 @@ export class Commands {
       }
     }
     if (!req) return;
-    if (approve) await api.approve(req.requestId);
-    else await api.deny(req.requestId);
+    await answerRequest(this.hub, req.requestId, { kind: approve ? "approve" : "deny" });
   }
 
   // ---------------- machine ----------------

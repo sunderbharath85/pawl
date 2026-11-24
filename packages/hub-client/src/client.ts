@@ -17,7 +17,7 @@ import type {
   Session,
   Welcome,
 } from "@krypto/protocol";
-import { USER_ACTIVITY_REPORT_MS } from "@krypto/protocol";
+import { INTENT_TIMEOUT_MS, parseGlobalId, USER_ACTIVITY_REPORT_MS, type MachineId } from "@krypto/protocol";
 import {
   applyAck,
   applyWelcome,
@@ -30,6 +30,7 @@ import {
   type HubState,
   type StateLimits,
 } from "./state";
+import { isAllowOption, remoteOptionBlocked } from "./intents";
 import { MACHINE_NAME_MAX, normalizeMachineName } from "./machine";
 import { INVITE_TTL_MAX_SECS, INVITE_TTL_MIN_SECS, parseInviteUri } from "./peer";
 import { toHubWsUrl } from "./url";
@@ -104,6 +105,29 @@ export interface RequestOptions {
  * `unreachable` / `timeout` itself; this only has to outlast that.
  */
 export const JOIN_PEER_TIMEOUT_MS = 30_000;
+
+/**
+ * Client-side wait for a request the hub forwards to another machine: the hub waits INTENT_TIMEOUT_MS for the
+ * owner's answer and then acks `timeout` itself, so this only has to outlast that.
+ */
+export const REMOTE_REQUEST_TIMEOUT_MS = INTENT_TIMEOUT_MS + 10_000;
+
+/** Options for `startSession`. */
+export interface StartSessionOptions {
+  agentId: string;
+  cwd: string;
+  prompt?: string | undefined;
+  /** Where the agent runs (default: this machine). Another machine's start is forwarded and needs `confirmed`. */
+  machineId?: MachineId | undefined;
+  /** The user confirmed on this device (required to start on another machine). */
+  confirmed?: boolean | undefined;
+}
+
+/** Options for answering a permission request. */
+export interface ResolveOptions {
+  /** The user confirmed on this device (required to approve another machine's request). */
+  confirmed?: boolean | undefined;
+}
 
 type StateListener = (state: HubState, msg?: ServerMsg) => void;
 type AnyMsgListener = (msg: ServerMsg) => void;
@@ -291,31 +315,73 @@ export class HubClient {
     });
   }
 
-  async startSession(agentId: string, cwd: string, prompt?: string): Promise<Session> {
-    const res = await this.request<"start_session">(
-      prompt === undefined ? { type: "start_session", agentId, cwd } : { type: "start_session", agentId, cwd, prompt },
-    );
+  /**
+   * Start a session. With `machineId` of another machine the hub forwards it to that machine (the agent runs
+   * there); that needs `confirmed: true`, checked here first (code `unconfirmed`, nothing is sent).
+   * The positional form starts on this machine.
+   */
+  async startSession(opts: StartSessionOptions): Promise<Session>;
+  async startSession(agentId: string, cwd: string, prompt?: string): Promise<Session>;
+  async startSession(a: string | StartSessionOptions, cwd?: string, prompt?: string): Promise<Session> {
+    const o: StartSessionOptions = typeof a === "string" ? { agentId: a, cwd: cwd ?? "", prompt } : a;
+    const msg: DistributiveOmit<Extract<ClientMsg, { type: "start_session" }>, "id"> = { type: "start_session", agentId: o.agentId, cwd: o.cwd };
+    if (o.prompt !== undefined) msg.prompt = o.prompt;
+    const remote = o.machineId !== undefined && o.machineId !== "" && o.machineId !== this.state.machine?.id;
+    if (remote) {
+      if (o.confirmed !== true) {
+        throw new HubRequestError("unconfirmed", "start_session", "starting a session on another machine needs a confirmation on this device");
+      }
+      msg.machineId = o.machineId;
+      msg.confirmed = true;
+    }
+    const res = await this.request<"start_session">(msg, remote ? this.remoteWait() : undefined);
     return res.session;
   }
 
   async prompt(sessionId: string, text: string): Promise<void> {
-    await this.request<"prompt">({ type: "prompt", sessionId, text });
+    await this.request<"prompt">({ type: "prompt", sessionId, text }, this.waitFor(sessionId));
   }
 
   async cancel(sessionId: string): Promise<void> {
-    await this.request<"cancel">({ type: "cancel", sessionId });
+    await this.request<"cancel">({ type: "cancel", sessionId }, this.waitFor(sessionId));
   }
 
-  async resolvePermission(requestId: string, optionId: string | null): Promise<void> {
-    await this.request<"resolve_permission">({ type: "resolve_permission", requestId, optionId });
+  /**
+   * Answer a permission request. Another machine's request is forwarded to its owner; an allow_* option then
+   * needs `confirmed: true` (see `needsConfirmation`), checked here first (code `unconfirmed`, nothing is sent).
+   */
+  async resolvePermission(requestId: string, optionId: string | null, opts: ResolveOptions = {}): Promise<void> {
+    const remote = this.isRemoteId(requestId);
+    const req = this.state.pending[requestId];
+    if (remote && req && remoteOptionBlocked(this.state, req, optionId)) {
+      // The owner refuses always-allow from other machines; do not even ask.
+      throw new HubRequestError("forbidden", "resolve_permission", "always-allow must be chosen on the request's own machine");
+    }
+    if (remote && opts.confirmed !== true && req && isAllowOption(req, optionId)) {
+      throw new HubRequestError("unconfirmed", "resolve_permission", "approving another machine's request needs a confirmation on this device");
+    }
+    const msg: DistributiveOmit<Extract<ClientMsg, { type: "resolve_permission" }>, "id"> = { type: "resolve_permission", requestId, optionId };
+    if (opts.confirmed !== undefined) msg.confirmed = opts.confirmed;
+    await this.request<"resolve_permission">(msg, remote ? this.remoteWait() : undefined);
   }
 
-  /** Approve with the request's `allow_once` option (falls back to `allow_always`). */
-  async approve(requestId: string): Promise<void> {
+  /**
+   * Approve with the request's `allow_once` option (this machine's request falls back to `allow_always`).
+   * Another machine's request: allow_once only (always-allow is chosen on that machine; code `forbidden`), and pass
+   * `confirmed`.
+   */
+  async approve(requestId: string, opts: ResolveOptions = {}): Promise<void> {
     const req = this.requirePending(requestId, "resolve_permission");
-    const option = pickPermissionOption(req, "allow");
-    if (!option) throw new HubRequestError("no_allow_option", "resolve_permission", `permission request ${requestId} has no allow option`);
-    await this.resolvePermission(requestId, option);
+    const option = this.isRemoteId(requestId)
+      ? ((req.options ?? []).find((o) => o.kind === "allow_once")?.optionId ?? null)
+      : pickPermissionOption(req, "allow");
+    if (!option) {
+      if (pickPermissionOption(req, "allow")) {
+        throw new HubRequestError("forbidden", "resolve_permission", "this request only offers always-allow, which must be chosen on its own machine");
+      }
+      throw new HubRequestError("no_allow_option", "resolve_permission", `permission request ${requestId} has no allow option`);
+    }
+    await this.resolvePermission(requestId, option, opts);
   }
 
   /** Deny with the request's `reject_once` option, else cancel (optionId null). */
@@ -336,8 +402,16 @@ export class HubClient {
     return res.pet;
   }
 
-  async listAgents(refresh?: boolean): Promise<Agent[]> {
-    const res = await this.request<"list_agents">(refresh === undefined ? { type: "list_agents" } : { type: "list_agents", refresh });
+  /**
+   * This machine's agents (folded into `state.agents`), or with `machineId` another machine's agents as last
+   * reported in its presence (returned only; `state.agents` stays this machine's).
+   */
+  async listAgents(opts?: boolean | { refresh?: boolean | undefined; machineId?: MachineId | undefined }): Promise<Agent[]> {
+    const o = typeof opts === "object" ? opts : { refresh: opts };
+    const msg: DistributiveOmit<Extract<ClientMsg, { type: "list_agents" }>, "id"> = { type: "list_agents" };
+    if (o.refresh !== undefined) msg.refresh = o.refresh;
+    if (o.machineId !== undefined && o.machineId !== this.state.machine?.id) msg.machineId = o.machineId;
+    const res = await this.request<"list_agents">(msg);
     return res.agents;
   }
 
@@ -450,6 +524,27 @@ export class HubClient {
   }
 
   // ---------------------------------------------------------------- internals
+
+  /** Request options for something the hub forwards to another machine (it waits for the owner). */
+  private remoteWait(): RequestOptions {
+    return { timeoutMs: Math.max(REMOTE_REQUEST_TIMEOUT_MS, this.opts.requestTimeoutMs) };
+  }
+
+  /** `remoteWait()` when the id belongs to another machine. */
+  private waitFor(id: string): RequestOptions | undefined {
+    return this.isRemoteId(id) ? this.remoteWait() : undefined;
+  }
+
+  /**
+   * True when a request or session id belongs to another machine: by the item's machineId when we hold it,
+   * else by its global id prefix. Ids without a machine prefix count as this machine's.
+   */
+  private isRemoteId(id: string): boolean {
+    const own = this.state.machine?.id;
+    if (!own) return false;
+    const machineId = this.state.pending[id]?.machineId ?? this.state.sessions[id]?.machineId ?? parseGlobalId(id)?.machineId;
+    return machineId !== undefined && machineId !== own;
+  }
 
   /** This hub's machine id, waiting for the hello `Welcome` if it has not arrived yet. */
   private localMachineId(type: string): Promise<string> {

@@ -300,6 +300,7 @@ mod tests {
             request_id: "r".into(),
             outcome: PermissionOutcome::Cancelled,
             by: ResolvedBy::User,
+            by_machine_id: None,
         })
         .unwrap();
         assert!(on_event(&mut p, EventType::PermissionResolved, &resolved));

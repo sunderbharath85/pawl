@@ -636,10 +636,17 @@ fn resolve_request(
         format!("{}{}", agent_name(&chosen.agent_id, &ctx.agents), MachineNames::from_ctx(ctx).on(&chosen.machine_id));
     let what = summary::tool_label(&chosen.tool_call);
     if !is_local(ctx, &chosen.machine_id) {
-        // Mirrored from a paired hub: read-only here until remote control (PLAN step 4).
+        // Another machine's request: chat never forwards it. Approving there needs a confirmation on
+        // the device that asks (the panel or the CLI), so the reply says where to do it.
         let machine = MachineNames::from_ctx(ctx).label(&chosen.machine_id).unwrap_or_else(|| chosen.machine_id.clone());
+        let short: String = krypto_protocol::parse_global_id(&chosen.request_id)
+            .map_or(chosen.request_id.as_str(), |(_, l)| l)
+            .chars()
+            .take(8)
+            .collect();
         return say(format!(
-            "{} {name} is waiting for your OK to: {what}. I can't {verb} it from here yet: remote control arrives in a later update. Answer it on {machine}.",
+            "{} {name} is waiting for your OK to: {what}. That request lives on {machine}, so I won't {verb} it from chat: \
+             answer it in the Krypto panel (it asks you to confirm), or run `krypto {verb} {short}` in a terminal.",
             voice.thinking(seed)
         ));
     }

@@ -29,7 +29,16 @@ export type FeedItem =
     }
   | { kind: "plan"; key: string; entries: PlanEntry[]; ts: number }
   | { kind: "permission"; key: string; requestId?: string; title: string; toolKind: ToolKind; ts: number }
-  | { kind: "resolved"; key: string; requestId: string; outcome: PermissionOutcome | null; by: string; ts: number }
+  | {
+      kind: "resolved";
+      key: string;
+      requestId: string;
+      outcome: PermissionOutcome | null;
+      by: string;
+      /** The machine the decision came from when it was not the owner (a remote approval). */
+      byMachineId?: string | undefined;
+      ts: number;
+    }
   | { kind: "stop"; key: string; reason: StopReason | string; ts: number }
   | { kind: "error"; key: string; message: string; ts: number }
   | { kind: "notice"; key: string; icon: string; text: string; ts: number }
@@ -147,6 +156,7 @@ export function buildFeed(events: readonly HubEvent[]): FeedItem[] {
           requestId: p.requestId ?? "",
           outcome: p.outcome ?? null,
           by: p.by ?? "user",
+          byMachineId: typeof p.byMachineId === "string" && p.byMachineId ? p.byMachineId : undefined,
           ts: ev.ts,
         });
         break;

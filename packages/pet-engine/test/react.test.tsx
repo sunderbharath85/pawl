@@ -122,13 +122,46 @@ describe("PetStage visitors (SSR)", () => {
     expect(html).toContain("Guest7 · Mac mini");
   });
 
-  test("a visitor that ran here leads, with a read-only bubble (no buttons)", () => {
-    const ran = visitor(9, { activity: "alert", bubble: { kind: "permission", text: "Run tests? Needs approval on Mac mini.", requestId: `${MAC}:r1`, readOnly: true } });
+  test("a visitor that ran here leads; its Approve opens a confirm step first", () => {
+    const ran = visitor(9, {
+      activity: "alert",
+      bubble: { kind: "permission", text: "Run tests? (on Mac mini)", requestId: `${MAC}:r1`, confirm: { machineName: "Mac mini", action: "Run tests" } },
+    });
     const html = render([visitor(1), ran]);
-    expect(html).toContain("Needs approval on Mac mini");
-    expect(html).toContain("ap-bubble-readonly");
-    expect(html).not.toContain("ap-btn-approve");
+    expect(html).toContain("Run tests? (on Mac mini)");
+    expect(html).toContain("ap-bubble-remote");
+    expect(html).toContain(">Approve…</button>");
+    expect(html).toContain(">Deny</button>");
+    expect(html).toContain('aria-label="Guest9 needs permission on Mac mini"');
     expect(html.indexOf("Guest9")).toBeLessThan(html.indexOf("Guest1"));
+  });
+
+  test("a blocked Approve is disabled and says where to choose always-allow; Deny stays", () => {
+    const html = renderToStaticMarkup(
+      <PetBubble
+        view={view({
+          bubble: {
+            kind: "permission",
+            text: "Run? (on Mac mini)",
+            requestId: "r",
+            confirm: { machineName: "Mac mini", action: "Run" },
+            approveBlocked: "Choose always-allow on Mac mini",
+          },
+        })}
+        onApprove={() => {}}
+        onDeny={() => {}}
+      />,
+    );
+    expect(html).toContain('disabled="" title="Choose always-allow on Mac mini"');
+    expect(html).toContain(">Deny</button>");
+  });
+
+  test("a read-only permission bubble still has no buttons", () => {
+    const html = renderToStaticMarkup(
+      <PetBubble view={view({ bubble: { kind: "permission", text: "Run?", requestId: "r", readOnly: true } })} onApprove={() => {}} onDeny={() => {}} />,
+    );
+    expect(html).toContain("ap-bubble-readonly");
+    expect(html).not.toContain("ap-btn");
   });
 
   test("an away pet is off-screen, hidden and without its bubble", () => {

@@ -12,7 +12,17 @@ import {
   type SessionStatus,
   type ToolLocation,
 } from "@krypto/protocol";
-import { agentFor, groupByMachine, machineDisplayName, petFor, readOnlyReason, type HubState } from "@krypto/hub-client";
+import {
+  agentFor,
+  approveOptionId,
+  groupByMachine,
+  isLocal,
+  machineDisplayName,
+  offlineReason,
+  petFor,
+  remoteOptionBlocked,
+  type HubState,
+} from "@krypto/hub-client";
 import type { ConnInfo } from "../shared/messages";
 import { buildTranscript, type TranscriptItem } from "./transcript";
 import { post } from "./vscodeApi";
@@ -151,10 +161,10 @@ export type Place = Pick<HubState, "machine" | "machines">;
 
 /** "Mac mini" chip for another machine's item; greyed with "last seen" when that machine is offline. */
 function MachineChip({ place, machineId, now }: { place: Place; machineId: string; now: number }) {
-  if (!readOnlyReason(place, machineId)) return null;
+  if (isLocal(place, machineId)) return null;
   const m = place.machines[machineId];
   return (
-    <span className={`machine-chip${m?.online ? "" : " offline"}`} title={m?.online ? "Mirrored from that machine" : "Offline"}>
+    <span className={`machine-chip${m?.online ? "" : " offline"}`} title={m?.online ? "Runs on that machine" : "Offline"}>
       {machineDisplayName(m)}
       {m?.online ? "" : ` · last seen ${relativeTime(m?.lastSeen ?? 0, now)}`}
     </span>
@@ -177,22 +187,25 @@ export function ApprovalCard({
   now: number;
 }) {
   const [busy, setBusy] = useState(false);
-  // Another machine's request is read-only here until remote control (migration step 4).
-  const readOnly = readOnlyReason(place, request.machineId);
-  const offline = !!readOnly && !place.machines[request.machineId]?.online;
+  // Another machine's request is forwarded to it; the host asks in a modal before approving (migration step 4).
+  const remote = !isLocal(place, request.machineId);
+  const offline = offlineReason(place, request.machineId);
+  const owner = machineDisplayName(place.machines[request.machineId]);
+  // Remotely only allow_once approves; a request offering only always-allow is approved on its machine.
+  const noApprove = approveOptionId(place, request) === null;
   const title = request.toolCall.title || request.toolCall.kind || "Tool call";
   const extra = [...request.options]
     .sort((a, b) => OPTION_ORDER[a.kind] - OPTION_ORDER[b.kind])
     .filter((o) => o.kind === "allow_always" || o.kind === "reject_always");
   const resolve = (msg: Parameters<typeof post>[0]) => {
-    if (readOnly) return;
+    if (offline) return;
     setBusy(true);
     post(msg);
     // The card disappears when the hub confirms; re-enable if it did not (e.g. hub error).
     setTimeout(() => setBusy(false), 4000);
   };
   return (
-    <div className={`card approval${readOnly ? " remote" : ""}${offline ? " offline" : ""}`}>
+    <div className={`card approval${remote ? " remote" : ""}${offline ? " offline" : ""}`}>
       <div className="card-head">
         <span className={`kind kind-${request.toolCall.kind ?? "other"}`}>{request.toolCall.kind ?? "tool"}</span>
         <span className="muted">
@@ -206,16 +219,16 @@ export function ApprovalCard({
       <div className="actions">
         <button
           className="primary"
-          disabled={busy || !!readOnly}
-          title={readOnly ?? undefined}
+          disabled={busy || !!offline || noApprove}
+          title={offline ?? (noApprove ? `Choose always-allow on ${owner}` : remote ? `Approve on ${owner} (asks you to confirm)` : undefined)}
           onClick={() => resolve({ type: "approve", requestId: request.requestId })}
         >
-          Approve
+          {remote ? "Approve…" : "Approve"}
         </button>
         <button
           className="danger"
-          disabled={busy || !!readOnly}
-          title={readOnly ?? undefined}
+          disabled={busy || !!offline}
+          title={offline ?? undefined}
           onClick={() => resolve({ type: "deny", requestId: request.requestId })}
         >
           Deny
@@ -224,15 +237,22 @@ export function ApprovalCard({
           <button
             key={o.optionId}
             className="secondary small"
-            disabled={busy || !!readOnly}
-            title={readOnly ?? o.kind.replace("_", " ")}
+            disabled={busy || !!offline || !!remoteOptionBlocked(place, request, o.optionId)}
+            title={offline ?? remoteOptionBlocked(place, request, o.optionId) ?? o.kind.replace("_", " ")}
             onClick={() => resolve({ type: "resolve", requestId: request.requestId, optionId: o.optionId })}
           >
             {o.name}
           </button>
         ))}
       </div>
-      {readOnly && <div className="muted small remote-note">{readOnly}</div>}
+      {offline ? (
+        <div className="muted small remote-note">{offline}: answer it when it is back.</div>
+      ) : remote ? (
+        <div className="muted small remote-note">
+          Runs on {owner}; approving asks you to confirm first.
+          {request.options.some((o) => remoteOptionBlocked(place, request, o.optionId)) ? ` Choose always-allow on ${owner}.` : ""}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -320,7 +340,7 @@ export function SessionList({
   );
 }
 
-function TranscriptRow({ item, cwd, machineName }: { item: TranscriptItem; cwd: string; machineName: string }) {
+function TranscriptRow({ item, cwd, machineName, place }: { item: TranscriptItem; cwd: string; machineName: string; place: Place }) {
   switch (item.kind) {
     case "user":
       return <div className="msg user">{item.text}</div>;
@@ -358,7 +378,14 @@ function TranscriptRow({ item, cwd, machineName }: { item: TranscriptItem; cwd: 
         </div>
       );
     case "permission":
-      return <div className="note permission">🔔 {item.text}</div>;
+      return (
+        <div className="note permission">
+          🔔 {item.text}
+          {item.fromMachineId
+            ? ` · from ${machineDisplayName(place.machines[item.fromMachineId] ?? (item.fromMachineId === place.machine?.id ? place.machine : undefined))}`
+            : ""}
+        </div>
+      );
     case "stop":
       return <div className="divider">{item.reason}</div>;
     case "error":
@@ -413,12 +440,12 @@ export function SessionDetail({
   }, [items]);
 
   const canPrompt = connected && session.source === "owned" && !session.endedAt;
-  // Another machine's session is a read-only mirror until remote control (migration step 4).
-  const readOnly = readOnlyReason(place, session.machineId);
+  // Another machine's session: prompts and cancels are forwarded to it (migration step 4).
+  const remote = !isLocal(place, session.machineId);
   const machine = place.machines[session.machineId];
   const machineName = machineDisplayName(machine);
-  const offline = !!readOnly && !machine?.online;
-  const inWorkspace = !readOnly && workspaceFolders.some((f) => session.cwd.toLowerCase().startsWith(f.toLowerCase()));
+  const offline = offlineReason(place, session.machineId);
+  const inWorkspace = !remote && workspaceFolders.some((f) => session.cwd.toLowerCase().startsWith(f.toLowerCase()));
 
   return (
     <div className={`detail${offline ? " offline" : ""}`}>
@@ -436,15 +463,15 @@ export function SessionDetail({
           <div className="muted small" title={session.cwd}>
             {session.title?.trim() ? `${session.title.trim()} · ` : ""}
             {basename(session.cwd)}
-            {readOnly || inWorkspace ? "" : " (outside this workspace)"} · {SOURCE_LABEL[session.source]} · started{" "}
+            {remote || inWorkspace ? "" : " (outside this workspace)"} · {SOURCE_LABEL[session.source]} · started{" "}
             {relativeTime(session.startedAt, now)}
           </div>
         </div>
         {connected && session.source === "owned" && isBusy(session) && (
           <button
             className="danger small"
-            disabled={!!readOnly}
-            title={readOnly ?? undefined}
+            disabled={!!offline}
+            title={offline ?? (remote ? `Cancels the turn on ${machineName}` : undefined)}
             onClick={() => post({ type: "cancel", sessionId: session.id })}
           >
             Cancel
@@ -453,7 +480,7 @@ export function SessionDetail({
       </div>
 
       {pending.length > 0 && (
-        <div className="note permission">🔔 {readOnly ? `Waiting for approval on ${machineName}.` : "Waiting for your approval above."}</div>
+        <div className="note permission">🔔 {remote ? `${machineName} is waiting for your approval above.` : "Waiting for your approval above."}</div>
       )}
 
       <div
@@ -467,14 +494,14 @@ export function SessionDetail({
         {items.length === 0 ? (
           <div className="empty">{session.source === "owned" ? "Nothing yet." : "This session reports through hooks; only milestones show up here."}</div>
         ) : (
-          items.map((item) => <TranscriptRow key={item.key} item={item} cwd={session.cwd} machineName={machineName} />)
+          items.map((item) => <TranscriptRow key={item.key} item={item} cwd={session.cwd} machineName={machineName} place={place} />)
         )}
       </div>
 
       {canPrompt ? (
         <Composer
-          placeholder={readOnly ?? (isBusy(session) ? "Queue a follow-up…" : "Reply to the agent…")}
-          disabled={!!readOnly}
+          placeholder={offline ?? (isBusy(session) ? "Queue a follow-up…" : remote ? `Reply to the agent on ${machineName}…` : "Reply to the agent…")}
+          disabled={!!offline}
           onSend={(text) => {
             stick.current = true;
             post({ type: "prompt", sessionId: session.id, text });

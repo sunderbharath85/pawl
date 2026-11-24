@@ -31,7 +31,14 @@ impl Host {
         match self {
             Host::Acp(h) => h.prompt(id, text).await,
             #[cfg(test)]
-            Host::Fake(f) => f.record(format!("prompt {id} {text}")),
+            Host::Fake(f) => {
+                f.record(format!("prompt {id} {text}"))?;
+                // Tests: the agent refuses this prompt.
+                if text == "fail" {
+                    anyhow::bail!("the agent refused the prompt");
+                }
+                Ok(())
+            }
         }
     }
 
@@ -47,7 +54,15 @@ impl Host {
         match self {
             Host::Acp(h) => h.resolve_permission(request_id, option_id).await,
             #[cfg(test)]
-            Host::Fake(f) => f.record(format!("resolve {request_id} {}", option_id.as_deref().unwrap_or("<cancelled>"))),
+            Host::Fake(f) => {
+                f.record(format!("resolve {request_id} {}", option_id.as_deref().unwrap_or("<cancelled>")))?;
+                // Tests: a slow answer the agent then refuses (the request goes back to pending).
+                if option_id.as_deref() == Some("slow-fail") {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    anyhow::bail!("the agent refused the answer");
+                }
+                Ok(())
+            }
         }
     }
 

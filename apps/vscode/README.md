@@ -8,9 +8,10 @@ A dog (or cat, bird, robot) that watches and drives your coding agents through t
 - **Pet view** (activity bar → Krypto): this machine's name (plus "N machines · M online" once paired), the pets
   (every pet shows its name), sessions grouped by machine, live transcript, Approve/Deny cards and chat.
   Paired machines' pets visit on the right, and a pet with a waiting approval runs to the machine you are
-  using. Other machines' sessions and approvals are read-only here (remote control comes later).
+  using. Other machines' sessions can be prompted, cancelled, approved and denied from here; approving one
+  (or starting a session on another machine) asks in a modal first ("Approve on Mac mini: …?").
   `Krypto: Open Pet in Editor` opens the same view in an editor tab.
-- **Commands:** Start Session, Prompt Session, Cancel Session, Approve Pending, Deny Pending, Show Pet,
+- **Commands:** Start Session (pick this machine or an online paired one), Prompt Session, Cancel Session, Approve Pending, Deny Pending, Show Pet,
   Rename Pet, Change Pet Species, Rename This Machine, Show Machines (read-only; pair machines in the desktop
   app or with `krypto peer`), Install Agent Hooks, Start Hub, Reconnect to Hub.
 - **Edits:** when an agent finishes editing a file inside this workspace, the file (or a diff against git

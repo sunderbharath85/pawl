@@ -10,6 +10,7 @@ import {
   type ErrorPayload,
 } from "@krypto/protocol";
 import type { HubConnection } from "./connection";
+import { answerRequest } from "./remote";
 import { activeMachineId, isLocal, machineDisplayName, petFor } from "@krypto/hub-client";
 import { agentName, errorMessage, isInWorkspace } from "./util";
 
@@ -109,8 +110,8 @@ export class Notifier implements vscode.Disposable {
     this.markRecent(req.sessionId, "perm");
 
     const text = `${this.who(req.machineId, req.agentId)} needs your OK: ${describePermission(req)}`;
-    // Another machine's request is read-only here until remote control (migration step 4).
-    const actions = isLocal(this.hub.state, req.machineId) ? ["Approve", "Deny", "Show"] : ["Show"];
+    // Another machine's request is forwarded to it; approving asks in a modal first (answerRequest).
+    const actions = ["Approve", "Deny", "Show"];
     void vscode.window.showWarningMessage(text, ...actions).then(async (pick) => {
       this.shownRequests.delete(req.requestId);
       if (!pick) return;
@@ -129,8 +130,7 @@ export class Notifier implements vscode.Disposable {
       return;
     }
     try {
-      if (approve) await this.hub.api.approve(requestId);
-      else await this.hub.api.deny(requestId);
+      await answerRequest(this.hub, requestId, { kind: approve ? "approve" : "deny" });
     } catch (err) {
       void vscode.window.showErrorMessage(`Krypto: could not ${approve ? "approve" : "deny"}: ${errorMessage(err)}`);
     }
@@ -145,8 +145,8 @@ export class Notifier implements vscode.Disposable {
     if (!this.relevant(e.sessionId)) return;
     const who = this.who(session.machineId, session.agentId);
     const title = session.title?.trim();
-    // Replying to another machine's session arrives with remote control (migration step 4).
-    const replyActions = isLocal(this.hub.state, session.machineId) ? ["Reply", "Show"] : ["Show"];
+    // Replying to another machine's session is forwarded to it (migration step 4).
+    const replyActions = isLocal(this.hub.state, session.machineId) || this.hub.state.machines[session.machineId]?.online ? ["Reply", "Show"] : ["Show"];
 
     if (e.type === "error") {
       const message = (e.payload as Partial<ErrorPayload> | null)?.message ?? "unknown error";
@@ -195,7 +195,7 @@ export class Notifier implements vscode.Disposable {
 
     const title = `${n.title}${this.where(n.machineId)}`;
     const text = n.title && n.body ? `${title}: ${n.body}` : n.title ? title : n.body;
-    const answerable = pending.length === 1 && isLocal(this.hub.state, pending[0]!.machineId);
+    const answerable = pending.length === 1;
     const actions = answerable ? ["Approve", "Deny", "Show"] : n.sessionId ? ["Show"] : [];
     const show =
       n.level === "alert" || n.level === "warning"

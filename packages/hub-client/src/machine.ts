@@ -165,11 +165,11 @@ export function groupByMachine<T extends { machineId: MachineId }>(
 }
 
 /**
- * Why an item can't be acted on here, or null for this machine's own items. Remote sessions and
- * approvals are read-only until remote control (PLAN.md migration step 4).
+ * Why another machine's pet can't be edited here, or null for this machine's own pets. (Sessions and
+ * approvals of other machines can be acted on since migration step 4; pets stay with their machine.)
  */
 export function readOnlyReason(state: Pick<HubState, "machine" | "machines">, machineId: MachineId): string | null {
   if (isLocal(state, machineId)) return null;
   const name = state.machines[machineId]?.name?.trim() || "its own machine";
-  return `Open on ${name} to act — remote control arrives in a later update.`;
+  return `Change it on ${name}: pets belong to their machine.`;
 }

@@ -74,6 +74,37 @@ pub enum Command {
         /// Run the agent in this process even if a hub is running
         #[arg(long)]
         local: bool,
+        /// Run it on a paired machine (name or id; see `krypto machines`); --cwd is then a path there
+        #[arg(long, value_name = "NAME|ID")]
+        machine: Option<String>,
+        /// Accepted for scripts, but a start on another machine always asks on this terminal
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Approve a waiting permission request, on this machine or a paired one (see `krypto pending`)
+    Approve {
+        /// Request id (or a unique start of it, 4+ characters)
+        request: String,
+        /// Option id to choose (default: the first allow option)
+        #[arg(long)]
+        option: Option<String>,
+        /// Do not ask for this machine's requests (another machine's always ask, on a terminal)
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Deny a waiting permission request, on this machine or a paired one
+    Deny {
+        /// Request id (or a unique start of it, 4+ characters)
+        request: String,
+        /// Option id to choose (default: the first reject option, else cancel)
+        #[arg(long)]
+        option: Option<String>,
+    },
+    /// List permission requests waiting for an answer, on every machine
+    Pending {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Forward an agent hook payload (stdin JSON, or JSON as the last argument) to the hub
     Hook {
@@ -169,7 +200,12 @@ pub async fn run() -> ExitCode {
         Command::Serve { peer_listen } => run_serve(paths, cli.port, peer_listen).await,
         Command::Agents { refresh, json } => run_agents(&paths, cli.port, refresh, json).await,
         Command::Sessions { json } => run_sessions(&paths, cli.port, json).await,
-        Command::Start { agent, cwd, prompt, local } => run_start(paths, cli.port, agent, cwd, prompt, local).await,
+        Command::Start { agent, cwd, prompt, local, machine, yes } => {
+            run_start(paths, cli.port, agent, cwd, prompt, local, machine, yes).await
+        }
+        Command::Approve { request, option, yes } => run_decide(&paths, cli.port, true, request, option, yes).await,
+        Command::Deny { request, option } => run_decide(&paths, cli.port, false, request, option, false).await,
+        Command::Pending { json } => run_pending(&paths, cli.port, json).await,
         Command::InstallHooks { target, apply, repo } => run_install_hooks(target, apply, repo),
         Command::Token => run_token(&paths),
         Command::Machine { name, json } => run_machine(&paths, cli.port, name, json).await,
@@ -479,6 +515,9 @@ fn rid() -> String {
 
 // ---------------------------------------------------------------- peer / machines
 
+/// What pairing gives the other machine, said once by `peer invite` and `peer join`.
+const PAIRED_CAN: &str = "It can see this machine's sessions and, with confirmation on its side, approve once, prompt, cancel and start agents in folders this machine already uses. Turn off with [peer] accept_intents = false.";
+
 /// Friendly text for the pairing ack error codes (the hub answers with the bare code).
 fn peer_error_text(code: &str) -> Option<&'static str> {
     Some(match code {
@@ -550,6 +589,8 @@ async fn run_peer(paths: &Paths, port_flag: Option<u16>, action: PeerAction) -> 
             println!("On the other machine, run:");
             println!();
             println!("  krypto peer join \"{uri}\"");
+            println!();
+            println!("{PAIRED_CAN}");
         }
         PeerAction::Join { uri } => {
             let v = peer_request(&mut conn, ClientMsg::JoinPeer { id: rid(), uri }).await?;
@@ -563,6 +604,7 @@ async fn run_peer(paths: &Paths, port_flag: Option<u16>, action: PeerAction) -> 
                 enum_label(&machine.os),
                 device.addr.as_deref().map(|a| format!(" at {a}")).unwrap_or_default()
             );
+            println!("{PAIRED_CAN}");
         }
         PeerAction::Revoke { machine } => {
             let device = resolve_device(&devices, &machine)?;
@@ -668,13 +710,220 @@ async fn run_machines(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
     Ok(())
 }
 
+// ---------------------------------------------------------------- approve / deny / pending (intents)
+
+/// Readable text for the codes an action on another machine (or a decided request) can return.
+fn intent_error_text(code: &str, machine: &str) -> Option<String> {
+    Some(match code {
+        "already_decided" => "Already answered.".to_string(),
+        "offline" => format!("{machine} is offline."),
+        "timeout" => format!("No answer from {machine} yet; check that machine (the result may still arrive)."),
+        "unconfirmed" => "This needs a confirmation on this device first.".to_string(),
+        "forbidden" => format!(
+            "{machine} does not allow that from another machine: \"always allow\" is chosen on {machine} itself, agents start only in folders it already uses (or under its [peer] start_roots), and nothing is accepted when its [peer] accept_intents = false."
+        ),
+        "rate_limited" => format!("Too many requests to {machine}; try again in a moment."),
+        "invalid" => "That request, option, agent or directory is not valid there.".to_string(),
+        "not_found" => "No such request or session (or that machine is not paired).".to_string(),
+        "not_owner" => "That id does not belong to the machine it was sent to.".to_string(),
+        _ => return None,
+    })
+}
+
+/// A request on the running hub; intent error codes become readable text (`machine` = the target).
+async fn intent_request(conn: &mut Conn, msg: ClientMsg, machine: &str) -> Result<Value> {
+    conn.request(msg).await.map_err(|e| {
+        let code = e.to_string();
+        match intent_error_text(&code, machine) {
+            Some(text) => anyhow!("{text} ({code})"),
+            None => e,
+        }
+    })
+}
+
+/// A machine by exact id, else by name (trimmed, case-insensitive; must be unambiguous).
+fn resolve_machine<'a>(machines: &'a [Machine], query: &str) -> Result<&'a Machine> {
+    let q = query.trim();
+    if let Some(m) = machines.iter().find(|m| m.id == q) {
+        return Ok(m);
+    }
+    let by_name: Vec<&Machine> = machines.iter().filter(|m| m.name.trim().to_lowercase() == q.to_lowercase()).collect();
+    match by_name.as_slice() {
+        [m] => Ok(m),
+        [] => bail!("no machine with id or name {q:?} (see `krypto machines`)"),
+        many => bail!(
+            "{} machines are named {q:?}; use the id: {}",
+            many.len(),
+            many.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+/// A pending request by full id, or by a unique prefix (4+ characters) of its local part.
+fn resolve_request<'a>(pending: &'a [PermissionRequest], query: &str) -> Result<Option<&'a PermissionRequest>> {
+    let q = query.trim();
+    if let Some(r) = pending.iter().find(|r| r.request_id == q) {
+        return Ok(Some(r));
+    }
+    if krypto_protocol::parse_global_id(q).is_some() {
+        return Ok(None); // a full id that is not pending: let its owner say why
+    }
+    if q.chars().count() < 4 {
+        bail!("request id {q:?} is too short (use at least 4 characters, see `krypto pending`)");
+    }
+    let hits: Vec<&PermissionRequest> = pending
+        .iter()
+        .filter(|r| krypto_protocol::parse_global_id(&r.request_id).is_some_and(|(_, local)| local.starts_with(q)))
+        .collect();
+    match hits.as_slice() {
+        [r] => Ok(Some(r)),
+        [] => bail!("no pending request {q:?} (see `krypto pending`)"),
+        _ => bail!("{q:?} matches {} pending requests; give more of the id", hits.len()),
+    }
+}
+
+/// The option an approve/deny uses: `--option` if given (it must be of the right kind), else the
+/// first allow (once, then always) / reject (once, then always; none = cancel).
+fn pick_option(req: &PermissionRequest, approve: bool, explicit: Option<&str>) -> Result<Option<String>> {
+    if let Some(o) = explicit {
+        let Some(opt) = req.options.iter().find(|x| x.option_id == o) else {
+            bail!("request has no option {o:?} (options: {})", req.options.iter().map(|x| x.option_id.as_str()).collect::<Vec<_>>().join(", "));
+        };
+        let allow = matches!(opt.kind, PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways);
+        if allow != approve {
+            bail!("option {o:?} is {} option; use `krypto {}`", if allow { "an allow" } else { "a reject" }, if allow { "approve" } else { "deny" });
+        }
+        return Ok(Some(o.to_string()));
+    }
+    Ok(if approve {
+        Some(
+            first_of(req, &[PermissionOptionKind::AllowOnce, PermissionOptionKind::AllowAlways])
+                .context("the request has no allow option")?,
+        )
+    } else {
+        deny_option(req)
+    })
+}
+
+/// Whether the CLI asks before acting. On another machine always: a person at this terminal,
+/// never `--yes` or a script. On this machine only for actions that ask at all, unless `--yes`.
+fn asks_first(remote: bool, yes: bool, asks_locally: bool) -> bool {
+    remote || (asks_locally && !yes)
+}
+
+/// Ask a yes/no question on the terminal (default no). Needs a TTY.
+async fn ask_yes_no(question: String) -> Result<bool> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        bail!("this needs a confirmation on an interactive terminal");
+    }
+    eprint!("{question} [y/N] ");
+    let _ = std::io::stderr().flush();
+    let line = tokio::task::spawn_blocking(|| {
+        let mut s = String::new();
+        std::io::stdin().read_line(&mut s).map(|_| s)
+    })
+    .await
+    .context("read the answer")??;
+    Ok(matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
+fn machine_name(machines: &[Machine], id: &str) -> String {
+    machines.iter().find(|m| m.id == id).map(|m| printable(&m.name)).unwrap_or_else(|| id.to_string())
+}
+
+/// `krypto approve|deny <requestId>`: this machine's requests, or another machine's (forwarded to
+/// its owner). A remote approval always asks on this terminal; `--yes` is not honoured for it, so a
+/// script cannot approve on another machine.
+async fn run_decide(
+    paths: &Paths,
+    port_flag: Option<u16>,
+    approve: bool,
+    request: String,
+    option: Option<String>,
+    yes: bool,
+) -> Result<()> {
+    let hub = running_hub(paths, port_flag).await?;
+    let me = hub.welcome.machine.id.clone();
+    let machines = hub.welcome.machines.clone();
+    let pending = hub.welcome.pending_permissions.clone();
+    let req = resolve_request(&pending, &request)?.cloned();
+    let request_id = req.as_ref().map_or(request.trim().to_string(), |r| r.request_id.clone());
+    let owner = krypto_protocol::parse_global_id(&request_id).map(|(m, _)| m.to_string()).unwrap_or_else(|| me.clone());
+    let remote = owner != me;
+    let where_ = machine_name(&machines, &owner);
+    let option_id = match &req {
+        Some(r) => pick_option(r, approve, option.as_deref())?,
+        None if approve => Some(option.context("the request is not pending here; pass --option <id>")?),
+        None => option,
+    };
+    let what = req.as_ref().and_then(|r| r.tool_call.title.clone()).unwrap_or_else(|| "this request".into());
+    let mut confirmed = None;
+    if approve {
+        let question = if remote {
+            format!("Approve on {where_}: {}?", printable(&what))
+        } else {
+            format!("Approve: {}?", printable(&what))
+        };
+        // Remote approvals are always confirmed by a person here; local ones may skip with --yes.
+        if asks_first(remote, yes, true) && !ask_yes_no(question).await? {
+            eprintln!("Not approved.");
+            return Ok(());
+        }
+        confirmed = Some(true);
+    }
+    let mut conn = Conn::Remote(Box::new(hub));
+    intent_request(&mut conn, ClientMsg::ResolvePermission { id: rid(), request_id: request_id.clone(), option_id, confirmed }, &where_)
+        .await?;
+    let verb = if approve { "Approved" } else { "Denied" };
+    if remote {
+        println!("{verb} on {where_}: {}", printable(&what));
+    } else {
+        println!("{verb}: {}", printable(&what));
+    }
+    Ok(())
+}
+
+/// `krypto pending`: requests waiting for an answer, on every machine.
+async fn run_pending(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> Result<()> {
+    let hub = running_hub(paths, port_flag).await?;
+    let w = hub.welcome;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&w.pending_permissions)?);
+        return Ok(());
+    }
+    if w.pending_permissions.is_empty() {
+        println!("Nothing is waiting for an answer.");
+        return Ok(());
+    }
+    let now = krypto_protocol::now_ms();
+    let rows: Vec<Vec<String>> = w
+        .pending_permissions
+        .iter()
+        .map(|r| {
+            vec![
+                short_id(&r.request_id),
+                machine_name(&w.machines, &r.machine_id),
+                r.agent_id.clone(),
+                printable(&crate::notify::truncate(r.tool_call.title.as_deref().unwrap_or("a tool call"), 50)),
+                r.options.iter().map(|o| o.option_id.as_str()).collect::<Vec<_>>().join(","),
+                ago(now, r.created_at),
+            ]
+        })
+        .collect();
+    print_table(&["ID", "MACHINE", "AGENT", "TOOL", "OPTIONS", "WAITING"], &rows);
+    println!();
+    println!("Answer with `krypto approve <ID>` or `krypto deny <ID>`.");
+    Ok(())
+}
+
 // ---------------------------------------------------------------- agents / sessions
 
 async fn run_agents(paths: &Paths, port_flag: Option<u16>, refresh: bool, as_json: bool) -> Result<()> {
     let agents: Vec<Agent> = match RemoteHub::connect(paths, port_flag).await? {
         Some(hub) => {
             let mut conn = Conn::Remote(Box::new(hub));
-            let v = conn.request(ClientMsg::ListAgents { id: rid(), refresh: Some(refresh) }).await?;
+            let v = conn.request(ClientMsg::ListAgents { id: rid(), refresh: Some(refresh), machine_id: None }).await?;
             serde_json::from_value(v.get("agents").cloned().unwrap_or_default())?
         }
         None => {
@@ -840,6 +1089,7 @@ impl StdinLines {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_start(
     paths: Paths,
     port_flag: Option<u16>,
@@ -847,7 +1097,37 @@ async fn run_start(
     cwd: PathBuf,
     prompt: Option<String>,
     force_local: bool,
+    machine: Option<String>,
+    yes: bool,
 ) -> Result<()> {
+    if let Some(query) = machine {
+        if force_local {
+            bail!("--machine and --local cannot be combined");
+        }
+        let hub = running_hub(&paths, port_flag).await?;
+        let target = resolve_machine(&hub.welcome.machines, &query)?.clone();
+        if target.id != hub.welcome.machine.id {
+            // A path on that machine: passed as given (it checks it is an absolute, existing directory).
+            let dir = cwd.to_string_lossy().into_owned();
+            if dir.trim().is_empty() || dir == "." {
+                bail!("--cwd <absolute path on {}> is required with --machine", printable(&target.name));
+            }
+            if !target.online {
+                bail!("{} is offline (see `krypto machines`)", printable(&target.name));
+            }
+            // Like a remote approval: always a person at this terminal, never --yes or a script.
+            if yes {
+                eprintln!("(--yes is not honoured for another machine: confirm below)");
+            }
+            let question = format!("Start {agent} on {} in {dir}?", printable(&target.name));
+            if asks_first(true, yes, false) && !ask_yes_no(question).await? {
+                eprintln!("Not started.");
+                return Ok(());
+            }
+            let mut conn = Conn::Remote(Box::new(hub));
+            return drive_session(&mut conn, &agent, &dir, prompt, Some(&target)).await;
+        }
+    }
     let cwd = std::path::absolute(&cwd).with_context(|| format!("bad --cwd {}", cwd.display()))?;
     let remote = if force_local { None } else { RemoteHub::connect(&paths, port_flag).await? };
     let mut local_hub = None;
@@ -870,18 +1150,27 @@ async fn run_start(
         }
     };
 
-    let result = drive_session(&mut conn, &agent, &cwd.to_string_lossy(), prompt).await;
+    let result = drive_session(&mut conn, &agent, &cwd.to_string_lossy(), prompt, None).await;
     if let Some(hub) = local_hub {
         hub.shutdown().await;
     }
     result
 }
 
-async fn drive_session(conn: &mut Conn, agent: &str, cwd: &str, prompt: Option<String>) -> Result<()> {
-    eprintln!("[hub] starting {agent} in {cwd} ...");
-    let v = conn
-        .request(ClientMsg::StartSession { id: rid(), agent_id: agent.into(), cwd: cwd.into(), prompt: prompt.clone() })
-        .await?;
+/// Start a session (here, or on `remote` after the user confirmed) and drive it from the terminal.
+async fn drive_session(conn: &mut Conn, agent: &str, cwd: &str, prompt: Option<String>, remote: Option<&Machine>) -> Result<()> {
+    let on = remote.map(|m| format!(" on {}", printable(&m.name))).unwrap_or_default();
+    eprintln!("[hub] starting {agent} in {cwd}{on} ...");
+    let msg = ClientMsg::StartSession {
+        id: rid(),
+        agent_id: agent.into(),
+        cwd: cwd.into(),
+        prompt: prompt.clone(),
+        machine_id: remote.map(|m| m.id.clone()),
+        confirmed: remote.map(|_| true),
+    };
+    let target = remote.map_or_else(|| "this machine".to_string(), |m| printable(&m.name));
+    let v = intent_request(conn, msg, &target).await?;
     let session: Session = serde_json::from_value(v.get("session").cloned().unwrap_or_default()).context("parse session")?;
     eprintln!("[hub] session {} ({})", session.id, enum_label(&session.status));
     let mut stdin = StdinLines::spawn();
@@ -962,7 +1251,14 @@ async fn run_turn(conn: &mut Conn, sid: &str, stdin: &mut StdinLines, printer: &
                 };
                 match answer {
                     Some(option_id) => {
-                        match conn.request(ClientMsg::ResolvePermission { id: rid(), request_id: req.request_id.clone(), option_id }).await {
+                        // The person answered on this terminal: that is the confirmation a remote approval needs.
+                        let msg = ClientMsg::ResolvePermission {
+                            id: rid(),
+                            request_id: req.request_id.clone(),
+                            option_id,
+                            confirmed: Some(true),
+                        };
+                        match conn.request(msg).await {
                             Ok(_) => asking = None,
                             Err(e) => eprintln!("[hub] {e:#}"),
                         }
@@ -1276,6 +1572,82 @@ mod tests {
         drop(store);
         run_machines(&paths, Some(9), false).await.unwrap();
         run_machines(&paths, Some(9), true).await.unwrap();
+    }
+
+    #[test]
+    fn intent_commands_parse() {
+        let c = Cli::try_parse_from(["krypto", "start", "codex", "--cwd", "/srv/api", "--machine", "Mac mini", "--yes"]).unwrap();
+        assert!(matches!(c.command, Command::Start { machine: Some(ref m), yes: true, .. } if m == "Mac mini"));
+        let c = Cli::try_parse_from(["krypto", "approve", "abcd1234", "--option", "allow-always", "--yes"]).unwrap();
+        assert!(matches!(c.command, Command::Approve { ref request, option: Some(ref o), yes: true } if request == "abcd1234" && o == "allow-always"));
+        let c = Cli::try_parse_from(["krypto", "deny", "abcd1234"]).unwrap();
+        assert!(matches!(c.command, Command::Deny { ref request, option: None } if request == "abcd1234"));
+        assert!(Cli::try_parse_from(["krypto", "deny", "abcd", "--yes"]).is_err(), "deny has no --yes");
+        let c = Cli::try_parse_from(["krypto", "pending", "--json"]).unwrap();
+        assert!(matches!(c.command, Command::Pending { json: true }));
+    }
+
+    fn machine(id: &str, name: &str) -> Machine {
+        Machine { id: id.into(), name: name.into(), os: MachineOs::Linux, last_seen: 0, online: true, hub_version: None, user_active_at: None }
+    }
+
+    #[test]
+    fn machines_resolve_by_id_or_unique_name() {
+        let ms = vec![machine("aaaaaa111111", "Mac mini"), machine("bbbbbb222222", "Laptop"), machine("cccccc333333", "laptop")];
+        assert_eq!(resolve_machine(&ms, "aaaaaa111111").unwrap().id, "aaaaaa111111");
+        assert_eq!(resolve_machine(&ms, " MAC MINI ").unwrap().id, "aaaaaa111111");
+        assert!(resolve_machine(&ms, "laptop").unwrap_err().to_string().contains("bbbbbb222222"));
+        assert!(resolve_machine(&ms, "desk").is_err());
+    }
+
+    #[test]
+    fn requests_resolve_and_options_follow_the_verb() {
+        let mut r1 = req();
+        r1.request_id = "zyxwvu987654:abcd1234-0000".into();
+        let mut r2 = req();
+        r2.request_id = "zyxwvu987654:abce9999-0000".into();
+        let pending = vec![r1.clone(), r2.clone()];
+        assert_eq!(resolve_request(&pending, "abcd1").unwrap().unwrap().request_id, r1.request_id);
+        assert_eq!(resolve_request(&pending, &r2.request_id).unwrap().unwrap().request_id, r2.request_id);
+        assert!(resolve_request(&pending, "abc").is_err(), "too short");
+        assert!(resolve_request(&pending, "abcx").is_err(), "no match");
+        assert!(resolve_request(&pending, "zyxwvu987654:gone").unwrap().is_none(), "a full id goes to its owner as is");
+        let mut amb = pending.clone();
+        amb[1].request_id = "zyxwvu987654:abcd9999".into();
+        assert!(resolve_request(&amb, "abcd").unwrap_err().to_string().contains("matches 2"));
+
+        assert_eq!(pick_option(&r1, true, None).unwrap().as_deref(), Some("ok"));
+        assert_eq!(pick_option(&r1, false, None).unwrap().as_deref(), Some("no"));
+        assert_eq!(pick_option(&r1, true, Some("always")).unwrap().as_deref(), Some("always"));
+        assert!(pick_option(&r1, true, Some("no")).unwrap_err().to_string().contains("krypto deny"), "approve with a reject option");
+        assert!(pick_option(&r1, false, Some("ok")).unwrap_err().to_string().contains("krypto approve"), "deny with an allow option");
+        assert!(pick_option(&r1, true, Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn another_machine_always_asks_a_person() {
+        // Remote approve and remote start: always asked, --yes or not.
+        for yes in [false, true] {
+            assert!(asks_first(true, yes, true), "remote approve, yes={yes}");
+            assert!(asks_first(true, yes, false), "remote start, yes={yes}");
+        }
+        // This machine: approve asks unless --yes; start never asks.
+        assert!(asks_first(false, false, true));
+        assert!(!asks_first(false, true, true));
+        assert!(!asks_first(false, false, false));
+        assert!(PAIRED_CAN.contains("approve once") && PAIRED_CAN.contains("accept_intents = false"));
+    }
+
+    #[test]
+    fn intent_errors_read_well() {
+        for code in ["already_decided", "offline", "timeout", "unconfirmed", "forbidden", "rate_limited", "invalid", "not_found", "not_owner"] {
+            assert!(intent_error_text(code, "Mac mini").is_some(), "{code}");
+        }
+        assert_eq!(intent_error_text("offline", "Mac mini").unwrap(), "Mac mini is offline.");
+        assert_eq!(intent_error_text("already_decided", "x").unwrap(), "Already answered.");
+        let f = intent_error_text("forbidden", "Mac mini").unwrap();
+        assert!(f.contains("\"always allow\" is chosen on Mac mini itself") && f.contains("start_roots") && f.contains("accept_intents"), "{f}");
+        assert!(intent_error_text("whatever", "x").is_none());
     }
 
     #[test]

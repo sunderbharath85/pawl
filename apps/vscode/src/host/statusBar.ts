@@ -30,10 +30,10 @@ export class PetStatusBar implements vscode.Disposable {
   render(): void {
     const conn = this.hub.info;
     const state = this.hub.state;
-    // Only this machine's approvals can be answered here; other machines' are mentioned in the tooltip.
-    const pending = Object.values(state.pending);
-    const pendingCount = pending.filter((p) => isLocal(state, p.machineId)).length;
-    const remotePending = pending.length - pendingCount;
+    // Approvals that can be answered from here: this machine's and online paired machines' (forwarded).
+    const pending = Object.values(state.pending).filter((p) => isLocal(state, p.machineId) || state.machines[p.machineId]?.online === true);
+    const pendingCount = pending.length;
+    const remotePending = pending.filter((p) => !isLocal(state, p.machineId)).length;
     const hasPending = conn.status === "connected" && pendingCount > 0;
     if (hasPending !== this.lastHasPending) {
       this.lastHasPending = hasPending;
@@ -135,9 +135,9 @@ export class PetStatusBar implements vscode.Disposable {
       md.appendMarkdown(`Visiting: ${list}\n\n`);
     }
     md.appendMarkdown(`${busy} busy session${busy === 1 ? "" : "s"}`);
-    if (remotePending > 0) md.appendMarkdown(` · ${remotePending} waiting on other machines`);
     if (pendingCount > 0) {
-      md.appendMarkdown(` · **${pendingCount} waiting for approval**\n\n`);
+      const elsewhere = remotePending > 0 ? ` (${remotePending} on other machines; approving those asks you to confirm)` : "";
+      md.appendMarkdown(` · **${pendingCount} waiting for approval**${elsewhere}\n\n`);
       md.appendMarkdown("[$(check) Approve](command:krypto.approvePending) · [$(close) Deny](command:krypto.denyPending) · ");
     } else {
       md.appendMarkdown("\n\n");

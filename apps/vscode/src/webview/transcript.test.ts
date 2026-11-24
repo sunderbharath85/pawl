@@ -75,3 +75,12 @@ describe("mirrored payloads that were too large", () => {
     expect(items[1]).toMatchObject({ kind: "truncated", bytes: 80_000 });
   });
 });
+
+test("a decision from another machine keeps where it came from", () => {
+  const items = buildTranscript([
+    ev("permission_resolved", { requestId: "r1", outcome: { kind: "selected", optionId: "allow" }, by: "user", byMachineId: "winpc0000001" }),
+    ev("permission_resolved", { requestId: "r2", outcome: { kind: "cancelled" }, by: "system" }),
+  ]);
+  expect(items[0]).toMatchObject({ kind: "permission", fromMachineId: "winpc0000001" });
+  expect(items[1]).toMatchObject({ kind: "permission", fromMachineId: undefined });
+});

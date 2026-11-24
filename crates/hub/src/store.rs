@@ -26,7 +26,13 @@ enum Migration {
 
 /// Ordered schema migrations; `PRAGMA user_version` = number applied.
 const MIGRATIONS: &[Migration] =
-    &[Migration::Sql(SCHEMA_V1), Migration::Code(migrate_v2), Migration::Sql(SCHEMA_V3), Migration::Sql(SCHEMA_V4)];
+    &[
+        Migration::Sql(SCHEMA_V1),
+        Migration::Code(migrate_v2),
+        Migration::Sql(SCHEMA_V3),
+        Migration::Sql(SCHEMA_V4),
+        Migration::Sql(SCHEMA_V5),
+    ];
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE agents (
@@ -169,6 +175,38 @@ CREATE TABLE mirror_pending (
 CREATE INDEX mirror_pending_machine ON mirror_pending(machine_id);
 "#;
 
+/// v5 (intents): who decided a permission from another machine (audit_log origin columns), the
+/// intent log (both roles), and each paired hub's last reported agents.
+const SCHEMA_V5: &str = r#"
+ALTER TABLE audit_log ADD COLUMN origin_machine_id TEXT;
+ALTER TABLE audit_log ADD COLUMN origin_name TEXT;
+ALTER TABLE audit_log ADD COLUMN intent_id TEXT;
+ALTER TABLE audit_log ADD COLUMN client TEXT;
+CREATE INDEX audit_request ON audit_log(request_id);
+CREATE TABLE intent_log (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts               INTEGER NOT NULL,
+    role             TEXT NOT NULL,
+    intent_id        TEXT NOT NULL,
+    kind             TEXT NOT NULL,
+    peer_machine_id  TEXT NOT NULL,
+    peer_name        TEXT,
+    client           TEXT NOT NULL,
+    target           TEXT,
+    option_id        TEXT,
+    status           TEXT NOT NULL,
+    reason           TEXT
+);
+CREATE INDEX intent_log_ts ON intent_log(ts);
+ALTER TABLE intent_log ADD COLUMN repeats INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE devices ADD COLUMN agents TEXT;
+ALTER TABLE sessions ADD COLUMN remote_driven INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// intent_log rows are kept this long, and at most INTENT_LOG_MAX_ROWS of them.
+pub const INTENT_LOG_RETENTION_MS: i64 = 30 * 86_400_000;
+pub const INTENT_LOG_MAX_ROWS: i64 = 100_000;
+
 /// Mirrored sessions per paired machine (oldest activity evicted first).
 pub const MIRROR_MAX_SESSIONS: i64 = 500;
 /// Mirrored events per mirrored session (oldest evicted first).
@@ -218,6 +256,52 @@ pub struct AuditEntry {
     pub option_kind: Option<PermissionOptionKind>,
     pub outcome: AuditOutcome,
     pub detail: Option<String>,
+    /// Set when the decision came from another machine (an intent).
+    pub origin: Option<AuditOrigin>,
+}
+
+/// The machine, intent and client behind a remote decision.
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct AuditOrigin {
+    pub machine_id: MachineId,
+    pub name: Option<String>,
+    pub intent_id: String,
+    /// The client kind on the origin, e.g. "desktop".
+    pub client: String,
+}
+
+/// Which side of an intent this hub was on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentRole {
+    /// This hub's client asked; the intent went to the owner.
+    Origin,
+    /// Another hub asked this hub (the owner) to act.
+    Owner,
+}
+
+/// One intent, as sent (origin) or as handled (owner). Never holds prompt text.
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct IntentLogEntry {
+    pub id: i64,
+    pub ts: UnixMs,
+    pub role: IntentRole,
+    pub intent_id: String,
+    /// approve | deny | prompt | start | cancel
+    pub kind: String,
+    /// Origin role: the target machine; owner role: the origin machine.
+    pub peer_machine_id: MachineId,
+    pub peer_name: Option<String>,
+    pub client: String,
+    /// The request id, session id, or (start) agent id.
+    pub target: Option<String>,
+    pub option_id: Option<String>,
+    /// applied | rejected | offline | timeout
+    pub status: String,
+    pub reason: Option<String>,
+    /// Identical rejections (rate_limited / forbidden) from the same peer not logged separately
+    /// since the previous entry for them.
+    pub repeats: u32,
 }
 
 /// What a pairing audit entry records.
@@ -680,8 +764,9 @@ impl Store {
         let c = self.conn();
         c.execute(
             "INSERT INTO audit_log (ts, request_id, session_id, agent_id, tool_call_id, tool_kind, tool_title, locations,
-                                    decided_by, actor, option_id, option_kind, outcome, detail, machine_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                                    decided_by, actor, option_id, option_kind, outcome, detail, machine_id,
+                                    origin_machine_id, origin_name, intent_id, client)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 a.ts,
                 a.request_id,
@@ -697,10 +782,135 @@ impl Store {
                 a.option_kind.as_ref().map(enum_str),
                 enum_str(&a.outcome),
                 a.detail,
-                a.machine_id
+                a.machine_id,
+                a.origin.as_ref().map(|o| o.machine_id.clone()),
+                a.origin.as_ref().and_then(|o| o.name.clone()),
+                a.origin.as_ref().map(|o| o.intent_id.clone()),
+                a.origin.as_ref().map(|o| o.client.clone())
             ],
         )?;
         Ok(c.last_insert_rowid())
+    }
+
+    /// Whether a permission request with this id was ever decided here (it has an audit entry).
+    pub fn request_was_decided(&self, request_id: &str) -> Result<bool> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT 1 FROM audit_log WHERE request_id = ?1 AND outcome != 'failed' LIMIT 1",
+                [request_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    pub fn insert_intent_log(&self, e: &IntentLogEntry) -> Result<i64> {
+        let c = self.conn();
+        c.execute(
+            "INSERT INTO intent_log (ts, role, intent_id, kind, peer_machine_id, peer_name, client, target, option_id, status, reason, repeats)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                e.ts,
+                enum_str(&e.role),
+                e.intent_id,
+                e.kind,
+                e.peer_machine_id,
+                e.peer_name,
+                e.client,
+                e.target,
+                e.option_id,
+                e.status,
+                e.reason,
+                e.repeats
+            ],
+        )?;
+        Ok(c.last_insert_rowid())
+    }
+
+    /// Drop intent_log rows older than INTENT_LOG_RETENTION_MS and keep the newest `max_rows`.
+    /// Returns the number of rows removed.
+    pub fn prune_intent_log(&self, now: UnixMs, max_rows: i64) -> Result<usize> {
+        let c = self.conn();
+        let mut n = c.execute("DELETE FROM intent_log WHERE ts < ?1", [now - INTENT_LOG_RETENTION_MS])?;
+        n += c.execute(
+            "DELETE FROM intent_log WHERE id <= (SELECT id FROM intent_log ORDER BY id DESC LIMIT 1 OFFSET ?1)",
+            [max_rows],
+        )?;
+        Ok(n)
+    }
+
+    /// Mark a session of this machine as driven by another machine (started or prompted by an
+    /// intent): rules never auto-approve its requests.
+    pub fn mark_remote_driven(&self, session_id: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET remote_driven = 1 WHERE id = ?1 AND machine_id = ?2",
+            params![session_id, self.machine_id],
+        )?;
+        Ok(())
+    }
+
+    /// This machine's sessions that another machine started or prompted.
+    pub fn remote_driven_sessions(&self) -> Result<Vec<SessionId>> {
+        let c = self.conn();
+        let mut st = c.prepare("SELECT id FROM sessions WHERE machine_id = ?1 AND remote_driven = 1")?;
+        let rows = st.query_map([&self.machine_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The distinct working directories of this machine's own sessions (owned and hook-tracked;
+    /// never mirrored ones).
+    pub fn local_session_cwds(&self) -> Result<Vec<String>> {
+        let c = self.conn();
+        let mut st = c.prepare("SELECT DISTINCT cwd FROM sessions WHERE machine_id = ?1 AND cwd != ''")?;
+        let rows = st.query_map([&self.machine_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Latest intent log entries (newest first).
+    pub fn intent_log(&self, limit: u32) -> Result<Vec<IntentLogEntry>> {
+        let c = self.conn();
+        let mut st = c.prepare(
+            "SELECT id, ts, role, intent_id, kind, peer_machine_id, peer_name, client, target, option_id, status, reason, repeats
+             FROM intent_log ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = st.query_map([limit], |r| {
+            let role: String = r.get(2)?;
+            Ok(IntentLogEntry {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                role: enum_from(&role).unwrap_or(IntentRole::Owner),
+                intent_id: r.get(3)?,
+                kind: r.get(4)?,
+                peer_machine_id: r.get(5)?,
+                peer_name: r.get(6)?,
+                client: r.get(7)?,
+                target: r.get(8)?,
+                option_id: r.get(9)?,
+                status: r.get(10)?,
+                reason: r.get(11)?,
+                repeats: r.get(12)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Remember a paired hub's agents (its latest presence), for `list_agents{machineId}` while it is offline.
+    pub fn set_device_agents(&self, device_id: &str, agents: &[Agent]) -> Result<()> {
+        self.conn().execute(
+            "UPDATE devices SET agents = ?2 WHERE id = ?1 AND revoked_at IS NULL",
+            params![device_id, json(&agents)?],
+        )?;
+        Ok(())
+    }
+
+    /// A paired hub's last reported agents (None if it never reported or is not paired).
+    pub fn device_agents(&self, device_id: &str) -> Result<Option<Vec<Agent>>> {
+        let v: Option<Option<String>> = self
+            .conn()
+            .query_row("SELECT agents FROM devices WHERE id = ?1 AND revoked_at IS NULL", [device_id], |r| r.get(0))
+            .optional()?;
+        Ok(v.flatten().and_then(|j| serde_json::from_str(&j).ok()))
     }
 
     /// Latest audit entries (newest first).
@@ -708,7 +918,8 @@ impl Store {
         let c = self.conn();
         let mut st = c.prepare(
             "SELECT id, ts, request_id, session_id, agent_id, tool_call_id, tool_kind, tool_title, locations,
-                    decided_by, actor, option_id, option_kind, outcome, detail, machine_id
+                    decided_by, actor, option_id, option_kind, outcome, detail, machine_id,
+                    origin_machine_id, origin_name, intent_id, client
              FROM audit_log ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = st.query_map([limit], |r| {
@@ -734,6 +945,15 @@ impl Store {
                 option_kind: option_kind.as_deref().and_then(enum_from),
                 outcome: enum_from(&outcome).unwrap_or(AuditOutcome::Failed),
                 detail: r.get(14)?,
+                origin: match (r.get::<_, Option<String>>(16)?, r.get::<_, Option<String>>(18)?) {
+                    (Some(machine_id), Some(intent_id)) => Some(AuditOrigin {
+                        machine_id,
+                        name: r.get(17)?,
+                        intent_id,
+                        client: r.get::<_, Option<String>>(19)?.unwrap_or_default(),
+                    }),
+                    _ => None,
+                },
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -1216,6 +1436,20 @@ impl Store {
     }
 }
 
+/// A name another machine reported for itself, made safe to store and show: control characters
+/// dropped, trimmed, at most 40 characters, "Unnamed machine" if nothing is left. It feeds audit
+/// actor labels, notifications and every client.
+pub fn sanitize_machine_name(name: &str) -> String {
+    let kept: String = name.chars().filter(|c| !c.is_control()).collect();
+    let t: String = kept.trim().chars().take(40).collect();
+    let t = t.trim_end();
+    if t.is_empty() {
+        "Unnamed machine".to_string()
+    } else {
+        t.to_string()
+    }
+}
+
 /// The pairing roster `krypto-peer` reads and updates. Quick synchronous calls on the store's
 /// connection; a failing write is logged (the link layer has no way to report it).
 impl Roster for Store {
@@ -1233,14 +1467,17 @@ impl Roster for Store {
         })
     }
 
-    fn upsert(&self, entry: RosterEntry) {
+    fn upsert(&self, mut entry: RosterEntry) {
+        entry.device.name = sanitize_machine_name(&entry.device.name);
+        entry.machine.name = sanitize_machine_name(&entry.machine.name);
         if let Err(e) = self.upsert_device(&entry) {
             tracing::warn!("roster: save {}: {e:#}", entry.device.id);
         }
     }
 
     fn update_seen(&self, device_id: &str, machine: &Machine, addr: Option<&str>, ts: UnixMs) {
-        if let Err(e) = self.update_device_seen(device_id, machine, addr, ts) {
+        let machine = Machine { name: sanitize_machine_name(&machine.name), ..machine.clone() };
+        if let Err(e) = self.update_device_seen(device_id, &machine, addr, ts) {
             tracing::warn!("roster: update {device_id}: {e:#}");
         }
     }
@@ -1926,6 +2163,7 @@ mod tests {
             option_kind: Some(PermissionOptionKind::RejectOnce),
             outcome: AuditOutcome::Rejected,
             detail: None,
+            origin: Some(AuditOrigin { machine_id: "zyxwvu987654".into(), name: Some("Mac mini".into()), intent_id: "i-1".into(), client: "desktop".into() }),
         };
         let id = s.insert_audit(&a).unwrap();
         let got = s.audit_log(10).unwrap();
@@ -2311,6 +2549,55 @@ mod tests {
         assert!(kept.first().unwrap().seq > 1, "the oldest were evicted");
         assert_eq!(kept.last().unwrap().seq, 40, "the newest stay");
         assert_eq!(s.events(&gid("mine"), None, 10).unwrap().len(), 1);
+    }
+
+    /// Review fix M4: the intent log keeps 30 days and at most `max_rows` rows.
+    #[test]
+    fn the_intent_log_is_pruned() {
+        let s = Store::open_in_memory(MID).unwrap();
+        let entry = |ts: UnixMs, n: usize| IntentLogEntry {
+            id: 0,
+            ts,
+            role: IntentRole::Owner,
+            intent_id: format!("i{n}"),
+            kind: "deny".into(),
+            peer_machine_id: "zyxwvu987654".into(),
+            peer_name: Some("Mac mini".into()),
+            client: "desktop".into(),
+            target: None,
+            option_id: None,
+            status: "rejected".into(),
+            reason: Some("not_found".into()),
+            repeats: 3,
+        };
+        let now = 100 * 86_400_000;
+        s.insert_intent_log(&entry(now - INTENT_LOG_RETENTION_MS - 1, 0)).unwrap();
+        for n in 1..=10 {
+            s.insert_intent_log(&entry(now, n)).unwrap();
+        }
+        assert_eq!(s.prune_intent_log(now, 4).unwrap(), 7, "1 too old + 6 over the cap");
+        let left = s.intent_log(100).unwrap();
+        assert_eq!(left.iter().map(|e| e.intent_id.as_str()).collect::<Vec<_>>(), vec!["i10", "i9", "i8", "i7"]);
+        assert_eq!(left[0].repeats, 3);
+    }
+
+    /// Review fix L10: names other machines report are cleaned before they are stored.
+    #[test]
+    fn peer_names_are_sanitized_at_the_roster() {
+        assert_eq!(sanitize_machine_name("  Mac\u{1b}[2J mini\n "), "Mac[2J mini");
+        assert_eq!(sanitize_machine_name(&"x".repeat(60)), "x".repeat(40));
+        assert_eq!(sanitize_machine_name(" \u{7}\t "), "Unnamed machine");
+        let s = Store::open_in_memory(MID).unwrap();
+        let r: &dyn Roster = &s;
+        let mut e = roster_entry(PEER, "Evil\u{1b}]0;title\u{7}Name", "pk", None);
+        e.machine.name = e.device.name.clone();
+        r.upsert(e);
+        let got = r.get(PEER).unwrap();
+        assert_eq!((got.device.name.as_str(), got.machine.name.as_str()), ("Evil]0;titleName", "Evil]0;titleName"));
+        let mut m = got.machine.clone();
+        m.name = "   ".into();
+        r.update_seen(PEER, &m, None, 5);
+        assert_eq!(r.get(PEER).unwrap().device.name, "Unnamed machine");
     }
 
     #[tokio::test]

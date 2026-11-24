@@ -273,6 +273,8 @@ export function applyAck(
     case "hello":
       return result ? applyWelcome(state, result as AckResults["hello"]) : state;
     case "list_agents": {
+      // Another machine's agents (from its presence) are returned to the caller, not stored.
+      if (request.machineId !== undefined && request.machineId !== state.machine?.id) return state;
       const agents = (result as Partial<AckResults["list_agents"]> | undefined)?.agents;
       return agents ? { ...state, agents } : state;
     }

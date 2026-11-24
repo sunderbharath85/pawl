@@ -44,6 +44,26 @@ async fn fixture(rules: Option<Vec<Rule>>) -> Fixture {
 
 /// `store_rules` are written to hub.db (as if a client had called set_rules); `config_rules`
 /// play the role of config.toml `rules`.
+/// The standard fixture with `edit` applied to its config.toml.
+async fn fixture_config(edit: impl FnOnce(&mut HubConfig)) -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path());
+    let store = Store::open(&paths.db, MID).unwrap();
+    store.replace_agents(&[agent("codex"), agent("claude-code")]).unwrap();
+    let fake = FakeHost::default();
+    let mut config = HubConfig { offline: true, ..Default::default() };
+    edit(&mut config);
+    let hub = Hub::build(
+        HubOptions { paths, config, token: "t".repeat(64), machine: ident(), background: false },
+        store,
+        Host::Fake(fake.clone()),
+    )
+    .await
+    .unwrap();
+    let rx = hub.subscribe();
+    Fixture { hub, fake, rx, dir }
+}
+
 async fn fixture_with(store_rules: Option<Vec<Rule>>, config_rules: Option<Vec<Rule>>) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::in_dir(dir.path());
@@ -117,7 +137,7 @@ async fn start(f: &Fixture) -> Session {
     let cwd = f.dir.path().to_string_lossy().into_owned();
     let v = ack_result(
         f.hub
-            .handle(ClientMsg::StartSession { id: "1".into(), agent_id: "codex".into(), cwd, prompt: Some("run the tests".into()) }, &actor())
+            .handle(ClientMsg::StartSession { machine_id: None, confirmed: None, id: "1".into(), agent_id: "codex".into(), cwd, prompt: Some("run the tests".into()) }, &actor())
             .await,
     );
     serde_json::from_value(v["session"].clone()).unwrap()
@@ -198,7 +218,7 @@ async fn start_prompt_events_and_ack_shapes() {
     );
     assert_eq!(err, "not_found");
     let err = ack_error(
-        f.hub.handle(ClientMsg::StartSession { id: "7".into(), agent_id: "codex".into(), cwd: "Z:/definitely/missing".into(), prompt: None }, &actor()).await,
+        f.hub.handle(ClientMsg::StartSession { machine_id: None, confirmed: None, id: "7".into(), agent_id: "codex".into(), cwd: "Z:/definitely/missing".into(), prompt: None }, &actor()).await,
     );
     assert!(err.contains("not an existing directory"), "{err}");
 }
@@ -216,15 +236,15 @@ async fn ask_rule_then_user_resolves_with_audit() {
 
     let err = ack_error(
         f.hub
-            .handle(ClientMsg::ResolvePermission { id: "r0".into(), request_id: req.request_id.clone(), option_id: Some("bogus".into()) }, &actor())
+            .handle(ClientMsg::ResolvePermission { confirmed: None, id: "r0".into(), request_id: req.request_id.clone(), option_id: Some("bogus".into()) }, &actor())
             .await,
     );
-    assert!(err.contains("unknown optionId"));
+    assert_eq!(err, "invalid", "an option the request does not offer");
     assert_eq!(f.hub.pending_permissions().len(), 1, "bad option keeps it pending");
 
     let v = ack_result(
         f.hub
-            .handle(ClientMsg::ResolvePermission { id: "r1".into(), request_id: req.request_id.clone(), option_id: Some("allow".into()) }, &actor())
+            .handle(ClientMsg::ResolvePermission { confirmed: None, id: "r1".into(), request_id: req.request_id.clone(), option_id: Some("allow".into()) }, &actor())
             .await,
     );
     assert_eq!(v, json!({}));
@@ -245,9 +265,9 @@ async fn ask_rule_then_user_resolves_with_audit() {
     assert_eq!(audit[0].machine_id, MID);
 
     let err = ack_error(
-        f.hub.handle(ClientMsg::ResolvePermission { id: "r2".into(), request_id: req.request_id.clone(), option_id: None }, &actor()).await,
+        f.hub.handle(ClientMsg::ResolvePermission { confirmed: None, id: "r2".into(), request_id: req.request_id.clone(), option_id: None }, &actor()).await,
     );
-    assert_eq!(err, "not_found");
+    assert_eq!(err, "already_decided", "a decided request is never decided twice");
 }
 
 #[tokio::test]
@@ -638,15 +658,16 @@ async fn foreign_and_legacy_ids_are_refused() {
     let local = parse_global_id(&s.id).unwrap().1.to_string();
     let theirs = global_id(OTHER, &local);
     let cases: Vec<(ClientMsg, &str)> = vec![
-        (ClientMsg::Prompt { id: "1".into(), session_id: theirs.clone(), text: "x".into() }, "not_owner"),
+        // Actions on an unpaired machine's ids: nowhere to forward them (step 4).
+        (ClientMsg::Prompt { id: "1".into(), session_id: theirs.clone(), text: "x".into() }, "not_found"),
         (ClientMsg::Prompt { id: "2".into(), session_id: local.clone(), text: "x".into() }, "not_found"),
-        (ClientMsg::Cancel { id: "3".into(), session_id: theirs.clone() }, "not_owner"),
+        (ClientMsg::Cancel { id: "3".into(), session_id: theirs.clone() }, "not_found"),
         (ClientMsg::Cancel { id: "4".into(), session_id: local.clone() }, "not_found"),
         (ClientMsg::GetEvents { id: "5".into(), session_id: theirs.clone(), since_seq: None, limit: None }, "not_owner"),
         (ClientMsg::GetEvents { id: "6".into(), session_id: local.clone(), since_seq: None, limit: None }, "not_found"),
         (ClientMsg::GetEvents { id: "6b".into(), session_id: global_id(MID, "missing"), since_seq: None, limit: None }, "not_found"),
-        (ClientMsg::ResolvePermission { id: "7".into(), request_id: global_id(OTHER, "r"), option_id: None }, "not_owner"),
-        (ClientMsg::ResolvePermission { id: "8".into(), request_id: "r".into(), option_id: None }, "not_found"),
+        (ClientMsg::ResolvePermission { confirmed: None, id: "7".into(), request_id: global_id(OTHER, "r"), option_id: None }, "not_found"),
+        (ClientMsg::ResolvePermission { confirmed: None, id: "8".into(), request_id: "r".into(), option_id: None }, "not_found"),
         (ClientMsg::UpdatePet { id: "9".into(), pet_id: global_id(OTHER, "pet-codex"), patch: PetPatch::default() }, "not_owner"),
         (ClientMsg::UpdatePet { id: "10".into(), pet_id: "pet-codex".into(), patch: PetPatch::default() }, "not_found"),
         (ClientMsg::Chat { id: "11".into(), pet_id: Some(global_id(OTHER, "pet-codex")), text: "hi".into() }, "not_owner"),
@@ -706,7 +727,7 @@ async fn default_pets_get_distinct_names() {
     for (i, agent_id) in ["codex", "claude-code"].into_iter().enumerate() {
         ack_result(
             f.hub
-                .handle(ClientMsg::StartSession { id: format!("s{i}"), agent_id: agent_id.into(), cwd: cwd.clone(), prompt: None }, &actor())
+                .handle(ClientMsg::StartSession { machine_id: None, confirmed: None, id: format!("s{i}"), agent_id: agent_id.into(), cwd: cwd.clone(), prompt: None }, &actor())
                 .await,
         );
     }
@@ -828,7 +849,7 @@ async fn update_pet_names_are_validated_and_unique() {
     for (i, agent_id) in ["codex", "claude-code"].into_iter().enumerate() {
         ack_result(
             f.hub
-                .handle(ClientMsg::StartSession { id: format!("s{i}"), agent_id: agent_id.into(), cwd: cwd.clone(), prompt: None }, &actor())
+                .handle(ClientMsg::StartSession { machine_id: None, confirmed: None, id: format!("s{i}"), agent_id: agent_id.into(), cwd: cwd.clone(), prompt: None }, &actor())
                 .await,
         );
     }
@@ -866,21 +887,27 @@ use krypto_protocol::{Device, DeviceKind};
 
 /// A real hub (fake ACP host) in `dir` with its own machine id; `listen` = config.toml [peer] listen.
 async fn peer_hub_in(dir: &std::path::Path, mid: &str, name: &str, listen: Option<&str>) -> Hub {
+    peer_hub_with_fake(dir, mid, name, listen).await.0
+}
+
+/// `peer_hub_in`, also returning the fake ACP host (to see what the hub asked of the agent).
+async fn peer_hub_with_fake(dir: &std::path::Path, mid: &str, name: &str, listen: Option<&str>) -> (Hub, FakeHost) {
     let paths = Paths::in_dir(dir);
     let store = Store::open(&paths.db, mid).unwrap();
     store.replace_agents(&[Agent { machine_id: mid.into(), ..agent("codex") }]).unwrap();
     let mut config = HubConfig { offline: true, ..Default::default() };
     config.peer.listen = listen.map(Into::into);
     let machine = MachineIdentity { id: mid.into(), name: name.into() };
+    let fake = FakeHost::default();
     let hub = Hub::build(
         HubOptions { paths, config, token: "t".repeat(64), machine, background: false },
         store,
-        Host::Fake(FakeHost::default()),
+        Host::Fake(fake.clone()),
     )
     .await
     .unwrap();
     hub.start_peer_links().await.unwrap();
-    hub
+    (hub, fake)
 }
 
 async fn peer_hub(mid: &str, name: &str, listen: Option<&str>) -> (Hub, tempfile::TempDir) {
@@ -1371,17 +1398,19 @@ async fn mirrored_items_are_read_only_and_revoke_deletes_them() {
     assert!(w.pending_permissions.iter().any(|r| r.request_id == rid));
     assert!(w.pets.iter().any(|p| p.id == pet.id));
 
-    // ...but never acted on: no auto-allow despite the read rule, and every action is not_owner.
+    // ...but never acted on here: no auto-allow despite the read rule. Actions are forwarded to the
+    // owner (offline: the peer is paired but not linked); pet and chat edits stay not_owner.
     assert!(!f.fake.calls().iter().any(|c| c.starts_with("resolve")), "rules never run on mirrored requests");
     assert!(f.hub.pending_permissions().is_empty());
-    for msg in [
-        ClientMsg::Prompt { id: "p".into(), session_id: sid.clone(), text: "x".into() },
-        ClientMsg::Cancel { id: "c".into(), session_id: sid.clone() },
-        ClientMsg::ResolvePermission { id: "r".into(), request_id: rid.clone(), option_id: Some("allow".into()) },
-        ClientMsg::UpdatePet { id: "u".into(), pet_id: pet.id.clone(), patch: PetPatch { name: Some("Rex".into()), ..Default::default() } },
-        ClientMsg::Chat { id: "h".into(), pet_id: Some(pet.id.clone()), text: "hi".into() },
+    for (msg, want) in [
+        (ClientMsg::Prompt { id: "p".into(), session_id: sid.clone(), text: "x".into() }, "offline"),
+        (ClientMsg::Cancel { id: "c".into(), session_id: sid.clone() }, "offline"),
+        (ClientMsg::ResolvePermission { confirmed: Some(true), id: "r".into(), request_id: rid.clone(), option_id: Some("allow".into()) }, "offline"),
+        (ClientMsg::ResolvePermission { confirmed: None, id: "r2".into(), request_id: rid.clone(), option_id: Some("allow".into()) }, "unconfirmed"),
+        (ClientMsg::UpdatePet { id: "u".into(), pet_id: pet.id.clone(), patch: PetPatch { name: Some("Rex".into()), ..Default::default() } }, "not_owner"),
+        (ClientMsg::Chat { id: "h".into(), pet_id: Some(pet.id.clone()), text: "hi".into() }, "not_owner"),
     ] {
-        assert_eq!(ack_error(f.hub.handle(msg.clone(), &actor()).await), "not_owner", "{msg:?}");
+        assert_eq!(ack_error(f.hub.handle(msg.clone(), &actor()).await), want, "{msg:?}");
     }
     // A peer's pet name is taken here too.
     f.hub.ensure_pet("codex").await;
@@ -1397,6 +1426,7 @@ async fn mirrored_items_are_read_only_and_revoke_deletes_them() {
             session_id: sid.clone(),
             outcome: PermissionOutcome::Selected { option_id: "allow".into() },
             by: ResolvedBy::User,
+            by_machine_id: None,
         },
     )
     .await;
@@ -1433,6 +1463,7 @@ async fn only_this_machines_items_are_mirrored_out() {
         session_id: local.id.clone(),
         outcome: PermissionOutcome::Cancelled,
         by: ResolvedBy::System,
+        by_machine_id: None,
     };
     assert!(f.hub.outbound_update(resolved(global_id(OTHER, "r"))).is_none());
     assert!(f.hub.outbound_update(resolved(global_id(MID, "r"))).is_some());
@@ -1480,7 +1511,7 @@ async fn two_hubs_mirror_live_resync_and_revoke() {
 
     // Live: a session, its events (one oversize), its pet and a pending request on A appear on B.
     let cwd = da.path().to_string_lossy().into_owned();
-    let v = ack_result(a.handle(ClientMsg::StartSession { id: "s".into(), agent_id: "codex".into(), cwd, prompt: None }, &actor()).await);
+    let v = ack_result(a.handle(ClientMsg::StartSession { machine_id: None, confirmed: None, id: "s".into(), agent_id: "codex".into(), cwd, prompt: None }, &actor()).await);
     let s: Session = serde_json::from_value(v["session"].clone()).unwrap();
     say(&a, &s.id, "hello").await;
     say(&a, &s.id, &"x".repeat(MIRROR_PAYLOAD_MAX_BYTES)).await;
@@ -1505,10 +1536,11 @@ async fn two_hubs_mirror_live_resync_and_revoke() {
     let b_events = b.events(&s.id, None, None).await.unwrap();
     assert!(b_events.iter().any(|e| e.payload["truncated"] == true), "the oversize payload arrived truncated");
     assert!(a.events(&s.id, None, None).await.unwrap().iter().all(|e| e.payload.get("truncated").is_none()), "the owner keeps it whole");
-    assert_eq!(ack_error(b.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "x".into() }, &actor()).await), "not_owner");
+    // Step 4: B can act on A's session; the prompt is forwarded and applied on A.
+    ack_result(b.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "x".into() }, &actor()).await);
 
     // Resolved on A: gone on B.
-    ack_result(a.handle(ClientMsg::ResolvePermission { id: "r".into(), request_id: req.request_id.clone(), option_id: Some("allow".into()) }, &actor()).await);
+    ack_result(a.handle(ClientMsg::ResolvePermission { confirmed: None, id: "r".into(), request_id: req.request_id.clone(), option_id: Some("allow".into()) }, &actor()).await);
     wait_until("b drops the resolved request", || {
         let b = b.clone();
         async move { b.welcome().pending_permissions.is_empty() }
@@ -1800,4 +1832,553 @@ async fn peer_timestamps_are_clamped() {
     for at in [Some(i64::MIN), Some(i64::MAX), Some(-1), Some(now + 1)] {
         assert_eq!(active_machine(&[m(at)], MID, now), MID, "{at:?} is never a valid activity time");
     }
+}
+
+// ---------------------------------------------------------------- intents (step 4)
+
+use super::intents::{Ack, INTENT_TIMEOUT};
+use crate::store::{AuditOrigin, IntentRole};
+use krypto_protocol::{Intent, IntentRejectReason as Reject, IntentStatus};
+
+/// The owner's answer to an intent from `from` (sent by a desktop client).
+async fn intent(hub: &Hub, from: &str, id: &str, confirmed: bool, i: Intent) -> Ack {
+    hub.handle_intent(from, id, ClientKind::Desktop, confirmed, &i).await.expect("answered")
+}
+
+fn reason(a: &Ack) -> Option<Reject> {
+    (a.status == IntentStatus::Rejected).then_some(a.reason).flatten()
+}
+
+fn approve(request_id: &str, option: &str) -> Intent {
+    Intent::Approve { request_id: request_id.into(), option_id: option.into() }
+}
+
+/// A session of this hub with one pending request (options "allow" / "reject"; execute = ask).
+async fn pending_request(f: &Fixture) -> PermissionRequest {
+    let s = start(f).await;
+    let req = permission(&s.id, ToolKind::Execute);
+    f.hub.on_host_event(HostEvent::PermissionRequest(req.clone())).await;
+    assert!(f.hub.pending_permissions().iter().any(|r| r.request_id == req.request_id));
+    req
+}
+
+fn resolves(f: &Fixture, request_id: &str) -> usize {
+    f.fake.calls().iter().filter(|c| c.starts_with(&format!("resolve {request_id}"))).count()
+}
+
+/// A remote approval is applied through the normal path: the agent gets the answer, the audit log
+/// names the origin, clients see byMachineId, and this machine is told.
+#[tokio::test]
+async fn remote_approve_is_applied_audited_and_announced() {
+    let mut f = fixture(None).await;
+    roster_peer(&f.hub, OTHER).await;
+    let req = pending_request(&f).await;
+    drain(&mut f.rx);
+    let a = intent(&f.hub, OTHER, "i-1", true, approve(&req.request_id, "allow")).await;
+    assert_eq!(a.status, IntentStatus::Applied, "{a:?}");
+    assert_eq!(a.result, Some(json!({})));
+    assert_eq!(resolves(&f, &req.request_id), 1);
+    assert!(f.hub.pending_permissions().is_empty());
+
+    let audit = &f.hub.store().audit_log(5).unwrap()[0];
+    assert_eq!((audit.request_id.as_str(), audit.outcome), (req.request_id.as_str(), AuditOutcome::Allowed));
+    assert_eq!(audit.decided_by, ResolvedBy::User, "the user decided; rules never re-ran");
+    assert_eq!(audit.actor, "desktop@Mac mini");
+    assert_eq!(
+        audit.origin,
+        Some(AuditOrigin { machine_id: OTHER.into(), name: Some("Mac mini".into()), intent_id: "i-1".into(), client: "desktop".into() })
+    );
+    let log = &f.hub.store().intent_log(5).unwrap()[0];
+    assert_eq!((log.role, log.kind.as_str(), log.peer_machine_id.as_str()), (IntentRole::Owner, "approve", OTHER));
+    assert_eq!((log.status.as_str(), log.option_id.as_deref()), ("applied", Some("allow")));
+
+    let msgs = drain(&mut f.rx);
+    assert!(msgs.iter().any(|m| matches!(m, ServerMsg::PermissionResolved { request_id, by: ResolvedBy::User, by_machine_id: Some(by), .. }
+        if *request_id == req.request_id && by == OTHER)));
+    assert!(msgs.iter().any(|m| matches!(m, ServerMsg::Notification { notification }
+        if notification.title == "Approved from Mac mini" && notification.body == "cargo test")));
+    let ev = f.hub.store().events(&req.session_id, None, 100).unwrap().into_iter().rev().find(|e| e.kind == EventType::PermissionResolved).unwrap();
+    assert_eq!((ev.payload["byMachineId"].as_str(), ev.payload["optionKind"].as_str()), (Some(OTHER), Some("allow_once")));
+}
+
+/// First valid decision wins: two intents, or a local click and an intent, for one request give
+/// exactly one `applied`; the other is `already_decided` and the agent is answered once.
+#[tokio::test]
+async fn first_decision_wins_between_intents_and_local_clicks() {
+    let f = fixture(None).await;
+    roster_peer(&f.hub, OTHER).await;
+
+    // Two intents racing.
+    let r1 = pending_request(&f).await;
+    let (a, b) = tokio::join!(
+        intent(&f.hub, OTHER, "race-a", true, approve(&r1.request_id, "allow")),
+        intent(&f.hub, OTHER, "race-b", true, approve(&r1.request_id, "allow")),
+    );
+    let mut got = [a.status == IntentStatus::Applied, b.status == IntentStatus::Applied];
+    got.sort();
+    assert_eq!(got, [false, true], "{a:?} {b:?}");
+    assert!([reason(&a), reason(&b)].contains(&Some(Reject::AlreadyDecided)));
+    assert_eq!(resolves(&f, &r1.request_id), 1);
+
+    // A local click and an intent racing.
+    let r2 = pending_request(&f).await;
+    let local = ClientMsg::ResolvePermission { confirmed: None, id: "l".into(), request_id: r2.request_id.clone(), option_id: Some("reject".into()) };
+    let me = actor();
+    let (click, remote) = tokio::join!(f.hub.handle(local, &me), intent(&f.hub, OTHER, "race-c", true, approve(&r2.request_id, "allow")));
+    let click_ok = matches!(click, ServerMsg::Ack { ok: true, .. });
+    assert_ne!(click_ok, remote.status == IntentStatus::Applied, "exactly one wins: {click:?} {remote:?}");
+    if click_ok {
+        assert_eq!(reason(&remote), Some(Reject::AlreadyDecided));
+    } else {
+        assert_eq!(ack_error(click), "already_decided", "the local path answers already_decided too");
+    }
+    assert_eq!(resolves(&f, &r2.request_id), 1);
+
+    // Later answers, either way, are already_decided (also after the in-memory record is gone).
+    assert_eq!(reason(&intent(&f.hub, OTHER, "late", true, approve(&r1.request_id, "allow")).await), Some(Reject::AlreadyDecided));
+    let late = ClientMsg::ResolvePermission { confirmed: None, id: "l2".into(), request_id: r1.request_id.clone(), option_id: None };
+    assert_eq!(ack_error(f.hub.handle(late.clone(), &actor()).await), "already_decided");
+    f.hub.st().decided.clear();
+    assert_eq!(ack_error(f.hub.handle(late, &actor()).await), "already_decided", "the audit log remembers");
+}
+
+/// The owner checks every intent against its own state.
+#[tokio::test]
+async fn the_owner_validates_intents() {
+    let f = fixture(None).await;
+    roster_peer(&f.hub, OTHER).await;
+    let req = pending_request(&f).await;
+    let rid = req.request_id.clone();
+    let cases = [
+        ("unconfirmed approve", false, approve(&rid, "allow"), Reject::Unconfirmed),
+        ("approve with a reject option", true, approve(&rid, "reject"), Reject::Invalid),
+        ("deny with an allow option", false, Intent::Deny { request_id: rid.clone(), option_id: Some("allow".into()) }, Reject::Invalid),
+        ("unknown option", true, approve(&rid, "bogus"), Reject::Invalid),
+        ("a third machine's request", true, approve(&global_id(THIRD, "r"), "allow"), Reject::NotOwner),
+        ("the origin's own request", true, approve(&global_id(OTHER, "r"), "allow"), Reject::NotOwner),
+        ("a third machine's session", false, Intent::Prompt { session_id: global_id(THIRD, "s"), text: "hi".into() }, Reject::NotOwner),
+        ("cancel a third machine's session", false, Intent::Cancel { session_id: global_id(THIRD, "s") }, Reject::NotOwner),
+        ("unknown request", true, approve(&global_id(MID, "nope"), "allow"), Reject::NotFound),
+        ("unprefixed id", true, approve("nope", "allow"), Reject::NotFound),
+        ("unknown session", false, Intent::Prompt { session_id: global_id(MID, "nope"), text: "hi".into() }, Reject::NotFound),
+        ("empty prompt", false, Intent::Prompt { session_id: req.session_id.clone(), text: "  ".into() }, Reject::Invalid),
+        ("oversize prompt", false, Intent::Prompt { session_id: req.session_id.clone(), text: "x".repeat(intents::MAX_PROMPT_CHARS + 1) }, Reject::Invalid),
+        ("unconfirmed start", false, Intent::Start { agent_id: "codex".into(), cwd: f.dir.path().to_string_lossy().into(), prompt: None }, Reject::Unconfirmed),
+    ];
+    for (i, (what, confirmed, intent_body, want)) in cases.into_iter().enumerate() {
+        let a = intent(&f.hub, OTHER, &format!("v{i}"), confirmed, intent_body).await;
+        assert_eq!(reason(&a), Some(want), "{what}: {a:?}");
+    }
+    assert_eq!(f.hub.pending_permissions().len(), 1, "nothing was decided");
+    assert_eq!(resolves(&f, &rid), 0);
+    assert!(f.hub.store().audit_log(10).unwrap().is_empty());
+    // A deny with a reject option (or none) needs no confirmation.
+    assert_eq!(intent(&f.hub, OTHER, "deny", false, Intent::Deny { request_id: rid.clone(), option_id: None }).await.status, IntentStatus::Applied);
+    assert_eq!(f.hub.store().audit_log(1).unwrap()[0].outcome, AuditOutcome::Cancelled);
+}
+
+/// M3: a remote start runs the agent on the owner only, in a folder it already knows: a previous
+/// local session's folder (or inside it), or inside a `[peer] start_roots` entry. Anything else,
+/// and share/device paths, are `forbidden`; relative or missing paths are `invalid`.
+#[tokio::test]
+async fn remote_start_runs_only_in_folders_this_machine_knows() {
+    let roots = tempfile::tempdir().unwrap();
+    let root_str = roots.path().to_string_lossy().into_owned();
+    let f = fixture_config(move |c| c.peer.start_roots = vec![root_str]).await;
+    roster_peer(&f.hub, OTHER).await;
+    let known = f.dir.path().join("repo");
+    let inside = known.join("crates");
+    let unknown = f.dir.path().join("elsewhere");
+    let in_root = roots.path().join("project");
+    for d in [&inside, &unknown, &in_root] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+    let start = |agent: &str, cwd: String| Intent::Start { agent_id: agent.into(), cwd, prompt: None };
+    // Before any local session there, its folder is unknown.
+    assert_eq!(reason(&intent(&f.hub, OTHER, "s0", true, start("codex", s(&known))).await), Some(Reject::Forbidden));
+    // A local session in `known` makes it (and what is inside it) a known folder.
+    ack_result(f.hub.handle(ClientMsg::StartSession { machine_id: None, confirmed: None, id: "l".into(), agent_id: "codex".into(), cwd: s(&known), prompt: None }, &actor()).await);
+    let missing = f.dir.path().join("missing");
+    let cases: Vec<(&str, Intent, Option<Reject>)> = vec![
+        ("relative", start("codex", "src".into()), Some(Reject::Invalid)),
+        ("home shorthand", start("codex", "~".into()), Some(Reject::Invalid)),
+        ("missing", start("codex", s(&missing)), Some(Reject::Invalid)),
+        ("unknown agent", start("goose", s(&known)), Some(Reject::Invalid)),
+        ("unknown folder", start("codex", s(&unknown)), Some(Reject::Forbidden)),
+        ("escape with ..", start("codex", s(&known.join("..").join("elsewhere"))), Some(Reject::Forbidden)),
+        ("a share", start("codex", r"\\server\share\repo".into()), Some(Reject::Forbidden)),
+        ("a forward-slash share", start("codex", "//server/share/repo".into()), Some(Reject::Forbidden)),
+        ("a device path", start("codex", r"\\.\C:\repo".into()), Some(Reject::Forbidden)),
+        ("a verbatim share", start("codex", r"\\?\UNC\server\share".into()), Some(Reject::Forbidden)),
+        ("the known folder", start("codex", s(&known)), None),
+        ("inside it", start("codex", s(&inside)), None),
+        ("inside a start root", start("codex", s(&in_root)), None),
+    ];
+    for (i, (what, body, want)) in cases.into_iter().enumerate() {
+        let a = intent(&f.hub, OTHER, &format!("c{i}"), true, body).await;
+        assert_eq!(reason(&a), want, "{what}: {a:?}");
+        if want.is_none() {
+            let session: Session = serde_json::from_value(a.result.unwrap()["session"].clone()).unwrap();
+            assert_eq!(session.machine_id, MID, "{what}: runs on the owner");
+            assert!(!session.cwd.starts_with(r"\\?\"), "{what}: the plain canonical path is used: {}", session.cwd);
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Case-insensitive, and the verbatim form of a known drive path is the same folder.
+        let upper = s(&inside).to_uppercase();
+        assert_eq!(reason(&intent(&f.hub, OTHER, "w1", true, start("codex", upper)).await), None);
+        let verbatim = format!(r"\\?\{}", s(&std::fs::canonicalize(&inside).map(|p| intents::plain_path(&p).unwrap()).unwrap()));
+        assert_eq!(reason(&intent(&f.hub, OTHER, "w2", true, start("codex", verbatim)).await), Some(Reject::Forbidden), "raw \\\\ paths are refused outright");
+    }
+}
+
+#[test]
+fn plain_paths_drop_the_verbatim_prefix_and_refuse_shares() {
+    use std::path::Path;
+    let w = |p: &str| intents::plain_path(Path::new(p)).map(|x| x.to_string_lossy().into_owned());
+    if cfg!(windows) {
+        assert_eq!(w(r"\\?\C:\Users\me\repo").as_deref(), Some(r"C:\Users\me\repo"));
+        assert_eq!(w(r"C:\Users\me").as_deref(), Some(r"C:\Users\me"));
+        assert_eq!(w(r"\\?\UNC\server\share"), None);
+        assert_eq!(w(r"\\server\share\x"), None);
+        assert_eq!(w(r"\\.\PhysicalDrive0"), None);
+        assert_eq!(w(r"\\?\GLOBALROOT\Device"), None);
+        assert!(intents::is_within(Path::new(r"c:\USERS\me\repo\x"), Path::new(r"C:\Users\me\repo")));
+        assert!(!intents::is_within(Path::new(r"C:\Users\me\repo2"), Path::new(r"C:\Users\me\repo")));
+    } else {
+        assert_eq!(w("/home/me/repo").as_deref(), Some("/home/me/repo"));
+        assert!(intents::is_within(Path::new("/home/me/repo/x"), Path::new("/home/me/repo")));
+        assert!(!intents::is_within(Path::new("/home/me/repo2"), Path::new("/home/me/repo")));
+        assert!(!intents::is_within(Path::new("/home/me/REPO"), Path::new("/home/me/repo")));
+    }
+}
+
+/// H1: a remote approval may only choose allow_once; allow_always is chosen on the owner.
+#[tokio::test]
+async fn remote_approve_never_chooses_allow_always() {
+    let f = fixture(None).await;
+    roster_peer(&f.hub, OTHER).await;
+    let s = start(&f).await;
+    let mut req = permission(&s.id, ToolKind::Execute);
+    req.options.insert(1, PermissionOption { option_id: "always".into(), name: "Always".into(), kind: PermissionOptionKind::AllowAlways });
+    f.hub.on_host_event(HostEvent::PermissionRequest(req.clone())).await;
+    let a = intent(&f.hub, OTHER, "aa", true, approve(&req.request_id, "always")).await;
+    assert_eq!(reason(&a), Some(Reject::Forbidden));
+    assert_eq!(resolves(&f, &req.request_id), 0);
+    assert_eq!(f.hub.pending_permissions().len(), 1, "still waiting for a human here");
+    // allow_once from the same peer works; allow_always stays a local choice.
+    let local = ClientMsg::ResolvePermission { confirmed: None, id: "l".into(), request_id: req.request_id.clone(), option_id: Some("always".into()) };
+    let r2 = {
+        let mut r = permission(&s.id, ToolKind::Execute);
+        r.options = req.options.clone();
+        r
+    };
+    f.hub.on_host_event(HostEvent::PermissionRequest(r2.clone())).await;
+    assert_eq!(intent(&f.hub, OTHER, "ao", true, approve(&r2.request_id, "allow")).await.status, IntentStatus::Applied);
+    ack_result(f.hub.handle(local, &actor()).await);
+}
+
+/// H2: a session started or prompted from another machine never gets rule auto-approval (deny
+/// rules still deny); its own sessions keep auto-approval; the mark survives a restart.
+#[tokio::test]
+async fn remote_driven_sessions_always_ask_a_human() {
+    let read_rule = rule("read", Some(ToolKind::Read), RuleAction::AutoAllow);
+    let f = fixture(Some(vec![read_rule.clone()])).await;
+    roster_peer(&f.hub, OTHER).await;
+    let cwd = f.dir.path().to_string_lossy().into_owned();
+    let read_request = |sid: &str| permission(sid, ToolKind::Read);
+
+    // A local session: rules auto-approve the read.
+    let local = start(&f).await;
+    let r0 = read_request(&local.id);
+    f.hub.on_host_event(HostEvent::PermissionRequest(r0.clone())).await;
+    assert_eq!(resolves(&f, &r0.request_id), 1, "local sessions keep auto-approval");
+
+    // Started by another machine (its folder is known now): the same read asks.
+    let a = intent(&f.hub, OTHER, "st", true, Intent::Start { agent_id: "codex".into(), cwd: cwd.clone(), prompt: None }).await;
+    let remote: Session = serde_json::from_value(a.result.unwrap()["session"].clone()).unwrap();
+    let r1 = read_request(&remote.id);
+    f.hub.on_host_event(HostEvent::PermissionRequest(r1.clone())).await;
+    assert_eq!(resolves(&f, &r1.request_id), 0, "a remote-started session asks");
+    assert!(f.hub.pending_permissions().iter().any(|r| r.request_id == r1.request_id));
+
+    // A local session prompted once by another machine asks from then on.
+    let prompted = start(&f).await;
+    assert_eq!(intent(&f.hub, OTHER, "pr", false, Intent::Prompt { session_id: prompted.id.clone(), text: "go on".into() }).await.status, IntentStatus::Applied);
+    let r2 = read_request(&prompted.id);
+    f.hub.on_host_event(HostEvent::PermissionRequest(r2.clone())).await;
+    assert_eq!(resolves(&f, &r2.request_id), 0, "a remote-prompted session asks");
+
+    // Deny rules still apply to remote-driven sessions.
+    ack_result(f.hub.handle(ClientMsg::SetRules { id: "r".into(), rules: vec![rule("no-fetch", Some(ToolKind::Fetch), RuleAction::Deny)] }, &actor()).await);
+    let r3 = permission(&remote.id, ToolKind::Fetch);
+    f.hub.on_host_event(HostEvent::PermissionRequest(r3.clone())).await;
+    assert_eq!(resolves(&f, &r3.request_id), 1, "deny rules still deny");
+
+    // Persisted: a restarted hub still treats them as remote-driven.
+    let mut marked = f.hub.store().remote_driven_sessions().unwrap();
+    marked.sort();
+    let mut want = vec![remote.id.clone(), prompted.id.clone()];
+    want.sort();
+    assert_eq!(marked, want);
+    f.hub.shutdown().await;
+    let paths = Paths::in_dir(f.dir.path());
+    let store = Store::open(&paths.db, MID).unwrap();
+    let fake = FakeHost::default();
+    let config = HubConfig { offline: true, rules: Some(vec![read_rule]), ..Default::default() };
+    let hub = Hub::build(HubOptions { paths, config, token: "t".repeat(64), machine: ident(), background: false }, store, Host::Fake(fake.clone()))
+        .await
+        .unwrap();
+    assert!(hub.st().remote_driven.contains(&prompted.id));
+}
+
+/// L8: a remote start whose first prompt fails still returns the session, with a warning.
+#[tokio::test]
+async fn a_start_whose_first_prompt_fails_returns_the_session_and_a_warning() {
+    let f = fixture(None).await;
+    roster_peer(&f.hub, OTHER).await;
+    let cwd = f.dir.path().to_string_lossy().into_owned();
+    start(&f).await; // the folder is known
+    let a = intent(&f.hub, OTHER, "sw", true, Intent::Start { agent_id: "codex".into(), cwd: cwd.clone(), prompt: Some("fail".into()) }).await;
+    assert_eq!(a.status, IntentStatus::Applied, "{a:?}");
+    let v = a.result.unwrap();
+    assert!(v["session"]["id"].as_str().unwrap().starts_with(MID));
+    assert!(v["warning"].as_str().unwrap().contains("first prompt was not sent"), "{v}");
+    // The local ack has the same shape.
+    let v = ack_result(f.hub.handle(ClientMsg::StartSession { machine_id: None, confirmed: None, id: "l".into(), agent_id: "codex".into(), cwd, prompt: Some("fail".into()) }, &actor()).await);
+    assert!(v["warning"].is_string() && v["session"].is_object(), "{v}");
+}
+
+/// L9: while the agent is being told one answer, a second answer waits for the real outcome: if
+/// the first is refused, the second is applied instead of getting a spurious already_decided.
+#[tokio::test]
+async fn a_concurrent_answer_waits_for_the_one_in_flight() {
+    let f = fixture(None).await;
+    roster_peer(&f.hub, OTHER).await;
+    let s = start(&f).await;
+    let mut req = permission(&s.id, ToolKind::Execute);
+    req.options.push(PermissionOption { option_id: "slow-fail".into(), name: "Flaky".into(), kind: PermissionOptionKind::RejectOnce });
+    f.hub.on_host_event(HostEvent::PermissionRequest(req.clone())).await;
+    let me = actor();
+    let first = f.hub.resolve_permission(&req.request_id, Some("slow-fail".into()), ResolvedBy::User, &me);
+    let second = async {
+        tokio::time::sleep(Duration::from_millis(30)).await; // lands while the first is in flight
+        intent(&f.hub, OTHER, "late", true, approve(&req.request_id, "allow")).await
+    };
+    let (first, second) = tokio::join!(first, second);
+    assert!(first.is_err(), "the agent refused the first answer");
+    assert_eq!(second.status, IntentStatus::Applied, "the waiting answer is applied: {second:?}");
+    assert!(f.hub.pending_permissions().is_empty());
+    let audit = f.hub.store().audit_log(5).unwrap();
+    assert_eq!(audit.iter().map(|a| a.outcome).collect::<Vec<_>>(), vec![AuditOutcome::Allowed, AuditOutcome::Failed]);
+}
+
+/// M4: flood-type refusals are logged once per peer per minute (the rest counted); the log is pruned.
+#[tokio::test]
+async fn flood_refusals_are_logged_once_a_minute() {
+    let f = fixture_config(|c| c.peer.accept_intents = false).await;
+    roster_peer(&f.hub, OTHER).await;
+    let deny = |i: usize| Intent::Deny { request_id: global_id(MID, format!("r{i}")), option_id: None };
+    for i in 0..50 {
+        assert_eq!(reason(&intent(&f.hub, OTHER, &format!("q{i}"), false, deny(i)).await), Some(Reject::Forbidden));
+    }
+    let log = f.hub.store().intent_log(100).unwrap();
+    assert_eq!(log.len(), 1, "one entry for the burst");
+    assert_eq!((log[0].reason.as_deref(), log[0].repeats), (Some("forbidden"), 0));
+}
+
+/// M5: the origin only accepts a start result that is a session of the target machine.
+#[test]
+fn the_origin_checks_owner_results() {
+    use intents::checked_result;
+    let sess = |mid: &str, id: &str| {
+        let mut s = remote_session(mid, "x");
+        s.id = id.into();
+        json!({ "session": s })
+    };
+    assert_eq!(checked_result("approve", OTHER, Some(json!({"anything": "else"}))), Ok(json!({})), "only {{}} for non-starts");
+    assert_eq!(checked_result("prompt", OTHER, None), Ok(json!({})));
+    let ok = checked_result("start", OTHER, Some(sess(OTHER, &global_id(OTHER, "s")))).unwrap();
+    assert_eq!(ok["session"]["machineId"], OTHER);
+    assert_eq!(checked_result("start", OTHER, Some(sess(THIRD, &global_id(THIRD, "s")))), Err(AckCode::Invalid), "a third machine's session");
+    assert_eq!(checked_result("start", OTHER, Some(sess(OTHER, &global_id(MID, "s")))), Err(AckCode::Invalid), "our id under their machine");
+    assert_eq!(checked_result("start", OTHER, Some(json!({"session": "nope"}))), Err(AckCode::Invalid));
+    assert_eq!(checked_result("start", OTHER, None), Err(AckCode::Invalid));
+    let mut big = sess(OTHER, &global_id(OTHER, "s"));
+    big["junk"] = json!("x".repeat(70 * 1024));
+    assert_eq!(checked_result("start", OTHER, Some(big)), Err(AckCode::Invalid), "oversize");
+    let mut warned = sess(OTHER, &global_id(OTHER, "s"));
+    warned["warning"] = json!(format!("bad\u{1b}[2J{}", "w".repeat(500)));
+    let w = checked_result("start", OTHER, Some(warned)).unwrap()["warning"].as_str().unwrap().to_string();
+    assert!(!w.contains('\u{1b}') && w.chars().count() == 300);
+}
+
+#[tokio::test]
+async fn accept_intents_false_forbids_every_intent() {
+    let f = fixture_config(|c| c.peer.accept_intents = false).await;
+    roster_peer(&f.hub, OTHER).await;
+    let req = pending_request(&f).await;
+    for (i, body) in [approve(&req.request_id, "allow"), Intent::Cancel { session_id: req.session_id.clone() }].into_iter().enumerate() {
+        assert_eq!(reason(&intent(&f.hub, OTHER, &format!("f{i}"), true, body).await), Some(Reject::Forbidden));
+    }
+    assert_eq!(f.hub.pending_permissions().len(), 1);
+    assert!(!f.fake.calls().iter().any(|c| c.starts_with("resolve") || c.starts_with("cancel")));
+    assert!(HubConfig::parse("").unwrap().peer.accept_intents, "default: accept");
+}
+
+#[tokio::test]
+async fn intents_are_rate_limited_per_peer() {
+    let f = fixture(None).await;
+    roster_peer(&f.hub, OTHER).await;
+    roster_peer(&f.hub, THIRD).await;
+    let deny = |i: usize| Intent::Deny { request_id: global_id(MID, format!("r{i}")), option_id: None };
+    for i in 0..krypto_protocol::INTENT_RATE_PER_SEC as usize {
+        assert_eq!(reason(&intent(&f.hub, OTHER, &format!("q{i}"), false, deny(i)).await), Some(Reject::NotFound));
+    }
+    assert_eq!(reason(&intent(&f.hub, OTHER, "over", false, deny(99)).await), Some(Reject::RateLimited));
+    assert_eq!(reason(&intent(&f.hub, THIRD, "other-peer", false, deny(98)).await), Some(Reject::NotFound), "per peer");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(reason(&intent(&f.hub, OTHER, "over", false, deny(99)).await), Some(Reject::NotFound), "a rate-limited id may be retried");
+}
+
+/// A repeated intent id gets the same ack and changes nothing.
+#[tokio::test]
+async fn a_repeated_intent_id_returns_the_same_ack() {
+    let mut f = fixture(None).await;
+    roster_peer(&f.hub, OTHER).await;
+    let req = pending_request(&f).await;
+    let first = intent(&f.hub, OTHER, "dup", true, approve(&req.request_id, "allow")).await;
+    drain(&mut f.rx);
+    let again = intent(&f.hub, OTHER, "dup", true, approve(&req.request_id, "allow")).await;
+    assert_eq!(again, first);
+    let other_body = intent(&f.hub, OTHER, "dup", false, Intent::Deny { request_id: req.request_id.clone(), option_id: None }).await;
+    assert_eq!(other_body, first, "keyed by intent id");
+    assert_eq!(resolves(&f, &req.request_id), 1);
+    assert!(drain(&mut f.rx).is_empty(), "nothing was re-applied or re-announced");
+    // Another peer's intent with the same id is a different intent.
+    roster_peer(&f.hub, THIRD).await;
+    assert_eq!(reason(&intent(&f.hub, THIRD, "dup", true, approve(&req.request_id, "allow")).await), Some(Reject::AlreadyDecided));
+}
+
+/// The origin checks confirmation before sending and answers offline / not_found itself.
+#[tokio::test]
+async fn the_origin_checks_before_sending() {
+    let f = fixture(None).await;
+    roster_peer(&f.hub, OTHER).await; // paired, not linked
+    let sid = global_id(OTHER, "s1");
+    feed(&f.hub, OTHER, MirrorUpdate::Session { session: remote_session(OTHER, "s1") }).await;
+    let mut req = remote_request(OTHER, "r1", &sid);
+    req.options = permission(&sid, ToolKind::Execute).options;
+    feed(&f.hub, OTHER, MirrorUpdate::PermissionRequest { request: req.clone() }).await;
+    let resolve = |id: &str, option: Option<&str>, confirmed: Option<bool>| ClientMsg::ResolvePermission {
+        id: id.into(),
+        request_id: req.request_id.clone(),
+        option_id: option.map(Into::into),
+        confirmed,
+    };
+    let start_on = |m: &str, confirmed: Option<bool>| ClientMsg::StartSession {
+        id: "st".into(),
+        agent_id: "codex".into(),
+        cwd: "/srv/api".into(),
+        prompt: None,
+        machine_id: Some(m.into()),
+        confirmed,
+    };
+    for (msg, want) in [
+        (resolve("a", Some("allow"), None), "unconfirmed"),
+        (resolve("b", Some("allow"), Some(false)), "unconfirmed"),
+        (start_on(OTHER, None), "unconfirmed"),
+        (resolve("c", Some("bogus"), Some(true)), "invalid"),
+    ] {
+        assert_eq!(ack_error(f.hub.handle(msg.clone(), &actor()).await), want, "{msg:?}");
+    }
+    assert!(f.hub.store().intent_log(10).unwrap().is_empty(), "nothing was sent");
+    for (msg, want) in [
+        (resolve("d", Some("allow"), Some(true)), "offline"),
+        (resolve("e", Some("reject"), None), "offline"), // deny: no confirmation needed
+        (start_on(OTHER, Some(true)), "offline"),
+        (start_on(THIRD, Some(true)), "not_found"),
+        (ClientMsg::Prompt { id: "p".into(), session_id: global_id(THIRD, "s"), text: "hi".into() }, "not_found"),
+    ] {
+        assert_eq!(ack_error(f.hub.handle(msg.clone(), &actor()).await), want, "{msg:?}");
+    }
+    let log = f.hub.store().intent_log(10).unwrap();
+    assert_eq!(log.len(), 3, "the offline ones were logged");
+    assert!(log.iter().all(|e| e.role == IntentRole::Origin && e.status == "offline" && e.peer_machine_id == OTHER));
+    assert!(log.iter().any(|e| e.kind == "approve") && log.iter().any(|e| e.kind == "deny") && log.iter().any(|e| e.kind == "start"));
+    // list_agents for a paired machine (no presence yet: none known), for an unknown one: not_found.
+    let v = ack_result(f.hub.handle(ClientMsg::ListAgents { id: "la".into(), refresh: None, machine_id: Some(OTHER.into()) }, &actor()).await);
+    assert_eq!(v["agents"], json!([]));
+    let err = ack_error(f.hub.handle(ClientMsg::ListAgents { id: "lb".into(), refresh: None, machine_id: Some(THIRD.into()) }, &actor()).await);
+    assert_eq!(err, "not_found");
+}
+
+/// End to end over real peer links: B approves A's request (audited on both sides), a second
+/// approval is already_decided, B starts a session on A, B lists A's agents, and A not answering
+/// gives B `timeout`.
+#[tokio::test]
+async fn two_hubs_approve_start_and_time_out() {
+    let da = tempfile::tempdir().unwrap();
+    let (a, a_fake) = peer_hub_with_fake(da.path(), MID, "Desk", Some("127.0.0.1:0")).await;
+    let (b, _db) = peer_hub(OTHER, "Laptop", None).await;
+    pair(&a, &b).await;
+    let cwd = da.path().to_string_lossy().into_owned();
+    let v = ack_result(a.handle(ClientMsg::StartSession { machine_id: None, confirmed: None, id: "s".into(), agent_id: "codex".into(), cwd: cwd.clone(), prompt: None }, &actor()).await);
+    let s: Session = serde_json::from_value(v["session"].clone()).unwrap();
+    let req = permission(&s.id, ToolKind::Execute);
+    a.on_host_event(HostEvent::PermissionRequest(req.clone())).await;
+    wait_until("b mirrors the request", || {
+        let (b, rid) = (b.clone(), req.request_id.clone());
+        async move { b.welcome().pending_permissions.iter().any(|r| r.request_id == rid) }
+    })
+    .await;
+    let mut brx = b.subscribe();
+
+    // Approve from B (confirmed on B's client).
+    let approve_msg = |id: &str| ClientMsg::ResolvePermission {
+        id: id.into(),
+        request_id: req.request_id.clone(),
+        option_id: Some("allow".into()),
+        confirmed: Some(true),
+    };
+    assert_eq!(ack_result(b.handle(approve_msg("ok"), &actor()).await), json!({}));
+    assert!(a_fake.calls().contains(&format!("resolve {} allow", req.request_id)));
+    let owner_audit = &a.store().audit_log(5).unwrap()[0];
+    assert_eq!(owner_audit.origin.as_ref().map(|o| (o.machine_id.as_str(), o.name.as_deref(), o.client.as_str())), Some((OTHER, Some("Laptop"), "desktop")));
+    let origin_log = &b.store().intent_log(5).unwrap()[0];
+    assert_eq!((origin_log.role, origin_log.kind.as_str(), origin_log.peer_machine_id.as_str(), origin_log.status.as_str()), (IntentRole::Origin, "approve", MID, "applied"));
+    assert_eq!(origin_log.intent_id, owner_audit.origin.as_ref().unwrap().intent_id, "both sides log the same intent");
+    wait_for(&mut brx, "b sees who decided", |m| matches!(m, ServerMsg::PermissionResolved { request_id, by_machine_id: Some(by), .. } if *request_id == req.request_id && by == OTHER)).await;
+
+    // A second approval, from B or on A itself, is already_decided.
+    assert_eq!(ack_error(b.handle(approve_msg("again"), &actor()).await), "already_decided");
+    assert_eq!(
+        ack_error(a.handle(ClientMsg::ResolvePermission { confirmed: None, id: "a".into(), request_id: req.request_id.clone(), option_id: Some("allow".into()) }, &actor()).await),
+        "already_decided"
+    );
+    assert_eq!(a_fake.calls().iter().filter(|c| c.starts_with("resolve")).count(), 1);
+
+    // B starts a session on A: it runs on A and B's mirror gets it.
+    let v = ack_result(b.handle(ClientMsg::StartSession { id: "rs".into(), agent_id: "codex".into(), cwd: cwd.clone(), prompt: None, machine_id: Some(MID.into()), confirmed: Some(true) }, &actor()).await);
+    let remote: Session = serde_json::from_value(v["session"].clone()).unwrap();
+    assert_eq!(remote.machine_id, MID);
+    assert_eq!(a_fake.calls().iter().filter(|c| c.starts_with("start codex")).count(), 2);
+    wait_until("b mirrors the remote start", || {
+        let (b, id) = (b.clone(), remote.id.clone());
+        async move { b.welcome().sessions.iter().any(|s| s.id == id) }
+    })
+    .await;
+    // B lists A's agents (from A's presence).
+    let v = ack_result(b.handle(ClientMsg::ListAgents { id: "la".into(), refresh: None, machine_id: Some(MID.into()) }, &actor()).await);
+    assert_eq!(v["agents"][0]["id"], "codex");
+
+    // A stops answering: B's client gets timeout.
+    a.drop_intents(true);
+    let started = std::time::Instant::now();
+    let err = ack_error(b.handle(ClientMsg::Prompt { id: "p".into(), session_id: remote.id.clone(), text: "hi".into() }, &actor()).await);
+    assert_eq!(err, "timeout");
+    assert!(started.elapsed() >= INTENT_TIMEOUT);
+    assert_eq!(b.store().intent_log(1).unwrap()[0].status, "timeout");
 }

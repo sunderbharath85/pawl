@@ -401,6 +401,9 @@ impl Hub {
             tokio::select! {
                 _ = iv.tick() => {
                     let now = krypto_protocol::now_ms();
+                    if let Err(e) = self.inner.store.run(move |s| s.prune_intent_log(now, crate::store::INTENT_LOG_MAX_ROWS)).await {
+                        tracing::warn!("prune the intent log: {e:#}");
+                    }
                     match self.inner.store.run(move |s| s.prune_mirror(now)).await {
                         Ok(0) => {}
                         Ok(n) => {
@@ -438,8 +441,8 @@ impl Hub {
             ServerMsg::PermissionRequest { request } if request.machine_id == me => {
                 Some(MirrorUpdate::PermissionRequest { request })
             }
-            ServerMsg::PermissionResolved { request_id, session_id, outcome, by } if owned_by(&request_id, me) => {
-                Some(MirrorUpdate::PermissionResolved { request_id, session_id, outcome, by })
+            ServerMsg::PermissionResolved { request_id, session_id, outcome, by, by_machine_id } if owned_by(&request_id, me) => {
+                Some(MirrorUpdate::PermissionResolved { request_id, session_id, outcome, by, by_machine_id })
             }
             ServerMsg::Notification { notification } if notification.machine_id == me => {
                 Some(MirrorUpdate::Notification { notification })
@@ -717,6 +720,12 @@ impl Hub {
             }
             PeerBody::MirrorEvents { events } => self.apply_events(from, events).await,
             PeerBody::SyncDone { seq, truncated } => self.finish_sync(from, seq, truncated).await,
+            PeerBody::Intent { intent_id, client, confirmed, intent, .. } => {
+                self.on_intent(from, intent_id, client, confirmed, intent)
+            }
+            PeerBody::IntentAck { intent_id, status, reason, result } => {
+                self.on_intent_ack(from, &intent_id, super::intents::Ack { status, reason, result })
+            }
             PeerBody::PairRequest { .. }
             | PeerBody::PairAccept { .. }
             | PeerBody::PairReject { .. }
@@ -792,16 +801,18 @@ impl Hub {
                 self.mirror().pending.insert(request.request_id.clone(), request.clone());
                 self.inner.bus.send_local(ServerMsg::PermissionRequest { request });
             }
-            MirrorUpdate::PermissionResolved { request_id, session_id, outcome, by } => {
+            MirrorUpdate::PermissionResolved { request_id, session_id, outcome, by, by_machine_id } => {
                 if let Some(why) = check_resolved(&request_id, &session_id, from) {
                     return dropped(from, "permission_resolved", why);
                 }
+                // Who decided: informational, but only ever a well-formed machine id.
+                let by_machine_id = by_machine_id.filter(|m| is_valid_machine_id(m));
                 let (mid, rid) = (from.to_string(), request_id.clone());
                 if let Err(e) = store.run(move |st| st.mirror_remove_pending(&mid, &rid)).await {
                     tracing::warn!("mirror: remove a pending request of {from}: {e:#}");
                 }
                 self.mirror().pending.remove(&request_id);
-                self.inner.bus.send_local(ServerMsg::PermissionResolved { request_id, session_id, outcome, by });
+                self.inner.bus.send_local(ServerMsg::PermissionResolved { request_id, session_id, outcome, by, by_machine_id });
             }
             MirrorUpdate::Notification { notification } => {
                 if let Some(why) = check_notification(&notification, from) {
@@ -921,6 +932,7 @@ impl Hub {
                 session_id,
                 outcome: PermissionOutcome::Cancelled,
                 by: ResolvedBy::System,
+                by_machine_id: None,
             });
         }
         for request in pending {

@@ -3,7 +3,7 @@ import { initialHubState, type HubState } from "@krypto/hub-client";
 import type { Machine, Pet } from "@krypto/protocol";
 import { buildFeed } from "../panel/feed";
 import { FALLBACK_PET_ID, petList } from "./pets";
-import { notifiesHere, onMachine } from "./where";
+import { answerErrorText, notifiesHere, onMachine } from "./where";
 
 const ME = "winpc0000001";
 const MAC = "macmini00002";
@@ -81,4 +81,54 @@ describe("feed: mirrored payloads that were too large", () => {
     expect(feed.map((f) => f.kind)).toEqual(["text", "truncated", "text"]);
     expect(feed[1]).toMatchObject({ kind: "truncated", bytes: 100_000, key: `${MAC}:2` });
   });
+});
+
+describe("answer errors name the owner of another machine's item", () => {
+  const remoteReq = {
+    requestId: `${MAC}:r1`,
+    machineId: MAC,
+    sessionId: `${MAC}:s1`,
+    agentId: "claude-code",
+    toolCall: { toolCallId: "t" },
+    options: [],
+    createdAt: 1,
+  };
+  const err = (code: string) => Object.assign(new Error(`hub request failed: ${code}`), { code });
+
+  test("remote: intent wording with the machine name", () => {
+    const s = state({ pending: { [remoteReq.requestId]: remoteReq } });
+    expect(answerErrorText(s, remoteReq.requestId, "approve", err("offline"))).toBe("Mac mini is offline.");
+    expect(answerErrorText(s, remoteReq.requestId, "approve", err("timeout"))).toBe("No answer from Mac mini yet — check that machine.");
+    // By id prefix when the request is no longer held.
+    expect(answerErrorText(state(), `${MAC}:gone`, "deny", err("not_found"))).toContain("Mac mini");
+  });
+
+  test("local: the plain error", () => {
+    expect(answerErrorText(state(), `${ME}:r1`, "approve", err("timeout"))).toBe("hub request failed: timeout");
+  });
+});
+
+test("feed: a decision from another machine keeps its byMachineId", () => {
+  const feed = buildFeed([
+    {
+      id: `${ME}:7`,
+      seq: 7,
+      machineId: ME,
+      sessionId: `${ME}:s1`,
+      type: "permission_resolved",
+      payload: { requestId: `${ME}:r1`, outcome: { kind: "selected", optionId: "allow" }, by: "user", byMachineId: MAC },
+      ts: 7,
+    },
+    {
+      id: `${ME}:8`,
+      seq: 8,
+      machineId: ME,
+      sessionId: `${ME}:s1`,
+      type: "permission_resolved",
+      payload: { requestId: `${ME}:r2`, outcome: { kind: "selected", optionId: "allow" }, by: "user" },
+      ts: 8,
+    },
+  ]);
+  expect(feed[0]).toMatchObject({ kind: "resolved", byMachineId: MAC });
+  expect(feed[1]).toMatchObject({ kind: "resolved", byMachineId: undefined });
 });

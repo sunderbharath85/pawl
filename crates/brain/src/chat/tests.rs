@@ -404,14 +404,15 @@ async fn status_names_machines_when_several_are_known() {
     assert!(r.text.contains("on 2 machines"), "{}", r.text);
     assert!(r.text.contains("Claude Code on Mac mini in web (waiting for approval)"), "{}", r.text);
 
-    // A request mirrored from another machine is read-only here: no action, and the reply says
-    // where to answer it (remote control arrives in a later step).
+    // Another machine's request is never decided from chat: no action, and the reply says where
+    // to answer it (the panel or the CLI, which ask for confirmation).
     for q in ["approve", "deny", "approve 1"] {
         let r = ask(q, &c).await;
         assert_eq!(r.action, None, "{q}");
         assert!(r.text.contains("Claude Code on Mac mini is waiting for your OK to: rm -rf build"), "{q}: {}", r.text);
-        assert!(r.text.contains("remote control arrives in a later update"), "{q}: {}", r.text);
-        assert!(r.text.contains("Answer it on Mac mini."), "{q}: {}", r.text);
+        assert!(r.text.contains("lives on Mac mini, so I won't"), "{q}: {}", r.text);
+        assert!(r.text.contains("Krypto panel (it asks you to confirm)"), "{q}: {}", r.text);
+        assert!(r.text.contains("`krypto approve r1`") || r.text.contains("`krypto deny r1`"), "{q}: {}", r.text);
     }
     // A request of this machine still resolves.
     let mut c = two_machine_ctx();
@@ -492,4 +493,23 @@ async fn mirrored_text_never_turns_into_an_action() {
     assert_eq!(r.action, None, "{}", r.text);
     let r = ask("approve 2", &c).await;
     assert_eq!(r.action, Some(BrainAction::ResolvePermission { request_id: "r-local".into(), option_id: Some("allow-once".into()) }));
+}
+
+#[tokio::test]
+async fn status_says_which_machine_decided() {
+    let mut c = ctx();
+    c.machines.push(machine(PEER, "Mac mini"));
+    let payload = json!({
+        "requestId": "r9", "outcome": {"kind": "selected", "optionId": "allow-once"}, "by": "user",
+        "byMachineId": PEER, "optionKind": "allow_once"
+    });
+    c.recent_events.push(event(50, "s-claude", EventType::PermissionResolved, payload));
+    let r = ask("What's Claude doing?", &c).await;
+    assert!(r.text.contains("Last request approved from Mac mini."), "{}", r.text);
+    // A decision made here is not called out.
+    let mut c2 = ctx();
+    c2.recent_events.push(event(50, "s-claude", EventType::PermissionResolved, json!({
+        "requestId": "r9", "outcome": {"kind": "selected", "optionId": "allow-once"}, "by": "user"
+    })));
+    assert!(!ask("What's Claude doing?", &c2).await.text.contains("Last request"));
 }

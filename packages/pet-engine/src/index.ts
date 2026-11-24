@@ -11,6 +11,7 @@ export {
 } from "./activity";
 export { hashString, PET_LINES, petLine, SPECIES_LIST, SPECIES_META } from "./lines";
 export {
+  approvalConfirmText,
   derivePetViews,
   describePermission,
   nextPetViewChange,

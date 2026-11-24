@@ -4,7 +4,7 @@ Named dog pets that watch and drive your coding agents over ACP (Agent Client Pr
 
 - Whiteboard: https://claude.ai/artifact/E8zVPktys5q8qKw5AjmjtB
 - Last updated: 2026-11-23
-- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto, step 1 (machine identity), step 2 (pairing + LAN presence, protocol v3), step 3 (mirror events + visitors, protocol v4). Next: step 4 (intents + acks).
+- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto, step 1 (machine identity), step 2 (pairing + LAN presence, protocol v3), step 3 (mirror events + visitors, protocol v4), step 4 (intents + acks, protocol v5). Next: step 5 (remote commands by machine + repo).
 
 ## Decisions
 
@@ -250,12 +250,15 @@ Each step can ship and be tested on its own.
    - Cross-machine pet-name clashes: the machine whose id sorts later renames its own pet (max 10 renames per peer per hour).
    - Deferred: a per-hub epoch so a peer whose hub.db was reset is always detected (today only a lower seq is detected).
 
-4. **Intents + acks.**
+4. ✅ **Intents + acks.** (done 2026-11-24; protocol v5)
    - Approve, deny, prompt, start and cancel are routed to the owning hub.
    - First valid approval wins (`already_decided`).
    - Remote approvals need a confirmation step on desktop and VS Code.
    - The audit log records origin device and machine.
    - Test: approve a PC session from the Mac; a double approval gets rejected.
+   - Hardened after a security review: a remote approve can only choose allow-once (always-allow only on the owner); remote start canonicalizes the folder, refuses network-share and device paths, and only runs in folders the owner already uses or under `[peer] start_roots`; sessions started or prompted from another machine never get rule auto-approval; remote approve and remote start in the CLI always ask on the terminal (`--yes` ignored); `[peer] accept_intents = false` turns remote control off.
+   - The owner cannot verify the other device's confirmation, so pairing is the trust decision.
+
 5. **Remote commands by machine + repo.**
    - Repo index in presence.
    - The brain parses machine and pet-name targets and routes `start`/`prompt` intents.

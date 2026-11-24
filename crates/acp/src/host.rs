@@ -1295,6 +1295,6 @@ impl Inner {
 fn permission_resolved(request_id: &str, outcome: pp::PermissionOutcome, by: pp::ResolvedBy) -> (pp::EventType, serde_json::Value) {
     (
         pp::EventType::PermissionResolved,
-        to_json(&pp::PermissionResolvedPayload { request_id: request_id.to_string(), outcome, by }),
+        to_json(&pp::PermissionResolvedPayload { request_id: request_id.to_string(), outcome, by, by_machine_id: None }),
     )
 }

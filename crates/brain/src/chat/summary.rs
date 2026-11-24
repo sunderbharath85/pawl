@@ -30,6 +30,8 @@ pub(crate) struct SessionFacts {
     pub last_stop: Option<StopReason>,
     pub permission_requests: usize,
     pub permission_decisions: usize,
+    /// The latest decision made on another machine: ("approved" | "denied" | "answered", machine id).
+    pub last_remote_decision: Option<(&'static str, String)>,
     pub errors: usize,
     pub last_hook: Option<String>,
 }
@@ -39,6 +41,16 @@ pub(crate) fn session_events<'a>(session_id: &str, events: &'a [HubEvent]) -> Ve
     let mut v: Vec<&HubEvent> = events.iter().filter(|e| e.session_id == session_id).collect();
     v.sort_by_key(|e| (e.ts, e.seq));
     v
+}
+
+/// "approved" / "denied" / "answered", from the `optionKind` the hub writes next to the outcome.
+fn decision_verb(payload: &Value, outcome: &PermissionOutcome) -> &'static str {
+    match (outcome, payload.get("optionKind").and_then(Value::as_str)) {
+        (PermissionOutcome::Cancelled, _) => "denied",
+        (_, Some(k)) if k.starts_with("allow") => "approved",
+        (_, Some(k)) if k.starts_with("reject") => "denied",
+        _ => "answered",
+    }
 }
 
 fn str_field(v: &Value, key: &str) -> Option<String> {
@@ -162,7 +174,12 @@ pub(crate) fn facts(events: &[&HubEvent]) -> SessionFacts {
                     f.last_tool = Some(t);
                 }
             }
-            EventType::PermissionResolved => f.permission_decisions += 1,
+            EventType::PermissionResolved => {
+                f.permission_decisions += 1;
+                if let Ok(r) = serde_json::from_value::<PermissionResolvedPayload>(p.clone()) {
+                    f.last_remote_decision = r.by_machine_id.map(|m| (decision_verb(p, &r.outcome), m));
+                }
+            }
             EventType::Stop => {
                 if let Ok(s) = serde_json::from_value::<StopPayload>(p.clone()) {
                     f.last_stop = Some(s.stop_reason);
@@ -295,6 +312,10 @@ pub(crate) fn deterministic_summary(
     }
     if facts.tool_calls > 0 && facts.last_message.is_none() {
         out.push_str(&format!(" {} so far.", plural(facts.tool_calls, "tool call")));
+    }
+    if let Some((verb, machine)) = &facts.last_remote_decision {
+        let who = machines.label(machine).unwrap_or_else(|| machine.clone());
+        out.push_str(&format!(" Last request {verb} from {who}."));
     }
     out
 }

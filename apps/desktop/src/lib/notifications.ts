@@ -63,11 +63,9 @@ export function attachNotifications(client: HubClient): () => void {
     const sound = SPECIES_META[pet?.species ?? "dog"]?.sound ?? "Woof!";
     const who = pet?.name ?? "Your pet";
     const where = onMachine(state, request.machineId);
-    // Another machine's request is read-only here (remote approval arrives in a later update).
-    const tail = where ? ` Answer it${where}.` : "";
     void notify(
       `${sound} ${who} needs you${where}`,
-      `${agentName(state.agents, request.agentId, request.machineId)} wants to: ${permissionSummary(request)}.${tail}`,
+      `${agentName(state.agents, request.agentId, request.machineId)} wants to: ${permissionSummary(request)}.`,
     );
   });
 

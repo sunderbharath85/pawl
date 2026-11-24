@@ -12,7 +12,7 @@ import {
   shortPath,
   timeAgo,
 } from "../../lib/format";
-import { machineDisplayName, readOnlyReason, sessionBackfill } from "@krypto/hub-client";
+import { intentErrorText, isLocal, machineDisplayName, offlineReason, sessionBackfill, type HubState } from "@krypto/hub-client";
 import { usePanel } from "../context";
 import { buildFeed, STOP_LABEL, type FeedItem } from "../feed";
 import * as I from "../icons";
@@ -69,11 +69,11 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const status = STATUS_META[session.status];
   const active = isActive(session);
   const canPrompt = session.source === "owned" && !session.endedAt;
-  // Another machine's session is a read-only mirror until remote control (migration step 4).
-  const readOnly = readOnlyReason(state, session.machineId);
+  // Another machine's session: prompts and cancels are forwarded to its owner (migration step 4).
+  const remote = !isLocal(state, session.machineId);
   const machine = state.machines[session.machineId];
   const machineName = machineDisplayName(machine);
-  const offline = !!readOnly && !machine?.online;
+  const offline = offlineReason(state, session.machineId);
 
   return (
     <section className={`session-view${offline ? " is-offline" : ""}`}>
@@ -86,8 +86,8 @@ export function SessionView({ sessionId }: { sessionId: string }) {
               <span className={`dot tone-${status.tone}`} /> {status.label}
             </span>
             <span className="chip">{agentName(state.agents, session.agentId, session.machineId)}</span>
-            {readOnly && (
-              <span className={`chip chip-machine${offline ? " is-offline" : ""}`} title={readOnly}>
+            {remote && (
+              <span className={`chip chip-machine${offline ? " is-offline" : ""}`} title={`Runs on ${machineName}`}>
                 <I.Monitor size={13} /> {machineName}
                 {offline ? ` · offline, last seen ${timeAgo(machine?.lastSeen ?? 0, now)}` : ""}
               </span>
@@ -107,9 +107,13 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         {canPrompt && active && (
           <button
             className="pill pill-bad"
-            disabled={!!readOnly}
-            title={readOnly ?? undefined}
-            onClick={() => client.cancel(session.id).catch((err) => toast(errorText(err), "error"))}
+            disabled={!!offline}
+            title={offline ?? (remote ? `Cancels the turn on ${machineName}` : undefined)}
+            onClick={() =>
+              client
+                .cancel(session.id)
+                .catch((err) => toast(remote ? intentErrorText(err, machineName, "cancel") : errorText(err), "error"))
+            }
           >
             <I.Stop size={14} /> Cancel turn
           </button>
@@ -130,7 +134,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
           </div>
         )}
         {feed.map((item) => (
-          <FeedRow key={item.key} item={item} machineName={machineName} />
+          <FeedRow key={item.key} item={item} machineName={machineName} state={state} />
         ))}
         {pending.map((req) => (
           <div className="feed-pending" key={req.requestId}>
@@ -147,7 +151,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
       </div>
 
       {canPrompt ? (
-        <PromptBar sessionId={session.id} busy={active} disabledReason={readOnly} />
+        <PromptBar sessionId={session.id} busy={active} disabledReason={offline} remoteName={remote ? machineName : null} />
       ) : (
         <div className="prompt-note">
           {session.endedAt
@@ -165,7 +169,7 @@ function sizeLabel(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-function FeedRow({ item, machineName }: { item: FeedItem; machineName: string }) {
+function FeedRow({ item, machineName, state }: { item: FeedItem; machineName: string; state: Pick<HubState, "machine" | "machines"> }) {
   switch (item.kind) {
     case "text":
       if (item.role === "user")
@@ -237,6 +241,8 @@ function FeedRow({ item, machineName }: { item: FeedItem; machineName: string })
         <div className={`notice ${ok ? "notice-good" : "notice-muted"}`}>
           {item.outcome?.kind === "cancelled" ? "Request cancelled" : ok ? "Approved" : "Denied"}
           {item.by === "rule" ? " by a rule" : ""}
+          {/* A decision made on another machine than the session's owner. */}
+          {item.byMachineId ? ` from ${machineDisplayName(state.machines[item.byMachineId] ?? (item.byMachineId === state.machine?.id ? state.machine : undefined))}` : ""}
         </div>
       );
     }
@@ -267,7 +273,18 @@ function FeedRow({ item, machineName }: { item: FeedItem; machineName: string })
   }
 }
 
-function PromptBar({ sessionId, busy, disabledReason }: { sessionId: string; busy: boolean; disabledReason: string | null }) {
+function PromptBar({
+  sessionId,
+  busy,
+  disabledReason,
+  remoteName,
+}: {
+  sessionId: string;
+  busy: boolean;
+  disabledReason: string | null;
+  /** The owner's name when the session runs on another machine (the prompt is forwarded there). */
+  remoteName: string | null;
+}) {
   const { client, toast } = usePanel();
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -280,7 +297,7 @@ function PromptBar({ sessionId, busy, disabledReason }: { sessionId: string; bus
       await client.prompt(sessionId, t);
       setText("");
     } catch (err) {
-      toast(errorText(err), "error");
+      toast(remoteName ? intentErrorText(err, remoteName, "prompt") : errorText(err), "error");
     } finally {
       setSending(false);
     }
@@ -301,7 +318,11 @@ function PromptBar({ sessionId, busy, disabledReason }: { sessionId: string; bus
         title={disabledReason ?? undefined}
         placeholder={
           disabledReason ??
-          (busy ? "The agent is mid-turn; send a follow-up when it finishes (or cancel)…" : "Ask the agent to do something…")
+          (busy
+            ? "The agent is mid-turn; send a follow-up when it finishes (or cancel)…"
+            : remoteName
+              ? `Ask the agent on ${remoteName} to do something…`
+              : "Ask the agent to do something…")
         }
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {

@@ -259,6 +259,62 @@ body.panel-body {
   opacity: 0.7;
 }
 
+/* ---------- acting on other machines (step 4) ---------- */
+.remote-note.is-problem {
+  color: var(--berry);
+}
+.perm-confirm,
+.start-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-s);
+  border: 1.5px solid var(--honey);
+  background: var(--honey-soft);
+}
+.perm-confirm-text,
+.start-confirm-text {
+  flex: 1 1 100%;
+  font-size: 13px;
+}
+.perm-confirm-machine,
+.start-confirm-machine {
+  font-size: 14px;
+  font-weight: 900;
+}
+.start-confirm .form-actions {
+  margin-top: 0;
+}
+.machine-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.machine-choice {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--card);
+  border: 1.5px solid var(--line-strong);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.machine-choice.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.machine-choice:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 /* ---------- machines view ---------- */
 .machine-list {
   display: flex;

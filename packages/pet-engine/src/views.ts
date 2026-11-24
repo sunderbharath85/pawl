@@ -18,8 +18,23 @@ export interface PetBubbleData {
   text: string;
   kind: "say" | "permission";
   requestId?: string | undefined;
-  /** A permission bubble that cannot be answered here (a visitor's; remote approval arrives in step 4). */
+  /** A permission bubble that cannot be answered here (no Approve/Deny buttons). */
   readOnly?: boolean | undefined;
+  /**
+   * Another machine's request (a visitor that ran here): approving it needs a confirm step on this device
+   * first ("Approve on Mac mini: Run npm test?"). Deny needs none.
+   */
+  confirm?: { machineName: string; action: string } | undefined;
+  /**
+   * Approve is not possible from here, and why: another machine's request that only offers always-allow
+   * ("Choose always-allow on Mac mini"). Deny still works.
+   */
+  approveBlocked?: string | undefined;
+}
+
+/** "Approve on Mac mini: Run npm test?" for a bubble that needs a confirm step, else null. */
+export function approvalConfirmText(bubble: Pick<PetBubbleData, "confirm">): string | null {
+  return bubble.confirm ? `Approve on ${bubble.confirm.machineName}: ${bubble.confirm.action}?` : null;
 }
 
 export interface PetView {
@@ -143,8 +158,9 @@ function derivePet(pet: Pet, input: DerivePetViewsInput, seedBase: number): Deri
 /**
  * Apply the visitor rules on local machine L with active machine A:
  * - a home pet with a pending approval gets `away = A` when A != L (it ran to the user);
- * - a visitor with a pending approval shows its (read-only) request bubble only when A == L (it ran
- *   here); otherwise it is a plain visitor in the waiting pose (alert, no bubble);
+ * - a visitor with a pending approval shows its request bubble only when A == L (it ran here; approving
+ *   it needs a confirm step, `bubble.confirm`); otherwise it is a plain visitor in the waiting pose
+ *   (alert, no bubble);
  * - visitors only ever show permission bubbles; pets of offline machines nap, without bubbles.
  */
 function applyPlace(view: PetView, pet: Pet, input: DerivePetViewsInput, pendingReq: PermissionRequest | undefined): PetView {
@@ -162,13 +178,17 @@ function applyPlace(view: PetView, pet: Pet, input: DerivePetViewsInput, pending
   if (pendingReq) {
     if (active === local) {
       const where = view.machineName ?? "its machine";
+      const action = describePermission(pendingReq);
+      // Remotely only allow_once can approve; always-allow is chosen on the owning machine.
+      const once = (pendingReq.options ?? []).some((o) => o.kind === "allow_once");
       return {
         ...view,
         bubble: {
           kind: "permission",
           requestId: pendingReq.requestId,
-          readOnly: true,
-          text: `${describePermission(pendingReq)}? Needs approval on ${where}.`,
+          text: `${action}? (on ${where})`,
+          confirm: { machineName: where, action },
+          ...(once ? null : { approveBlocked: `Choose always-allow on ${where}` }),
         },
       };
     }

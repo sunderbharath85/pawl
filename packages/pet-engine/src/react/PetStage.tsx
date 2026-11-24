@@ -25,7 +25,8 @@ export interface PetStageProps {
   views: PetView[];
   /** Strip width in px. */
   width: number;
-  onApprove(requestId: string): void | Promise<unknown>;
+  /** `confirmed` = the user passed the bubble's confirm step (another machine's request, `bubble.confirm`). */
+  onApprove(requestId: string, opts: { confirmed: boolean }): void | Promise<unknown>;
   onDeny(requestId: string): void | Promise<unknown>;
   onPetClick?: ((petId: string) => void) | undefined;
   /** Pet box size in px. Default 96. Visitors are drawn at VISITOR_SCALE of it. */
@@ -345,7 +346,7 @@ export function PetStage(props: PetStageProps): JSX.Element {
             <div style={{ "--ap-tail-x": `${tail.toFixed(1)}px` } as CSSProperties}>
               <PetBubble
                 view={{ ...view, bubble }}
-                onApprove={requestId ? () => onApprove(requestId) : undefined}
+                onApprove={requestId ? (opts) => onApprove(requestId, opts) : undefined}
                 onDeny={requestId ? () => onDeny(requestId) : undefined}
                 onClick={onPetClick ? () => onPetClick(view.petId) : undefined}
               />

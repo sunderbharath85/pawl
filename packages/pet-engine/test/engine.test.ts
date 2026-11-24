@@ -13,6 +13,7 @@ import {
   SAD_DECAY_MS,
   SPECIES_META,
   stageShowsApproval,
+  approvalConfirmText,
   type DerivePetViewsInput,
 } from "../src/index";
 
@@ -326,6 +327,7 @@ describe("visitors and the active machine (L/A rules)", () => {
     expect(h!.activity).toBe("alert");
     expect(h!.bubble).toMatchObject({ kind: "permission", requestId: "r1" });
     expect(h!.bubble?.readOnly).toBeUndefined();
+    expect(h!.bubble?.confirm).toBeUndefined();
   });
 
   test("A != L: home pet with a pending approval runs to A", () => {
@@ -345,12 +347,28 @@ describe("visitors and the active machine (L/A rules)", () => {
     expect(h!.activity).toBe("working");
   });
 
-  test("A == L: a visitor with a pending approval ran here with a read-only bubble", () => {
+  test("A == L: a visitor with a pending approval ran here; approving needs a confirm step", () => {
     const [, v] = place({ pending: [visitorReq], activeMachineId: L });
     expect(v!.activity).toBe("alert");
-    expect(v!.bubble).toMatchObject({ kind: "permission", requestId: `${M}:r1`, readOnly: true });
-    expect(v!.bubble!.text).toContain("Needs approval on Mac mini");
+    expect(v!.bubble).toMatchObject({ kind: "permission", requestId: `${M}:r1`, confirm: { machineName: "Mac mini", action: "Run npm test" } });
+    expect(v!.bubble!.readOnly).toBeUndefined();
+    expect(v!.bubble!.text).toBe("Run npm test? (on Mac mini)");
+    expect(approvalConfirmText(v!.bubble!)).toBe("Approve on Mac mini: Run npm test?");
     expect(v!.away).toBeUndefined();
+  });
+
+  test("a visitor's request without allow_once cannot be approved from here (always-allow is chosen there)", () => {
+    const alwaysOnly = { ...visitorReq, options: [{ optionId: "always", name: "Always", kind: "allow_always" as const }] };
+    const [, v] = place({ pending: [alwaysOnly], activeMachineId: L });
+    expect(v!.bubble?.approveBlocked).toBe("Choose always-allow on Mac mini");
+    const [, ok] = place({ pending: [visitorReq], activeMachineId: L });
+    expect(ok!.bubble?.approveBlocked).toBeUndefined();
+  });
+
+  test("a home pet's own request needs no confirm step", () => {
+    const [h] = place({ pending: [homeReq], activeMachineId: L });
+    expect(h!.bubble?.confirm).toBeUndefined();
+    expect(approvalConfirmText(h!.bubble!)).toBeNull();
   });
 
   test("A != L: a visitor with a pending approval waits without a bubble", () => {

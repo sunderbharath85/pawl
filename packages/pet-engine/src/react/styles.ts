@@ -288,6 +288,9 @@ ${SP("bird")}[data-walking="true"] .ap-leg-f1{animation:ap-walk .36s ease-in-out
 .ap-stage-bubble{position:absolute;transform:translateX(-50%);z-index:2;pointer-events:none;width:max-content;max-width:var(--ap-bubble-max,240px)}
 .ap-stage-bubble .ap-bubble{max-width:100%}
 .ap-bubble-readonly{background:#f3f6ff;box-shadow:0 4px 14px rgba(63,100,200,.22),0 0 0 1.5px #9db4ee}
+.ap-bubble-remote{box-shadow:0 4px 16px rgba(63,100,200,.25),0 0 0 1.5px #7f9de6}
+.ap-bubble-confirming{background:#fff1d6;box-shadow:0 4px 18px rgba(255,140,0,.35),0 0 0 2px #f39c12}
+.ap-bubble-machine{font-weight:800}
 .ap-stage-visitor .ap-stage-name{background:rgba(52,72,140,.72)}
 .ap-stage-more{position:absolute;transform:translateX(-50%);pointer-events:auto;min-width:28px;padding:2px 7px;border-radius:11px;text-align:center;
   background:rgba(52,72,140,.78);color:#fff;font:800 11px/18px ui-rounded,system-ui,-apple-system,"Segoe UI",sans-serif}

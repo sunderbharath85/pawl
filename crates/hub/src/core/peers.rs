@@ -192,6 +192,11 @@ impl Hub {
         v
     }
 
+    /// A paired hub's agents from its latest presence (None until one arrived).
+    pub(super) fn presence_agents(&self, machine_id: &str) -> Option<Vec<Agent>> {
+        self.peers().presence.get(machine_id).map(|p| p.agents.clone())
+    }
+
     /// Pet names on other machines, from the mirror and their latest presence (pet names are
     /// unique across all known machines).
     pub(super) fn remote_pet_names(&self) -> Vec<String> {
@@ -311,7 +316,10 @@ impl Hub {
     pub(super) async fn on_peer_event(&self, ev: PeerEvent) {
         let _ops = self.inner.peer_ops.lock().await;
         match ev {
-            PeerEvent::Paired { device, machine, we_invited } => {
+            PeerEvent::Paired { device, mut machine, we_invited } => {
+                // The peer chose these names: the roster stores them sanitized, and so do we here.
+                machine.name = crate::store::sanitize_machine_name(&machine.name);
+                let device = Device { name: crate::store::sanitize_machine_name(&device.name), ..device };
                 tracing::info!(
                     "paired with {:?} ({}, {})",
                     machine.name,
@@ -363,6 +371,15 @@ impl Hub {
                     return;
                 }
                 let presence = presence_to_local_clock(presence, krypto_protocol::now_ms());
+                let agents_changed =
+                    self.peers().presence.get(&device_id).is_none_or(|old| old.agents != presence.agents);
+                if agents_changed {
+                    // Kept for list_agents{machineId} while that hub is offline (or after a restart here).
+                    let (id, agents) = (device_id.clone(), presence.agents.clone());
+                    if let Err(e) = self.inner.store.run(move |s| s.set_device_agents(&id, &agents)).await {
+                        tracing::warn!("save the agents of {device_id}: {e:#}");
+                    }
+                }
                 self.peers().presence.insert(device_id.clone(), presence);
                 self.sync_peers(Some((&device_id, true))).await;
             }

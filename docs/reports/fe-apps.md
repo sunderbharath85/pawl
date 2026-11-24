@@ -1,196 +1,154 @@
-# fe-apps: Step 3 (mirror events + visitors): hub-client, pet-engine, desktop, VS Code
+# fe-apps: Step 4 (intents + acks): hub-client, pet-engine, desktop, VS Code
 
-Branch `step-3-mirror-visitors`. Nothing committed.
+Branch `step-4-intents`. Nothing committed.
 
-I edited only my owned paths: `packages/hub-client`, `packages/pet-engine`, `apps/desktop` (incl. `src-tauri`) and `apps/vscode`. I coded against the protocol v4 types and the CONTRACTS.md "Step 3" section, not against a running hub, because sde-hubcore and sde-peer are building their side in parallel.
+I edited only my owned paths: `packages/hub-client`, `packages/pet-engine`, `apps/desktop` and `apps/vscode`. I coded against the protocol v5 types and the CONTRACTS.md "Step 4" section, not against a running hub, because sde-hubcore is building the hub side in parallel. The CLI part of the section is sde-hubcore's.
 
-Files I did not touch: the modified `PLAN.md`, `docs/CONTRACTS.md`, `packages/protocol`, `crates/protocol` and `crates/brain` files in the tree.
+**Contract change during the step:** t13 added `PermissionResolvedPayload.byMachineId` (event payload, TS and Rust) at my request. History is built from events, so "Approved from Windows PC" survives reloads and backfill. The clients read that field and fall back to plain "Approved".
+
+## Security model on the client
+
+The owner hub decides, and the origin hub checks `confirmed` too. The client adds two more layers of its own:
+
+1. **Every UI asks before approving another machine's request, or starting a session on another machine.** Nothing in the clients ever sets `confirmed: true` automatically.
+   - Desktop: the bubble's confirm step, the card's confirm step, and the New Session confirm step.
+   - VS Code: a modal with a single "Approve on Mac mini" / "Start on Mac mini" button. Cancel or Esc does nothing.
+   - The only places `confirmed: true` is set are the handlers of those confirm buttons.
+2. **hub-client refuses without the confirmation.** `resolvePermission` with an allow_* option on another machine's request, and `startSession` on another machine, reject with `unconfirmed` *before sending* unless `confirmed: true` is passed. A UI bug can't skip the step silently. Tests cover both.
+- **Deny, prompt and cancel need no confirmation,** as the contract says.
+- **No logging of prompt text or secrets.** The only new log line is VS Code's "started session <id> (<agent>) on <machineId>".
 
 ## What changed
 
 ### hub-client (`packages/hub-client`)
 
-**Helpers moved in.** The contract asked for these to move, and each app's copy is deleted.
+**`HubClient`:**
+- `resolvePermission(requestId, optionId, {confirmed?})` and `approve(requestId, {confirmed?})`. Remote allow without `confirmed` → local `unconfirmed`. `confirmed` goes on the wire only when given.
+- `startSession({agentId, cwd, prompt?, machineId?, confirmed?})`. The positional `startSession(agentId, cwd, prompt?)` still works (mobile and older callers).
+  - `machineId` is sent only for another machine (this machine stays the hub's default).
+  - Remote without `confirmed` → local `unconfirmed`.
+- `listAgents({refresh?, machineId?})`, and `listAgents(refresh?)` still works. Another machine's agents are returned only: `applyAck` no longer replaces `state.agents` for a `machineId` request.
+- **Longer waits for forwarded requests.** Approvals, prompts, cancels and starts for another machine wait `REMOTE_REQUEST_TIMEOUT_MS` (INTENT_TIMEOUT_MS + 10 s), so the hub's own `timeout` ack arrives first.
+- **Which requests count as remote.** A request is remote when its held machineId (or failing that, the global id's prefix) isn't this machine. Ids without a machine prefix count as local.
 
-| New file | What it holds | Former copies |
-|---|---|---|
-| `src/machine.ts` | `petFor`, `agentFor`, `renameErrorText`, `checkMachineName`, `OS_LABEL`, `machineDisplayName`, `machineSummary`, `UNKNOWN_MACHINE_NAME`, `machinesLine(total, online?)`. `MACHINE_NAME_MAX` and `normalizeMachineName` moved here from `client.ts` (same exports). | desktop `lib/machine.ts`, VS Code `shared/machine.ts` (VS Code keeps only its own `presenceLabel`) |
-| `src/petNames.ts` | pet-name rules | desktop `lib/petNames.ts`, VS Code `shared/petNames.ts` |
-| `src/backfill.ts` | `SessionBackfill`, `sessionBackfill`, `backfillSession` | desktop `lib/backfill.ts`, VS Code `host/backfill.ts` |
+**New `src/intents.ts`:**
+- **Confirmation rules:** `needsConfirmation(state, request, optionId)` (another machine's allow_* answer), `startNeedsConfirmation(state, machineId)` and `isAllowOption`.
+- **Machine helpers:** `offlineReason(state, machineId)` ("Mac mini is offline") and `ownerName`.
+- **`intentErrorText(err, machineName, action)`.** Clear text for every code: `already_decided`, `offline`, `timeout`, `unconfirmed`, `forbidden`, `invalid`, `rate_limited`, `not_found`, `not_owner`, and connection loss.
+  - The contract's three headline texts are used as written: "Already answered.", "Mac mini is offline." and "No answer from Mac mini yet — check that machine."
+  - `invalid` and `not_found` are worded per action.
+  - Also: `isAlreadyDecided` and `INTENT_ERROR_CODES`.
+- **`recentCwds(state, machineId)`:** a machine's distinct recent session folders, for the cwd suggestions.
 
-The tests moved with them: `test/machine.test.ts`, `test/petNames.test.ts` and `test/backfill.test.ts`.
+**`readOnlyReason`** now covers only pets ("Change it on Mac mini: pets belong to their machine."). Sessions and approvals are actionable.
 
-**New:**
-- **`activeMachineId(state, now)`** (where the user is):
-  - It picks the online machine with the latest `userActiveAt` within `USER_ACTIVE_WINDOW_MS`. This machine always counts as online.
-  - If no machine qualifies, it returns this machine. Ties go to this machine, then to the lower id.
-  - Before the hub's hello it returns `""`.
-- **`isLocal(state, id)`**: true when a machine id or any global id belongs to this machine. Everything counts as local before the hub's hello.
-- **`groupByMachine(state, items)`**: groups items with this machine first, then online machines, then by name, and unknown machines last. Each group says whether it is local and whether it is online.
-- **`readOnlyReason(state, machineId)`**: `null` for this machine's items. For another machine's it returns "Open on Mac mini to act — remote control arrives in a later update."
-- **`HubClient.reportUserActivity(now?)`**:
-  - It sends `user_activity` at most once per `USER_ACTIVITY_REPORT_MS`, and only while connected (nothing is queued).
-  - The first input after each hello is reported at once.
-  - A rejection (from an older hub) is swallowed.
-
-**Removed:** `scopeToMachine` (the step-2 filter) and its tests. Welcome, reducers and mirrored ServerMsgs needed no change, because mirrored items arrive as ordinary messages.
+**Tests:** new `test/intents.test.ts` covers the confirmation rules, every code's text, `recentCwds`, the local `unconfirmed` refusals with nothing sent, the `confirmed` wire format, the longer waits, `listAgents` not touching state, and the `byMachineId` resolution. 153 tests in total.
 
 ### pet-engine (`packages/pet-engine`)
-
-**`PetView` gains:**
-- `visitor: boolean` (the pet's machine is another one, and online);
-- `away?: MachineId`;
-- `remoteOffline: boolean` (the pet's machine is another one, and offline or unknown).
-
-`PetBubbleData` gains `readOnly?`. `derivePetViews` input gains optional `localMachineId` and `activeMachineId` (the active machine defaults to the local one). Without `localMachineId` every pet is a home pet, as before.
-
-**Rules,** on local machine L with active machine A:
-- **Home pet with a pending approval:** `away = A` when A ≠ L. Its bubble data is kept for lists, but the stage hides it.
-- **Visitor with a pending approval:**
-  - When A == L, it shows a read-only permission bubble, "Run tests? Needs approval on Mac mini."
-  - Otherwise it is in the waiting pose (`alert`) with no bubble.
-- **Visitors without an approval** keep their activity but drop chatter bubbles.
-- **Pets of offline machines** nap with no bubble, `since` = the machine's last seen, and no session.
-
-**`PetStage`:**
-- **Home pets** keep their lanes. The lanes now shrink to leave room for the visitors area on the right.
-- **Visitors area:**
-  - Visitors are drawn at 0.75× size with a "Biscuit · Mac mini" name tag.
-  - At most `maxVisitors` (default 6) are shown, never more than half the strip. The rest go into a "+N" chip whose tooltip lists the hidden names.
-  - Visitors with a request come first.
-- **Away pets** run off the left edge, become hidden (and drop out of the hit-rects) once there, and walk back when no longer away.
-- **A visitor that brings a request** runs in from the right edge. Its bubble appears once it arrives.
-- **Offline machines' pets** are not drawn.
-
-The walks to and from the edges are a new kind of motion (`Motion.travel`) that the wander rules never stop. With reduced motion, pets just appear and disappear.
-
-`PetBubble` shows no Approve/Deny on `readOnly` bubbles (role `status`, its own style). New exports: `layoutVisitors`, `MAX_VISITORS`, `VISITOR_SCALE`, `VisitorLayout`, and `stageShowsApproval(views)` (true while a stage shows an approval: a home pet's permission bubble that is not `away`, or a visitor that ran here).
-
-**Tests:** 12 tests for the L/A rules in `engine.test.ts`, visitor stage tests (badge, offline hidden, +N, read-only bubble, away hidden), and layout and walk tests.
+- **`PetBubbleData.confirm?: {machineName, action}`.** A visitor that ran here now gets an *actionable* bubble: "Run npm test? (on Mac mini)". It is no longer read-only.
+- **`approvalConfirmText(bubble)`** returns "Approve on Mac mini: Run npm test?".
+- **`PetBubble`:**
+  - With `confirm`, the Approve button ("Approve…") turns the bubble into a confirm step. The step shows the machine name in bold, an "Approve on Mac mini" button and Back; Esc goes back.
+  - Only that button calls `onApprove({confirmed: true})`. Deny stays one click.
+  - `readOnly` bubbles still have no buttons.
+- **`PetStage.onApprove(requestId, {confirmed})`.**
+- **Tests:** the visitor bubble carries `confirm`, home bubbles don't, the SSR "Approve…" label and aria-label, and read-only still has no buttons. 73 tests in total.
 
 ### Desktop (`apps/desktop`)
-
-**Step-2 filters removed** (`useLocalHubState`, the `isRemote` guards). Panel and strip use `useHubState`.
-
-**Strip (`PetApp`, `lib/pets.ts`):**
-- `derivePetViews` gets `localMachineId` and `activeMachineId`.
-- The placeholder dog stays home when this machine has no pet of its own, even when visitors are present.
-- Clicking a visitor's bubble opens the panel at that request (the existing `approvals` focus).
-
-**`src-tauri/src/pet_window.rs`:**
-- **User activity.** The existing 50 ms cursor poll now emits `user-activity`, at most every 5 s and only for moves of 2 px or more. This continues while pets are paused.
-- **Following the cursor.** New command `set_follow_cursor(follow)`. While it is on, the strip re-anchors every ~250 ms to the work area of `app.monitor_from_point(cursor)` (Tauri 2.12 API). It falls back to the primary monitor.
-- `PetApp` turns following on only while the strip shows an approval: a home pet's request that is not `away`, or a visitor that ran here with its request (`stageShowsApproval`, below). It turns following off on unmount.
-- `lib.rs` registers the command. There is a unit test for the cursor-jitter threshold.
-
-**Activity reporting:** the strip calls `client.reportUserActivity()` on `user-activity`. The panel calls it on pointer, key, wheel and focus events.
-
-**Panel:**
-- **Sidebar:**
-  - Sessions are grouped by machine, with headings only once another machine's sessions are mirrored.
-  - An offline machine's group is greyed with "last seen 5m ago".
-  - The hero pet is chosen from home pets.
+- **Strip (`PetApp`):**
+  - Approve passes the bubble's `confirmed` through.
+  - Failures show the intent text naming the machine, and the bubble's buttons come back (the rejection is passed on).
+  - `already_decided` → "Already answered." and the bubble closes at once. The request stays out of the bubble until the mirror's `permission_resolved` removes it.
+- **Approval cards (`PermissionCard`, also the pinned strip and the Approvals view):**
+  - Remote cards are enabled. An allow option opens an inline confirm in the card: "Allow on **Mac mini**: Run npm test?" with "Allow on Mac mini" / Back.
+  - Results show inline: "Already answered.", "Mac mini is offline.", "No answer from Mac mini yet — check that machine.", and the rest.
+  - After a successful send the card stays, showing "Sent to Mac mini…", until the mirror resolves it.
+  - Offline owners → buttons disabled with "Mac mini is offline".
 - **Session view:**
-  - The header shows a machine chip, which says "offline, last seen …" when that machine is offline.
-  - For a remote session the prompt bar is disabled, with the read-only reason as its placeholder and tooltip, and so is Cancel turn.
-  - An offline machine's feed is greyed.
-- **`feed.ts`:** a `TruncatedPayload` becomes a "📦 Large output — open on Mac mini" row. A run of them merges into one row, and the tooltip gives the size.
-- **Approval cards** (PermissionCard, the Approvals view and the pinned strip): another machine's request shows "on Mac mini". Its buttons are disabled with the reason and a note below. Offline machines' cards are greyed. This machine's requests sort first.
-- **Pets view:**
-  - Pets are grouped by machine ("Visiting from Mac mini").
-  - Remote pets are read-only (inputs and species buttons disabled, Save hidden, reason shown).
-  - Offline groups are greyed.
-- **Home view:** home pets go on the rug, and remote sessions get a machine chip.
-- **Only this machine's items where acting is needed:** Chat lists only this machine's pets, and New Session offers only this machine's agents.
-
-**Notifications** (`lib/notifications.ts`, `lib/where.ts` new):
-- They cover every machine's events, but only on the active machine (`notifiesHere`).
-- Remote items say "on Mac mini". A remote request's notification says to answer it on that machine.
-- Events and hub notifications older than 2 min are skipped, so a mirror sync after a reconnect does not flood the user.
-
-**Tests:** `src/lib/where.test.ts`: where to notify, the "on Mac mini" text, the placeholder-dog rule, and the truncated feed row. The old copied tests moved to hub-client.
+  - Prompt and Cancel are enabled for remote sessions (they are forwarded), with the machine in the placeholder and tooltip and intent-worded errors.
+  - Offline → disabled with the reason.
+  - History rows say "Approved from Windows PC" (`byMachineId` from the event payload, via `feed.ts`).
+- **New session:**
+  - A machine picker shows this machine (the default) plus the online paired machines.
+  - Agents come from `listAgents({machineId})`, with a loading state, an error state and Reload.
+  - The cwd field has a `<datalist>` of that machine's recent folders, and switching machines prefills its latest. Browse is offered only for this machine.
+  - A remote start shows "Runs on Mac mini", then a confirm step: "Start Claude Code on **Mac mini** in `/repo`? It runs on Mac mini…".
+  - The last agent/cwd settings are saved only for this machine.
+- **Notifications:** remote requests no longer say "answer it there". Who decided is in the owner hub's own notification, which every client already shows.
+- **`lib/where.ts`:** `answerErrorText(state, id, action, err)` gives intent wording for another machine's item and the plain error for this machine's.
+- **Tests:** `where.test.ts` gained the answer-error cases and the feed `byMachineId` case. 23 tests in total.
 
 ### VS Code (`apps/vscode`)
-
-**Step-2 filters removed** (`HubConnection.local`, the notifier's `remote()`).
-
-**Pets** (`petViewsOf` and the webview): `derivePetViews` gets `localMachineId` and `activeMachineId`. The webview `PetStage` shows visitors and away pets the same way the desktop strip does. The sleepy dog stays home when this machine has no pet of its own.
-
-**Status bar:**
-- The lead pet is a home pet, with "(ran to Mac mini)" when it is away.
-- The bell counts only this machine's approvals, the ones Approve and Deny act on. The `krypto.hasPending` context follows the same count.
-- The tooltip lists home pets (an away pet says "ran to Mac mini with a request"), a "Visiting: …" line, and "N waiting on other machines".
-
-**Webview:**
-- Sessions are grouped by machine, with headings once more than one machine is present. Offline groups are greyed with "last seen".
-- Each remote item gets a machine chip.
-- For remote sessions, Cancel and the composer are disabled with the reason.
-- For remote approval cards, the buttons are disabled with the reason, and offline cards are greyed.
-- A `TruncatedPayload` shows as "📦 Large output — open on Mac mini" in the transcript (merged per run).
-- Chat, Rename pet and Change species use only this machine's pets.
-- Clicking a visitor with no session opens the sessions list, not a chat with a remote pet.
-
-**Commands:**
-- Prompt, Cancel, Approve and Deny pickers list only this machine's items, and an explicit remote id fails with the read-only reason.
-- Approve/Deny with only remote requests waiting says they are on other machines.
-- Rename Pet and Change Species pick only this machine's pets.
-- Start Session offers only this machine's agents.
-
-**Notifications:**
-- They cover every machine, but only when this machine is the active one.
-- Remote items say "on Mac mini". Remote requests get only "Show" (no Approve/Deny), and remote turn-finished notifications get no "Reply".
-- Events and notifications older than 2 min are skipped.
-
-**Activity (`host/activity.ts`, new):** reports window focus, text edits, selection and active-editor changes, and a reconnect, but only while the window is focused. Files an agent rewrites in the background therefore don't count.
-
-**Tests and README:** `src/host/petViews.test.ts` (visitor, away, remoteOffline) and a truncated-payload test in `transcript.test.ts`. The README is updated.
+- **`host/remote.ts` (new):**
+  - `answerRequest(hub, requestId, decision)`, used by the webview cards, the Approve/Deny commands and notifications. A remote approval first opens `showWarningMessage("Approve on Mac mini: Run bun test?", {modal: true, detail}, "Approve on Mac mini")`, and only that button goes ahead.
+  - "Already answered" is an info message, not an error.
+  - `remoteError` wraps failures in intent text. `confirmModal` is shared.
+- **`host/remoteText.ts` (new, pure):** the modal wording for approve and start, and a " · Mac mini" picker suffix.
+- **Start Session:**
+  - It opens with a QuickPick machine picker (this machine plus online paired machines; skipped with only one), then that machine's agents (`listAgents({machineId})`).
+  - The folder comes from a QuickPick of that machine's recent folders or "Enter a folder path…", then the prompt.
+  - A remote start then asks in a modal ("Start Claude Code on Mac mini in /repo?") and sends `machineId` + `confirmed: true`.
+  - The command also takes an optional 4th argument, `machineId`.
+- **Prompt, Cancel, Approve and Deny commands:**
+  - They list every reachable machine's items (local first, tagged " · Mac mini"); errors name the machine.
+  - Pets stay this machine's (Rename / Change Species).
+- **Webview:**
+  - Remote approval cards are enabled ("Approve…" with a hint that it asks to confirm). Offline → disabled with the reason.
+  - Remote Cancel and the composer are enabled. The transcript shows "· from Windows PC" on decisions.
+- **Notifications:** remote requests get Approve/Deny again (approve goes through the modal), and remote turns get Reply when that machine is online.
+- **Status bar:** the bell counts all answerable approvals (local plus online remote), and the tooltip says how many are on other machines.
+- **Tests and README:** `src/host/remoteText.test.ts` (new) and a `byMachineId` transcript case. 19 tests in total. The README is updated.
 
 ## Commands run (final; all pass)
 
 | Where | Command | Result |
 |---|---|---|
 | packages/hub-client | `bunx tsc --noEmit` | ok |
-| packages/hub-client | `bun test` | 135 pass / 0 fail (7 files) |
+| packages/hub-client | `bun test` | 158 pass / 0 fail (8 files) |
 | packages/pet-engine | `bunx tsc --noEmit` | ok |
-| packages/pet-engine | `bun test` | 71 pass / 0 fail (3 files) |
+| packages/pet-engine | `bun test` | 75 pass / 0 fail (3 files) |
 | apps/desktop | `bunx tsc --noEmit` | ok |
 | apps/desktop | `bunx tsc --noEmit -p tsconfig.node.json` | ok |
 | apps/desktop | `bunx tsc --noEmit -p tsconfig.test.json` | ok |
-| apps/desktop | `bun test src` | 20 pass / 0 fail (2 files) |
+| apps/desktop | `bun test src` | 23 pass / 0 fail |
 | apps/desktop | `bunx vite build` | ok |
-| apps/desktop/src-tauri | `cargo check` (and `cargo check --tests`) | ok |
+| apps/desktop/src-tauri | `cargo check` | ok (no Rust changes this step) |
 | apps/vscode | `bunx tsc --noEmit` | ok |
-| apps/vscode | `bun test` | 15 pass / 0 fail (3 files). Lower than step 2 because 19 tests moved to hub-client. |
+| apps/vscode | `bun test` | 19 pass / 0 fail (4 files) |
 | apps/vscode | `bun run build` | ok |
-| apps/mobile | `bunx tsc --noEmit` | ok. No fix needed: it builds its state with `initialHubState()` and doesn't use `PetView`. |
+| apps/mobile | `bunx tsc --noEmit` | ok. No fix needed: the positional `startSession` and boolean `listAgents` still work. |
 
 No dependencies were added, removed or upgraded, and no install was run.
 
-Line endings are preserved: CRLF files stay CRLF, new files are LF, and no file has mixed line endings.
-
-Nothing logs mirrored payloads, invite URIs or tokens. The new code adds no `console.*` or `log.*` calls.
+Line endings are preserved: CRLF files (NewSessionView, PermissionCard, SessionView, PetApp, panel.css) stay CRLF and new files are LF. No file has mixed line endings.
 
 ## Known gaps
-- **Not run against the real hub** (it is being built in parallel), and no Tauri window or Extension Development Host was launched. The runs in and out, the visitors area and following the cursor across monitors have only been checked by reading the code and the SSR tests.
-- **Desktop activity** is global cursor movement plus input in the panel. There is no global keyboard hook, which would need OS hooks or a new dependency. Typing elsewhere without moving the mouse doesn't count.
-- **`activeMachineId` compares `userActiveAt` values stamped by different hubs' clocks.** If machines' clocks differ by more than the gap between two activity reports, the wrong machine can be chosen. See decision 1.
-- **The 2-minute freshness window** also uses the owner machine's clock (`event.ts`). A machine whose clock is more than 2 minutes behind would have its notifications dropped.
-- **Remote request bubbles on the strip are read-only** by design (step 4 turns on approving remotely).
+- **Not run against the real hub** (it is being built in parallel), and no Tauri window or Extension Development Host was launched. The confirm steps were checked through code, SSR tests and the hub-client unit tests.
+- **Some states clear only when the mirror catches up.** The desktop card's "Sent to Mac mini…" state and the strip's closed "Already answered" bubble last until the mirror's `permission_resolved` removes the request. If the mirror never delivers it (the owner went offline right after applying), the card stays in "Sent" until a resync.
+- **No folder browser for a remote cwd.** It can't be browsed from here; it is typed or picked from that machine's recent sessions, and the owner validates it (`invalid` → "the folder must exist on it").
+- **The machine picker shows only online machines.** `list_agents{machineId}` would also return an offline machine's last-known agents, but starting there would fail with `offline` anyway.
 
 ## Decisions for the orchestrator
-1. **Clock skew in "where the user is".** The hub could rewrite a peer's `userActiveAt` (and maybe `lastSeen`) into its own clock, using the peer's presence `ts` against the arrival time. Then `activeMachineId` compares like with like. The clients take `Machine.userActiveAt` as given.
-2. **`Welcome.agents` for remote machines** is not specified. The clients cope either way: they start sessions only with this machine's agents, and agent-name lookups fall back to an id-only match.
-3. **Follow-the-cursor (narrowed, per t13).** The strip now follows only while it shows an approval: a home pet's request (not `away`) or a visitor that ran here. A pet-engine test covers the rule: A == L or A != L, home or visitor, an offline machine, and say-bubbles.
-4. **Notification freshness (2 min)** is a client rule against sync floods. If the hub marks synced items (for example a `replay` flag on mirrored ServerMsgs), the clients could use that instead.
+1. **Client-side `unconfirmed` refusal in hub-client** (no frame sent) on top of the origin and owner checks. This could only bite a caller that deliberately passes a remote allow without `confirmed`, and that is the point.
+2. **The bell and pickers show online remote items only.** Offline machines' items stay visible in lists, greyed and disabled. Say if offline items should also be in the VS Code pickers (they would fail with `offline`).
 
-## Follow-up (t13 review)
-- **Decision 1:** the hub will normalize peers' `userActiveAt` / `lastSeen` into its own clock (sde-hubcore). The clients keep using the values as given.
-- **Decision 2:** `Welcome.agents` stays this machine only in step 3. The client filters stay as a safety net.
-- **Decision 3:** follow-the-cursor is narrowed to `stageShowsApproval(views)`, with a test (`engine.test.ts`). The comments in `pet_window.rs` and `native.ts` are updated.
-- **Decision 4:** the 2-minute freshness rule stays.
-- **Gates rerun, all green:**
-  - hub-client: tsc ok, 135 tests.
-  - pet-engine: tsc ok, 71 tests.
-  - desktop: three tsc configs ok, 20 tests, `vite build` ok, `cargo check` ok.
-  - VS Code: tsc ok, 15 tests, build ok.
-  - mobile: tsc ok.
+## Follow-up (t13 security review)
+1. **Always-allow is chosen only on the owning machine.**
+   - hub-client:
+     - `remoteOptionBlocked(state, request, optionId)` returns "Choose always-allow on Mac mini" for another machine's allow_always.
+     - `approveOptionId(state, request)` returns allow_once; this machine's own request may still fall back to always-allow.
+     - `resolvePermission` refuses a remote allow_always locally with `forbidden`, even when confirmed, and sends nothing.
+     - A remote `approve()` uses allow_once only, and refuses with `forbidden` when the request offers only always-allow.
+   - pet-engine: a visitor bubble without allow_once gets `approveBlocked` (Approve disabled, tooltip "Choose always-allow on Mac mini"; Deny still works).
+   - Desktop `PermissionCard` and the VS Code webview card: remote always-allow buttons are disabled with that tooltip, plus a note. VS Code `answerRequest` refuses it before any modal.
+2. **`forbidden` explains the owner's policy per action** (`intentErrorText`):
+   - start: "Mac mini only lets other machines start agents in folders it already uses, or it does not accept actions from other machines (accept_intents is off in its config.toml)."
+   - approve and resolve: "Always-allow must be chosen on Mac mini itself, or …accept_intents…".
+   - deny, prompt and cancel: only the accept_intents reason.
+3. **Remote start folders:**
+   - Desktop: the placeholder and a hint say "Only folders Mac mini already uses". The hint adds "(pick one from the list)", or says to start a session there first when that machine has no recent folders.
+   - VS Code: the folder QuickPick says "Only folders Mac mini already uses", with "Enter another folder Mac mini already uses…".
+   - Suggestions are still that machine's recent session folders. The owner remains the authority.
+4. **Remote-driven sessions ask for every permission:** no client change was needed.
+- **Tests:** hub-client 158 (blocked options, the approve option, local `forbidden` refusals with nothing sent, the always-only request, `forbidden` wording per action) and pet-engine 75 (`approveBlocked` in the derived view and the SSR markup).
+- **Gates rerun, all green:** hub-client, pet-engine, desktop (three tsc configs, 23 tests, vite build, cargo check), VS Code (tsc, 19 tests, build), mobile tsc.

@@ -600,3 +600,82 @@ No new dependencies expected; ask t13 first if one seems needed.
   machine's events, so the user is told once, where they are.
 - **Activity reporting:** desktop reports on global cursor movement (pet_window already polls it) and panel input;
   VS Code on window focus, editor edits and selection changes. Both throttled.
+
+## Step 4 — Intents + acks (PLAN.md migration step 4) — protocol v5
+
+Branch `step-4-intents`. Protocol already updated by the orchestrator (PROTOCOL_VERSION = 5): `Intent`
+(approve / deny / prompt / start / cancel), `IntentKind`, `IntentRejectReason`, `INTENT_TIMEOUT_MS` (15 s),
+`INTENT_RATE_PER_SEC` (20), PeerBody `intent{intentId,client,confirmed,intent,ts}` and
+`intent_ack{intentId,status,reason?,result?}` (Rust `IntentStatus`), `resolve_permission.confirmed?`,
+`start_session.machineId?` + `confirmed?`, `list_agents.machineId?`, `permission_resolved.byMachineId?` (ServerMsg and
+MirrorUpdate). Read the doc comments there; they are the spec.
+
+Scope: act on another machine's session from here. The owner is the source of truth; the origin hub only forwards.
+**Not** in step 4: bot routing of remote commands by machine/repo/pet name (step 5), relay (step 6), phone (step 7).
+`crates/peer` needs no change (intents are ordinary bodies).
+
+### Ownership (step 4)
+| Role | Owns |
+|---|---|
+| sde-hubcore | `crates/hub/`, `crates/brain/` |
+| fe-apps | `packages/hub-client/`, `packages/pet-engine/`, `apps/desktop/`, `apps/vscode/` |
+
+No new dependencies expected; ask t13 first.
+
+### Origin hub (the one whose client asked)
+- A ClientMsg naming another machine's id (resolve_permission, prompt, cancel by id prefix; start_session by
+  `machineId`) is no longer `not_owner`: if that machine is paired and linked, send `intent` and wait for
+  `intent_ack` (INTENT_TIMEOUT_MS), then ack the client with the owner's result or reason. Not linked -> `offline`;
+  no ack in time -> `timeout` (the outcome may still arrive through the mirror). Unknown / unpaired machine ->
+  `not_found`. A third machine's data is never forwarded on someone else's behalf: the target is always the id's owner.
+- `confirmed` is required, and checked on the origin before sending, for: resolve_permission with an allow_* option,
+  and start_session on another machine. Missing -> `unconfirmed` without sending. Deny, prompt and cancel need none.
+- Audit (origin): every forwarded approve/deny is logged with intentId, target machine, client kind and the owner's
+  answer (or offline/timeout).
+
+### Owner hub (the one that has the session)
+- Accept `intent` only from a paired, linked hub; dedupe by intentId (keep the last 1000 acks for 10 min; a repeat
+  gets the same ack and changes nothing). More than INTENT_RATE_PER_SEC per peer -> `rate_limited`.
+  `[peer] accept_intents = false` in config.toml -> every intent `forbidden` (default true).
+- Validate against own state: target id has this hub's prefix (else `not_owner`); the request or session exists
+  (`not_found`); a request that existed but is no longer pending -> `already_decided` (keep resolved request ids
+  long enough to tell, e.g. the audit log); approve needs an allow_* option of that request and deny a reject_* option
+  or null (`invalid`); approve and start need `confirmed` (`unconfirmed`); start: agent installed here, cwd absolute,
+  existing directory (`invalid`), prompt length limits as for local.
+- **Review hardening (owner):** a remote approve may only pick an `allow_once` option (`allow_always` -> `forbidden`;
+  choose it on the owner). Remote start canonicalizes cwd, refuses UNC, `\?\UNC\` and device paths, and requires a
+  folder the owner already knows (canonical cwd of a previous local session, or under `[peer] start_roots`), else
+  `forbidden`. Sessions started or prompted by a peer are marked remote-driven and rules never auto-approve their
+  requests. The owner cannot verify the origin's UI, so `confirmed` is a statement by a paired hub; pairing is the
+  trust decision (`[peer] accept_intents = false` turns all of this off).
+- **First valid decision wins**: resolving is atomic with the pending check, shared with the local path, so a local
+  click and a remote intent racing for the same request give exactly one `applied`; the loser gets `already_decided`
+  (local ClientMsg path too: it now answers `already_decided` instead of `not_found` for a request that was decided).
+- Apply through the same code path as a local ClientMsg (rules never re-run; the user decided). The resulting
+  `permission_resolved` carries `by: "user"` and `byMachineId` = origin. `start` runs the agent on this machine only.
+- Audit (owner): every remote approve/deny with intentId, origin machine id + name, client kind, option, outcome.
+  Remote prompt/start/cancel are logged too (kind, origin, target, outcome; prompt text is not logged).
+- Notification on the owner when a remote approval was applied ("Approved from Mac mini: run `bun test`").
+- `list_agents{machineId}` for a peer returns the agents from its latest presence (offline -> last known).
+- Brain: chat "approve"/"deny" for a remote request answers with how to do it in the panel (confirmation needed);
+  it does not forward. Status replies say who decided ("approved from Mac mini").
+
+### Clients (fe-apps)
+- Enable approve / deny / prompt / cancel on remote items (they were read-only). Remote **approve** always shows a
+  confirmation step on this device first ("Approve on Mac mini: run `bun test`?" with the machine name prominent),
+  then sends `confirmed: true`; deny/prompt/cancel need none. Desktop: inline confirm in the bubble and the panel (no
+  window.confirm); VS Code: modal `showWarningMessage(..., {modal: true}, "Approve on Mac mini")`.
+- Results: `already_decided` -> "Already answered" and close the bubble (the mirror closes it anyway);
+  `offline` -> "Mac mini is offline"; `timeout` -> "No answer from Mac mini yet — check that machine";
+  `unconfirmed` / `forbidden` / `rate_limited` / `invalid` -> clear text. Keep the request visible until the
+  mirror's permission_resolved arrives.
+- `permission_resolved.byMachineId` -> "Approved from Windows PC" in history/transcript and in notifications.
+- New session: machine picker (this machine default; online paired machines), agents from `list_agents{machineId}`,
+  cwd input with suggestions from that machine's recent session cwds; remote start needs the confirm step and shows
+  "Runs on Mac mini". VS Code "New session" gets the same picker as a QuickPick.
+- hub-client: `resolvePermission(requestId, optionId, {confirmed})`, `startSession({..., machineId, confirmed})`,
+  `listAgents({machineId})`, `needsConfirmation(state, request, optionId)` helper, error-text helper for the new codes.
+- CLI (sde-hubcore): `krypto start <agent> --cwd <dir> --machine <name|id> [--yes]` asks "Start claude-code on
+  Mac mini in <cwd>? [y/N]" unless --yes; `krypto approve <requestId> [--option <id>] [--yes]` and `krypto deny <requestId>`
+  work for local and remote requests. A remote approve always asks interactively on the terminal (it needs a TTY;
+  `--yes` is NOT honoured for remote approvals, so a script cannot approve on another machine).

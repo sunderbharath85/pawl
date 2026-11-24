@@ -150,13 +150,25 @@ impl WatchdogSection {
 }
 
 /// `[peer]`: hub-to-hub links (pairing + presence).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PeerSection {
     /// Peer listener address "ip[:port]" (default port 47801). Unset = no listener (the default):
     /// this hub can still join other hubs' invites and dial them, but cannot invite.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
+    /// Let paired hubs act on this machine's sessions (approve once, deny, prompt, start, cancel).
+    /// false = every intent is answered `forbidden`; the mirror still works.
+    pub accept_intents: bool,
+    /// Folders (and everything under them) where paired hubs may start agents, besides the folders
+    /// of this machine's own previous sessions.
+    pub start_roots: Vec<String>,
+}
+
+impl Default for PeerSection {
+    fn default() -> Self {
+        Self { listen: None, accept_intents: true, start_roots: Vec::new() }
+    }
 }
 
 impl PeerSection {
@@ -239,6 +251,8 @@ const CONFIG_TEMPLATE: &str = r#"# Krypto hub configuration. Every key is option
 #
 # [peer]
 # listen = "192.168.1.20:47801"   # hub-to-hub listener (off by default; needed to create invites)
+# accept_intents = true           # false = paired machines can watch but never act here
+# start_roots = ["E:/work"]       # paired machines may also start agents under these folders
 #
 # [watchdog]
 # waiting_nudge_after_ms = 300000

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const HUB_DEFAULT_PORT: u16 = 47800;
 pub const HUB_HOST: &str = "127.0.0.1";
 pub const HUB_DATA_DIR_NAME: &str = "krypto";
@@ -208,9 +208,64 @@ pub enum MirrorUpdate {
     Event { event: HubEvent },
     Pet { pet: Pet },
     PermissionRequest { request: PermissionRequest },
-    PermissionResolved { request_id: RequestId, session_id: SessionId, outcome: PermissionOutcome, by: ResolvedBy },
+    PermissionResolved {
+        request_id: RequestId,
+        session_id: SessionId,
+        outcome: PermissionOutcome,
+        by: ResolvedBy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by_machine_id: Option<MachineId>,
+    },
     Notification { notification: HubNotification },
 }
+
+// ---------- intents: act on another machine's session (migration step 4) ----------
+/// What a hub asks an owning hub to do. The owner validates and applies it, writes the audit log,
+/// then answers intent_ack; the resulting state reaches everyone through the mirror.
+/// approve: option_id must be an allow_once option of a pending request (allow_always only on the owner: `forbidden`);
+/// deny: a reject_* option or None.
+/// start: the agent runs on the owner (the machine that has the code). cwd is canonicalized there and must be a folder
+/// the owner already knows (a previous local session's cwd, or under config.toml `[peer] start_roots`); network-share
+/// and device paths are refused (`forbidden`). Sessions started or prompted by another machine never get rule
+/// auto-approval: every request they raise asks a human.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum Intent {
+    Approve { request_id: RequestId, option_id: String },
+    Deny { request_id: RequestId, option_id: Option<String> },
+    Prompt { session_id: SessionId, text: String },
+    Start {
+        agent_id: AgentId,
+        cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
+    Cancel { session_id: SessionId },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentStatus {
+    Applied,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentRejectReason {
+    AlreadyDecided,
+    NotFound,
+    NotOwner,
+    Forbidden,
+    Unconfirmed,
+    Invalid,
+    RateLimited,
+}
+
+/// The origin hub gives up waiting for intent_ack after this long (client gets `timeout`).
+pub const INTENT_TIMEOUT_MS: i64 = 15_000;
+/// Owners reject intents beyond this many per second per peer (`rate_limited`).
+pub const INTENT_RATE_PER_SEC: u32 = 20;
 
 /// Event payloads larger than this (serialized) are mirrored as a TruncatedPayload.
 pub const MIRROR_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
@@ -262,6 +317,18 @@ pub enum PeerBody {
     MirrorEvents { events: Vec<HubEvent> },
     /// End of a sync. `seq` = highest event seq sent; `truncated` = older events were skipped.
     SyncDone { seq: i64, truncated: bool },
+    /// Origin hub -> owner (migration step 4). `client` = the local client that asked; `confirmed` = the user
+    /// confirmed on that device (required for approve and start). The owner answers a repeated intent_id with the same ack.
+    Intent { intent_id: String, client: ClientKind, confirmed: bool, intent: Intent, ts: UnixMs },
+    /// Owner -> origin. `result` has the same shape as the matching ClientMsg ack result (start: `{session}`).
+    IntentAck {
+        intent_id: String,
+        status: IntentStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<IntentRejectReason>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<Value>,
+    },
 }
 
 // ---------- agents ----------
@@ -543,6 +610,9 @@ pub struct PermissionResolvedPayload {
     pub request_id: RequestId,
     pub outcome: PermissionOutcome,
     pub by: ResolvedBy,
+    /// The machine the decision came from when it was not the owner (a remote approval).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_machine_id: Option<MachineId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -734,13 +804,40 @@ pub enum ClientKind {
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum ClientMsg {
     Hello { id: String, client: ClientKind, client_version: String, token: String },
-    ListAgents { id: String, #[serde(default)] refresh: Option<bool> },
+    /// `machine_id` = another machine's agents as last reported in its presence (read-only; refresh ignored).
+    ListAgents {
+        id: String,
+        #[serde(default)]
+        refresh: Option<bool>,
+        #[serde(default)]
+        machine_id: Option<MachineId>,
+    },
     ListSessions { id: String, #[serde(default)] include_ended: Option<bool> },
     GetEvents { id: String, session_id: SessionId, #[serde(default)] since_seq: Option<i64>, #[serde(default)] limit: Option<u32> },
-    StartSession { id: String, agent_id: AgentId, cwd: String, #[serde(default)] prompt: Option<String> },
+    /// `machine_id` (default: this machine) picks where the agent runs; another machine's start is forwarded as
+    /// an intent and needs `confirmed: Some(true)`.
+    StartSession {
+        id: String,
+        agent_id: AgentId,
+        cwd: String,
+        #[serde(default)]
+        prompt: Option<String>,
+        #[serde(default)]
+        machine_id: Option<MachineId>,
+        #[serde(default)]
+        confirmed: Option<bool>,
+    },
     Prompt { id: String, session_id: SessionId, text: String },
     Cancel { id: String, session_id: SessionId },
-    ResolvePermission { id: String, request_id: RequestId, option_id: Option<String> },
+    /// For another machine's request the hub forwards an intent; an allow option then needs `confirmed: Some(true)`.
+    /// Remote errors: already_decided, not_found, unconfirmed, forbidden, invalid, rate_limited, offline, timeout.
+    ResolvePermission {
+        id: String,
+        request_id: RequestId,
+        option_id: Option<String>,
+        #[serde(default)]
+        confirmed: Option<bool>,
+    },
     ListHistory { id: String, agent_id: AgentId, #[serde(default)] cwd: Option<String> },
     ResumeSession { id: String, agent_id: AgentId, acp_session_id: String, cwd: String },
     Chat { id: String, #[serde(default)] pet_id: Option<PetId>, text: String },
@@ -829,7 +926,15 @@ pub enum ServerMsg {
     Session { session: Session },
     Event { event: HubEvent },
     PermissionRequest { request: PermissionRequest },
-    PermissionResolved { request_id: RequestId, session_id: SessionId, outcome: PermissionOutcome, by: ResolvedBy },
+    /// `by_machine_id` = the machine the decision came from when it was not the owner (a remote approval).
+    PermissionResolved {
+        request_id: RequestId,
+        session_id: SessionId,
+        outcome: PermissionOutcome,
+        by: ResolvedBy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by_machine_id: Option<MachineId>,
+    },
     Pet { pet: Pet },
     Chat { message: ChatMessage },
     Notification { notification: HubNotification },
@@ -882,6 +987,19 @@ mod tests {
         assert_eq!(serde_json::to_value(&b).unwrap(), serde_json::json!({"type":"sync_request","sinceSeq":5}));
         let m: ClientMsg = serde_json::from_str(r#"{"type":"user_activity","id":"9"}"#).unwrap();
         assert_eq!(m.id(), "9");
+        let b = PeerBody::Intent {
+            intent_id: "i1".into(),
+            client: ClientKind::Desktop,
+            confirmed: true,
+            intent: Intent::Approve { request_id: "abcdef012345:r".into(), option_id: "allow".into() },
+            ts: 1,
+        };
+        assert_eq!(
+            serde_json::to_value(&b).unwrap(),
+            serde_json::json!({"type":"intent","intentId":"i1","client":"desktop","confirmed":true,"intent":{"kind":"approve","requestId":"abcdef012345:r","optionId":"allow"},"ts":1})
+        );
+        let a = PeerBody::IntentAck { intent_id: "i1".into(), status: IntentStatus::Rejected, reason: Some(IntentRejectReason::AlreadyDecided), result: None };
+        assert_eq!(serde_json::to_value(&a).unwrap(), serde_json::json!({"type":"intent_ack","intentId":"i1","status":"rejected","reason":"already_decided"}));
         let s = ServerMsg::MachineRemoved { machine_id: "abcdef012345".into() };
         assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::json!({"type":"machine_removed","machineId":"abcdef012345"}));
     }
@@ -893,7 +1011,7 @@ mod tests {
         assert!(matches!(m, ClientMsg::StartSession { .. }));
         let j = r#"{"type":"resolve_permission","id":"2","requestId":"r","optionId":null}"#;
         let m: ClientMsg = serde_json::from_str(j).unwrap();
-        assert_eq!(m, ClientMsg::ResolvePermission { id: "2".into(), request_id: "r".into(), option_id: None });
+        assert_eq!(m, ClientMsg::ResolvePermission { id: "2".into(), request_id: "r".into(), option_id: None, confirmed: None });
     }
 
     #[test]
@@ -903,6 +1021,7 @@ mod tests {
             session_id: "s".into(),
             outcome: PermissionOutcome::Selected { option_id: "o".into() },
             by: ResolvedBy::Rule,
+            by_machine_id: None,
         };
         let v = serde_json::to_value(&m).unwrap();
         assert_eq!(

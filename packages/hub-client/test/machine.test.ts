@@ -166,7 +166,7 @@ describe("groupByMachine / readOnlyReason", () => {
 
   test("readOnlyReason names the owning machine", () => {
     expect(readOnlyReason(state, A)).toBeNull();
-    expect(readOnlyReason(state, B)).toBe("Open on Zed box to act — remote control arrives in a later update.");
-    expect(readOnlyReason(state, "unknown00000")).toContain("Open on its own machine");
+    expect(readOnlyReason(state, B)).toBe("Change it on Zed box: pets belong to their machine.");
+    expect(readOnlyReason(state, "unknown00000")).toContain("Change it on its own machine");
   });
 });

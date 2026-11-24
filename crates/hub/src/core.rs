@@ -2,10 +2,11 @@
 //! hook feeds into sessions + events; applies permission rules; answers every `ClientMsg`.
 
 mod host;
+mod intents;
 mod mirror;
 mod peers;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -29,7 +30,7 @@ use crate::bus::Bus;
 use crate::config::{HubConfig, Paths};
 use crate::machine::{self, MachineIdentity};
 use crate::notify;
-use crate::store::{AuditEntry, AuditOutcome, Store};
+use crate::store::{AuditEntry, AuditOrigin, AuditOutcome, Store};
 use host::Host;
 
 const DAY_MS: i64 = 86_400_000;
@@ -91,6 +92,24 @@ pub enum AckCode {
     /// Another known pet already has this name (names are unique, case-insensitively).
     #[error("name_taken")]
     NameTaken,
+    /// The permission request existed but was already answered (here or from another machine).
+    #[error("already_decided")]
+    AlreadyDecided,
+    /// Approving or starting on another machine needs `confirmed: true` from the client.
+    #[error("unconfirmed")]
+    Unconfirmed,
+    /// The owner does not accept intents (`[peer] accept_intents = false`).
+    #[error("forbidden")]
+    Forbidden,
+    /// The owner is getting too many intents from this hub.
+    #[error("rate_limited")]
+    RateLimited,
+    /// The owning machine is paired but not linked right now.
+    #[error("offline")]
+    Offline,
+    /// The owner did not answer within INTENT_TIMEOUT_MS (the outcome may still arrive by mirror).
+    #[error("timeout")]
+    Timeout,
 }
 
 impl AckCode {
@@ -100,29 +119,41 @@ impl AckCode {
     }
 }
 
+/// A decision that came from another machine (an intent), see [`Hub::decide`].
+pub(crate) struct RemoteDecision {
+    /// approve (allow_* option) vs deny (reject_* option or none).
+    pub approve: bool,
+    pub origin: AuditOrigin,
+}
+
 /// Who asked for something (recorded in the audit log).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Actor {
     pub label: String,
+    /// The local client kind, when a client asked (forwarded intents carry it to the owner).
+    pub kind: Option<ClientKind>,
+}
+
+pub(crate) fn client_label(kind: ClientKind) -> &'static str {
+    match kind {
+        ClientKind::Desktop => "desktop",
+        ClientKind::Vscode => "vscode",
+        ClientKind::Mobile => "mobile",
+        ClientKind::Cli => "cli",
+    }
 }
 
 impl Actor {
     pub fn client(kind: ClientKind, conn_id: u64) -> Self {
-        let k = match kind {
-            ClientKind::Desktop => "desktop",
-            ClientKind::Vscode => "vscode",
-            ClientKind::Mobile => "mobile",
-            ClientKind::Cli => "cli",
-        };
-        Self { label: format!("{k}#{conn_id}") }
+        Self { label: format!("{}#{conn_id}", client_label(kind)), kind: Some(kind) }
     }
 
     pub fn internal(label: impl Into<String>) -> Self {
-        Self { label: label.into() }
+        Self { label: label.into(), kind: None }
     }
 
     fn via_chat(&self) -> Self {
-        Self { label: format!("chat:{}", self.label) }
+        Self { label: format!("chat:{}", self.label), kind: self.kind }
     }
 
     fn rule(action: RuleAction) -> Self {
@@ -131,7 +162,7 @@ impl Actor {
             RuleAction::Ask => "ask",
             RuleAction::Deny => "deny",
         };
-        Self { label: format!("rule:{a}") }
+        Self { label: format!("rule:{a}"), kind: None }
     }
 }
 
@@ -160,9 +191,54 @@ struct State {
     dirty_pets: HashSet<PetId>,
     /// Last alert notification per hook session (dedupe window).
     last_hook_alert: HashMap<SessionId, UnixMs>,
+    /// Requests answered while this hub runs (newest DECIDED_KEEP), so a late answer gets
+    /// `already_decided`; older ones are found in the audit log.
+    decided: HashSet<RequestId>,
+    decided_order: VecDeque<RequestId>,
+    /// Requests whose answer is with the agent right now (see [`Hub::decide`]).
+    deciding: HashSet<RequestId>,
+    /// Sessions of this machine started or prompted by another machine: rules never auto-approve
+    /// their requests (a human always answers).
+    remote_driven: HashSet<SessionId>,
 }
 
+/// One pass of [`Hub::decide`]'s check.
+enum Step {
+    Take(Box<PermissionRequest>, Option<PermissionOptionKind>),
+    Wait,
+    Gone(bool),
+}
+
+/// A remote decision's option: approve only `allow_once` (`allow_always` is chosen on the owner:
+/// `forbidden`), deny only a reject option or none (`invalid` otherwise).
+fn check_remote_option(approve: bool, kind: Option<PermissionOptionKind>) -> Result<()> {
+    use PermissionOptionKind::*;
+    match (approve, kind) {
+        (true, Some(AllowOnce)) | (false, None | Some(RejectOnce | RejectAlways)) => Ok(()),
+        (true, Some(AllowAlways)) => {
+            Err(anyhow::Error::new(AckCode::Forbidden).context("allow_always can only be chosen on this machine"))
+        }
+        (true, _) => Err(anyhow::Error::new(AckCode::Invalid).context("approve needs an allow option")),
+        (false, _) => Err(anyhow::Error::new(AckCode::Invalid).context("deny needs a reject option or none")),
+    }
+}
+
+/// Recently decided request ids kept in memory.
+const DECIDED_KEEP: usize = 10_000;
+
 impl State {
+    fn mark_decided(&mut self, request_id: &str) {
+        if self.decided.insert(request_id.to_string()) {
+            self.decided_order.push_back(request_id.to_string());
+            while self.decided_order.len() > DECIDED_KEEP {
+                if let Some(old) = self.decided_order.pop_front() {
+                    self.decided.remove(&old);
+                }
+            }
+        }
+    }
+
+
     fn index_session(&mut self, s: &Session) {
         if let Some(ext) = &s.external_id {
             self.by_external.insert((s.agent_id.clone(), ext.clone()), s.id.clone());
@@ -244,6 +320,10 @@ struct Inner {
     peer_ops: tokio::sync::Mutex<()>,
     /// Read-only copy of paired hubs' sessions, pets and pending requests (see `mirror.rs`).
     mirror: Mutex<mirror::MirrorCache>,
+    /// Intents waiting for acks (origin) and answered intents (owner), see `intents.rs`.
+    intents: Mutex<intents::IntentState>,
+    /// Woken whenever a decision in flight finishes (see [`Hub::decide`]).
+    decide_done: tokio::sync::Notify,
     activity: Mutex<Activity>,
 }
 
@@ -278,7 +358,7 @@ impl Hub {
         let machine_id = machine.id.clone();
         let now = krypto_protocol::now_ms();
         let retention_days = config.event_retention_days;
-        let (agents, mut sessions, mut pets, db_rules, mirror_sessions, mirror_pending) = store
+        let (agents, mut sessions, mut pets, db_rules, mirror_sessions, mirror_pending, remote_driven) = store
             .run(move |s| {
                 if retention_days > 0 {
                     let n = s.prune_events_before(now - retention_days as i64 * DAY_MS)?;
@@ -294,6 +374,7 @@ impl Hub {
                     tracing::info!("deleted {n} mirror rows of machines that are no longer paired");
                 }
                 s.prune_mirror(now)?;
+                s.prune_intent_log(now, crate::store::INTENT_LOG_MAX_ROWS)?;
                 Ok((
                     s.agents()?,
                     s.sessions_active_since(now - CACHE_WINDOW_MS)?,
@@ -301,6 +382,7 @@ impl Hub {
                     s.rules()?,
                     s.mirror_sessions(now - crate::store::MIRROR_RETENTION_MS)?,
                     s.mirror_pending()?,
+                    s.remote_driven_sessions()?,
                 ))
             })
             .await?;
@@ -362,7 +444,13 @@ impl Hub {
                 None,
             ));
         }
-        let mut state = State { machine_id: machine_id.clone(), agents, rules, ..Default::default() };
+        let mut state = State {
+            machine_id: machine_id.clone(),
+            agents,
+            rules,
+            remote_driven: remote_driven.into_iter().collect(),
+            ..Default::default()
+        };
         for s in sessions {
             state.index_session(&s);
             state.sessions.insert(s.id.clone(), s);
@@ -397,6 +485,8 @@ impl Hub {
                 presence_pushed: Mutex::new(None),
                 peer_ops: tokio::sync::Mutex::new(()),
                 mirror: Mutex::new(mirror::MirrorCache::default()),
+                intents: Mutex::new(intents::IntentState::default()),
+                decide_done: tokio::sync::Notify::new(),
                 activity: Mutex::new(Activity::default()),
             }),
         };
@@ -635,8 +725,12 @@ impl Hub {
     async fn dispatch(&self, msg: ClientMsg, actor: &Actor) -> Result<Value> {
         Ok(match msg {
             ClientMsg::Hello { .. } => serde_json::to_value(self.welcome())?,
-            ClientMsg::ListAgents { refresh, .. } => {
-                let agents = if refresh == Some(true) { self.refresh_agents(true).await? } else { self.agents() };
+            ClientMsg::ListAgents { refresh, machine_id, .. } => {
+                let agents = match machine_id.filter(|m| *m != self.inner.machine_id) {
+                    Some(m) => self.peer_agents(&m).await?,
+                    None if refresh == Some(true) => self.refresh_agents(true).await?,
+                    None => self.agents(),
+                };
                 json!({ "agents": agents })
             }
             ClientMsg::ListSessions { include_ended, .. } => {
@@ -645,21 +739,40 @@ impl Hub {
             ClientMsg::GetEvents { session_id, since_seq, limit, .. } => {
                 json!({ "events": self.events(&session_id, since_seq, limit).await? })
             }
-            ClientMsg::StartSession { agent_id, cwd, prompt, .. } => {
-                json!({ "session": self.start_session(&agent_id, &cwd, prompt).await? })
+            // Another machine's ids (or machineId) become an intent to that machine (intents.rs).
+            ClientMsg::StartSession { agent_id, cwd, prompt, machine_id, confirmed, .. } => {
+                match machine_id.filter(|m| *m != self.inner.machine_id) {
+                    Some(m) => self.start_remote(&m, &agent_id, &cwd, prompt, confirmed, actor).await?,
+                    None => {
+                        let (session, warning) = self.start_session(&agent_id, &cwd, prompt).await?;
+                        match warning {
+                            Some(w) => json!({ "session": session, "warning": w }),
+                            None => json!({ "session": session }),
+                        }
+                    }
+                }
             }
-            ClientMsg::Prompt { session_id, text, .. } => {
-                self.prompt(&session_id, text).await?;
-                json!({})
-            }
-            ClientMsg::Cancel { session_id, .. } => {
-                self.cancel(&session_id, actor).await?;
-                json!({})
-            }
-            ClientMsg::ResolvePermission { request_id, option_id, .. } => {
-                self.resolve_permission(&request_id, option_id, ResolvedBy::User, actor).await?;
-                json!({})
-            }
+            ClientMsg::Prompt { session_id, text, .. } => match self.foreign_owner(&session_id) {
+                Some(m) => self.forward(&m, actor, false, krypto_protocol::Intent::Prompt { session_id, text }).await?,
+                None => {
+                    self.prompt(&session_id, text).await?;
+                    json!({})
+                }
+            },
+            ClientMsg::Cancel { session_id, .. } => match self.foreign_owner(&session_id) {
+                Some(m) => self.forward(&m, actor, false, krypto_protocol::Intent::Cancel { session_id }).await?,
+                None => {
+                    self.cancel(&session_id, actor).await?;
+                    json!({})
+                }
+            },
+            ClientMsg::ResolvePermission { request_id, option_id, confirmed, .. } => match self.foreign_owner(&request_id) {
+                Some(m) => self.resolve_remote(&m, &request_id, option_id, confirmed, actor).await?,
+                None => {
+                    self.resolve_permission(&request_id, option_id, ResolvedBy::User, actor).await?;
+                    json!({})
+                }
+            },
             ClientMsg::ListHistory { agent_id, cwd, .. } => {
                 json!({ "sessions": self.list_history(&agent_id, cwd).await? })
             }
@@ -735,7 +848,28 @@ impl Hub {
     }
 
     /// Start an owned ACP session. `prompt` (if any) is logged and sent right after `session/new`.
-    pub async fn start_session(&self, agent_id: &str, cwd: &str, prompt: Option<String>) -> Result<Session> {
+    /// Start an owned ACP session, then send `prompt` (if any). A first prompt that cannot be sent
+    /// leaves the session running and is reported as a warning instead of failing the start.
+    pub async fn start_session(&self, agent_id: &str, cwd: &str, prompt: Option<String>) -> Result<(Session, Option<String>)> {
+        let session = self.launch_session(agent_id, cwd).await?;
+        let warning = self.first_prompt(&session.id, prompt).await;
+        Ok((self.session(&session.id).unwrap_or(session), warning))
+    }
+
+    /// The first prompt of a session just started; Some(warning) if it could not be sent.
+    pub(super) async fn first_prompt(&self, session_id: &str, prompt: Option<String>) -> Option<String> {
+        let p = prompt.filter(|p| !p.trim().is_empty())?;
+        match self.prompt(session_id, p).await {
+            Ok(()) => None,
+            Err(e) => {
+                tracing::warn!("session {session_id} started, but its first prompt was not sent: {e:#}");
+                Some(format!("the session started, but its first prompt was not sent: {e:#}"))
+            }
+        }
+    }
+
+    /// Start an owned ACP session without a prompt.
+    pub(super) async fn launch_session(&self, agent_id: &str, cwd: &str) -> Result<Session> {
         let agent = self.find_agent(agent_id).await?;
         let cwd = resolve_cwd(cwd)?;
         let id = self.new_id();
@@ -749,9 +883,6 @@ impl Hub {
         let session = self.merge_session(started).await;
         self.record_event(&session.id, EventType::SessionStart, json!({ "agentId": agent.id, "cwd": session.cwd }))
             .await?;
-        if let Some(p) = prompt.filter(|p| !p.trim().is_empty()) {
-            self.prompt(&session.id, p).await.context("session started, but sending the prompt failed")?;
-        }
         Ok(self.session(&session.id).unwrap_or(session))
     }
 
@@ -777,9 +908,7 @@ impl Hub {
 
     pub async fn prompt(&self, session_id: &str, text: String) -> Result<()> {
         self.owned_open_session(session_id)?;
-        if text.trim().is_empty() {
-            bail!("prompt text is empty");
-        }
+        intents::validate_prompt(&text)?;
         // The ACP host emits the `user_message` event for every prompt it sends; recording it here
         // too would log (and print) the prompt twice.
         self.inner.host.prompt(session_id, text).await
@@ -1215,9 +1344,26 @@ impl Hub {
     // ------------------------------------------------------------ permissions
 
     /// Rule decision for a request. Relative tool paths are judged against the session's cwd.
+    /// A session driven from another machine never gets auto_allow (deny rules still apply): a human
+    /// answers every request it raises.
     fn rule_action(&self, rules: &[Rule], req: &PermissionRequest) -> RuleAction {
         let cwd = self.session(&req.session_id).map(|s| s.cwd).filter(|c| !c.is_empty());
-        krypto_brain::rules::evaluate_in(rules, req, cwd.as_deref())
+        let action = krypto_brain::rules::evaluate_in(rules, req, cwd.as_deref());
+        if action == RuleAction::AutoAllow && self.st().remote_driven.contains(&req.session_id) {
+            return RuleAction::Ask;
+        }
+        action
+    }
+
+    /// Mark one of this machine's sessions as driven by another machine (persisted).
+    pub(super) async fn mark_remote_driven(&self, session_id: &str) {
+        if !self.st().remote_driven.insert(session_id.to_string()) {
+            return;
+        }
+        let id = session_id.to_string();
+        if let Err(e) = self.inner.store.run(move |s| s.mark_remote_driven(&id)).await {
+            tracing::warn!("mark session {session_id} remote-driven: {e:#}");
+        }
     }
 
     /// The host cancelled a pending request itself (turn cancelled/ended, agent withdrew it,
@@ -1231,7 +1377,16 @@ impl Hub {
                 return;
             }
         };
-        let Some(req) = self.st().pending.remove(&p.request_id) else { return };
+        let Some(req) = ({
+            let mut st = self.st();
+            let r = st.pending.remove(&p.request_id);
+            if r.is_some() {
+                st.mark_decided(&p.request_id);
+            }
+            r
+        }) else {
+            return;
+        };
         let (option_id, option_kind, outcome) = match &p.outcome {
             PermissionOutcome::Cancelled => (None, None, AuditOutcome::Cancelled),
             PermissionOutcome::Selected { option_id } => {
@@ -1244,9 +1399,9 @@ impl Hub {
                 (Some(option_id.clone()), kind, outcome)
             }
         };
-        self.audit(&req, p.by, &Actor::internal("acp-host"), option_id, option_kind, outcome, Some("resolved by the agent host".into()))
+        self.audit(&req, p.by, &Actor::internal("acp-host"), option_id, option_kind, outcome, Some("resolved by the agent host".into()), None)
             .await;
-        self.after_resolved(&req, p.outcome, p.by).await;
+        self.after_resolved(&req, p.outcome, p.by, None).await;
     }
 
     /// Rules first: auto_allow/deny resolve immediately (broadcast `permission_resolved` by "rule");
@@ -1283,19 +1438,68 @@ impl Hub {
     }
 
     /// Answer a pending permission request (user, chat or rule). Audited either way.
+    /// Answer one of this hub's permission requests (local clients, rules, chat).
     pub async fn resolve_permission(&self, request_id: &str, option_id: Option<String>, by: ResolvedBy, actor: &Actor) -> Result<()> {
+        self.decide(request_id, option_id, by, actor, None).await
+    }
+
+    /// The single decision path, shared by local clients, rules, chat and intents from paired
+    /// hubs. **First valid decision wins**: the pending check, the option check and taking the
+    /// request out happen under one lock, so of two answers racing for a request exactly one is
+    /// applied and the other gets `already_decided`. A request that is not pending is
+    /// `already_decided` if it was ever answered here (memory, then the audit log), else `not_found`.
+    /// `remote`: an intent's decision (option kind checked: approve needs allow_*, deny reject_* or
+    /// none; the audit entry and `permission_resolved` name the origin).
+    pub(super) async fn decide(
+        &self,
+        request_id: &str,
+        option_id: Option<String>,
+        by: ResolvedBy,
+        actor: &Actor,
+        remote: Option<RemoteDecision>,
+    ) -> Result<()> {
         self.check_owned(request_id)?;
-        // Take it out first so two clients answering at once cannot both resolve it.
-        let req = self.st().pending.remove(request_id).ok_or(AckCode::NotFound)?;
-        let option_kind = match &option_id {
-            Some(o) => match req.options.iter().find(|x| &x.option_id == o) {
-                Some(x) => Some(x.kind),
-                None => {
-                    self.st().pending.insert(req.request_id.clone(), req);
-                    bail!("unknown optionId {o:?} for permission request {request_id}");
+        // A request being decided right now (agent call in flight) is waited for: its real outcome
+        // decides what a concurrent answer gets (applied after a rollback, else already_decided).
+        let (req, option_kind) = loop {
+            let wake = self.inner.decide_done.notified();
+            tokio::pin!(wake);
+            wake.as_mut().enable();
+            let step = {
+                let mut st = self.st();
+                if let Some(req) = st.pending.get(request_id) {
+                    let option_kind = match &option_id {
+                        Some(o) => match req.options.iter().find(|x| &x.option_id == o) {
+                            Some(x) => Some(x.kind),
+                            None => {
+                                return Err(anyhow::Error::new(AckCode::Invalid)
+                                    .context(format!("unknown optionId {o:?} for permission request {request_id}")));
+                            }
+                        },
+                        None => None,
+                    };
+                    if let Some(r) = &remote {
+                        check_remote_option(r.approve, option_kind)?;
+                    }
+                    let req = st.pending.remove(request_id).expect("checked above");
+                    st.deciding.insert(request_id.to_string());
+                    Step::Take(Box::new(req), option_kind)
+                } else if st.deciding.contains(request_id) {
+                    Step::Wait
+                } else {
+                    Step::Gone(st.decided.contains(request_id))
                 }
-            },
-            None => None,
+            };
+            match step {
+                Step::Take(req, kind) => break (*req, kind),
+                Step::Wait => wake.await,
+                Step::Gone(true) => return Err(AckCode::AlreadyDecided.into()),
+                Step::Gone(false) => {
+                    let rid = request_id.to_string();
+                    let decided = self.inner.store.run(move |s| s.request_was_decided(&rid)).await.unwrap_or(false);
+                    return Err(if decided { AckCode::AlreadyDecided } else { AckCode::NotFound }.into());
+                }
+            }
         };
         let result = self.inner.host.resolve_permission(request_id, option_id.clone()).await;
         let outcome = match (&result, option_kind) {
@@ -1304,17 +1508,29 @@ impl Hub {
             (Ok(()), Some(PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways)) => AuditOutcome::Allowed,
             (Ok(()), Some(_)) => AuditOutcome::Rejected,
         };
-        self.audit(&req, by, actor, option_id.clone(), option_kind, outcome, result.as_ref().err().map(|e| format!("{e:#}")))
+        let origin = remote.as_ref().map(|r| r.origin.clone());
+        self.audit(&req, by, actor, option_id.clone(), option_kind, outcome, result.as_ref().err().map(|e| format!("{e:#}")), origin)
             .await;
         if let Err(e) = result {
-            self.st().pending.insert(req.request_id.clone(), req);
+            {
+                let mut st = self.st();
+                st.deciding.remove(&req.request_id);
+                st.pending.insert(req.request_id.clone(), req);
+            }
+            self.inner.decide_done.notify_waiters();
             return Err(e.context("the agent did not accept the permission answer"));
         }
+        {
+            let mut st = self.st();
+            st.deciding.remove(&req.request_id);
+            st.mark_decided(&req.request_id);
+        }
+        self.inner.decide_done.notify_waiters();
         let outcome = match option_id {
             Some(option_id) => PermissionOutcome::Selected { option_id },
             None => PermissionOutcome::Cancelled,
         };
-        self.after_resolved(&req, outcome, by).await;
+        self.after_resolved(&req, outcome, by, remote.map(|r| r.origin.machine_id)).await;
         Ok(())
     }
 
@@ -1325,15 +1541,28 @@ impl Hub {
             Ok(()) => why.to_string(),
             Err(e) => format!("{why} (agent: {e:#})"),
         };
-        self.audit(&req, by, actor, None, None, AuditOutcome::Cancelled, Some(detail)).await;
-        self.after_resolved(&req, PermissionOutcome::Cancelled, by).await;
+        self.st().mark_decided(&req.request_id);
+        self.audit(&req, by, actor, None, None, AuditOutcome::Cancelled, Some(detail), None).await;
+        self.after_resolved(&req, PermissionOutcome::Cancelled, by, None).await;
     }
 
-    async fn after_resolved(&self, req: &PermissionRequest, outcome: PermissionOutcome, by: ResolvedBy) {
-        let payload = PermissionResolvedPayload { request_id: req.request_id.clone(), outcome: outcome.clone(), by };
+    /// `by_machine_id`: the machine the decision came from when it was not this one.
+    async fn after_resolved(&self, req: &PermissionRequest, outcome: PermissionOutcome, by: ResolvedBy, by_machine_id: Option<MachineId>) {
+        let payload = PermissionResolvedPayload {
+            request_id: req.request_id.clone(),
+            outcome: outcome.clone(),
+            by,
+            by_machine_id: by_machine_id.clone(),
+        };
         let mut payload = serde_json::to_value(&payload).unwrap_or_else(|_| json!({}));
         if let (Value::Object(m), Ok(tc)) = (&mut payload, serde_json::to_value(&req.tool_call)) {
             m.insert("toolCall".into(), tc);
+            // The kind of the chosen option, so history can say "approved"/"denied" after a reload.
+            if let PermissionOutcome::Selected { option_id } = &outcome {
+                if let Some(o) = req.options.iter().find(|o| &o.option_id == option_id) {
+                    m.insert("optionKind".into(), serde_json::to_value(o.kind).unwrap_or(Value::Null));
+                }
+            }
         }
         if let Err(e) = self.record_event(&req.session_id, EventType::PermissionResolved, payload).await {
             tracing::warn!("record permission resolution: {e:#}");
@@ -1343,6 +1572,7 @@ impl Hub {
             session_id: req.session_id.clone(),
             outcome,
             by,
+            by_machine_id,
         });
         // The agent is unblocked; it reports its real status with the next update.
         let flipped = {
@@ -1371,6 +1601,7 @@ impl Hub {
         option_kind: Option<PermissionOptionKind>,
         outcome: AuditOutcome,
         detail: Option<String>,
+        origin: Option<AuditOrigin>,
     ) {
         let entry = AuditEntry {
             id: 0,
@@ -1389,10 +1620,11 @@ impl Hub {
             option_kind,
             outcome,
             detail,
+            origin,
         };
         tracing::info!(
             request = %entry.request_id, session = %entry.session_id, actor = %entry.actor,
-            outcome = ?entry.outcome, "permission decision"
+            outcome = ?entry.outcome, origin = ?entry.origin.as_ref().map(|o| &o.machine_id), "permission decision"
         );
         if let Err(e) = self.inner.store.run(move |s| s.insert_audit(&entry)).await {
             tracing::error!("audit log write failed: {e:#}");
@@ -1595,7 +1827,7 @@ impl Hub {
         match action {
             BrainAction::StartSession { agent_id, cwd, prompt } => {
                 let prompt = Some(prompt).filter(|p| !p.trim().is_empty());
-                let s = self.start_session(&agent_id, &cwd, prompt).await?;
+                let (s, _warning) = self.start_session(&agent_id, &cwd, prompt).await?;
                 Ok(Some(s.id))
             }
             BrainAction::Prompt { session_id, text } => {

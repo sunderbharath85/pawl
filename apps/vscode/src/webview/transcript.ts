@@ -30,7 +30,14 @@ export type TranscriptItem =
       ts: number;
     }
   | { kind: "plan"; key: string; entries: PlanEntry[]; ts: number }
-  | { kind: "permission"; key: string; text: string; ts: number }
+  | {
+      kind: "permission";
+      key: string;
+      text: string;
+      ts: number;
+      /** A decision made on another machine than the session's owner ("Approved from Windows PC"). */
+      fromMachineId?: string | undefined;
+    }
   | { kind: "stop"; key: string; reason: string; ts: number }
   | { kind: "error"; key: string; text: string; ts: number }
   | { kind: "note"; key: string; text: string; ts: number }
@@ -135,7 +142,8 @@ export function buildTranscript(events: readonly HubEvent[]): TranscriptItem[] {
       case "permission_resolved": {
         const p = e.payload as Partial<PermissionResolvedPayload> | null;
         const outcome = p?.outcome?.kind === "selected" ? `option “${p.outcome.optionId}”` : "cancelled";
-        items.push({ kind: "permission", key: `rr${e.id}`, text: `Answered (${p?.by ?? "user"}): ${outcome}`, ts: e.ts });
+        const from = typeof p?.byMachineId === "string" && p.byMachineId ? p.byMachineId : undefined;
+        items.push({ kind: "permission", key: `rr${e.id}`, text: `Answered (${p?.by ?? "user"}): ${outcome}`, ts: e.ts, fromMachineId: from });
         break;
       }
       case "stop": {

@@ -3,7 +3,7 @@
 // crates/protocol/src/lib.rs and must stay byte-compatible (camelCase fields,
 // snake_case `type` tags). Change both together.
 
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 export const HUB_DEFAULT_PORT = 47800;
 export const HUB_HOST = "127.0.0.1";
 /** Folder name under the OS data dir (Win %APPDATA%, mac ~/Library/Application Support, linux ~/.local/share). */
@@ -210,6 +210,8 @@ export interface PermissionResolvedPayload {
   requestId: RequestId;
   outcome: PermissionOutcome;
   by: ResolvedBy;
+  /** The machine the decision came from when it was not the owner (a remote approval). */
+  byMachineId?: MachineId;
 }
 
 export interface HubEvent {
@@ -403,8 +405,42 @@ export type MirrorUpdate =
   | { type: "event"; event: HubEvent }
   | { type: "pet"; pet: Pet }
   | { type: "permission_request"; request: PermissionRequest }
-  | { type: "permission_resolved"; requestId: RequestId; sessionId: SessionId; outcome: PermissionOutcome; by: ResolvedBy }
+  | { type: "permission_resolved"; requestId: RequestId; sessionId: SessionId; outcome: PermissionOutcome; by: ResolvedBy; byMachineId?: MachineId }
   | { type: "notification"; notification: HubNotification };
+
+// ---------- intents: act on another machine's session (migration step 4) ----------
+/**
+ * What a hub asks an owning hub to do. The owner validates and applies it, writes the audit log,
+ * then answers intent_ack; the resulting state reaches everyone through the mirror.
+ * approve: optionId must be an allow_once option of a pending request (allow_always can only be chosen on the
+ * owner: `forbidden`); deny: a reject_* option or null.
+ * start: the agent runs on the owner (the machine that has the code). cwd is canonicalized there and must be a folder
+ * the owner already knows (a previous local session's cwd, or under config.toml `[peer] start_roots`); network-share and
+ * device paths are refused (`forbidden`). Sessions started or prompted by another machine never get rule auto-approval:
+ * every request they raise asks a human.
+ */
+export type Intent =
+  | { kind: "approve"; requestId: RequestId; optionId: string }
+  | { kind: "deny"; requestId: RequestId; optionId: string | null }
+  | { kind: "prompt"; sessionId: SessionId; text: string }
+  | { kind: "start"; agentId: AgentId; cwd: string; prompt?: string }
+  | { kind: "cancel"; sessionId: SessionId };
+
+export type IntentKind = Intent["kind"];
+
+export type IntentRejectReason =
+  | "already_decided"
+  | "not_found"
+  | "not_owner"
+  | "forbidden"
+  | "unconfirmed"
+  | "invalid"
+  | "rate_limited";
+
+/** The origin hub gives up waiting for intent_ack after this long (client gets `timeout`). */
+export const INTENT_TIMEOUT_MS = 15_000;
+/** Owners reject intents beyond this many per second per peer (`rate_limited`). */
+export const INTENT_RATE_PER_SEC = 20;
 
 /** Event payloads larger than this (serialized) are mirrored as a TruncatedPayload. */
 export const MIRROR_PAYLOAD_MAX_BYTES = 64 * 1024;
@@ -441,7 +477,14 @@ export type PeerBody =
   /** Batches of events, oldest first, each batch under MIRROR_FRAME_MAX_BYTES. */
   | { type: "mirror_events"; events: HubEvent[] }
   /** End of a sync. `seq` = highest event seq sent; `truncated` = older events were skipped. */
-  | { type: "sync_done"; seq: number; truncated: boolean };
+  | { type: "sync_done"; seq: number; truncated: boolean }
+  /**
+   * Origin hub -> owner (migration step 4). `client` = the local client that asked; `confirmed` = the user confirmed
+   * on that device (required for approve and start). intentId is unique; the owner answers a repeat with the same ack.
+   */
+  | { type: "intent"; intentId: string; client: ClientKind; confirmed: boolean; intent: Intent; ts: UnixMs }
+  /** Owner -> origin. `result` has the same shape as the matching ClientMsg ack result (start: `{session}`). */
+  | { type: "intent_ack"; intentId: string; status: "applied" | "rejected"; reason?: IntentRejectReason; result?: unknown };
 
 export type PeerBodyType = PeerBody["type"];
 
@@ -453,14 +496,25 @@ export type ClientKind = "desktop" | "vscode" | "mobile" | "cli";
 
 export type ClientMsg =
   | { type: "hello"; id: string; client: ClientKind; clientVersion: string; token: string }
-  | { type: "list_agents"; id: string; refresh?: boolean }
+  /** `machineId` = another machine's agents as last reported in its presence (read-only; refresh is ignored). */
+  | { type: "list_agents"; id: string; refresh?: boolean; machineId?: MachineId }
   | { type: "list_sessions"; id: string; includeEnded?: boolean }
   | { type: "get_events"; id: string; sessionId: SessionId; sinceSeq?: number; limit?: number }
-  | { type: "start_session"; id: string; agentId: AgentId; cwd: string; prompt?: string }
+  /**
+   * `machineId` (default: this machine) picks where the agent runs; another machine's start is forwarded as an
+   * intent and needs `confirmed: true` (the user confirmed on this device).
+   */
+  | { type: "start_session"; id: string; agentId: AgentId; cwd: string; prompt?: string; machineId?: MachineId; confirmed?: boolean }
   | { type: "prompt"; id: string; sessionId: SessionId; text: string }
   | { type: "cancel"; id: string; sessionId: SessionId }
-  /** optionId null = cancel/deny without choosing an option */
-  | { type: "resolve_permission"; id: string; requestId: RequestId; optionId: string | null }
+  /**
+   * optionId null = cancel/deny without choosing an option. For another machine's request the hub forwards an
+   * intent to the owner; an allow option then needs `confirmed: true` (the user confirmed on this device).
+   * Remote errors (any ClientMsg naming another machine's id): already_decided, not_found, unconfirmed, forbidden,
+   * invalid, rate_limited, offline (owner not linked), timeout (no ack within INTENT_TIMEOUT_MS; the outcome may still
+   * arrive through the mirror).
+   */
+  | { type: "resolve_permission"; id: string; requestId: RequestId; optionId: string | null; confirmed?: boolean }
   | { type: "list_history"; id: string; agentId: AgentId; cwd?: string }
   | { type: "resume_session"; id: string; agentId: AgentId; acpSessionId: string; cwd: string }
   | { type: "chat"; id: string; petId?: PetId; text: string }
@@ -535,7 +589,8 @@ export type ServerMsg =
   | { type: "session"; session: Session }
   | { type: "event"; event: HubEvent }
   | { type: "permission_request"; request: PermissionRequest }
-  | { type: "permission_resolved"; requestId: RequestId; sessionId: SessionId; outcome: PermissionOutcome; by: ResolvedBy }
+  /** `byMachineId` = the machine the decision came from when it was not the owner (a remote approval). */
+  | { type: "permission_resolved"; requestId: RequestId; sessionId: SessionId; outcome: PermissionOutcome; by: ResolvedBy; byMachineId?: MachineId }
   | { type: "pet"; pet: Pet }
   | { type: "chat"; message: ChatMessage }
   | { type: "notification"; notification: HubNotification }

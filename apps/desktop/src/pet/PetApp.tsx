@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { isAlreadyDecided } from "@krypto/hub-client";
 import { useHubState } from "@krypto/hub-client/react";
 import { stageShowsApproval } from "@krypto/pet-engine";
 import { PetSprite, PetStage } from "@krypto/pet-engine/react";
 import type { PetActivity, PetSpritesConfig } from "@krypto/pet-engine";
 import type { ConnectionMeta } from "../lib/connection";
 import { errorText } from "../lib/format";
+import { answerErrorText } from "../lib/where";
 import { native, onNative } from "../lib/native";
 import { attachNotifications } from "../lib/notifications";
 import { usePetViews } from "../lib/pets";
@@ -21,7 +23,22 @@ export function PetApp() {
   const now = useNow(1000);
   const sprites = useSprites();
   const [settings] = useSettings();
-  const views = usePetViews(state, now);
+  const derived = usePetViews(state, now);
+  /** Requests someone already answered: their bubbles close at once (the mirror removes them soon after). */
+  const [dismissed, setDismissed] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    setDismissed((d) => {
+      const next = new Set([...d].filter((id) => id in state.pending));
+      return next.size === d.size ? d : next;
+    });
+  }, [state.pending]);
+  const views = useMemo(
+    () =>
+      dismissed.size === 0
+        ? derived
+        : derived.map((v) => (v.bubble?.requestId && dismissed.has(v.bubble.requestId) ? { ...v, bubble: undefined } : v)),
+    [derived, dismissed],
+  );
   const stripRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(() => window.innerWidth);
   const [hover, setHover] = useState(false);
@@ -57,6 +74,25 @@ export function PetApp() {
     p.catch((err) => setToast(errorText(err)));
   }, []);
 
+  /**
+   * Answer a request from a bubble. Another machine's request is forwarded to its owner; failures say so
+   * ("Mac mini is offline", "No answer from Mac mini yet — check that machine"), and the bubble's buttons come
+   * back (the rejection is passed on). "Already answered" closes the bubble instead.
+   */
+  const answer = useCallback(
+    (requestId: string, action: "approve" | "deny", p: Promise<unknown>) =>
+      p.catch((err: unknown) => {
+        if (isAlreadyDecided(err)) {
+          setDismissed((d) => new Set(d).add(requestId));
+          setToast("Already answered.");
+          return;
+        }
+        setToast(answerErrorText(client.getState(), requestId, action, err));
+        throw err;
+      }),
+    [client],
+  );
+
   const onPetClick = useCallback(
     (petId: string) => {
       const view = views.find((v) => v.petId === petId);
@@ -84,8 +120,8 @@ export function PetApp() {
             petSize={settings.petSize}
             showNames={settings.showPetNames}
             sprites={sprites}
-            onApprove={(requestId) => guard(client.approve(requestId))}
-            onDeny={(requestId) => guard(client.deny(requestId))}
+            onApprove={(requestId, opts) => answer(requestId, "approve", client.approve(requestId, { confirmed: opts?.confirmed }))}
+            onDeny={(requestId) => answer(requestId, "deny", client.deny(requestId))}
             onPetClick={onPetClick}
           />
         </ErrorBoundary>

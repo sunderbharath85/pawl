@@ -5,9 +5,27 @@ export {
   HubRequestError,
   JOIN_PEER_TIMEOUT_MS,
   pickPermissionOption,
+  REMOTE_REQUEST_TIMEOUT_MS,
   type HubClientOptions,
   type RequestOptions,
+  type ResolveOptions,
+  type StartSessionOptions,
 } from "./client";
+export {
+  approveOptionId,
+  INTENT_ERROR_CODES,
+  intentErrorText,
+  isAllowOption,
+  isAlreadyDecided,
+  needsConfirmation,
+  offlineReason,
+  ownerName,
+  recentCwds,
+  remoteOptionBlocked,
+  startNeedsConfirmation,
+  type IntentAction,
+  type IntentErrorCode,
+} from "./intents";
 export {
   applyAck,
   applyWelcome,

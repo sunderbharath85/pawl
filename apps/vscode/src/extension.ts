@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import type { WebviewToHost } from "./shared/messages";
 import { sessionBackfill } from "@krypto/hub-client";
 import { ActivityReporter } from "./host/activity";
+import { answerRequest, remoteError } from "./host/remote";
 import { Commands } from "./host/commands";
 import { HubConnection } from "./host/connection";
 import { EditedFilesWatcher } from "./host/editedFiles";
@@ -66,22 +67,31 @@ const WEBVIEW_COMMANDS = {
   showMachines: "krypto.showMachines",
 } as const;
 
+/** The machine a session belongs to (by the held session, else its global id prefix). */
+function sessionMachine(hub: HubConnection, sessionId: string): string {
+  return hub.state.sessions[sessionId]?.machineId ?? sessionId.split(":")[0] ?? "";
+}
+
 async function handleWebviewMessage(msg: WebviewToHost, hub: HubConnection): Promise<void> {
   switch (msg.type) {
+    // Another machine's approval asks in a modal first; its errors name that machine.
     case "approve":
-      await hub.api.approve(msg.requestId);
+      await answerRequest(hub, msg.requestId, { kind: "approve" });
       return;
     case "deny":
-      await hub.api.deny(msg.requestId);
+      await answerRequest(hub, msg.requestId, { kind: "deny" });
       return;
     case "resolve":
-      await hub.api.resolvePermission(msg.requestId, msg.optionId);
+      await answerRequest(hub, msg.requestId, { kind: "option", optionId: msg.optionId });
       return;
-    case "prompt":
-      if (msg.text.trim()) await hub.api.prompt(msg.sessionId, msg.text.trim());
+    case "prompt": {
+      const text = msg.text.trim();
+      if (!text) return;
+      await hub.api.prompt(msg.sessionId, text).catch((err) => Promise.reject(remoteError(hub, sessionMachine(hub, msg.sessionId), "prompt", err)));
       return;
+    }
     case "cancel":
-      await hub.api.cancel(msg.sessionId);
+      await hub.api.cancel(msg.sessionId).catch((err) => Promise.reject(remoteError(hub, sessionMachine(hub, msg.sessionId), "cancel", err)));
       return;
     case "chat":
       if (msg.text.trim()) await hub.api.chat(msg.text.trim(), msg.petId);
