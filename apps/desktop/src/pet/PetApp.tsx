@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { isAlreadyDecided } from "@krypto/hub-client";
-import { useHubState } from "@krypto/hub-client/react";
-import { stageShowsApproval } from "@krypto/pet-engine";
-import { PetSprite, PetStage } from "@krypto/pet-engine/react";
-import type { PetActivity, PetSpritesConfig } from "@krypto/pet-engine";
+import { isAlreadyDecided } from "@pawl/hub-client";
+import { useHubState } from "@pawl/hub-client/react";
+import { stageShowsApproval } from "@pawl/pet-engine";
+import { PetSprite, PetStage } from "@pawl/pet-engine/react";
+import type { PetActivity, PetSpritesConfig } from "@pawl/pet-engine";
 import type { ConnectionMeta } from "../lib/connection";
 import { errorText } from "../lib/format";
 import { answerErrorText } from "../lib/where";
@@ -190,7 +190,7 @@ function SleepyHub({ meta, sprites, size, onWake, onOpen }: SleepyHubProps) {
       bubble = (
         <>
           <p className="sleepy-title">The hub doesn't recognise me.</p>
-          <p className="sleepy-sub">Token mismatch — restart the hub or check KRYPTO_HUB_TOKEN.</p>
+          <p className="sleepy-sub">Token mismatch — restart the hub or check PAWL_HUB_TOKEN.</p>
           <div className="sleepy-actions">
             <button className="pill" onClick={onOpen}>
               Open panel
@@ -213,7 +213,7 @@ function SleepyHub({ meta, sprites, size, onWake, onOpen }: SleepyHubProps) {
           {bubble}
         </div>
       )}
-      <button className="sleepy-pet" onClick={dismissed ? () => setDismissed(false) : onOpen} title="Krypto">
+      <button className="sleepy-pet" onClick={dismissed ? () => setDismissed(false) : onOpen} title="Pawl">
         <PetSprite species="dog" activity={activity} size={size} facing="left" sprites={sprites} />
       </button>
     </div>

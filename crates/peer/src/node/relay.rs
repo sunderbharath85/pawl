@@ -10,7 +10,7 @@
 
 use super::*;
 use crate::relay::{auth_answer, ensure_tls_provider, parse_address, parse_relay_pk, Pacer};
-use krypto_protocol::{RelayErrorCode, RelayServerFrame, RELAY_FRAME_MAX_BYTES, RELAY_MAX_ALLOWED, RELAY_PROTOCOL_VERSION};
+use pawl_protocol::{RelayErrorCode, RelayServerFrame, RELAY_FRAME_MAX_BYTES, RELAY_MAX_ALLOWED, RELAY_PROTOCOL_VERSION};
 use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 

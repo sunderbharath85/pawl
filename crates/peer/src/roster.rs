@@ -1,7 +1,7 @@
 //! Pairing roster storage. The hub implements `Roster` on SQLite; `MemoryRoster` is the reference
 //! implementation (used by tests, usable by the hub's tests too).
 
-use krypto_protocol::{Device, Machine, UnixMs};
+use pawl_protocol::{Device, Machine, UnixMs};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -141,7 +141,7 @@ impl Roster for MemoryRoster {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krypto_protocol::{DeviceKind, MachineOs};
+    use pawl_protocol::{DeviceKind, MachineOs};
 
     fn entry(id: &str) -> RosterEntry {
         RosterEntry {

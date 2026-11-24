@@ -1,4 +1,4 @@
-//! krypto-protocol: Rust mirror of `packages/protocol/src/index.ts` (the source of truth).
+//! pawl-protocol: Rust mirror of `packages/protocol/src/index.ts` (the source of truth).
 //! JSON must be identical: struct fields camelCase, enum tags/values snake_case.
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 pub const PROTOCOL_VERSION: u32 = 8;
 pub const HUB_DEFAULT_PORT: u16 = 47800;
 pub const HUB_HOST: &str = "127.0.0.1";
-pub const HUB_DATA_DIR_NAME: &str = "krypto";
+pub const HUB_DATA_DIR_NAME: &str = "pawl";
 pub const HUB_TOKEN_FILE: &str = "token";
 
 pub type AgentId = String;
@@ -89,7 +89,7 @@ pub fn now_ms() -> UnixMs {
         .unwrap_or(0)
 }
 
-/// `dirs::data_dir()/krypto` (Win %APPDATA%\krypto). Callers create it.
+/// `dirs::data_dir()/pawl` (Win %APPDATA%\pawl). Callers create it.
 pub fn data_dir() -> Option<std::path::PathBuf> {
     dirs::data_dir().map(|d| d.join(HUB_DATA_DIR_NAME))
 }
@@ -246,7 +246,7 @@ pub const PRESENCE_OFFLINE_MS: i64 = 45_000;
 /// Hub <-> hub frame (JSON text over WebSocket). `box` is a NaCl box (X25519 + XSalsa20-Poly1305,
 /// `crypto_box::SalsaBox`) of the UTF-8 JSON `PeerBody`, from the sender's secret key to the receiver's
 /// public key. Invite URI:
-/// `krypto://peer?v=1&mid=<machineId>&pk=<base64url pk>&addr=<host:port>&code=<base64url 16 bytes>&exp=<unix ms>`.
+/// `pawl://peer?v=1&mid=<machineId>&pk=<base64url pk>&addr=<host:port>&code=<base64url 16 bytes>&exp=<unix ms>`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerEnvelope {
@@ -889,7 +889,7 @@ pub struct HubNotification {
 /// mailbox is touched; it travels inside invite URIs (`rk=`) and is stored write-only in hub settings.
 pub const RELAY_PROTOCOL_VERSION: u8 = 1;
 /// Text the device boxes in its auth answer: `{RELAY_AUTH_CONTEXT}:{challenge_nonce}:{relay_host}`.
-pub const RELAY_AUTH_CONTEXT: &str = "krypto-relay-auth-v1";
+pub const RELAY_AUTH_CONTEXT: &str = "pawl-relay-auth-v1";
 pub const RELAY_MAX_ALLOWED: usize = 64;
 pub const RELAY_QUEUE_MAX_FRAMES: usize = 256;
 pub const RELAY_QUEUE_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -1166,7 +1166,7 @@ pub struct HubSettingsPatch {
     pub custom_agents: Option<Vec<CustomAgentSetting>>,
 }
 
-/// Agent hooks the hub can install (same targets as `krypto install-hooks`). copilot-vscode is per repo.
+/// Agent hooks the hub can install (same targets as `pawl install-hooks`). copilot-vscode is per repo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HookTargetName {
     #[serde(rename = "claude")]

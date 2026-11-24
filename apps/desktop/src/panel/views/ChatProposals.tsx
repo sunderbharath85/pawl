@@ -11,8 +11,8 @@ import {
   proposalDoneText,
   proposalExpired,
   proposalRetryable,
-} from "@krypto/hub-client";
-import type { ChatMessage, ChatProposal } from "@krypto/protocol";
+} from "@pawl/hub-client";
+import type { ChatMessage, ChatProposal } from "@pawl/protocol";
 import { usePanel } from "../context";
 import * as I from "../icons";
 

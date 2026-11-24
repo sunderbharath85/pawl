@@ -10,7 +10,7 @@
 // one ordered chain, so frames from A to B arrive in the order A sent them (receivers drop seq regressions).
 
 import { DurableObject } from "cloudflare:workers";
-import { RELAY_FRAME_MAX_BYTES, type RelayErrorCode } from "@krypto/protocol";
+import { RELAY_FRAME_MAX_BYTES, type RelayErrorCode } from "@pawl/protocol";
 import { createChallenge, verifyAuth } from "./auth";
 import {
   decodePk,
@@ -56,8 +56,8 @@ export interface Env {
 }
 
 /** Headers the Worker sets on the request it forwards to the mailbox (client headers are never passed through). */
-export const H_PK = "x-krypto-relay-pk";
-export const H_HOST = "x-krypto-relay-host";
+export const H_PK = "x-pawl-relay-pk";
+export const H_HOST = "x-pawl-relay-host";
 
 type PendingAttachment = {
   s: "pending";

@@ -7,7 +7,7 @@
 // an envelope whose `seq` differs from its nonce (no seq-bumped replays) or whose direction byte is wrong (no frame
 // reflected back to its sender). `from` / `to` are bound by the keys: the receiver opens with its own secret and the
 // roster key of `from`.
-import type { PeerBody, PeerEnvelope } from "@krypto/protocol";
+import type { PeerBody, PeerEnvelope } from "@pawl/protocol";
 import { compareBytes, decode, encode, tryDecode, utf8Decode, utf8Encode } from "./b64";
 import { NONCE_BYTES, TAG_BYTES, type DeviceKeys } from "./keys";
 import type { RandomBytes } from "./types";

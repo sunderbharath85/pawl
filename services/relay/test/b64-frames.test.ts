@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { RELAY_MAX_ALLOWED, type RelayClientFrame } from "@krypto/protocol";
+import { RELAY_MAX_ALLOWED, type RelayClientFrame } from "@pawl/protocol";
 import { decodeStd, decodeUrl, encodeStd, encodeUrl, randomBytes } from "../src/b64";
 import {
   decodePk,

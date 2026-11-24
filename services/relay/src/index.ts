@@ -1,4 +1,4 @@
-// Krypto relay Worker entry. Request checks live in gate.ts; the only way to a Durable Object is `forward`,
+// Pawl relay Worker entry. Request checks live in gate.ts; the only way to a Durable Object is `forward`,
 // which gate.ts calls after the access key, the per-IP connect budget, the pk and the Host have been checked.
 
 import { handleRequest } from "./gate";

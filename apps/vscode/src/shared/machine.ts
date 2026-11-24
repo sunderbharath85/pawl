@@ -1,5 +1,5 @@
-// VS Code-only machine text (the shared machine helpers live in @krypto/hub-client).
-import type { Machine } from "@krypto/protocol";
+// VS Code-only machine text (the shared machine helpers live in @pawl/hub-client).
+import type { Machine } from "@pawl/protocol";
 
 /**
  * Online state of a paired machine: "online", or "offline · last seen 14:05" (a clock time, or a date

@@ -1,4 +1,4 @@
-//! `krypto` command line.
+//! `pawl` command line.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
@@ -9,8 +9,8 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use futures::{SinkExt, StreamExt};
-use krypto_discovery::hooks::HookTarget;
-use krypto_protocol::{
+use pawl_discovery::hooks::HookTarget;
+use pawl_protocol::{
     Agent, ChatMessage, ChatProposal, ChatProposalKind, ChatRole, ClientKind, ClientMsg, Device, DeviceKind, EventType,
     HubEvent, Machine, MachineOs, PeerStatus, PermissionOptionKind, PermissionOutcome, PermissionRequest, PlanPayload,
     RepoRef, ResolvedBy, ServerMsg, Session, ToolCallPayload, Welcome,
@@ -25,12 +25,12 @@ use crate::machine::{self, MachineIdentity};
 use crate::{logging, server, HUB_VERSION};
 
 #[derive(Parser, Debug)]
-#[command(name = "krypto", version, about = "Krypto: dog pets that watch and drive your coding agents over ACP")]
+#[command(name = "pawl", version, about = "Pawl: dog pets that watch and drive your coding agents over ACP")]
 pub struct Cli {
-    /// Hub data directory (default: <OS data dir>/krypto)
+    /// Hub data directory (default: <OS data dir>/pawl)
     #[arg(long, global = true, env = config::ENV_DATA_DIR)]
     pub data_dir: Option<PathBuf>,
-    /// Hub port (default: KRYPTO_HUB_URL, then config.toml, then 47800)
+    /// Hub port (default: PAWL_HUB_URL, then config.toml, then 47800)
     #[arg(long, global = true)]
     pub port: Option<u16>,
     #[command(subcommand)]
@@ -63,7 +63,7 @@ pub enum Command {
     },
     /// Start an ACP session and stream its events (via the running hub, else in-process)
     Start {
-        /// Agent id, e.g. claude-code or codex (see `krypto agents`)
+        /// Agent id, e.g. claude-code or codex (see `pawl agents`)
         agent: String,
         /// Working directory for the agent
         #[arg(long, default_value = ".")]
@@ -74,17 +74,17 @@ pub enum Command {
         /// Run the agent in this process even if a hub is running
         #[arg(long)]
         local: bool,
-        /// Run it on a paired machine (name or id; see `krypto machines`); --cwd is then a path there
+        /// Run it on a paired machine (name or id; see `pawl machines`); --cwd is then a path there
         #[arg(long, value_name = "NAME|ID")]
         machine: Option<String>,
-        /// Run it in this repo of that machine's index instead of --cwd (see `krypto repos`)
+        /// Run it in this repo of that machine's index instead of --cwd (see `pawl repos`)
         #[arg(long, value_name = "NAME")]
         repo: Option<String>,
         /// Accepted for scripts, but a start on another machine always asks on this terminal
         #[arg(long)]
         yes: bool,
     },
-    /// Approve a waiting permission request, on this machine or a paired one (see `krypto pending`)
+    /// Approve a waiting permission request, on this machine or a paired one (see `pawl pending`)
     Approve {
         /// Request id (or a unique start of it, 4+ characters)
         request: String,
@@ -177,7 +177,7 @@ pub enum Command {
 
 #[derive(Subcommand, Debug)]
 pub enum PeerAction {
-    /// Create a one-time invite (prints the URI and the `krypto peer join` line for the other machine)
+    /// Create a one-time invite (prints the URI and the `pawl peer join` line for the other machine)
     Invite {
         /// Seconds the invite stays valid (60-3600, default 600)
         #[arg(long, value_name = "SECS")]
@@ -185,18 +185,18 @@ pub enum PeerAction {
         /// Address the other hub dials, "host:port" (default: the listener's; required if it binds 0.0.0.0)
         #[arg(long, value_name = "HOST:PORT", conflicts_with = "phone")]
         addr: Option<String>,
-        /// An invite for the Krypto phone app: relay only (needs the relay connected); scan or paste it
+        /// An invite for the Pawl phone app: relay only (needs the relay connected); scan or paste it
         #[arg(long)]
         phone: bool,
     },
     /// Pair with the hub that created this invite URI
     Join {
-        /// krypto://peer?... (quote it: it contains '&')
+        /// pawl://peer?... (quote it: it contains '&')
         uri: String,
     },
     /// Unpair a machine: it can no longer connect, and it is told
     Revoke {
-        /// Machine id or name (see `krypto machines`)
+        /// Machine id or name (see `pawl machines`)
         machine: String,
     },
 }
@@ -359,7 +359,7 @@ fn run_token(paths: &Paths) -> Result<()> {
 
 // ---------------------------------------------------------------- machine
 
-/// `krypto machine [--name ...]`: through the running hub when it serves this data dir (it saves
+/// `pawl machine [--name ...]`: through the running hub when it serves this data dir (it saves
 /// machine.toml and broadcasts `machine` to its clients), else straight on machine.toml.
 async fn run_machine(paths: &Paths, port_flag: Option<u16>, name: Option<String>, as_json: bool) -> Result<()> {
     // Validate up front: the hub only answers a bad name with the bare code "invalid"; the CLI
@@ -398,7 +398,7 @@ async fn run_machine(paths: &Paths, port_flag: Option<u16>, name: Option<String>
                 ident.name = name;
                 machine::save(paths, &ident)?;
             }
-            (ident.to_machine(false, krypto_protocol::now_ms()), false)
+            (ident.to_machine(false, pawl_protocol::now_ms()), false)
         }
     };
     if renamed {
@@ -433,8 +433,8 @@ fn run_install_hooks(target: HookTargetArg, apply: bool, repo: Option<PathBuf>) 
             HookTarget::CopilotVscode { repo: std::path::absolute(&repo)? }
         }
     };
-    let exe = std::env::current_exe().context("locate the krypto executable")?;
-    let out = krypto_discovery::hooks::install(target, &exe, apply)?;
+    let exe = std::env::current_exe().context("locate the pawl executable")?;
+    let out = pawl_discovery::hooks::install(target, &exe, apply)?;
     println!("{out}");
     if !apply {
         eprintln!("(dry run: nothing written; re-run with --apply)");
@@ -444,20 +444,20 @@ fn run_install_hooks(target: HookTargetArg, apply: bool, repo: Option<PathBuf>) 
 
 // ---------------------------------------------------------------- hook
 
-/// `krypto_discovery::hooks::run_hook_cli` reads argv/stdin JSON, prints the stdout reply some agents
+/// `pawl_discovery::hooks::run_hook_cli` reads argv/stdin JSON, prints the stdout reply some agents
 /// require (even when the hub is down or no token exists yet), and forwards with a 2 s cap.
 async fn run_hook(paths: &Paths, port_flag: Option<u16>, source: &str, args: Vec<String>) {
-    let Some(source) = krypto_discovery::hooks::parse_hook_source(source) else { return };
+    let Some(source) = pawl_discovery::hooks::parse_hook_source(source) else { return };
     let token = config::read_token(paths).unwrap_or_default();
     let cfg = HubConfig::load(paths).unwrap_or_default();
     let ep = client_endpoint(paths, port_flag, cfg.port).await;
-    krypto_discovery::hooks::run_hook_cli(source, &args, &ep.http_base, &token).await;
+    pawl_discovery::hooks::run_hook_cli(source, &args, &ep.http_base, &token).await;
 }
 
 /// How long a client waits for `/health` when checking runtime.json's port (hooks have 2 s in all).
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Where this data dir's running hub is: `--port` > `KRYPTO_HUB_URL` > runtime.json's port when
+/// Where this data dir's running hub is: `--port` > `PAWL_HUB_URL` > runtime.json's port when
 /// the hub answering there has this machine's id > config.toml.
 pub async fn client_endpoint(paths: &Paths, port_flag: Option<u16>, config_port: u16) -> HubEndpoint {
     if let Some(port) = config::runtime_candidate(port_flag, paths, config_port) {
@@ -475,8 +475,8 @@ pub async fn client_endpoint(paths: &Paths, port_flag: Option<u16>, config_port:
 pub async fn health_machine_id(port: u16, timeout: Duration) -> Option<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     tokio::time::timeout(timeout, async {
-        let mut s = tokio::net::TcpStream::connect((krypto_protocol::HUB_HOST, port)).await.ok()?;
-        let req = format!("GET /health HTTP/1.1\r\nHost: {}:{port}\r\nConnection: close\r\n\r\n", krypto_protocol::HUB_HOST);
+        let mut s = tokio::net::TcpStream::connect((pawl_protocol::HUB_HOST, port)).await.ok()?;
+        let req = format!("GET /health HTTP/1.1\r\nHost: {}:{port}\r\nConnection: close\r\n\r\n", pawl_protocol::HUB_HOST);
         s.write_all(req.as_bytes()).await.ok()?;
         let mut buf = Vec::new();
         s.take(64 * 1024).read_to_end(&mut buf).await.ok()?;
@@ -525,7 +525,7 @@ impl RemoteHub {
         let result = tokio::time::timeout(Duration::from_secs(5), hub.request_raw(hello))
             .await
             .map_err(|_| anyhow!("hub at {} did not answer hello", ep.ws_url))?
-            .map_err(|e| anyhow!("hub at {} refused the connection: {e:#} (token mismatch? check KRYPTO_HUB_TOKEN)", ep.ws_url))?;
+            .map_err(|e| anyhow!("hub at {} refused the connection: {e:#} (token mismatch? check PAWL_HUB_TOKEN)", ep.ws_url))?;
         hub.welcome = serde_json::from_value(result).context("parse welcome")?;
         Ok(Some(hub))
     }
@@ -574,7 +574,7 @@ fn empty_welcome() -> Welcome {
     let machine =
         Machine { id: String::new(), name: String::new(), os: MachineOs::current(), last_seen: 0, online: false, hub_version: None, user_active_at: None };
     Welcome {
-        protocol_version: krypto_protocol::PROTOCOL_VERSION,
+        protocol_version: pawl_protocol::PROTOCOL_VERSION,
         hub_version: String::new(),
         machine,
         machines: vec![],
@@ -651,8 +651,8 @@ fn rid() -> String {
 // ---------------------------------------------------------------- peer / machines
 
 /// What pairing gives the other machine, said once by `peer invite` and `peer join`.
-/// What `krypto peer invite --phone` tells the user after the URI.
-const PHONE_INVITE_HOWTO: &str = "In the Krypto phone app, open Pair and paste this URI (the desktop app's \"Pair a phone\" shows it as a QR code). The phone pairs through the relay, then reaches every machine this one pairs with.";
+/// What `pawl peer invite --phone` tells the user after the URI.
+const PHONE_INVITE_HOWTO: &str = "In the Pawl phone app, open Pair and paste this URI (the desktop app's \"Pair a phone\" shows it as a QR code). The phone pairs through the relay, then reaches every machine this one pairs with.";
 
 const PAIRED_CAN: &str = "It can see this machine's sessions and, with confirmation on its side, approve once, prompt, cancel and start agents in folders this machine already uses. Turn off with [peer] accept_intents = false.";
 
@@ -661,18 +661,18 @@ fn peer_error_text(code: &str) -> Option<&'static str> {
     Some(match code {
         "peer_listener_off" => {
             "this hub's peer listener is off, so it cannot invite. Restart it with \
-             `krypto serve --peer-listen <LAN-IP>` or set [peer] listen = \"<LAN-IP>:47801\" in config.toml"
+             `pawl serve --peer-listen <LAN-IP>` or set [peer] listen = \"<LAN-IP>:47801\" in config.toml"
         }
         "invalid" => "invalid invite options: --ttl must be 60-3600 seconds and --addr a reachable host:port \
                       (required when the listener binds 0.0.0.0 or ::)",
-        "bad_uri" => "that is not a valid Krypto invite (expected krypto://peer?...)",
-        "self_invite" => "that invite was created by this machine; run `krypto peer join` on the other machine",
+        "bad_uri" => "that is not a valid Pawl invite (expected pawl://peer?...)",
+        "self_invite" => "that invite was created by this machine; run `pawl peer join` on the other machine",
         "unreachable" => "could not reach the inviting hub at the invite's address (same network? firewall?)",
         "invite_rejected" => "the inviting hub rejected the invite: it is wrong, expired or already used; create a new one",
         "timeout" => "the inviting hub did not answer in time",
         "not_found" => "no such paired machine",
         "relay_off" => "a phone pairs through the relay, and this hub is not connected to one: set the relay in \
-                        the desktop app's Settings (or [relay] url in config.toml) and check `krypto settings`",
+                        the desktop app's Settings (or [relay] url in config.toml) and check `pawl settings`",
         _ => return None,
     })
 }
@@ -692,7 +692,7 @@ async fn peer_request(conn: &mut Conn, msg: ClientMsg) -> Result<Value> {
 async fn running_hub(paths: &Paths, port_flag: Option<u16>) -> Result<RemoteHub> {
     match RemoteHub::connect(paths, port_flag).await? {
         Some(hub) => Ok(hub),
-        None => bail!("no hub is running for this data dir; start it first (`krypto serve`, add --peer-listen <LAN-IP> to invite)"),
+        None => bail!("no hub is running for this data dir; start it first (`pawl serve`, add --peer-listen <LAN-IP> to invite)"),
     }
 }
 
@@ -723,7 +723,7 @@ async fn run_peer(paths: &Paths, port_flag: Option<u16>, action: PeerAction) -> 
             let v = peer_request(&mut conn, msg).await?;
             let uri = v.get("uri").and_then(Value::as_str).context("hub sent no invite uri")?;
             let expires_at = v.get("expiresAt").and_then(Value::as_i64).unwrap_or(0);
-            let mins = ((expires_at - krypto_protocol::now_ms()).max(0) + 59_999) / 60_000;
+            let mins = ((expires_at - pawl_protocol::now_ms()).max(0) + 59_999) / 60_000;
             if phone {
                 println!(
                     "Phone invite for {} (single use, expires at {} - in {mins} min):",
@@ -746,7 +746,7 @@ async fn run_peer(paths: &Paths, port_flag: Option<u16>, action: PeerAction) -> 
             println!();
             println!("On the other machine, run:");
             println!();
-            println!("  krypto peer join \"{uri}\"");
+            println!("  pawl peer join \"{uri}\"");
             println!();
             println!("{PAIRED_CAN}");
         }
@@ -798,7 +798,7 @@ fn introduced_line(revoked: &str, ack: &Value) -> Option<String> {
         return None;
     }
     Some(format!(
-        "{} added {} here; they stay paired. Revoke them too with `krypto peer revoke <name>` if you no longer trust them.",
+        "{} added {} here; they stay paired. Revoke them too with `pawl peer revoke <name>` if you no longer trust them.",
         printable(revoked),
         names.join(", ")
     ))
@@ -812,7 +812,7 @@ fn resolve_device<'a>(devices: &'a [Device], query: &str) -> Result<&'a Device> 
     let by_name: Vec<&Device> = devices.iter().filter(|d| d.name.trim().to_lowercase() == q.to_lowercase()).collect();
     match by_name.as_slice() {
         [d] => Ok(d),
-        [] => bail!("no paired machine with id or name {q:?} (see `krypto machines`)"),
+        [] => bail!("no paired machine with id or name {q:?} (see `pawl machines`)"),
         many => bail!(
             "{} paired machines are named {q:?}; use the id: {}",
             many.len(),
@@ -821,7 +821,7 @@ fn resolve_device<'a>(devices: &'a [Device], query: &str) -> Result<&'a Device> 
     }
 }
 
-/// `krypto machines`: from the running hub (live online state), else from hub.db (peers offline).
+/// `pawl machines`: from the running hub (live online state), else from hub.db (peers offline).
 async fn run_machines(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> Result<()> {
     let (machines, devices, listening, relay, hub_running) = match RemoteHub::connect(paths, port_flag).await? {
         Some(hub) => {
@@ -837,7 +837,7 @@ async fn run_machines(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
             } else {
                 Vec::new()
             };
-            let mut machines = vec![me.to_machine(false, krypto_protocol::now_ms())];
+            let mut machines = vec![me.to_machine(false, pawl_protocol::now_ms())];
             let mut devices = Vec::new();
             for e in roster {
                 let mut m = e.machine;
@@ -857,7 +857,7 @@ async fn run_machines(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
         );
         return Ok(());
     }
-    let now = krypto_protocol::now_ms();
+    let now = pawl_protocol::now_ms();
     let rows: Vec<Vec<String>> = machines
         .iter()
         .enumerate()
@@ -903,14 +903,14 @@ async fn run_machines(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
     }
     if machines.len() == 1 {
         println!();
-        println!("No paired machines. Pair one with `krypto peer invite` (needs `krypto serve --peer-listen <LAN-IP>`).");
+        println!("No paired machines. Pair one with `pawl peer invite` (needs `pawl serve --peer-listen <LAN-IP>`).");
     }
     Ok(())
 }
 
-/// The paired phones for `krypto machines` (they are devices, never machines): online while a link
+/// The paired phones for `pawl machines` (they are devices, never machines): online while a link
 /// is up (it has a path), and who introduced it when it was not paired here.
-fn phone_rows(devices: &[Device], machines: &[Machine], now: krypto_protocol::UnixMs) -> Vec<Vec<String>> {
+fn phone_rows(devices: &[Device], machines: &[Machine], now: pawl_protocol::UnixMs) -> Vec<Vec<String>> {
     devices
         .iter()
         .filter(|d| d.kind == DeviceKind::Phone)
@@ -937,7 +937,7 @@ fn phone_rows(devices: &[Device], machines: &[Machine], now: krypto_protocol::Un
 }
 
 /// "wss://relay.example.com (connected)", "off", "wss://... (not connected: unreachable)".
-fn relay_line(r: &krypto_protocol::RelayStatusInfo) -> String {
+fn relay_line(r: &pawl_protocol::RelayStatusInfo) -> String {
     match (&r.url, r.connected, &r.last_error) {
         (None, ..) => "off".into(),
         (Some(u), true, _) => format!("{} (connected)", printable(u)),
@@ -948,14 +948,14 @@ fn relay_line(r: &krypto_protocol::RelayStatusInfo) -> String {
 
 // ---------------------------------------------------------------- settings
 
-/// `krypto settings [--json]`: from the running hub (effective values, flags, restart needed,
+/// `pawl settings [--json]`: from the running hub (effective values, flags, restart needed,
 /// relay status), else from config.toml. Secrets are never printed: only whether they are set.
 async fn run_settings(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> Result<()> {
     let (settings, restart, config_path, relay) = match RemoteHub::connect(paths, port_flag).await? {
         Some(mut hub) => {
             let relay = hub.welcome.peer.relay.clone();
             let v = hub.request_raw(ClientMsg::GetSettings { id: "settings".into() }).await?;
-            let settings: krypto_protocol::HubSettings = serde_json::from_value(v["settings"].clone()).context("settings reply")?;
+            let settings: pawl_protocol::HubSettings = serde_json::from_value(v["settings"].clone()).context("settings reply")?;
             let restart: Vec<String> = serde_json::from_value(v["restartRequired"].clone()).unwrap_or_default();
             let path = v["configPath"].as_str().map(str::to_string).unwrap_or_else(|| paths.config.display().to_string());
             (settings, restart, path, Some(relay))
@@ -1033,7 +1033,7 @@ fn resolve_machine<'a>(machines: &'a [Machine], query: &str) -> Result<&'a Machi
     let by_name: Vec<&Machine> = machines.iter().filter(|m| m.name.trim().to_lowercase() == q.to_lowercase()).collect();
     match by_name.as_slice() {
         [m] => Ok(m),
-        [] => bail!("no machine with id or name {q:?} (see `krypto machines`)"),
+        [] => bail!("no machine with id or name {q:?} (see `pawl machines`)"),
         many => bail!(
             "{} machines are named {q:?}; use the id: {}",
             many.len(),
@@ -1048,19 +1048,19 @@ fn resolve_request<'a>(pending: &'a [PermissionRequest], query: &str) -> Result<
     if let Some(r) = pending.iter().find(|r| r.request_id == q) {
         return Ok(Some(r));
     }
-    if krypto_protocol::parse_global_id(q).is_some() {
+    if pawl_protocol::parse_global_id(q).is_some() {
         return Ok(None); // a full id that is not pending: let its owner say why
     }
     if q.chars().count() < 4 {
-        bail!("request id {q:?} is too short (use at least 4 characters, see `krypto pending`)");
+        bail!("request id {q:?} is too short (use at least 4 characters, see `pawl pending`)");
     }
     let hits: Vec<&PermissionRequest> = pending
         .iter()
-        .filter(|r| krypto_protocol::parse_global_id(&r.request_id).is_some_and(|(_, local)| local.starts_with(q)))
+        .filter(|r| pawl_protocol::parse_global_id(&r.request_id).is_some_and(|(_, local)| local.starts_with(q)))
         .collect();
     match hits.as_slice() {
         [r] => Ok(Some(r)),
-        [] => bail!("no pending request {q:?} (see `krypto pending`)"),
+        [] => bail!("no pending request {q:?} (see `pawl pending`)"),
         _ => bail!("{q:?} matches {} pending requests; give more of the id", hits.len()),
     }
 }
@@ -1074,7 +1074,7 @@ fn pick_option(req: &PermissionRequest, approve: bool, explicit: Option<&str>) -
         };
         let allow = matches!(opt.kind, PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways);
         if allow != approve {
-            bail!("option {o:?} is {} option; use `krypto {}`", if allow { "an allow" } else { "a reject" }, if allow { "approve" } else { "deny" });
+            bail!("option {o:?} is {} option; use `pawl {}`", if allow { "an allow" } else { "a reject" }, if allow { "approve" } else { "deny" });
         }
         return Ok(Some(o.to_string()));
     }
@@ -1115,7 +1115,7 @@ fn machine_name(machines: &[Machine], id: &str) -> String {
     machines.iter().find(|m| m.id == id).map(|m| printable(&m.name)).unwrap_or_else(|| id.to_string())
 }
 
-/// `krypto approve|deny <requestId>`: this machine's requests, or another machine's (forwarded to
+/// `pawl approve|deny <requestId>`: this machine's requests, or another machine's (forwarded to
 /// its owner). A remote approval always asks on this terminal; `--yes` is not honoured for it, so a
 /// script cannot approve on another machine.
 async fn run_decide(
@@ -1132,7 +1132,7 @@ async fn run_decide(
     let pending = hub.welcome.pending_permissions.clone();
     let req = resolve_request(&pending, &request)?.cloned();
     let request_id = req.as_ref().map_or(request.trim().to_string(), |r| r.request_id.clone());
-    let owner = krypto_protocol::parse_global_id(&request_id).map(|(m, _)| m.to_string()).unwrap_or_else(|| me.clone());
+    let owner = pawl_protocol::parse_global_id(&request_id).map(|(m, _)| m.to_string()).unwrap_or_else(|| me.clone());
     let remote = owner != me;
     let where_ = machine_name(&machines, &owner);
     let option_id = match &req {
@@ -1167,7 +1167,7 @@ async fn run_decide(
     Ok(())
 }
 
-/// `krypto pending`: requests waiting for an answer, on every machine.
+/// `pawl pending`: requests waiting for an answer, on every machine.
 async fn run_pending(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> Result<()> {
     let hub = running_hub(paths, port_flag).await?;
     let w = hub.welcome;
@@ -1179,7 +1179,7 @@ async fn run_pending(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> Re
         println!("Nothing is waiting for an answer.");
         return Ok(());
     }
-    let now = krypto_protocol::now_ms();
+    let now = pawl_protocol::now_ms();
     let rows: Vec<Vec<String>> = w
         .pending_permissions
         .iter()
@@ -1196,7 +1196,7 @@ async fn run_pending(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> Re
         .collect();
     print_table(&["ID", "MACHINE", "AGENT", "TOOL", "OPTIONS", "WAITING"], &rows);
     println!();
-    println!("Answer with `krypto approve <ID>` or `krypto deny <ID>`.");
+    println!("Answer with `pawl approve <ID>` or `pawl deny <ID>`.");
     Ok(())
 }
 
@@ -1215,7 +1215,7 @@ fn resolve_repo<'a>(repos: &'a [RepoRef], query: &str, machine: &str) -> Result<
         [] => {
             let all: Vec<&RepoRef> = repos.iter().collect();
             if all.is_empty() {
-                bail!("{machine} has no repos yet (it lists folders its sessions used, see `krypto repos`)");
+                bail!("{machine} has no repos yet (it lists folders its sessions used, see `pawl repos`)");
             }
             bail!("{machine} has no repo {query:?}; it has: {}", names(&all))
         }
@@ -1223,7 +1223,7 @@ fn resolve_repo<'a>(repos: &'a [RepoRef], query: &str, machine: &str) -> Result<
     }
 }
 
-/// `krypto repos [--machine X]`: a machine's repo index (from the running hub, else from hub.db).
+/// `pawl repos [--machine X]`: a machine's repo index (from the running hub, else from hub.db).
 async fn run_repos(paths: &Paths, port_flag: Option<u16>, machine: Option<String>, as_json: bool) -> Result<()> {
     let (repos, where_) = match RemoteHub::connect(paths, port_flag).await? {
         Some(hub) => {
@@ -1250,7 +1250,7 @@ async fn run_repos(paths: &Paths, port_flag: Option<u16>, machine: Option<String
                         let extra = cfg.repos.paths.clone();
                         let repos = store
                             .run(move |s| {
-                                let mut c: Vec<(String, Option<krypto_protocol::UnixMs>)> =
+                                let mut c: Vec<(String, Option<pawl_protocol::UnixMs>)> =
                                     s.local_session_folders()?.into_iter().map(|(p, t)| (p, Some(t))).collect();
                                 c.extend(extra.into_iter().map(|p| (p, None)));
                                 Ok(crate::repos::build_index(c))
@@ -1277,7 +1277,7 @@ async fn run_repos(paths: &Paths, port_flag: Option<u16>, machine: Option<String
         println!("No repos on {where_} yet (folders its sessions used, plus config.toml [repos] paths).");
         return Ok(());
     }
-    let now = krypto_protocol::now_ms();
+    let now = pawl_protocol::now_ms();
     let rows: Vec<Vec<String>> = repos
         .iter()
         .map(|r| vec![printable(&r.name), r.last_used_at.map_or_else(|| "-".into(), |t| ago(now, t)), printable(&r.path)])
@@ -1296,11 +1296,11 @@ fn print_reply(reply: &ChatMessage) {
             println!("  {}) {}", i + 1, printable(&p.summary));
         }
         println!();
-        println!("Run one with `krypto chat \"<same text>\" --pick N`.");
+        println!("Run one with `pawl chat \"<same text>\" --pick N`.");
     }
 }
 
-/// `krypto chat "<text>" [--pick N]`: ask the pet, print its reply and proposals; `--pick N` runs
+/// `pawl chat "<text>" [--pick N]`: ask the pet, print its reply and proposals; `--pick N` runs
 /// proposal N through the normal path (another machine: start asks on this terminal first).
 async fn run_chat(paths: &Paths, port_flag: Option<u16>, text: String, pick: Option<usize>) -> Result<()> {
     let hub = running_hub(paths, port_flag).await?;
@@ -1344,7 +1344,7 @@ fn check_proposal(p: &ChatProposal, machines: &[Machine]) -> Result<()> {
         }
         ChatProposalKind::Prompt => {
             let sid = p.session_id.as_deref().context("the prompt proposal has no session")?;
-            let owner = krypto_protocol::parse_global_id(sid).map(|(m, _)| m);
+            let owner = pawl_protocol::parse_global_id(sid).map(|(m, _)| m);
             if owner != Some(p.machine_id.as_str()) {
                 bail!("the prompt proposal's session is not on the machine it names");
             }
@@ -1431,7 +1431,7 @@ async fn run_agents(paths: &Paths, port_flag: Option<u16>, refresh: bool, as_jso
     Ok(())
 }
 
-/// `krypto sessions`: every machine's sessions (this one's plus the mirror of paired hubs).
+/// `pawl sessions`: every machine's sessions (this one's plus the mirror of paired hubs).
 async fn run_sessions(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> Result<()> {
     let (sessions, names): (Vec<Session>, HashMap<String, String>) = match RemoteHub::connect(paths, port_flag).await? {
         Some(hub) => {
@@ -1462,7 +1462,7 @@ async fn run_sessions(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
         println!("No sessions yet.");
         return Ok(());
     }
-    let now = krypto_protocol::now_ms();
+    let now = pawl_protocol::now_ms();
     let rows: Vec<Vec<String>> = sessions
         .iter()
         .map(|s| {
@@ -1511,7 +1511,7 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
 
 /// First 8 characters of the local part of a global id (`machine:local`), else of the id itself.
 fn short_id(id: &str) -> String {
-    let local = krypto_protocol::parse_global_id(id).map_or(id, |(_, l)| l);
+    let local = pawl_protocol::parse_global_id(id).map_or(id, |(_, l)| l);
     local.chars().take(8).collect()
 }
 
@@ -1604,7 +1604,7 @@ async fn run_start(
                 bail!("--cwd <absolute path on {}> is required with --machine", printable(&target.name));
             }
             if !target.online {
-                bail!("{} is offline (see `krypto machines`)", printable(&target.name));
+                bail!("{} is offline (see `pawl machines`)", printable(&target.name));
             }
             // Like a remote approval: always a person at this terminal, never --yes or a script.
             if yes {
@@ -1960,13 +1960,13 @@ impl Printer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krypto_protocol::PermissionOption;
+    use pawl_protocol::PermissionOption;
 
     /// runtime.json is trusted only when the hub on that port has this data dir's machine id.
     #[tokio::test]
     async fn clients_verify_runtime_json_before_using_it() {
         if std::env::var(config::ENV_URL).is_ok() {
-            return; // KRYPTO_HUB_URL set in this environment: it wins by design
+            return; // PAWL_HUB_URL set in this environment: it wins by design
         }
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::in_dir(dir.path());
@@ -2035,35 +2035,35 @@ mod tests {
 
     #[test]
     fn cli_parses() {
-        let c = Cli::try_parse_from(["krypto", "start", "codex", "--cwd", ".", "--prompt", "run tests"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "start", "codex", "--cwd", ".", "--prompt", "run tests"]).unwrap();
         assert!(matches!(c.command, Command::Start { ref agent, .. } if agent == "codex"));
-        let c = Cli::try_parse_from(["krypto", "hook", "codex", r#"{"type":"agent-turn-complete"}"#]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "hook", "codex", r#"{"type":"agent-turn-complete"}"#]).unwrap();
         assert!(matches!(c.command, Command::Hook { ref source, ref args } if source == "codex" && args.len() == 1));
-        let c = Cli::try_parse_from(["krypto", "install-hooks", "copilot-vscode", "--apply"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "install-hooks", "copilot-vscode", "--apply"]).unwrap();
         assert!(matches!(c.command, Command::InstallHooks { target: HookTargetArg::CopilotVscode, apply: true, .. }));
-        let c = Cli::try_parse_from(["krypto", "--port", "48000", "serve"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "--port", "48000", "serve"]).unwrap();
         assert_eq!(c.port, Some(48000));
-        let c = Cli::try_parse_from(["krypto", "machine", "--name", "Windows PC"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "machine", "--name", "Windows PC"]).unwrap();
         assert!(matches!(c.command, Command::Machine { name: Some(ref n), json: false } if n == "Windows PC"));
-        let c = Cli::try_parse_from(["krypto", "machine", "--json"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "machine", "--json"]).unwrap();
         assert!(matches!(c.command, Command::Machine { name: None, json: true }));
-        let c = Cli::try_parse_from(["krypto", "serve", "--peer-listen", "192.168.1.20"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "serve", "--peer-listen", "192.168.1.20"]).unwrap();
         assert!(matches!(c.command, Command::Serve { peer_listen: Some(ref l) } if l == "192.168.1.20"));
-        let c = Cli::try_parse_from(["krypto", "peer", "invite", "--ttl", "120", "--addr", "10.0.0.2:47801"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "peer", "invite", "--ttl", "120", "--addr", "10.0.0.2:47801"]).unwrap();
         assert!(matches!(
             c.command,
             Command::Peer { action: PeerAction::Invite { ttl: Some(120), addr: Some(ref a), phone: false } } if a == "10.0.0.2:47801"
         ));
-        let c = Cli::try_parse_from(["krypto", "peer", "invite", "--phone"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "peer", "invite", "--phone"]).unwrap();
         assert!(matches!(c.command, Command::Peer { action: PeerAction::Invite { ttl: None, addr: None, phone: true } }));
-        assert!(Cli::try_parse_from(["krypto", "peer", "invite", "--phone", "--addr", "10.0.0.2:47801"]).is_err(), "a phone invite has no addr");
-        let c = Cli::try_parse_from(["krypto", "peer", "join", "krypto://peer?v=1&mid=x"]).unwrap();
-        assert!(matches!(c.command, Command::Peer { action: PeerAction::Join { ref uri } } if uri.starts_with("krypto://")));
-        let c = Cli::try_parse_from(["krypto", "peer", "revoke", "Mac mini"]).unwrap();
+        assert!(Cli::try_parse_from(["pawl", "peer", "invite", "--phone", "--addr", "10.0.0.2:47801"]).is_err(), "a phone invite has no addr");
+        let c = Cli::try_parse_from(["pawl", "peer", "join", "pawl://peer?v=1&mid=x"]).unwrap();
+        assert!(matches!(c.command, Command::Peer { action: PeerAction::Join { ref uri } } if uri.starts_with("pawl://")));
+        let c = Cli::try_parse_from(["pawl", "peer", "revoke", "Mac mini"]).unwrap();
         assert!(matches!(c.command, Command::Peer { action: PeerAction::Revoke { ref machine } } if machine == "Mac mini"));
-        let c = Cli::try_parse_from(["krypto", "machines", "--json"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "machines", "--json"]).unwrap();
         assert!(matches!(c.command, Command::Machines { json: true }));
-        assert!(Cli::try_parse_from(["krypto", "peer"]).is_err());
+        assert!(Cli::try_parse_from(["pawl", "peer"]).is_err());
     }
 
     fn device(id: &str, name: &str) -> Device {
@@ -2086,7 +2086,7 @@ mod tests {
         let mac = Machine {
             id: "aaaaaa111111".into(),
             name: "Mac mini".into(),
-            os: krypto_protocol::MachineOs::Macos,
+            os: pawl_protocol::MachineOs::Macos,
             last_seen: 0,
             online: true,
             hub_version: None,
@@ -2094,8 +2094,8 @@ mod tests {
         };
         let mut phone = device("pppppp111111", "iPhone");
         phone.kind = DeviceKind::Phone;
-        phone.os = Some(krypto_protocol::MachineOs::Ios);
-        phone.path = Some(krypto_protocol::LinkPath::Relay);
+        phone.os = Some(pawl_protocol::MachineOs::Ios);
+        phone.path = Some(pawl_protocol::LinkPath::Relay);
         let mut pixel = device("pppppp222222", "Pixel");
         pixel.kind = DeviceKind::Phone;
         pixel.introduced_by = Some(mac.id.clone());
@@ -2125,7 +2125,7 @@ mod tests {
         assert_eq!(printable("Mac\u{1b}[2Jmini"), "Mac?[2Jmini");
     }
 
-    /// `krypto machines` without a hub lists this machine from machine.toml and peers from hub.db.
+    /// `pawl machines` without a hub lists this machine from machine.toml and peers from hub.db.
     #[tokio::test]
     async fn machines_command_without_a_hub() {
         let dir = tempfile::tempdir().unwrap();
@@ -2147,7 +2147,7 @@ mod tests {
             hub_version: Some("0.1.0".into()),
             user_active_at: None,
         };
-        store.upsert_device(&krypto_peer::RosterEntry { device: d, machine: m }).unwrap();
+        store.upsert_device(&pawl_peer::RosterEntry { device: d, machine: m }).unwrap();
         drop(store);
         run_machines(&paths, Some(9), false).await.unwrap();
         run_machines(&paths, Some(9), true).await.unwrap();
@@ -2155,14 +2155,14 @@ mod tests {
 
     #[test]
     fn intent_commands_parse() {
-        let c = Cli::try_parse_from(["krypto", "start", "codex", "--cwd", "/srv/api", "--machine", "Mac mini", "--yes"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "start", "codex", "--cwd", "/srv/api", "--machine", "Mac mini", "--yes"]).unwrap();
         assert!(matches!(c.command, Command::Start { machine: Some(ref m), yes: true, .. } if m == "Mac mini"));
-        let c = Cli::try_parse_from(["krypto", "approve", "abcd1234", "--option", "allow-always", "--yes"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "approve", "abcd1234", "--option", "allow-always", "--yes"]).unwrap();
         assert!(matches!(c.command, Command::Approve { ref request, option: Some(ref o), yes: true } if request == "abcd1234" && o == "allow-always"));
-        let c = Cli::try_parse_from(["krypto", "deny", "abcd1234"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "deny", "abcd1234"]).unwrap();
         assert!(matches!(c.command, Command::Deny { ref request, option: None } if request == "abcd1234"));
-        assert!(Cli::try_parse_from(["krypto", "deny", "abcd", "--yes"]).is_err(), "deny has no --yes");
-        let c = Cli::try_parse_from(["krypto", "pending", "--json"]).unwrap();
+        assert!(Cli::try_parse_from(["pawl", "deny", "abcd", "--yes"]).is_err(), "deny has no --yes");
+        let c = Cli::try_parse_from(["pawl", "pending", "--json"]).unwrap();
         assert!(matches!(c.command, Command::Pending { json: true }));
     }
 
@@ -2198,8 +2198,8 @@ mod tests {
         assert_eq!(pick_option(&r1, true, None).unwrap().as_deref(), Some("ok"));
         assert_eq!(pick_option(&r1, false, None).unwrap().as_deref(), Some("no"));
         assert_eq!(pick_option(&r1, true, Some("always")).unwrap().as_deref(), Some("always"));
-        assert!(pick_option(&r1, true, Some("no")).unwrap_err().to_string().contains("krypto deny"), "approve with a reject option");
-        assert!(pick_option(&r1, false, Some("ok")).unwrap_err().to_string().contains("krypto approve"), "deny with an allow option");
+        assert!(pick_option(&r1, true, Some("no")).unwrap_err().to_string().contains("pawl deny"), "approve with a reject option");
+        assert!(pick_option(&r1, false, Some("ok")).unwrap_err().to_string().contains("pawl approve"), "deny with an allow option");
         assert!(pick_option(&r1, true, Some("bogus")).is_err());
     }
 
@@ -2219,11 +2219,11 @@ mod tests {
 
     #[test]
     fn repo_commands_parse_and_repos_resolve() {
-        let c = Cli::try_parse_from(["krypto", "repos", "--machine", "Mac mini", "--json"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "repos", "--machine", "Mac mini", "--json"]).unwrap();
         assert!(matches!(c.command, Command::Repos { machine: Some(ref m), json: true } if m == "Mac mini"));
-        let c = Cli::try_parse_from(["krypto", "start", "codex", "--machine", "Mac mini", "--repo", "api"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "start", "codex", "--machine", "Mac mini", "--repo", "api"]).unwrap();
         assert!(matches!(c.command, Command::Start { repo: Some(ref r), .. } if r == "api"));
-        let c = Cli::try_parse_from(["krypto", "chat", "tell codex to run the tests", "--pick", "2"]).unwrap();
+        let c = Cli::try_parse_from(["pawl", "chat", "tell codex to run the tests", "--pick", "2"]).unwrap();
         assert!(matches!(c.command, Command::Chat { ref text, pick: Some(2) } if text.starts_with("tell codex")));
 
         let r = |n: &str| RepoRef { name: n.into(), path: format!("/srv/{n}"), last_used_at: None };
@@ -2289,7 +2289,7 @@ mod tests {
         assert_eq!(short_id("abcdef012345:ab"), "ab");
     }
 
-    /// `krypto machine` without a hub works on machine.toml directly (scratch data dir; the port is
+    /// `pawl machine` without a hub works on machine.toml directly (scratch data dir; the port is
     /// one nothing listens on, and there is no token, so no hub is ever contacted).
     #[tokio::test]
     async fn machine_command_without_a_hub() {
@@ -2313,7 +2313,7 @@ mod tests {
         let ack = serde_json::json!({ "introduced": [{ "id": "pppppp000001", "name": "Pixel", "kind": "phone" }, { "id": "ssssss000001", "name": "Studio", "kind": "hub" }] });
         assert_eq!(
             introduced_line("Laptop", &ack).as_deref(),
-            Some("Laptop added Pixel (phone), Studio here; they stay paired. Revoke them too with `krypto peer revoke <name>` if you no longer trust them.")
+            Some("Laptop added Pixel (phone), Studio here; they stay paired. Revoke them too with `pawl peer revoke <name>` if you no longer trust them.")
         );
         assert_eq!(introduced_line("Laptop", &serde_json::json!({ "introduced": [] })), None);
         assert_eq!(introduced_line("Laptop", &serde_json::json!({})), None);

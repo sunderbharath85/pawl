@@ -1,6 +1,6 @@
 // Settings: this phone (name), relay status, paired computers (remove one), push on/off, recent roster notices,
 // approvals lock status, and "Unpair this phone" (bye to every computer, new identity).
-import { relayStatusText } from "@krypto/hub-client";
+import { relayStatusText } from "@pawl/hub-client";
 import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import { Alert, ScrollView, Switch, Text, TextInput, View } from "react-native";
@@ -44,7 +44,7 @@ export default function SettingsScreen() {
   const unpair = () => {
     Alert.alert(
       "Unpair this phone?",
-      "Every computer is told to forget this phone, and this phone forgets its key and all pairings. To use Krypto here again, pair with a new code.",
+      "Every computer is told to forget this phone, and this phone forgets its key and all pairings. To use Pawl here again, pair with a new code.",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -120,7 +120,7 @@ export default function SettingsScreen() {
         />
         {!pushAvailable ? (
           <Body muted style={{ fontSize: 13 }}>
-            Push needs an EAS project id in this build's app config (extra.eas.projectId). Approvals still work while Krypto is open.
+            Push needs an EAS project id in this build's app config (extra.eas.projectId). Approvals still work while Pawl is open.
           </Body>
         ) : null}
         {pushAvailable && snapshot.pushEnabled && push && !push.ok ? <Banner tone="warning" text={push.message} /> : null}
@@ -157,7 +157,7 @@ export default function SettingsScreen() {
       {snapshot.paired ? (
         <Button title="Unpair this phone" kind="danger" icon="trash.fill" onPress={unpair} busy={busy} style={{ marginTop: 8 }} />
       ) : null}
-      <Text style={{ color: t.textFaint, fontSize: 12, textAlign: "center", fontFamily: Fonts.rounded }}>Krypto · open source (MIT)</Text>
+      <Text style={{ color: t.textFaint, fontSize: 12, textAlign: "center", fontFamily: Fonts.rounded }}>Pawl · open source (MIT)</Text>
     </ScrollView>
   );
 }

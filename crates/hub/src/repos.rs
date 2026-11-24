@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf, Prefix};
 
-use krypto_protocol::{RepoRef, UnixMs, REPO_INDEX_MAX};
+use pawl_protocol::{RepoRef, UnixMs, REPO_INDEX_MAX};
 
 /// Peer-supplied repo fields beyond these are refused.
 pub const PEER_REPO_NAME_MAX: usize = 80;
@@ -153,7 +153,7 @@ const PEER_AGENT_NAME_MAX: usize = 80;
 /// `[A-Za-z0-9._-]`, or whose name is empty, over 80 characters or has control characters, is
 /// dropped; at most PEER_AGENTS_MAX are kept. They feed the brain ("tell the Mac mini's codex")
 /// and the agent pickers.
-pub fn validate_peer_agents(agents: Vec<krypto_protocol::Agent>) -> Vec<krypto_protocol::Agent> {
+pub fn validate_peer_agents(agents: Vec<pawl_protocol::Agent>) -> Vec<pawl_protocol::Agent> {
     let id_ok = |id: &str| {
         !id.is_empty()
             && id.chars().count() <= PEER_AGENT_ID_MAX
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn peer_agents_are_validated() {
-        let a = |id: &str, name: &str| krypto_protocol::Agent {
+        let a = |id: &str, name: &str| pawl_protocol::Agent {
             id: id.into(),
             machine_id: "zyxwvu987654".into(),
             name: name.into(),
@@ -270,7 +270,7 @@ mod tests {
             description: None,
             icon: None,
             installed: true,
-            source: krypto_protocol::AgentSource::Registry,
+            source: pawl_protocol::AgentSource::Registry,
             capabilities: None,
         };
         let got = validate_peer_agents(vec![

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { HubEvent } from "@krypto/protocol";
+import type { HubEvent } from "@pawl/protocol";
 import {
   SOURCE_LABEL,
   STATUS_META,
@@ -12,7 +12,7 @@ import {
   shortPath,
   timeAgo,
 } from "../../lib/format";
-import { intentErrorText, isLocal, machineDisplayName, offlineReason, sessionBackfill, type HubState } from "@krypto/hub-client";
+import { intentErrorText, isLocal, machineDisplayName, offlineReason, sessionBackfill, type HubState } from "@pawl/hub-client";
 import { usePanel } from "../context";
 import { buildFeed, STOP_LABEL, type FeedItem } from "../feed";
 import * as I from "../icons";

@@ -17,7 +17,7 @@
  * Run process.ts afterwards.
  */
 import { parseArgs } from "node:util";
-import type { Species } from "@krypto/protocol";
+import type { Species } from "@pawl/protocol";
 import {
   ACTIVITIES,
   FRAME_ASPECT,

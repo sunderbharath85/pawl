@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { SPECIES_META } from "@krypto/pet-engine";
-import type { Pet, Species } from "@krypto/protocol";
+import { SPECIES_META } from "@pawl/pet-engine";
+import type { Pet, Species } from "@pawl/protocol";
 import { agentName, errorText, timeAgo } from "../../lib/format";
-import { checkPetName, groupByMachine, machineDisplayName, petRenameErrorText, readOnlyReason } from "@krypto/hub-client";
+import { checkPetName, groupByMachine, machineDisplayName, petRenameErrorText, readOnlyReason } from "@pawl/hub-client";
 import { usePanel } from "../context";
 import { ACTIVITY_LABEL, PetAvatar } from "../PetAvatar";
 

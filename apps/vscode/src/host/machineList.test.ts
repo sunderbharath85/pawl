@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { Device, Machine } from "@krypto/protocol";
-import { machinesLine } from "@krypto/hub-client";
+import type { Device, Machine } from "@pawl/protocol";
+import { machinesLine } from "@pawl/hub-client";
 import { presenceLabel } from "../shared/machine";
 import { machinePickItems, phonesTooltipLine } from "./machineList";
 
@@ -24,16 +24,16 @@ const state = {
 describe("machinePickItems", () => {
   test("this machine first, then online peers, each with OS, presence and address", () => {
     const { title, items } = machinePickItems(state, true, 5_000);
-    expect(title).toBe("Krypto: 3 machines · 2 online");
+    expect(title).toBe("Pawl: 3 machines · 2 online");
     expect(items.map((i) => i.label)).toEqual(["$(circle-filled) Windows PC", "$(circle-filled) Mac mini", "$(circle-outline) Attic box"]);
-    expect(items[0]).toMatchObject({ description: "this machine · Windows", detail: "online · listening on 192.168.1.10:47801 · krypto 0.3.0" });
+    expect(items[0]).toMatchObject({ description: "this machine · Windows", detail: "online · listening on 192.168.1.10:47801 · pawl 0.3.0" });
     expect(items[1]).toMatchObject({ description: "macOS", detail: "online · 192.168.1.20:47801" });
     expect(items[2]!.detail).toStartWith("offline · last seen ");
   });
 
   test("hub offline: nothing is shown as online", () => {
     const { title, items } = machinePickItems(state, false);
-    expect(title).toBe("Krypto: 3 machines · hub offline");
+    expect(title).toBe("Pawl: 3 machines · hub offline");
     expect(items.every((i) => i.label.startsWith("$(circle-outline)"))).toBe(true);
     expect(items[1]!.detail).toStartWith("hub offline");
   });
@@ -81,7 +81,7 @@ describe("machinePickItems", () => {
 
   test("before the hub said hello", () => {
     const { title, items } = machinePickItems({ machine: undefined, machines: {}, devices: [], peer: undefined }, false);
-    expect(title).toBe("Krypto: Machines");
+    expect(title).toBe("Pawl: Machines");
     expect(items).toHaveLength(1);
   });
 });

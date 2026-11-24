@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use krypto_protocol::{
+use pawl_protocol::{
     Agent, EventType, HookPayload, HubEvent, PermissionOutcome, PermissionRequest, PermissionResolvedPayload,
     PlanEntryStatus, PlanPayload, Session, SessionStatus, StopPayload, StopReason, ToolCallPayload, ToolCallStatus,
     ToolKind, UnixMs,
@@ -243,7 +243,7 @@ pub(crate) fn short_status(session: &Session, facts: &SessionFacts, pending: &[P
 }
 
 /// Deterministic summary of one session (no voice decoration). Names the session's machine
-/// once more than one machine is known ("Codex on Mac mini in krypto ...").
+/// once more than one machine is known ("Codex on Mac mini in pawl ...").
 pub(crate) fn deterministic_summary(
     session: &Session,
     facts: &SessionFacts,
@@ -518,14 +518,14 @@ pub(crate) fn daily_report_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krypto_protocol::SessionSource;
+    use pawl_protocol::SessionSource;
     use serde_json::json;
 
     const M: &str = "abcdef012345";
 
     fn hub_event(seq: i64, session_id: &str, kind: EventType, payload: Value, ts: i64) -> HubEvent {
         HubEvent {
-            id: krypto_protocol::global_id(M, seq),
+            id: pawl_protocol::global_id(M, seq),
             seq,
             machine_id: M.into(),
             session_id: session_id.into(),
@@ -546,7 +546,7 @@ mod tests {
             agent_id: "codex".into(),
             acp_session_id: None,
             external_id: None,
-            cwd: "E:\\work\\krypto".into(),
+            cwd: "E:\\work\\pawl".into(),
             title: Some("Fix tests".into()),
             source: SessionSource::Owned,
             status,
@@ -575,7 +575,7 @@ mod tests {
         assert_eq!(f.last_message.as_deref(), Some("Running the tests now."));
         assert_eq!(f.plan, Some((1, 2, Some("fix failures".into()))));
         let s = deterministic_summary(&sess(SessionStatus::Working), &f, &[], &[], &MachineNames::default(), 10);
-        assert!(s.starts_with("Codex in krypto (“Fix tests”) is working on: Run cargo test."), "{s}");
+        assert!(s.starts_with("Codex in pawl (“Fix tests”) is working on: Run cargo test."), "{s}");
         assert!(s.contains("Plan: 1/2 done, next: fix failures."), "{s}");
         let digest = event_digest(&refs, 10);
         assert_eq!(digest[0], "user: run the tests");
@@ -621,13 +621,13 @@ mod tests {
         let all = [a.clone(), b.clone()];
         let names = MachineNames::from_sessions(&all);
         let s = deterministic_summary(&b, &SessionFacts::default(), &[], &[], &names, now);
-        assert!(s.starts_with("Codex on zz9988776655 in krypto"), "{s}");
+        assert!(s.starts_with("Codex on zz9988776655 in pawl"), "{s}");
         let r = daily_report_text(&all, &[], &[], &names, None, now);
         assert!(r.contains("in 1 repo on 2 machines"), "{r}");
-        assert!(r.contains("• Codex on abcdef012345 · krypto: working"), "{r}");
-        assert!(r.contains("Needs you: Codex on zz9988776655 in krypto (waiting for approval)."), "{r}");
+        assert!(r.contains("• Codex on abcdef012345 · pawl: working"), "{r}");
+        assert!(r.contains("Needs you: Codex on zz9988776655 in pawl (waiting for approval)."), "{r}");
         // A single machine is never named.
         let one = MachineNames::from_sessions(std::slice::from_ref(&a));
-        assert!(deterministic_summary(&a, &SessionFacts::default(), &[], &[], &one, now).starts_with("Codex in krypto"));
+        assert!(deterministic_summary(&a, &SessionFacts::default(), &[], &[], &one, now).starts_with("Codex in pawl"));
     }
 }

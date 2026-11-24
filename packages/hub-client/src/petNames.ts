@@ -1,7 +1,7 @@
 // Pet name rules (mirrors the hub's `update_pet` checks): trimmed, 1–40 characters, and
 // not already used by another pet on any known machine (case-insensitive), so paired
 // machines never show two "Biscuit"s.
-import type { Pet } from "@krypto/protocol";
+import type { Pet } from "@pawl/protocol";
 
 export const PET_NAME_MAX = 40;
 

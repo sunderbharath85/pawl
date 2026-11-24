@@ -14,9 +14,9 @@ import {
   renameErrorText,
   sortedMachines,
   startNeedsConfirmation,
-} from "@krypto/hub-client";
-import { SPECIES_META } from "@krypto/pet-engine";
-import type { Agent, Machine, PermissionRequest, Pet, Session, Species } from "@krypto/protocol";
+} from "@pawl/hub-client";
+import { SPECIES_META } from "@pawl/pet-engine";
+import type { Agent, Machine, PermissionRequest, Pet, Session, Species } from "@pawl/protocol";
 import { HubOfflineError, type HubConnection } from "./connection";
 import { installHooks, startHub, type HookTargetId } from "./hubProcess";
 import { machinePickItems } from "./machineList";
@@ -25,8 +25,8 @@ import { machineSuffix, openSettingsErrorText, remoteStartText } from "./remoteT
 import type { PetWebviews } from "./petView";
 import { agentName, errorMessage, isBusy, isInWorkspace, isOpen, relativeTime, sessionLabel } from "./util";
 
-const LAST_AGENT_KEY = "krypto.lastAgentId";
-const LAST_CWD_KEY = "krypto.lastCwd";
+const LAST_AGENT_KEY = "pawl.lastAgentId";
+const LAST_CWD_KEY = "pawl.lastCwd";
 
 type SessionItem = vscode.QuickPickItem & { session: Session };
 type RequestItem = vscode.QuickPickItem & { request: PermissionRequest };
@@ -49,35 +49,35 @@ export class Commands {
         }
       });
     return [
-      reg("krypto.startSession", (agentId?: string, cwd?: string, prompt?: string, machineId?: string) =>
+      reg("pawl.startSession", (agentId?: string, cwd?: string, prompt?: string, machineId?: string) =>
         this.startSession(agentId, cwd, prompt, machineId),
       ),
-      reg("krypto.promptSession", (sessionId?: string, text?: string) => this.promptSession(sessionId, text)),
-      reg("krypto.cancelSession", (sessionId?: string) => this.cancelSession(sessionId)),
-      reg("krypto.approvePending", (requestId?: string) => this.resolvePending(true, requestId)),
-      reg("krypto.denyPending", (requestId?: string) => this.resolvePending(false, requestId)),
-      reg("krypto.showPet", (sessionId?: string) => this.showPet(sessionId)),
-      reg("krypto.openPetPanel", () => this.views.openPanel()),
-      reg("krypto.changeSpecies", (petId?: string, species?: Species) => this.changeSpecies(petId, species)),
-      reg("krypto.renamePet", (petId?: string, name?: string) => this.renamePet(petId, name)),
-      reg("krypto.installHooks", (target?: HookTargetId) => installHooks(this.log, target)),
-      reg("krypto.startHub", () => startHub(this.hub, this.log)),
-      reg("krypto.reconnect", () => this.hub.restart()),
-      reg("krypto.renameMachine", (name?: string) => this.renameMachine(name)),
-      reg("krypto.showMachines", () => this.showMachines()),
-      reg("krypto.openSettings", () => this.openSettings()),
+      reg("pawl.promptSession", (sessionId?: string, text?: string) => this.promptSession(sessionId, text)),
+      reg("pawl.cancelSession", (sessionId?: string) => this.cancelSession(sessionId)),
+      reg("pawl.approvePending", (requestId?: string) => this.resolvePending(true, requestId)),
+      reg("pawl.denyPending", (requestId?: string) => this.resolvePending(false, requestId)),
+      reg("pawl.showPet", (sessionId?: string) => this.showPet(sessionId)),
+      reg("pawl.openPetPanel", () => this.views.openPanel()),
+      reg("pawl.changeSpecies", (petId?: string, species?: Species) => this.changeSpecies(petId, species)),
+      reg("pawl.renamePet", (petId?: string, name?: string) => this.renamePet(petId, name)),
+      reg("pawl.installHooks", (target?: HookTargetId) => installHooks(this.log, target)),
+      reg("pawl.startHub", () => startHub(this.hub, this.log)),
+      reg("pawl.reconnect", () => this.hub.restart()),
+      reg("pawl.renameMachine", (name?: string) => this.renameMachine(name)),
+      reg("pawl.showMachines", () => this.showMachines()),
+      reg("pawl.openSettings", () => this.openSettings()),
     ];
   }
 
   reportError(err: unknown): void {
     if (err instanceof HubOfflineError) {
       void vscode.window.showWarningMessage(err.message, "Start Hub").then((pick) => {
-        if (pick === "Start Hub") void vscode.commands.executeCommand("krypto.startHub");
+        if (pick === "Start Hub") void vscode.commands.executeCommand("pawl.startHub");
       });
       return;
     }
     this.log.error(errorMessage(err));
-    void vscode.window.showErrorMessage(`Krypto: ${errorMessage(err)}`);
+    void vscode.window.showErrorMessage(`Pawl: ${errorMessage(err)}`);
   }
 
   async showPet(sessionId?: string): Promise<void> {
@@ -107,7 +107,7 @@ export class Commands {
     let text = typeof prompt === "string" ? prompt : undefined;
     if (text === undefined) {
       text = await vscode.window.showInputBox({
-        title: `Krypto: Start ${agent.name}${where} in ${path.basename(dir) || dir}`,
+        title: `Pawl: Start ${agent.name}${where} in ${path.basename(dir) || dir}`,
         prompt: "What should the agent do? (leave empty to start an idle session)",
         placeHolder: "e.g. run the tests and fix what fails",
         ignoreFocusOut: true,
@@ -121,7 +121,7 @@ export class Commands {
       await this.context.globalState.update(LAST_CWD_KEY, dir);
     }
     const session = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `Krypto: starting ${agent.name}${where}…` },
+      { location: vscode.ProgressLocation.Notification, title: `Pawl: starting ${agent.name}${where}…` },
       () =>
         api
           .startSession({
@@ -149,7 +149,7 @@ export class Commands {
         label: `$(device-desktop) ${machineDisplayName(m)}`,
         description: m.id === own ? "this machine" : OS_LABEL[m.os] ?? m.os,
       })),
-      { title: "Krypto: Start Session", placeHolder: "Where should the agent run?" },
+      { title: "Pawl: Start Session", placeHolder: "Where should the agent run?" },
     );
     return pick?.id;
   }
@@ -162,13 +162,13 @@ export class Commands {
     if (repos.length > 0) {
       const pick = await vscode.window.showQuickPick(
         [...repos.map((r) => ({ label: `$(repo) ${r.name}`, description: r.path, path: r.path })), { label: TYPE, description: "", path: "" }],
-        { title: `Krypto: working folder on ${name}`, placeHolder: `Only folders ${name} already uses`, matchOnDescription: true },
+        { title: `Pawl: working folder on ${name}`, placeHolder: `Only folders ${name} already uses`, matchOnDescription: true },
       );
       if (!pick) return undefined;
       if (pick.path) return pick.path;
     }
     const typed = await vscode.window.showInputBox({
-      title: `Krypto: working folder on ${name}`,
+      title: `Pawl: working folder on ${name}`,
       prompt: `Only folders ${name} already uses (absolute path); it refuses others.`,
       placeHolder: "/home/me/code/project or C:\\code\\project",
       ignoreFocusOut: true,
@@ -194,13 +194,13 @@ export class Commands {
     if (agents.length === 0) {
       void vscode.window.showWarningMessage(
         remoteAgents
-          ? `Krypto: no agents reported${where}.`
-          : "Krypto: the hub found no agents. Install an ACP agent (e.g. Claude Code or Codex) and try again.",
+          ? `Pawl: no agents reported${where}.`
+          : "Pawl: the hub found no agents. Install an ACP agent (e.g. Claude Code or Codex) and try again.",
       );
       return undefined;
     }
     const preferred =
-      vscode.workspace.getConfiguration("krypto").get<string>("defaultAgent")?.trim() ||
+      vscode.workspace.getConfiguration("pawl").get<string>("defaultAgent")?.trim() ||
       this.context.globalState.get<string>(LAST_AGENT_KEY);
     agents.sort((a, b) => {
       if (a.id === preferred) return -1;
@@ -221,7 +221,7 @@ export class Commands {
       };
     });
     const pick = await vscode.window.showQuickPick(items, {
-      title: `Krypto: Start Session${where}`,
+      title: `Pawl: Start Session${where}`,
       placeHolder: "Which agent?",
       matchOnDescription: true,
       matchOnDetail: true,
@@ -242,7 +242,7 @@ export class Commands {
       const BROWSE = "$(folder-opened) Browse…";
       const pick = await vscode.window.showQuickPick(
         [...repos.map((r) => ({ label: `$(repo) ${r.name}`, description: r.path, path: r.path })), { label: BROWSE, description: "", path: "" }],
-        { title: "Krypto: working directory for the agent", placeHolder: "Pick a repo, or browse for a folder", matchOnDescription: true },
+        { title: "Pawl: working directory for the agent", placeHolder: "Pick a repo, or browse for a folder", matchOnDescription: true },
       );
       if (!pick) return undefined;
       if (pick.path) return pick.path;
@@ -253,7 +253,7 @@ export class Commands {
       canSelectFolders: true,
       canSelectMany: false,
       openLabel: "Use as working directory",
-      title: "Krypto: working directory for the agent",
+      title: "Pawl: working directory for the agent",
       defaultUri: last ? vscode.Uri.file(last) : undefined,
     });
     return chosen?.[0]?.fsPath;
@@ -288,7 +288,7 @@ export class Commands {
   private async pickSession(title: string, filter: (s: Session) => boolean, empty: string): Promise<Session | undefined> {
     const items = this.sessionItems(filter);
     if (items.length === 0) {
-      void vscode.window.showInformationMessage(`Krypto: ${empty}`);
+      void vscode.window.showInformationMessage(`Pawl: ${empty}`);
       return undefined;
     }
     if (items.length === 1) return items[0].session;
@@ -302,9 +302,9 @@ export class Commands {
       typeof sessionId === "string" && sessionId
         ? this.hub.state.sessions[sessionId]
         : await this.pickSession(
-            "Krypto: Prompt Session",
+            "Pawl: Prompt Session",
             (s) => s.source === "owned" && isOpen(s),
-            "no open sessions started by the pet. Use “Krypto: Start Session” first.",
+            "no open sessions started by the pet. Use “Pawl: Start Session” first.",
           );
     if (!session) return;
     if (session.source !== "owned") {
@@ -313,7 +313,7 @@ export class Commands {
     let message = typeof text === "string" ? text : undefined;
     if (message === undefined) {
       message = await vscode.window.showInputBox({
-        title: `Krypto: Prompt ${sessionLabel(session, this.hub.state.agents)}`,
+        title: `Pawl: Prompt ${sessionLabel(session, this.hub.state.agents)}`,
         prompt: isBusy(session) ? "The agent is busy; your message is sent as the next prompt." : undefined,
         placeHolder: "Message for the agent",
         ignoreFocusOut: true,
@@ -328,11 +328,11 @@ export class Commands {
     const session =
       typeof sessionId === "string" && sessionId
         ? this.hub.state.sessions[sessionId]
-        : await this.pickSession("Krypto: Cancel Session", (s) => s.source === "owned" && isBusy(s), "nothing to cancel — no busy sessions.");
+        : await this.pickSession("Pawl: Cancel Session", (s) => s.source === "owned" && isBusy(s), "nothing to cancel — no busy sessions.");
     if (!session) return;
     await api.cancel(session.id).catch((err) => Promise.reject(remoteError(this.hub, session.machineId, "cancel", err)));
     void vscode.window.setStatusBarMessage(
-      `Krypto: cancelled ${agentName(this.hub.state.agents, session.agentId, session.machineId)}`,
+      `Pawl: cancelled ${agentName(this.hub.state.agents, session.agentId, session.machineId)}`,
       3000,
     );
   }
@@ -351,7 +351,7 @@ export class Commands {
         .filter((p) => isLocal(state, p.machineId) || state.machines[p.machineId]?.online === true)
         .sort((a, b) => Number(isLocal(state, b.machineId)) - Number(isLocal(state, a.machineId)) || a.createdAt - b.createdAt);
       if (pending.length === 0) {
-        void vscode.window.showInformationMessage("Krypto: nothing is waiting for approval.");
+        void vscode.window.showInformationMessage("Pawl: nothing is waiting for approval.");
         return;
       }
       if (pending.length === 1) req = pending[0];
@@ -363,7 +363,7 @@ export class Commands {
           detail: request.toolCall.locations?.map((l) => l.path).join(", "),
         }));
         const pick = await vscode.window.showQuickPick(items, {
-          title: approve ? "Krypto: Approve Pending" : "Krypto: Deny Pending",
+          title: approve ? "Pawl: Approve Pending" : "Pawl: Deny Pending",
           placeHolder: approve ? "Approve which request?" : "Deny which request?",
           matchOnDetail: true,
         });
@@ -384,7 +384,7 @@ export class Commands {
     let next = typeof name === "string" ? name : undefined;
     if (next === undefined) {
       next = await vscode.window.showInputBox({
-        title: "Krypto: Rename This Machine",
+        title: "Pawl: Rename This Machine",
         prompt: `Shown above this machine's pets on every paired screen. ${OS_LABEL[machine.os] ?? machine.os} · id ${machine.id}`,
         value: machine.name,
         valueSelection: [0, machine.name.length],
@@ -408,15 +408,15 @@ export class Commands {
       throw new Error(renameErrorText(err));
     }
     this.log.info(`renamed machine ${updated.id} to "${updated.name}"`);
-    void vscode.window.setStatusBarMessage(`Krypto: this machine is now “${updated.name}”`, 4000);
+    void vscode.window.setStatusBarMessage(`Pawl: this machine is now “${updated.name}”`, 4000);
   }
 
   /**
    * Read-only list of this machine and every paired hub with its online state, kept live while open.
-   * Pairing and revoking happen in the desktop app (or `krypto peer …`), not here.
+   * Pairing and revoking happen in the desktop app (or `pawl peer …`), not here.
    */
   /**
-   * Every setting lives in the Krypto desktop app (PLAN.md migration step 5b): ask it to open its Settings view.
+   * Every setting lives in the Pawl desktop app (PLAN.md migration step 5b): ask it to open its Settings view.
    * The hub forwards `open_panel` to connected desktop apps; without one, say so.
    */
   async openSettings(): Promise<void> {
@@ -427,7 +427,7 @@ export class Commands {
       throw new Error(openSettingsErrorText(err));
     }
     if (!delivered) {
-      void vscode.window.showInformationMessage("Open the Krypto desktop app to change settings.");
+      void vscode.window.showInformationMessage("Open the Pawl desktop app to change settings.");
       return;
     }
     this.log.info("asked the desktop app to open Settings");
@@ -435,7 +435,7 @@ export class Commands {
 
   showMachines(): void {
     const qp = vscode.window.createQuickPick<vscode.QuickPickItem>();
-    qp.placeholder = "Read-only. Pair or revoke machines in the Krypto desktop app or with krypto peer.";
+    qp.placeholder = "Read-only. Pair or revoke machines in the Pawl desktop app or with pawl peer.";
     qp.matchOnDescription = true;
     qp.matchOnDetail = true;
     const render = () => {
@@ -468,7 +468,7 @@ export class Commands {
       .filter((p) => isLocal(state, p.machineId))
       .sort((a, b) => a.name.localeCompare(b.name));
     if (pets.length === 0) {
-      void vscode.window.showInformationMessage("Krypto: no pets yet — each agent gets one when the hub discovers it.");
+      void vscode.window.showInformationMessage("Pawl: no pets yet — each agent gets one when the hub discovers it.");
       return undefined;
     }
     if (pets.length === 1) return pets[0];
@@ -486,13 +486,13 @@ export class Commands {
   /** Rename a pet (input box unless `name` is given). Names are unique across every known pet. */
   async renamePet(petId?: string, name?: string): Promise<void> {
     const api = this.hub.api;
-    const pet = await this.pickPet("Krypto: Rename Pet", petId);
+    const pet = await this.pickPet("Pawl: Rename Pet", petId);
     if (!pet) return;
     const others = () => Object.values(this.hub.state.pets);
     let next = typeof name === "string" ? name : undefined;
     if (next === undefined) {
       next = await vscode.window.showInputBox({
-        title: `Krypto: Rename ${pet.name}`,
+        title: `Pawl: Rename ${pet.name}`,
         prompt: `Watches ${agentName(this.hub.state.agents, pet.agentId, pet.machineId)}. Shown above the pet everywhere.`,
         value: pet.name,
         valueSelection: [0, pet.name.length],
@@ -514,12 +514,12 @@ export class Commands {
     } catch (err) {
       throw new Error(petRenameErrorText(err, check.name) ?? errorMessage(err));
     }
-    void vscode.window.setStatusBarMessage(`Krypto: ${SPECIES_META[updated.species].emoji} ${pet.name} is now ${updated.name}`, 4000);
+    void vscode.window.setStatusBarMessage(`Pawl: ${SPECIES_META[updated.species].emoji} ${pet.name} is now ${updated.name}`, 4000);
   }
 
   async changeSpecies(petId?: string, species?: Species): Promise<void> {
     const api = this.hub.api;
-    const chosen = await this.pickPet("Krypto: Change Pet Species", petId);
+    const chosen = await this.pickPet("Pawl: Change Pet Species", petId);
     if (!chosen) return;
     let next = species && species in SPECIES_META ? species : undefined;
     if (!next) {
@@ -529,12 +529,12 @@ export class Commands {
           label: `${SPECIES_META[s].emoji} ${SPECIES_META[s].label}`,
           description: s === chosen.species ? "current" : undefined,
         })),
-        { title: `Krypto: ${chosen.name} should be a…`, placeHolder: "Pick a species" },
+        { title: `Pawl: ${chosen.name} should be a…`, placeHolder: "Pick a species" },
       );
       next = pick?.species;
     }
     if (!next || next === chosen.species) return;
     const updated = await api.updatePet(chosen.id, { species: next });
-    void vscode.window.setStatusBarMessage(`Krypto: ${updated.name} is now a ${SPECIES_META[updated.species].label.toLowerCase()} ${SPECIES_META[updated.species].emoji}`, 4000);
+    void vscode.window.setStatusBarMessage(`Pawl: ${updated.name} is now a ${SPECIES_META[updated.species].label.toLowerCase()} ${SPECIES_META[updated.species].emoji}`, 4000);
   }
 }

@@ -1,6 +1,6 @@
 # Security policy
 
-Krypto approves actions for coding agents on your machine, so a bug here can let an agent or another program run commands, read secrets or change files. Please report security problems privately.
+Pawl approves actions for coding agents on your machine, so a bug here can let an agent or another program run commands, read secrets or change files. Please report security problems privately.
 
 ## Reporting a vulnerability
 
@@ -22,7 +22,7 @@ What to expect:
 
 ## Supported versions
 
-Krypto is pre-1.0. Only the latest commit on `main` gets security fixes. There are no release branches yet.
+Pawl is pre-1.0. Only the latest commit on `main` gets security fixes. There are no release branches yet.
 
 | Version | Supported |
 |---|---|
@@ -33,15 +33,15 @@ Krypto is pre-1.0. Only the latest commit on `main` gets security fixes. There a
 
 This is a summary. The design is in [PLAN.md](PLAN.md) and the interfaces are in [docs/CONTRACTS.md](docs/CONTRACTS.md).
 
-### What Krypto protects
+### What Pawl protects
 
-- **Approvals.** Approving a permission request can let an agent run a command, delete files or reach the network. Only you, through a Krypto client you run, should be able to approve.
+- **Approvals.** Approving a permission request can let an agent run a command, delete files or reach the network. Only you, through a Pawl client you run, should be able to approve.
 - **The hub token.** It authorizes every local API call, including approvals.
 - **Session content.** Prompts, agent messages, tool calls and file paths in `hub.db` and in transit to the clients.
 
 ### Trust boundaries today (single machine)
 
-- **Your OS user account is trusted.** The hub, its data directory (`token`, `config.toml`, `hub.db`, `hub.log`) and the clients run as you. A program that already runs as your user can read the token; Krypto does not defend against that.
+- **Your OS user account is trusted.** The hub, its data directory (`token`, `config.toml`, `hub.db`, `hub.log`) and the clients run as you. A program that already runs as your user can read the token; Pawl does not defend against that.
 - **Web pages are not trusted.** The hub binds `127.0.0.1` only. WebSocket and hook requests need the bearer token, and WebSocket connections with a browser `Origin` are refused unless it is the Tauri app, a VS Code webview or the desktop app's Vite dev server.
 - **Agents are not fully trusted.** Their permission requests go through the rules engine:
   - the first matching rule wins and no match means *ask*;
@@ -54,8 +54,8 @@ This is a summary. The design is in [PLAN.md](PLAN.md) and the interfaces are in
 
 Out of scope for these protections:
 
-- **The agent process itself.** It runs with your user's permissions. Krypto controls what the hub approves over ACP; it does not sandbox the agent, and an agent can still act outside ACP if it has its own tools.
-- **Sessions tracked through hooks.** For agents you start yourself, `krypto hook` only reports events to the hub. Approvals for those sessions stay in the agent's own UI.
+- **The agent process itself.** It runs with your user's permissions. Pawl controls what the hub approves over ACP; it does not sandbox the agent, and an agent can still act outside ACP if it has its own tools.
+- **Sessions tracked through hooks.** For agents you start yourself, `pawl hook` only reports events to the hub. Approvals for those sessions stay in the agent's own UI.
 - **Third-party agents, ACP adapters and the ACP registry.** Report problems in those to their maintainers.
 
 ### Planned: multiple machines and the phone

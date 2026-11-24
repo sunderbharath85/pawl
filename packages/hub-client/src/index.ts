@@ -1,5 +1,5 @@
-// @krypto/hub-client — framework-free core. Browser/webview/Node safe: no React, no Node built-ins here.
-// React binding: "@krypto/hub-client/react". Node credential helpers: "@krypto/hub-client/node".
+// @pawl/hub-client — framework-free core. Browser/webview/Node safe: no React, no Node built-ins here.
+// React binding: "@pawl/hub-client/react". Node credential helpers: "@pawl/hub-client/node".
 export {
   HubClient,
   HubRequestError,

@@ -2,7 +2,7 @@
 // initial setup. Hub sections read and write the hub's config.toml through get_settings / update_settings (local
 // only); Notifications, the strip and This app are desktop preferences on this computer.
 import { useEffect, type ReactNode } from "react";
-import { machineDisplayName, restartText } from "@krypto/hub-client";
+import { machineDisplayName, restartText } from "@pawl/hub-client";
 import { usePanel } from "../context";
 import { AgentsSection } from "./settings/AgentsSection";
 import { AppSection, MachineSection, NotificationsSection, StripSection } from "./settings/AppSections";
@@ -48,7 +48,7 @@ export function SettingsView({ section }: { section?: string | undefined }) {
       <header className="view-head">
         <h1>Settings</h1>
         <p>
-          Everything Krypto does on {state.machine ? machineDisplayName(state.machine) : "this computer"}. Hub settings are saved to its
+          Everything Pawl does on {state.machine ? machineDisplayName(state.machine) : "this computer"}. Hub settings are saved to its
           config.toml and apply right away unless a section says otherwise.
         </p>
       </header>
@@ -99,7 +99,7 @@ function RestartBanner({ keys }: { keys: string[] }) {
         <span>
           {restarting
             ? "It comes back by itself in a few seconds with the saved settings."
-            : "The change is saved; the running hub keeps the old value until it restarts. Restarting ends the sessions Krypto is running, so pick a quiet moment."}
+            : "The change is saved; the running hub keeps the old value until it restarts. Restarting ends the sessions Pawl is running, so pick a quiet moment."}
         </span>
       </div>
       {restarting ? (
@@ -132,7 +132,7 @@ function HubNotice({ hs }: { hs: HubSettingsView }) {
   } else if (!hs.supported) {
     body = (
       <>
-        <strong>This hub is too old to change settings from here.</strong> Update krypto on this machine and restart the hub.
+        <strong>This hub is too old to change settings from here.</strong> Update pawl on this machine and restart the hub.
       </>
     );
   } else if (hs.loadError) {

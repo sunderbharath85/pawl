@@ -1,6 +1,6 @@
 // Start: machine -> repo (that computer's repo index) -> agent (installed there) -> optional first prompt -> confirm
 // with biometrics -> start intent. The computer only starts agents in folders it already knows.
-import type { Agent, RepoRef } from "@krypto/protocol";
+import type { Agent, RepoRef } from "@pawl/protocol";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useMemo, useState, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";

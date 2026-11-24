@@ -1,4 +1,4 @@
-# Krypto — Contracts & Ownership (read before coding)
+# Pawl — Contracts & Ownership (read before coding)
 
 Plan: `PLAN.md`. This file fixes the interfaces so parallel engineers can build
 against each other without waiting. **Code against these APIs exactly.** If one
@@ -12,7 +12,7 @@ another owner's files.
   `package.json`, `tsconfig.base.json`, `docs/CONTRACTS.md`,
   `packages/protocol`, `crates/protocol`) are orchestrator-owned: read-only for you.
 - Wire types: `packages/protocol/src/index.ts` (TS, source of truth) and
-  `crates/protocol/src/lib.rs` (Rust mirror, crate `krypto-protocol`). Import them; never redefine.
+  `crates/protocol/src/lib.rs` (Rust mirror, crate `pawl-protocol`). Import them; never redefine.
 - E2E tests are out of scope for now. Write real, working code; keep it compiling
   (`cargo check -p <crate>` / `tsc --noEmit`). Small unit tests are welcome where cheap.
 - bun (TypeScript toolchain + package manager, workspaces in root package.json): never run bare `bun install`/`bun add` — parallel installs race on bun.lock and node_modules. Use `bash scripts/bun-locked.sh install` or
@@ -31,38 +31,38 @@ another owner's files.
 
 | Role | Owns | Package/crate |
 |---|---|---|
-| sde-acp | `crates/acp/` | `krypto-acp` |
-| sde-hub | `crates/hub/` | `krypto-hub` (lib + bin `krypto`) |
-| sde-discovery | `crates/discovery/` | `krypto-discovery` |
-| sde-brain | `crates/brain/` | `krypto-brain` |
-| sde-relay (wave 2) | `crates/relay-link/`, `services/relay/` | `krypto-relay-link`, `@krypto/relay` |
-| fe-engine | `packages/pet-engine/`, `packages/hub-client/` | `@krypto/pet-engine`, `@krypto/hub-client` |
-| fe-desktop | `apps/desktop/` (incl. `src-tauri/`) | `@krypto/desktop` |
-| fe-vscode | `apps/vscode/` | `krypto-vscode` |
-| fe-mobile (wave 2) | `apps/mobile/` | `@krypto/mobile` |
+| sde-acp | `crates/acp/` | `pawl-acp` |
+| sde-hub | `crates/hub/` | `pawl-hub` (lib + bin `pawl`) |
+| sde-discovery | `crates/discovery/` | `pawl-discovery` |
+| sde-brain | `crates/brain/` | `pawl-brain` |
+| sde-relay (wave 2) | `crates/relay-link/`, `services/relay/` | `pawl-relay-link`, `@pawl/relay` |
+| fe-engine | `packages/pet-engine/`, `packages/hub-client/` | `@pawl/pet-engine`, `@pawl/hub-client` |
+| fe-desktop | `apps/desktop/` (incl. `src-tauri/`) | `@pawl/desktop` |
+| fe-vscode | `apps/vscode/` | `pawl-vscode` |
+| fe-mobile (wave 2) | `apps/mobile/` | `@pawl/mobile` |
 | art-sprites | `assets/pets/`, `scripts/art/` | sprite sheets + manifest |
 
 ## Runtime facts
 
-- Hub binds **only** `127.0.0.1:47800` (override `KRYPTO_HUB_URL` / `--port`).
-- Data dir: `krypto_protocol::data_dir()` = `dirs::data_dir()/krypto`
-  (Windows `%APPDATA%\krypto`, macOS `~/Library/Application Support/krypto`,
-  Linux `~/.local/share/krypto`). Contains `machine.toml` (`id`, `name`: this machine's identity; never edit `id`), `hub.db` (SQLite), `token`,
+- Hub binds **only** `127.0.0.1:47800` (override `PAWL_HUB_URL` / `--port`).
+- Data dir: `pawl_protocol::data_dir()` = `dirs::data_dir()/pawl`
+  (Windows `%APPDATA%\pawl`, macOS `~/Library/Application Support/pawl`,
+  Linux `~/.local/share/pawl`). Contains `machine.toml` (`id`, `name`: this machine's identity; never edit `id`), `hub.db` (SQLite), `token`,
   `config.toml`, `registry-cache.json`, `device.key` (X25519 secret for peer links; never read by clients, never logged).
 - `token`: 32 random bytes hex, created by the hub on first start. Clients read it
-  (env `KRYPTO_HUB_TOKEN` overrides).
-- Endpoints (crate `krypto-hub`):
+  (env `PAWL_HUB_TOKEN` overrides).
+- Endpoints (crate `pawl-hub`):
   - `GET  /health` → `{"ok":true,"version":"x"}` (no auth)
   - `GET  /ws` → WebSocket. First frame `hello{token}`. Reject non-empty `Origin`
     headers other than `vscode-webview://*`, `tauri://localhost`, `http://tauri.localhost`,
     `https://tauri.localhost`, `http://localhost:1420` (vite dev). Browsers can reach localhost; this blocks drive-by pages.
   - `POST /hooks/{claude|codex|copilot}` with `Authorization: Bearer <token>`, body = raw hook JSON → `{"ok":true}`.
-- Hook forwarding: agents' hook configs call `krypto hook <source>` which reads
+- Hook forwarding: agents' hook configs call `pawl hook <source>` which reads
   stdin JSON and POSTs it (fails silently in <2 s if the hub is down; never blocks the agent).
 
 ## Rust crate APIs
 
-### `krypto-acp` (sde-acp) — ACP client host
+### `pawl-acp` (sde-acp) — ACP client host
 
 Uses the official `agent-client-protocol` crate (check docs.rs for the current API).
 Spawns agents as stdio subprocesses. If the crate's futures are `!Send`, run each
@@ -72,13 +72,13 @@ public API below MUST be `Send + Sync + Clone`.
 ```rust
 pub enum HostEvent {
     /// Upsert (status changes, title, ended).
-    Session(krypto_protocol::Session),
+    Session(pawl_protocol::Session),
     /// Normalized ACP update for the event log. payload = protocol payload shapes
     /// (TextPayload, ToolCallPayload, PlanPayload, StopPayload, ErrorPayload).
-    Event { session_id: SessionId, kind: krypto_protocol::EventType, payload: serde_json::Value },
+    Event { session_id: SessionId, kind: pawl_protocol::EventType, payload: serde_json::Value },
     /// Agent asked `session/request_permission`. Host waits for resolve_permission().
-    PermissionRequest(krypto_protocol::PermissionRequest),
-    AgentCapabilities { agent_id: AgentId, capabilities: krypto_protocol::AgentCapabilities },
+    PermissionRequest(pawl_protocol::PermissionRequest),
+    AgentCapabilities { agent_id: AgentId, capabilities: pawl_protocol::AgentCapabilities },
 }
 
 #[derive(Clone)]
@@ -108,7 +108,7 @@ stop end_turn → `done` (session stays open, idle for next prompt); refusal/err
 Client-side ACP capabilities: implement `fs/read_text_file` + `fs/write_text_file`
 (restricted to the session cwd), terminals optional (advertise false if not implemented).
 
-### `krypto-discovery` (sde-discovery) — agents + hooks
+### `pawl-discovery` (sde-discovery) — agents + hooks
 
 ```rust
 pub struct CustomAgent { pub id: String, pub name: String, pub command: Vec<String>, pub env: Option<BTreeMap<String,String>> }
@@ -133,16 +133,16 @@ pub mod hooks {
         pub notification: Option<(NotificationLevel, String, String)>, // (level, title, body) worth surfacing
     }
     pub fn normalize(source: HookSource, raw: serde_json::Value) -> Option<NormalizedHook>;
-    /// Used by `krypto hook <source>`: read stdin JSON, POST to hub, 2s timeout, never error loudly.
+    /// Used by `pawl hook <source>`: read stdin JSON, POST to hub, 2s timeout, never error loudly.
     pub async fn forward(source: HookSource, raw: serde_json::Value, hub_url: &str, token: &str) -> anyhow::Result<()>;
-    /// Config snippets/merges for: ~/.claude/settings.json, ~/.codex/config.toml (notify), ~/.copilot/hooks/krypto.json,
-    /// .github/hooks/krypto.json. `apply=false` returns a dry-run diff text; `apply=true` merges (backup file first).
+    /// Config snippets/merges for: ~/.claude/settings.json, ~/.codex/config.toml (notify), ~/.copilot/hooks/pawl.json,
+    /// .github/hooks/pawl.json. `apply=false` returns a dry-run diff text; `apply=true` merges (backup file first).
     pub fn install(target: HookTarget, hub_exe: &Path, apply: bool) -> anyhow::Result<String>;
     pub enum HookTarget { Claude, Codex, CopilotCli, CopilotVscode { repo: PathBuf } }
 }
 ```
 
-### `krypto-brain` (sde-brain) — rules, bot, watchdog, pet growth
+### `pawl-brain` (sde-brain) — rules, bot, watchdog, pet growth
 
 ```rust
 pub mod rules {
@@ -185,18 +185,18 @@ pub mod growth {
 Anthropic calls: plain `reqwest` POST `https://api.anthropic.com/v1/messages`,
 headers `x-api-key`, `anthropic-version: 2023-06-01`; model default `claude-haiku-5-5`.
 
-### `krypto-hub` (sde-hub) — the daemon
+### `pawl-hub` (sde-hub) — the daemon
 
 Modules: `config` (data dir, token, config.toml: port, custom agents, rules, brain), `store` (rusqlite bundled; tables agents, sessions, events, pets, rules, chat, audit_log), `bus` (tokio broadcast of `ServerMsg`), `server` (axum: /health, /ws, /hooks/:source), `core` (owns AcpHost, discovery results, rules, brain, watchdog; merges ACP + hook feeds into sessions/events; applies rules to permission requests; writes audit log for every approval), `notify` (desktop notifications are a client concern — hub only emits `notification` msgs).
-CLI (`clap`): `krypto serve [--port]`, `agents [--refresh]`, `sessions`, `start <agent> --cwd <dir> [--prompt <text>]` (talks to a running hub over WS if up, else runs in-process and streams events to stdout), `hook <source>`, `install-hooks <claude|codex|copilot-cli|copilot-vscode> [--apply]`, `token`.
+CLI (`clap`): `pawl serve [--port]`, `agents [--refresh]`, `sessions`, `start <agent> --cwd <dir> [--prompt <text>]` (talks to a running hub over WS if up, else runs in-process and streams events to stdout), `hook <source>`, `install-hooks <claude|codex|copilot-cli|copilot-vscode> [--apply]`, `token`.
 Relay integration is wave 2 (sde-relay will add it behind a `relay` module).
 
 ## TypeScript package APIs
 
-### `@krypto/hub-client` (fe-engine) — works in browser, Tauri webview, VS Code webview and Node
+### `@pawl/hub-client` (fe-engine) — works in browser, Tauri webview, VS Code webview and Node
 
 ```ts
-import type { ClientMsg, ServerMsg, AckResults, ClientKind, Agent, Session, Pet, PermissionRequest, HubEvent, ChatMessage, HubNotification, Rule } from "@krypto/protocol";
+import type { ClientMsg, ServerMsg, AckResults, ClientKind, Agent, Session, Pet, PermissionRequest, HubEvent, ChatMessage, HubNotification, Rule } from "@pawl/protocol";
 export interface HubState {
   status: "disconnected" | "connecting" | "connected" | "unauthorized";
   agents: Agent[]; sessions: Record<string, Session>; pets: Record<string, Pet>;
@@ -226,20 +226,20 @@ export class HubClient {
   listHistory(agentId: string, cwd?: string): Promise<HistorySession[]>;
   resumeSession(agentId: string, acpSessionId: string, cwd: string): Promise<Session>;
 }
-// subpath "@krypto/hub-client/react"
+// subpath "@pawl/hub-client/react"
 export function useHubState(client: HubClient): HubState;
-// subpath "@krypto/hub-client/node" (Node only; never import from browser code)
+// subpath "@pawl/hub-client/node" (Node only; never import from browser code)
 export interface HubCredentials { url: string /* ws */; httpUrl: string; token: string; tokenSource: "env" | "file"; dataDir: string; tokenFile: string }
 export function readHubCredentials(opts?: HubCredentialsOptions): HubCredentials;   // sync; throws HubCredentialsError if no token
 export function tryReadHubCredentials(opts?: HubCredentialsOptions): HubCredentials | null;
-// Env KRYPTO_HUB_TOKEN / KRYPTO_HUB_URL (http or ws form) override. Extras (non-breaking): HubState.hubVersion/lastError,
+// Env PAWL_HUB_TOKEN / PAWL_HUB_URL (http or ws form) override. Extras (non-breaking): HubState.hubVersion/lastError,
 // HubClient.setToken/listSessions/setRules/wsUrl; PetStage/PetBubble callbacks may return Promise (buttons disabled while pending).
 ```
 
-### `@krypto/pet-engine` (fe-engine)
+### `@pawl/pet-engine` (fe-engine)
 
 ```ts
-import type { Species, Session, HubEvent, PermissionRequest, Pet } from "@krypto/protocol";
+import type { Species, Session, HubEvent, PermissionRequest, Pet } from "@pawl/protocol";
 export type PetActivity = "napping" | "idle" | "thinking" | "working" | "planning" | "alert" | "happy" | "sad";
 export interface PetView { petId: string; agentId: string; species: Species; name: string; activity: PetActivity; since: number;
   bubble?: { text: string; kind: "say" | "permission"; requestId?: string }; sessionId?: string; mood: number; }
@@ -250,7 +250,7 @@ export function activityForEvent(e: HubEvent): PetActivity | null;
 export function derivePetViews(input: { pets: Pet[]; sessions: Session[]; pending: PermissionRequest[]; lastEvents: Record<string, HubEvent | undefined>; now: number }): PetView[];
 export function petLine(species: Species, activity: PetActivity, seed?: number): string; // flavor text ("Woof! Need you!")
 export const SPECIES_META: Record<Species, { label: string; emoji: string; sound: string }>;
-// subpath "@krypto/pet-engine/react" — pure SVG + CSS keyframes, no assets needed (Rive later)
+// subpath "@pawl/pet-engine/react" — pure SVG + CSS keyframes, no assets needed (Rive later)
 export function PetSprite(props: { species: Species; activity: PetActivity; size?: number; facing?: "left" | "right"; walking?: boolean; skin?: string }): JSX.Element;
 export function PetBubble(props: { view: PetView; onApprove?: () => void; onDeny?: () => void; onClick?: () => void }): JSX.Element | null;
 export function PetStage(props: { views: PetView[]; width: number; onApprove(requestId: string): void; onDeny(requestId: string): void; onPetClick?(petId: string): void }): JSX.Element; // pets walk/idle along a strip
@@ -260,7 +260,7 @@ Both packages: `"type":"module"`, `main`/`types`/`exports` point at `src/*.ts(x)
 ## Relay (wave 2, sde-relay + fe-mobile)
 
 - Crypto: NaCl box (X25519 + XSalsa20-Poly1305, 24-byte nonce). Rust `crypto_box::SalsaBox`; TS `tweetnacl` `nacl.box`. Base64 (standard) on the wire.
-- Pairing QR: `krypto://pair?relay=<https-url>&hub=<hubId>&pk=<hubPkB64>&code=<8 chars>` (code one-time, 5 min).
+- Pairing QR: `pawl://pair?relay=<https-url>&hub=<hubId>&pk=<hubPkB64>&code=<8 chars>` (code one-time, 5 min).
 - Relay frames (JSON over WS `wss://<relay>/v1/connect?role=hub|device|pairing&hubId=..`):
   `{t:"msg", from, to, nonce, box}` (box = encrypted UTF-8 JSON of a protocol `ClientMsg`/`ServerMsg`),
   `{t:"pair_request", deviceId, devicePk, deviceName, code}`, `{t:"pair_ok", deviceId, nonce, box}`,
@@ -313,16 +313,16 @@ Rules: **every id on the wire is global** (`${machineId}:${localId}`). Hubs stor
 
 ### Rust API changes (sde-libs implements; sde-hubcore codes against them)
 ```rust
-// krypto-acp
+// pawl-acp
 impl AcpHost { pub fn new(machine_id: MachineId, events: UnboundedSender<HostEvent>) -> Self; }
 // every Session / HistorySession / PermissionRequest / HubEvent payload it builds carries machine_id;
 // request ids are global: global_id(machine_id, uuid). hub_session_id passed in is already global.
 
-// krypto-discovery
+// pawl-discovery
 pub struct DiscoveryConfig { pub machine_id: MachineId, /* existing fields */ }  // Agent.machine_id = cfg.machine_id
 // hooks::NormalizedHook unchanged (hub assigns machine ids)
 
-// krypto-brain
+// pawl-brain
 pub fn growth::default_pet(agent: &Agent, taken_names: &[String]) -> Pet;
 //   id = global_id(&agent.machine_id, format!("pet-{}", agent.id)) (deterministic, one per agent per machine)
 //   name seeded by fnv1a(machine_id + "/" + agent_id); skip names in taken_names (case-insensitive) — pass the
@@ -336,7 +336,7 @@ impl Watchdog { pub fn new(cfg: WatchdogConfig, machine_id: MachineId) -> Self; 
 - `data_dir/machine.toml` `{ id, name }`: id generated once (12 chars `[a-z0-9]` from a CSPRNG), name defaults
   to the host name (Windows `COMPUTERNAME`, macOS `scutil --get ComputerName`, Linux `/etc/hostname`, else "This machine").
   No new dependencies.
-- CLI: `krypto machine` (print id/name/os), `krypto machine --name "Windows PC"` (works with or without a running hub;
+- CLI: `pawl machine` (print id/name/os), `pawl machine --name "Windows PC"` (works with or without a running hub;
   a running hub broadcasts `ServerMsg::Machine`).
 - Store migration (schema v2): add `machine_id` columns; rewrite existing ids to global form; events keep rowid as seq.
 - Welcome: `machine` + `machines` (`[self]` for now, online=true, lastSeen=now).
@@ -350,7 +350,7 @@ impl Watchdog { pub fn new(cfg: WatchdogConfig, machine_id: MachineId) -> Self; 
   `machines?: Record<MachineId, Machine>`; pets match sessions/pending by `(machineId, agentId)`; `PetStage.showNames`
   defaults to **true**; name label shows `name` (visitors area comes in step 3).
 - desktop/vscode (fe-apps): show pet names by default; show the machine name (panel header / status-bar tooltip);
-  desktop Settings + VS Code command "Krypto: Rename This Machine" call `updateMachine`; use `seq` cursors.
+  desktop Settings + VS Code command "Pawl: Rename This Machine" call `updateMachine`; use `seq` cursors.
 - mobile: frozen; only keep `bunx tsc --noEmit` green against protocol v2 (fe-core does the minimal type fixes).
 
 ## Step 2 — Pairing + LAN presence (PLAN.md migration step 2) — protocol v3
@@ -369,13 +369,13 @@ Peer frames never reach ClientMsg handling: a peer can only pair, say hello, sen
 ### Ownership (step 2)
 | Role | Owns |
 |---|---|
-| sde-peer | `crates/peer/` (`krypto-peer`, new; skeleton exists) |
+| sde-peer | `crates/peer/` (`pawl-peer`, new; skeleton exists) |
 | sde-hubcore | `crates/hub/` |
 | fe-apps | `apps/desktop/`, `apps/vscode/`, `packages/hub-client/` |
 
 Dependencies: `crypto_box` is the only new one (approved; sde-peer adds it to `crates/peer/Cargo.toml`).
 Reuse the versions the hub already uses for `axum 0.8 (ws)`, `tokio-tungstenite 0.29`, `getrandom 0.4`, `subtle`,
-`hex`. Base64 is hand-rolled in `krypto-peer` (no `base64` crate). Ask t13 before adding anything else.
+`hex`. Base64 is hand-rolled in `pawl-peer` (no `base64` crate). Ask t13 before adding anything else.
 
 ### Crypto + wire
 - Device key: X25519 secret in `data_dir/device.key` (64 hex chars; unix mode 0600). Created on first start from
@@ -387,7 +387,7 @@ Reuse the versions the hub already uses for `axum 0.8 (ws)`, `tokio-tungstenite 
   sender). The TS side (step 7) must use the same layout.
 - `seq`: sender uses `max(last_tx + 1, now_ms * 1000)` per peer and persists `last_tx`; receiver accepts only
   `seq > last_rx` for that peer and persists `last_rx`. Survives restarts on both sides.
-- Invite URI: `krypto://peer?v=1&mid=<machineId>&pk=<b64url pk>&addr=<host:port>&code=<b64url 16 random bytes>&exp=<unix ms>`.
+- Invite URI: `pawl://peer?v=1&mid=<machineId>&pk=<b64url pk>&addr=<host:port>&code=<b64url 16 random bytes>&exp=<unix ms>`.
   Code: CSPRNG, single use (consumed on the first matching attempt even if a later step fails), compared in constant
   time (`subtle`), held in memory only, never logged. TTL 60..=3600 s, default 600. A wrong code does NOT burn
   invites (anyone who knows the hub's public key could block pairing); instead pair attempts are rate-limited
@@ -409,7 +409,7 @@ Reuse the versions the hub already uses for `axum 0.8 (ws)`, `tokio-tungstenite 
 4. B: decrypt `pair_accept` with A.pk from the URI, store A (addr from the URI); the link is live.
 
 ### Links + presence
-- Listener (opt-in, off by default): `krypto serve --peer-listen <ip[:port]>` or config.toml `[peer] listen = "ip:port"`
+- Listener (opt-in, off by default): `pawl serve --peer-listen <ip[:port]>` or config.toml `[peer] listen = "ip:port"`
   (default port 47801). Serves **only** `GET /peer` (WebSocket); every other path 404; any request carrying an
   `Origin` header -> 403 (blocks browsers); max WebSocket frame/message 320 KiB (a 216 KiB body is ~288 KiB boxed + base64; raised in step 3); an unauthenticated socket must send a valid first frame
   within 5 s; at most 16 unauthenticated sockets at once. Binding 0.0.0.0 / :: logs a warning. It never exposes the
@@ -424,7 +424,7 @@ Reuse the versions the hub already uses for `axum 0.8 (ws)`, `tokio-tungstenite 
 - Revoke: `bye{revoked}` on the live link, close, mark revoked, stop dialing. Receiving `bye{revoked}` marks the
   sender revoked too (mutual). Audit-log both.
 
-### `krypto-peer` API (sde-peer implements; sde-hubcore codes against it)
+### `pawl-peer` API (sde-peer implements; sde-hubcore codes against it)
 ```rust
 pub mod b64 { pub fn encode(b: &[u8]) -> String; pub fn decode(s: &str) -> Result<Vec<u8>, B64Error>;
               pub fn encode_url(b: &[u8]) -> String; pub fn decode_url(s: &str) -> Result<Vec<u8>, B64Error>; }
@@ -499,9 +499,9 @@ Error enums implement `Display` with the snake_case wire codes (`bad_uri`, `self
 - PeerEvents -> `ServerMsg::Machine` (online flips, renames), `MachineRemoved`, `Devices`. Welcome: `machines` = self
   then roster hubs (`online` from `PeerNode::online()`), `devices`, `peer`.
 - ClientMsgs `create_invite`, `join_peer`, `revoke_device` per the protocol doc comments.
-- CLI: `krypto serve --peer-listen <ip[:port]>`; `krypto peer invite [--ttl <secs>] [--addr <host:port>]` (prints the URI,
-  the expiry and the exact `krypto peer join "<uri>"` line); `krypto peer join <uri>`; `krypto peer revoke <machineId|name>`;
-  `krypto machines [--json]` (online, last seen, addr; works without a hub from hub.db, showing peers offline).
+- CLI: `pawl serve --peer-listen <ip[:port]>`; `pawl peer invite [--ttl <secs>] [--addr <host:port>]` (prints the URI,
+  the expiry and the exact `pawl peer join "<uri>"` line); `pawl peer join <uri>`; `pawl peer revoke <machineId|name>`;
+  `pawl machines [--json]` (online, last seen, addr; works without a hub from hub.db, showing peers offline).
   invite/join/revoke need a running hub.
 
 ### Clients (fe-apps)
@@ -510,9 +510,9 @@ Error enums implement `Display` with the snake_case wire codes (`bad_uri`, `self
   `joinPeer(uri)`, `revokeDevice(deviceId)`. Tests for the reducers.
 - Desktop panel "Machines" view: this machine first, then paired hubs (online dot, OS, last seen, addr), Revoke with an
   in-app confirm (no browser `confirm()`); "Pair a machine": Create invite -> URI + copy button + expiry countdown +
-  the CLI line, and a Join field (paste a URI). Listener off -> show how to turn it on (`krypto serve --peer-listen
+  the CLI line, and a Join field (paste a URI). Listener off -> show how to turn it on (`pawl serve --peer-listen
   <LAN-IP>` or config.toml `[peer] listen`). Friendly text for every error code. Sidebar shows "N machines · M online".
-- VS Code: status-bar tooltip lists machines with online state; command "Krypto: Show Machines" (read-only QuickPick).
+- VS Code: status-bar tooltip lists machines with online state; command "Pawl: Show Machines" (read-only QuickPick).
   No pairing UI in VS Code.
 - Remote pets and sessions are not shown yet (step 3).
 
@@ -675,8 +675,8 @@ No new dependencies expected; ask t13 first.
   "Runs on Mac mini". VS Code "New session" gets the same picker as a QuickPick.
 - hub-client: `resolvePermission(requestId, optionId, {confirmed})`, `startSession({..., machineId, confirmed})`,
   `listAgents({machineId})`, `needsConfirmation(state, request, optionId)` helper, error-text helper for the new codes.
-- CLI (sde-hubcore): `krypto start <agent> --cwd <dir> --machine <name|id> [--yes]` asks "Start claude-code on
-  Mac mini in <cwd>? [y/N]" unless --yes; `krypto approve <requestId> [--option <id>] [--yes]` and `krypto deny <requestId>`
+- CLI (sde-hubcore): `pawl start <agent> --cwd <dir> --machine <name|id> [--yes]` asks "Start claude-code on
+  Mac mini in <cwd>? [y/N]" unless --yes; `pawl approve <requestId> [--option <id>] [--yes]` and `pawl deny <requestId>`
   work for local and remote requests. A remote approve always asks interactively on the terminal (it needs a TTY;
   `--yes` is NOT honoured for remote approvals, so a script cannot approve on another machine).
 
@@ -748,8 +748,8 @@ start, local target still yields a BrainAction, and that no LLM path can produce
   no control chars; stored per peer (persist like agents).
 - `list_repos{machineId?}`; BrainContext wiring (remote_agents, repos, pets of all machines); chat replies store and
   broadcast `ChatMessage.proposals`.
-- CLI: `krypto repos [--machine <name|id>] [--json]`; `krypto start <agent> --machine X --repo <name>` (repo name ->
-  path via that machine's index; ambiguous/unknown -> error listing names); `krypto chat "<text>"` prints the reply
+- CLI: `pawl repos [--machine <name|id>] [--json]`; `pawl start <agent> --machine X --repo <name>` (repo name ->
+  path via that machine's index; ambiguous/unknown -> error listing names); `pawl chat "<text>"` prints the reply
   and numbered proposals, `--pick N` executes proposal N through the normal path (remote start still asks on the TTY).
 
 ### Clients (fe-apps)
@@ -772,7 +772,7 @@ the LAN link stays the preferred fast path with relay fallback. The relay sees p
 ### Ownership (step 6, phase A — runs in parallel with steps 5 / 5b)
 | Role | Owns |
 |---|---|
-| sde-relay (new) | `services/relay/` (`@krypto/relay`, Cloudflare Worker + Durable Objects) |
+| sde-relay (new) | `services/relay/` (`@pawl/relay`, Cloudflare Worker + Durable Objects) |
 | sde-peer | `crates/peer/` (relay transport) |
 Phase B (after 5b): sde-hubcore wires `[relay]` settings + status into the hub; fe-apps adds the relay settings UI.
 
@@ -846,7 +846,7 @@ Dependencies approved by the user ("complete all steps, use recommended choices"
   `Invite::parse` accepts these params (still strict otherwise).
 - Tests: an in-process mock relay (Rust, tokio-tungstenite server implementing the frames above) — auth, allow,
   relay-only pairing, link over relay, LAN takeover and fallback, from/env.from mismatch dropped, relay restart
-  reconnect. Gate: cargo test -p krypto-peer + clippy -D warnings.
+  reconnect. Gate: cargo test -p pawl-peer + clippy -D warnings.
 
 ## Step 5b — Settings in the UI (PLAN.md migration step 5b) — protocol v7
 
@@ -881,15 +881,15 @@ keeping comments). Nothing else without asking t13.
 - Settings audit: every update logged with client kind, changed keys (never secret values) and time.
 - Settings calls are local-only by construction (only local WebSocket clients send ClientMsgs); no peer body, intent,
   mirror or relay frame may ever reach them. Test that.
-- `hook_status` / `install_hooks{target, action: "preview" | "apply" | "remove"}` reuse `krypto-discovery`'s hook
-  install code (the same code as `krypto install-hooks`); preview returns the exact change without writing.
+- `hook_status` / `install_hooks{target, action: "preview" | "apply" | "remove"}` reuse `pawl-discovery`'s hook
+  install code (the same code as `pawl install-hooks`); preview returns the exact change without writing.
 - `open_panel{view}` -> broadcast `ServerMsg open_panel{view}` (VS Code asks the desktop app to open a view).
 - `restart_hub`: ack, spawn a replacement (`current_exe` with the same args, detached; it retries binding the port for
   ~10 s), send `bye{shutdown}` to peers, exit. The UI confirms first ("running sessions end").
-- `data_dir/runtime.json` `{port, pid, startedAt}` is written at startup (removed on clean exit). `krypto hook`, the
+- `data_dir/runtime.json` `{port, pid, startedAt}` is written at startup (removed on clean exit). `pawl hook`, the
   desktop app and VS Code resolve the port from it first, then config.toml, so a saved-but-not-yet-applied port change
   never loses hook events.
-- CLI stays as is (initial setup); add `krypto settings [--json]` (print effective settings, secrets masked).
+- CLI stays as is (initial setup); add `pawl settings [--json]` (print effective settings, secrets masked).
 - Tests: validation table, toml_edit round-trip keeps comments, runtime apply (listener on/off, accept_intents,
   start_roots), restartRequired for port, audit rows without secret values, hooks preview does not write.
 
@@ -906,8 +906,8 @@ keeping comments). Nothing else without asking t13.
   remote control, adding a start root, adding or changing a custom agent command, removing hooks.
 - First-run setup (desktop, shown once; reopen from Settings): hub running? (start it) -> name this machine ->
   install hooks for the agents found (preview + apply) -> optional: turn on the listener and pair a machine.
-- VS Code: command "Krypto: Open Settings" -> `openPanel("settings")`; if no desktop app is connected, say
-  "Open the Krypto desktop app to change settings". Desktop handles `open_panel` by showing the panel at that view.
+- VS Code: command "Pawl: Open Settings" -> `openPanel("settings")`; if no desktop app is connected, say
+  "Open the Pawl desktop app to change settings". Desktop handles `open_panel` by showing the panel at that view.
 
 ## Step 7 — Phone (PLAN.md migration step 7) — protocol v8
 
@@ -948,7 +948,7 @@ tweetnacl. Nothing else without asking t13.
 
 ### Phone as a peer
 - Over the relay only. After hello the phone sends `sync_request` to every hub and keeps a mirror (reuse
-  @krypto/hub-client reducers: MirrorUpdate variants match ServerMsg variants).
+  @pawl/hub-client reducers: MirrorUpdate variants match ServerMsg variants).
 - Intents from a phone use `client: "mobile"`. Approve requires a successful biometric check
   (expo-local-authentication) on the phone before `confirmed: true`; no biometrics available -> device passcode; neither ->
   approvals disabled with an explanation. The step-4 owner rules apply unchanged.

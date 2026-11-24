@@ -1,7 +1,7 @@
 // Screen-level actions: every approve / start goes through the biometric gate first; results become short,
 // friendly text. Deny, prompt and cancel need no confirmation (step-4 rules).
-import { describePermission } from "@krypto/pet-engine";
-import type { PermissionRequest } from "@krypto/protocol";
+import { describePermission } from "@pawl/pet-engine";
+import type { PermissionRequest } from "@pawl/protocol";
 import { useCallback, useEffect, useState } from "react";
 import { tapHaptic } from "@/components/ui";
 import { phoneIntentErrorText, type GateAvailability, type IntentApplied, type PhoneSnapshot } from "@/lib/peer";

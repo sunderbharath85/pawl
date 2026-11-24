@@ -1,4 +1,4 @@
-// HubClient: framework-free WebSocket client for the Krypto hub.
+// HubClient: framework-free WebSocket client for the Pawl hub.
 // Works with the browser/webview `WebSocket`, Node's global `WebSocket` (Node 22+) and the `ws` package
 // (pass it as `WebSocketImpl`). No DOM, Node or React imports here.
 import type {
@@ -22,8 +22,8 @@ import type {
   ServerMsg,
   Session,
   Welcome,
-} from "@krypto/protocol";
-import { INTENT_TIMEOUT_MS, parseGlobalId, USER_ACTIVITY_REPORT_MS, type MachineId } from "@krypto/protocol";
+} from "@pawl/protocol";
+import { INTENT_TIMEOUT_MS, parseGlobalId, USER_ACTIVITY_REPORT_MS, type MachineId } from "@pawl/protocol";
 import {
   applyAck,
   applyWelcome,
@@ -585,7 +585,7 @@ export class HubClient {
   async joinPeer(uri: string): Promise<AckResults["join_peer"]> {
     const trimmed = uri.trim();
     const info = parseInviteUri(trimmed);
-    if (!info) throw new HubRequestError("bad_uri", "join_peer", "not a Krypto pairing invite");
+    if (!info) throw new HubRequestError("bad_uri", "join_peer", "not a Pawl pairing invite");
     if (info.machineId === this.state.machine?.id) {
       throw new HubRequestError("self_invite", "join_peer", "the invite was created by this hub");
     }

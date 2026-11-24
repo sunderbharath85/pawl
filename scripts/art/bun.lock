@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@krypto/art",
+      "name": "@pawl/art",
       "dependencies": {
         "sharp": "^0.35.5",
       },

@@ -33,7 +33,7 @@ function sample(addr: string): Invite {
 }
 
 function withRelay(addr: string | null): Invite {
-  return { ...sample("10.0.0.2:47801"), addr, relay: "wss://relay.krypto.dev/r", relayToken: code(), relayKey: "k3y_-AZ" };
+  return { ...sample("10.0.0.2:47801"), addr, relay: "wss://relay.pawl.dev/r", relayToken: code(), relayKey: "k3y_-AZ" };
 }
 
 describe("invite", () => {
@@ -41,7 +41,7 @@ describe("invite", () => {
     for (const addr of ["192.168.1.5:47801", "mac-mini.local:47801", "[fe80::1]:47801", "[::1]:9"]) {
       const inv = sample(addr);
       const uri = inviteToUri(inv);
-      expect(uri.startsWith("krypto://peer?v=1&mid=abcdef012345&pk=")).toBe(true);
+      expect(uri.startsWith("pawl://peer?v=1&mid=abcdef012345&pk=")).toBe(true);
       expect(uri.includes("[")).toBe(false);
       expect(parseInvite(uri)).toEqual(inv);
       expect(parseInvite(`  ${uri}\n`)).toEqual(inv);
@@ -52,13 +52,13 @@ describe("invite", () => {
     const open = { ...withRelay(null), relayKey: null };
     for (const inv of [withRelay("10.0.0.2:47801"), withRelay(null), open]) {
       const uri = inviteToUri(inv);
-      expect(uri).toContain("&relay=wss%3A%2F%2Frelay.krypto.dev%2Fr&rt=");
+      expect(uri).toContain("&relay=wss%3A%2F%2Frelay.pawl.dev%2Fr&rt=");
       expect(uri.includes("&rk=k3y_-AZ")).toBe(inv.relayKey !== null);
       expect(uri.includes("addr=")).toBe(inv.addr !== null);
       expect(parseInvite(uri)).toEqual(inv);
     }
-    const uri = inviteToUri(withRelay(null)).replace("wss%3A%2F%2Frelay.krypto.dev%2Fr", "https%3A%2F%2FRELAY.krypto.dev%3A443%2Fr%2F");
-    expect(parseInvite(uri).relay).toBe("wss://relay.krypto.dev/r");
+    const uri = inviteToUri(withRelay(null)).replace("wss%3A%2F%2Frelay.pawl.dev%2Fr", "https%3A%2F%2FRELAY.pawl.dev%3A443%2Fr%2F");
+    expect(parseInvite(uri).relay).toBe("wss://relay.pawl.dev/r");
   });
 
   test("relay params are strict", () => {
@@ -69,9 +69,9 @@ describe("invite", () => {
       noRt,
       inviteToUri(sample("10.0.0.2:47801")) + `&rt=${rt}`,
       inviteToUri(sample("10.0.0.2:47801")).replace("&addr=10.0.0.2:47801", ""),
-      good.replace("wss%3A%2F%2Frelay.krypto.dev%2Fr", "ws%3A%2F%2Frelay.krypto.dev"),
-      good.replace("wss%3A%2F%2Frelay.krypto.dev%2Fr", "relay.krypto.dev"),
-      good.replace("wss%3A%2F%2Frelay.krypto.dev%2Fr", "wss%3A%2F%2Frelay.krypto.dev%3Fx%3D1"),
+      good.replace("wss%3A%2F%2Frelay.pawl.dev%2Fr", "ws%3A%2F%2Frelay.pawl.dev"),
+      good.replace("wss%3A%2F%2Frelay.pawl.dev%2Fr", "relay.pawl.dev"),
+      good.replace("wss%3A%2F%2Frelay.pawl.dev%2Fr", "wss%3A%2F%2Frelay.pawl.dev%3Fx%3D1"),
       `${noRt}&rt=AAAA`,
       `${noRt}&rt=${rt}A`,
       `${good}&rt=${rt}`,
@@ -85,7 +85,7 @@ describe("invite", () => {
 
   test("unknown params and order are fine", () => {
     const inv = sample("10.0.0.2:47801");
-    const uri = `krypto://peer?exp=${inv.expiresAt}&code=${inv.code}&x=y&addr=10.0.0.2:47801&pk=${encodeUrl(inv.publicKey)}&mid=abcdef012345&v=1`;
+    const uri = `pawl://peer?exp=${inv.expiresAt}&code=${inv.code}&x=y&addr=10.0.0.2:47801&pk=${encodeUrl(inv.publicKey)}&mid=abcdef012345&v=1`;
     expect(parseInvite(uri)).toEqual(inv);
   });
 
@@ -94,7 +94,7 @@ describe("invite", () => {
     const bad = [
       "",
       "garbage",
-      good.replace("krypto://peer?", "http://peer?"),
+      good.replace("pawl://peer?", "http://peer?"),
       good.replace("v=1", "v=2"),
       good.replace("mid=abcdef012345", "mid=ABCDEF012345"),
       good.replace("10.0.0.2:47801", "10.0.0.2"),
@@ -126,7 +126,7 @@ describe("invite", () => {
 
   test("extract from pasted text", () => {
     const uri = inviteToUri(withRelay(null));
-    expect(extractInviteUri(`krypto peer join "${uri}"`)).toBe(uri);
+    expect(extractInviteUri(`pawl peer join "${uri}"`)).toBe(uri);
     expect(extractInviteUri(`see ${uri} now`)).toBe(uri);
     expect(extractInviteUri("nothing here")).toBeNull();
   });
@@ -178,16 +178,16 @@ describe("net rules", () => {
     for (const bad of ["[::]:47801", "::1:47801", "host:65536", "host:+1", ":47801", "a..b:1", "host/x:1", "[::1]47801"]) {
       expect(validAddr(bad)).toBe(false);
     }
-    expect(validHost("[::1]") && validHost("relay.krypto.dev") && validHost("10.0.0.1")).toBe(true);
+    expect(validHost("[::1]") && validHost("relay.pawl.dev") && validHost("10.0.0.1")).toBe(true);
     for (const bad of ["::1", "[::]", "0.0.0.0", "[::1"]) expect(validHost(bad)).toBe(false);
   });
 
   test("relay URL normalization", () => {
     const ok: [string, string][] = [
-      ["wss://relay.krypto.dev", "wss://relay.krypto.dev"],
-      ["https://Relay.Krypto.dev/", "wss://relay.krypto.dev"],
-      [" wss://relay.krypto.dev:443 ", "wss://relay.krypto.dev"],
-      ["wss://relay.krypto.dev:8443/r/v-1", "wss://relay.krypto.dev:8443/r/v-1"],
+      ["wss://relay.pawl.dev", "wss://relay.pawl.dev"],
+      ["https://Relay.Pawl.dev/", "wss://relay.pawl.dev"],
+      [" wss://relay.pawl.dev:443 ", "wss://relay.pawl.dev"],
+      ["wss://relay.pawl.dev:8443/r/v-1", "wss://relay.pawl.dev:8443/r/v-1"],
       ["WSS://10.0.0.5", "wss://10.0.0.5"],
       ["wss://[2001:db8::1]:9", "wss://[2001:db8::1]:9"],
       ["ws://127.0.0.1:8787", "ws://127.0.0.1:8787"],
@@ -197,19 +197,19 @@ describe("net rules", () => {
     for (const [raw, want] of ok) expect(normalizeRelayUrl(raw)).toBe(want);
     for (const raw of [
       "",
-      "relay.krypto.dev",
-      "ftp://relay.krypto.dev",
-      "ws://relay.krypto.dev",
+      "relay.pawl.dev",
+      "ftp://relay.pawl.dev",
+      "ws://relay.pawl.dev",
       "http://10.0.0.5:8787",
-      "wss://user@relay.krypto.dev",
-      "wss://relay.krypto.dev/?x=1",
-      "wss://relay.krypto.dev/#x",
-      "wss://relay.krypto.dev/a%20b",
-      "wss://relay.krypto.dev/a//b",
-      "wss://relay.krypto.dev/../x",
-      "wss://relay.krypto.dev:0",
-      "wss://relay.krypto.dev:65536",
-      "wss://relay.krypto.dev:",
+      "wss://user@relay.pawl.dev",
+      "wss://relay.pawl.dev/?x=1",
+      "wss://relay.pawl.dev/#x",
+      "wss://relay.pawl.dev/a%20b",
+      "wss://relay.pawl.dev/a//b",
+      "wss://relay.pawl.dev/../x",
+      "wss://relay.pawl.dev:0",
+      "wss://relay.pawl.dev:65536",
+      "wss://relay.pawl.dev:",
       "wss://:443",
       "wss://a..b",
       "wss://-a.dev",
@@ -220,7 +220,7 @@ describe("net rules", () => {
     ]) {
       expect(normalizeRelayUrl(raw)).toBeNull();
     }
-    expect(relayHostHeader("wss://relay.krypto.dev:8443/r")).toBe("relay.krypto.dev:8443");
+    expect(relayHostHeader("wss://relay.pawl.dev:8443/r")).toBe("relay.pawl.dev:8443");
     expect(relayHostHeader("ws://127.0.0.1:8787")).toBe("127.0.0.1:8787");
   });
 });

@@ -1,14 +1,14 @@
 // One-time pairing invites, parsed exactly like crates/peer/src/invite.rs (`Invite::parse`):
-//   krypto://peer?v=1&mid=<machineId>&pk=<b64url pk>[&addr=<host:port>]&code=<b64url 16 bytes>&exp=<unix ms>
+//   pawl://peer?v=1&mid=<machineId>&pk=<b64url pk>[&addr=<host:port>]&code=<b64url 16 bytes>&exp=<unix ms>
 //   [&relay=<percent-encoded relay URL>&rt=<b64url 16 bytes>[&rk=<relay access key>]]
 // The code, relay token and access key are secrets: nothing here logs or returns them except in the Invite itself.
-import { MACHINE_ID_RE, type MachineId, type UnixMs } from "@krypto/protocol";
+import { MACHINE_ID_RE, type MachineId, type UnixMs } from "@pawl/protocol";
 import { encodeUrl, tryDecodeUrl, utf8Decode, utf8Encode } from "./b64";
 import nacl from "tweetnacl";
 import { isLowOrderKey } from "./keys";
 import { normalizeRelayUrl, relayHostHeader, validAccessKey, validAddr } from "./net";
 
-export const INVITE_PREFIX = "krypto://peer?";
+export const INVITE_PREFIX = "pawl://peer?";
 const MAX_URI_LEN = 1024;
 export const INVITE_CODE_BYTES = 16;
 
@@ -184,7 +184,7 @@ export function inviteSummary(inv: Invite): InviteSummary {
   };
 }
 
-/** Find an invite URI in pasted / scanned text (bare, quoted, or a `krypto peer join "<uri>"` line). */
+/** Find an invite URI in pasted / scanned text (bare, quoted, or a `pawl peer join "<uri>"` line). */
 export function extractInviteUri(text: string): string | null {
   const lower = text.toLowerCase();
   const start = lower.indexOf(INVITE_PREFIX);

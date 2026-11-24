@@ -1,5 +1,5 @@
 use super::*;
-use krypto_protocol::{
+use pawl_protocol::{
     AgentSource, ChatProposalKind, EventType, PermissionOption, PermissionOptionKind, Species, ToolCallPayload, ToolKind,
 };
 use serde_json::json;
@@ -43,7 +43,7 @@ fn session(id: &str, agent: &str, cwd: &str, source: SessionSource, status: Sess
 
 fn event(seq: i64, session: &str, kind: EventType, payload: serde_json::Value) -> HubEvent {
     HubEvent {
-        id: krypto_protocol::global_id(ME, seq),
+        id: pawl_protocol::global_id(ME, seq),
         seq,
         machine_id: ME.into(),
         session_id: session.into(),
@@ -416,8 +416,8 @@ async fn status_names_machines_when_several_are_known() {
         assert_eq!(r.action, None, "{q}");
         assert!(r.text.contains("Claude Code on Mac mini is waiting for your OK to: rm -rf build"), "{q}: {}", r.text);
         assert!(r.text.contains("lives on Mac mini, so I won't"), "{q}: {}", r.text);
-        assert!(r.text.contains("Krypto panel (it asks you to confirm)"), "{q}: {}", r.text);
-        assert!(r.text.contains("`krypto approve r1`") || r.text.contains("`krypto deny r1`"), "{q}: {}", r.text);
+        assert!(r.text.contains("Pawl panel (it asks you to confirm)"), "{q}: {}", r.text);
+        assert!(r.text.contains("`pawl approve r1`") || r.text.contains("`pawl deny r1`"), "{q}: {}", r.text);
     }
     // A request of this machine still resolves.
     let mut c = two_machine_ctx();
@@ -503,7 +503,7 @@ async fn mirrored_text_never_turns_into_an_action() {
     // Only the user's own "approve" acts. Numbers count this machine's requests only, so "1" is the
     // local one although the mirrored request is older; the mirrored one is never numbered here.
     let r = ask("status", &c).await;
-    assert!(r.text.contains("1 request needs your OK: say “approve” or “deny” (+1 on other machines, in the Krypto panel)."), "{}", r.text);
+    assert!(r.text.contains("1 request needs your OK: say “approve” or “deny” (+1 on other machines, in the Pawl panel)."), "{}", r.text);
     let r = ask("approve 1", &c).await;
     assert_eq!(r.action, Some(BrainAction::ResolvePermission { request_id: "r-local".into(), option_id: Some("allow-once".into()) }));
     let r = ask("approve", &c).await;
@@ -511,7 +511,7 @@ async fn mirrored_text_never_turns_into_an_action() {
     let r = ask("approve 2", &c).await;
     assert_eq!(r.action, None, "{}", r.text);
     assert!(r.text.contains("There's no request #2. Waiting:\n1. Claude Code on Windows PC: cargo build"), "{}", r.text);
-    assert!(r.text.contains("(1 more request on other machines: answer it in the Krypto panel, or name the machine.)"), "{}", r.text);
+    assert!(r.text.contains("(1 more request on other machines: answer it in the Pawl panel, or name the machine.)"), "{}", r.text);
     // Naming the machine reaches its request, which chat never decides.
     let r = ask("approve the mac mini's request", &c).await;
     assert_eq!(r.action, None, "{}", r.text);
@@ -546,8 +546,8 @@ fn on_machine(mut a: Agent, machine_id: &str) -> Agent {
     a
 }
 
-fn repo(name: &str, path: &str) -> krypto_protocol::RepoRef {
-    krypto_protocol::RepoRef { name: name.into(), path: path.into(), last_used_at: Some(now_ms() - 3_600_000) }
+fn repo(name: &str, path: &str) -> pawl_protocol::RepoRef {
+    pawl_protocol::RepoRef { name: name.into(), path: path.into(), last_used_at: Some(now_ms() - 3_600_000) }
 }
 
 fn pet(id: &str, name: &str, machine_id: &str, agent_id: &str) -> Pet {
@@ -789,7 +789,7 @@ async fn local_targets_still_act_and_never_propose() {
     c.pending.push(req);
     let r = ask("approve the mac mini's request", &c).await;
     assert!(r.action.is_none() && r.proposals.is_empty(), "{r:?}");
-    assert!(r.text.contains("Krypto panel"), "{}", r.text);
+    assert!(r.text.contains("Pawl panel"), "{}", r.text);
     c.pending.push(request("r-local", "s-claude", "claude-code", "cargo build", now_ms()));
     let r = ask("approve on windows pc", &c).await;
     assert_eq!(r.action, Some(BrainAction::ResolvePermission { request_id: "r-local".into(), option_id: Some("allow-once".into()) }));

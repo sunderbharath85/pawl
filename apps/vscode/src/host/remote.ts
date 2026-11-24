@@ -10,8 +10,8 @@ import {
   pickPermissionOption,
   remoteOptionBlocked,
   type IntentAction,
-} from "@krypto/hub-client";
-import type { PermissionRequest } from "@krypto/protocol";
+} from "@pawl/hub-client";
+import type { PermissionRequest } from "@pawl/protocol";
 import type { HubConnection } from "./connection";
 import { remoteApprovalText, type ConfirmText } from "./remoteText";
 
@@ -41,7 +41,7 @@ export async function answerRequest(hub: HubConnection, requestId: string, decis
   const state = hub.state;
   const req: PermissionRequest | undefined = state.pending[requestId];
   if (!req) {
-    void vscode.window.showInformationMessage("Krypto: that request was already answered.");
+    void vscode.window.showInformationMessage("Pawl: that request was already answered.");
     return false;
   }
   // Approve: allow_once (this machine's request may fall back to always-allow; another machine's may not).
@@ -69,7 +69,7 @@ export async function answerRequest(hub: HubConnection, requestId: string, decis
     return true;
   } catch (err) {
     if (isAlreadyDecided(err)) {
-      void vscode.window.showInformationMessage("Krypto: already answered.");
+      void vscode.window.showInformationMessage("Pawl: already answered.");
       return false;
     }
     throw remoteError(hub, req.machineId, isAllowOption(req, optionId) ? "approve" : "deny", err);

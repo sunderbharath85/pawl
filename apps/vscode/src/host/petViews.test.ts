@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { initialHubState, type HubState } from "@krypto/hub-client";
-import type { Machine, Pet, PermissionRequest } from "@krypto/protocol";
+import { initialHubState, type HubState } from "@pawl/hub-client";
+import type { Machine, Pet, PermissionRequest } from "@pawl/protocol";
 import { petViewsOf, primaryView } from "./petViews";
 
 const ME = "winpc0000001";

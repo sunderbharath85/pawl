@@ -1,4 +1,4 @@
-// PhoneNode: the phone as a Krypto peer (PLAN.md step 7). Relay only. Pairs by invite URI (QR), keeps a per-hub
+// PhoneNode: the phone as a Pawl peer (PLAN.md step 7). Relay only. Pairs by invite URI (QR), keeps a per-hub
 // E2E link (hello -> presence, presence every 15 s, offline after 45 s of silence), mirrors every hub's sessions,
 // pets and pending approvals, applies group-roster introductions, and sends intents (`client: "mobile"`).
 // Platform-free: storage, WebSocket, clock and randomness are injected (see ./types). Drive it headless from bun:
@@ -31,7 +31,7 @@ import {
   type RepoRef,
   type Session,
   type UnixMs,
-} from "@krypto/protocol";
+} from "@pawl/protocol";
 import { bytesEqual, decodeKey, encode } from "./b64";
 import { open, seal } from "./envelope";
 import {

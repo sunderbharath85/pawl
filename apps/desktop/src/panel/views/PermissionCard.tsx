@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { PermissionOption, PermissionRequest } from "@krypto/protocol";
+import type { PermissionOption, PermissionRequest } from "@pawl/protocol";
 import {
   TOOL_KIND_ICON,
   agentName,
@@ -19,7 +19,7 @@ import {
   offlineReason,
   petFor,
   remoteOptionBlocked,
-} from "@krypto/hub-client";
+} from "@pawl/hub-client";
 import { usePanel } from "../context";
 import { PetAvatar } from "../PetAvatar";
 

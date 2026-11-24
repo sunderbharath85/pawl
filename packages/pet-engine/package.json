@@ -1,5 +1,5 @@
 {
-  "name": "@krypto/pet-engine",
+  "name": "@pawl/pet-engine",
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
@@ -16,7 +16,7 @@
     "preview": "bun scripts/preview.tsx"
   },
   "dependencies": {
-    "@krypto/protocol": "workspace:*"
+    "@pawl/protocol": "workspace:*"
   },
   "peerDependencies": {
     "react": ">=18"

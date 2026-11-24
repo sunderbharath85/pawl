@@ -11,7 +11,7 @@
 // refuse challenges whose byte 15 is 0 or 1 (`answerChallenge` below does).
 
 import nacl from "tweetnacl";
-import { RELAY_AUTH_CONTEXT, RELAY_PROTOCOL_VERSION } from "@krypto/protocol";
+import { RELAY_AUTH_CONTEXT, RELAY_PROTOCOL_VERSION } from "@pawl/protocol";
 import { bytesEqual, decodeStd, encodeStd, randomBytes as defaultRandom, utf8 } from "./b64";
 
 /** Index of the envelope nonce's direction byte (0 or 1 in envelopes; 2..=255 in challenges). */

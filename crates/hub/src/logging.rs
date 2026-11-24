@@ -46,7 +46,7 @@ pub fn init(log_file: Option<&Path>, stderr_default: &str, file_default: &str) -
             (Some(layer), Some(guard))
         }
         Some(Err(e)) => {
-            eprintln!("krypto: could not open log file: {e}");
+            eprintln!("pawl: could not open log file: {e}");
             (None, None)
         }
         None => (None, None),

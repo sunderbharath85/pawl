@@ -1,6 +1,6 @@
 import { useMemo } from "react";
-import { isLocal, machineDisplayName } from "@krypto/hub-client";
-import type { Session } from "@krypto/protocol";
+import { isLocal, machineDisplayName } from "@pawl/hub-client";
+import type { Session } from "@pawl/protocol";
 import { STATUS_META, SOURCE_LABEL, agentName, isActive, sessionTitle, timeAgo } from "../../lib/format";
 import { usePanel } from "../context";
 import * as I from "../icons";
@@ -41,7 +41,7 @@ export function HomeView() {
       <div className="home-hero">
         <div className="home-hero-text">
           <span className="eyebrow">
-            <I.Paw size={12} /> Krypto
+            <I.Paw size={12} /> Pawl
           </span>
           <h1>
             {greeting()}! {active.length > 0 ? `${active.length} agent${active.length > 1 ? "s are" : " is"} busy.` : "The pack is resting."}

@@ -6,16 +6,16 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use krypto_discovery::{CustomAgent, DiscoveryConfig};
-use krypto_protocol::{Rule, HUB_DEFAULT_PORT, HUB_HOST, HUB_TOKEN_FILE, PEER_DEFAULT_PORT};
+use pawl_discovery::{CustomAgent, DiscoveryConfig};
+use pawl_protocol::{Rule, HUB_DEFAULT_PORT, HUB_HOST, HUB_TOKEN_FILE, PEER_DEFAULT_PORT};
 use serde::{Deserialize, Serialize};
 
 /// Env var: overrides the token (hub and clients).
-pub const ENV_TOKEN: &str = "KRYPTO_HUB_TOKEN";
+pub const ENV_TOKEN: &str = "PAWL_HUB_TOKEN";
 /// Env var: hub URL for clients (`http://127.0.0.1:47800`, `ws://127.0.0.1:47800/ws`, ...).
-pub const ENV_URL: &str = "KRYPTO_HUB_URL";
+pub const ENV_URL: &str = "PAWL_HUB_URL";
 /// Env var: alternative data dir (tests, portable installs). Clients must then also get the token via env.
-pub const ENV_DATA_DIR: &str = "KRYPTO_HUB_DATA_DIR";
+pub const ENV_DATA_DIR: &str = "PAWL_HUB_DATA_DIR";
 /// Env var: Anthropic key for the pet brain (used when `brain.anthropic_api_key` is not set).
 pub const ENV_ANTHROPIC_KEY: &str = "ANTHROPIC_API_KEY";
 
@@ -37,7 +37,7 @@ pub struct Paths {
     pub config: PathBuf,
     /// `machine.toml`: this machine's id + name (see [`crate::machine`]).
     pub machine: PathBuf,
-    /// `device.key`: this hub's peer-link secret key (see `krypto_peer::DeviceKeys`).
+    /// `device.key`: this hub's peer-link secret key (see `pawl_peer::DeviceKeys`).
     pub device_key: PathBuf,
     pub log: PathBuf,
     pub registry_cache: PathBuf,
@@ -61,13 +61,13 @@ impl Paths {
         }
     }
 
-    /// Explicit dir > `KRYPTO_HUB_DATA_DIR` > `krypto_protocol::data_dir()`.
+    /// Explicit dir > `PAWL_HUB_DATA_DIR` > `pawl_protocol::data_dir()`.
     pub fn resolve(explicit: Option<PathBuf>) -> Result<Self> {
         let dir = match explicit {
             Some(d) => d,
             None => match std::env::var_os(ENV_DATA_DIR).filter(|v| !v.is_empty()) {
                 Some(d) => PathBuf::from(d),
-                None => krypto_protocol::data_dir().context("could not determine the OS data directory")?,
+                None => pawl_protocol::data_dir().context("could not determine the OS data directory")?,
             },
         };
         Ok(Self::in_dir(dir))
@@ -118,13 +118,13 @@ impl BrainSection {
     }
 
     /// Config key, else `ANTHROPIC_API_KEY`.
-    pub fn to_brain_config(&self) -> krypto_brain::chat::BrainConfig {
+    pub fn to_brain_config(&self) -> pawl_brain::chat::BrainConfig {
         let key = self
             .anthropic_api_key
             .clone()
             .filter(|k| !k.trim().is_empty())
             .or_else(|| std::env::var(ENV_ANTHROPIC_KEY).ok().filter(|k| !k.trim().is_empty()));
-        krypto_brain::chat::BrainConfig {
+        pawl_brain::chat::BrainConfig {
             anthropic_api_key: key,
             model: self.effective_model(),
             ollama_url: self.ollama_url.clone().filter(|s| !s.trim().is_empty()),
@@ -151,8 +151,8 @@ impl Default for WatchdogSection {
 }
 
 impl WatchdogSection {
-    pub fn to_watchdog_config(&self) -> krypto_brain::watchdog::WatchdogConfig {
-        krypto_brain::watchdog::WatchdogConfig {
+    pub fn to_watchdog_config(&self) -> pawl_brain::watchdog::WatchdogConfig {
+        pawl_brain::watchdog::WatchdogConfig {
             waiting_nudge_after_ms: self.waiting_nudge_after_ms.max(1_000),
             repeat_every_ms: self.repeat_every_ms.max(10_000),
         }
@@ -284,7 +284,7 @@ impl Default for HubConfig {
 
 /// Written when config.toml is missing. The desktop app's Settings change these keys in place
 /// (comments and unknown keys are kept).
-pub(crate) const CONFIG_TEMPLATE: &str = r#"# Krypto hub configuration. Every key is optional; defaults shown.
+pub(crate) const CONFIG_TEMPLATE: &str = r#"# Pawl hub configuration. Every key is optional; defaults shown.
 # Every setting can also be changed in the desktop app (Settings).
 # port = 47800                 # the hub only ever binds 127.0.0.1
 # offline = false              # true = never fetch the ACP registry
@@ -395,13 +395,13 @@ impl HubConfig {
 pub struct RuntimeInfo {
     pub port: u16,
     pub pid: u32,
-    pub started_at: krypto_protocol::UnixMs,
+    pub started_at: pawl_protocol::UnixMs,
 }
 
 impl RuntimeInfo {
     /// This process, serving on `port` now.
     pub fn now(port: u16) -> Self {
-        Self { port, pid: std::process::id(), started_at: krypto_protocol::now_ms() }
+        Self { port, pid: std::process::id(), started_at: pawl_protocol::now_ms() }
     }
 
     /// Write it atomically (the hub, once its port is bound).
@@ -432,7 +432,7 @@ fn valid_token(t: &str) -> bool {
     t.len() >= 32 && t.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// `KRYPTO_HUB_TOKEN` if set, else the token file (None if missing/invalid). Never creates.
+/// `PAWL_HUB_TOKEN` if set, else the token file (None if missing/invalid). Never creates.
 pub fn read_token(paths: &Paths) -> Option<String> {
     if let Ok(t) = std::env::var(ENV_TOKEN) {
         let t = t.trim().to_string();
@@ -533,7 +533,7 @@ impl HubEndpoint {
         })
     }
 
-    /// `--port` > `KRYPTO_HUB_URL` > config port.
+    /// `--port` > `PAWL_HUB_URL` > config port.
     pub fn resolve(port_flag: Option<u16>, config_port: u16) -> Self {
         if let Some(p) = port_flag {
             return Self::local(p);
@@ -550,14 +550,14 @@ impl HubEndpoint {
     }
 }
 
-/// Port the daemon binds: `--port` > port of `KRYPTO_HUB_URL` > config.
+/// Port the daemon binds: `--port` > port of `PAWL_HUB_URL` > config.
 pub fn serve_port(port_flag: Option<u16>, cfg: &HubConfig) -> u16 {
     HubEndpoint::resolve(port_flag, cfg.port).port
 }
 
 impl HubEndpoint {
-    /// Where a client (`krypto hook`, every other client command) finds the running hub:
-    /// `--port` > `KRYPTO_HUB_URL` > runtime.json (once verified, see [`runtime_candidate`] and
+    /// Where a client (`pawl hook`, every other client command) finds the running hub:
+    /// `--port` > `PAWL_HUB_URL` > runtime.json (once verified, see [`runtime_candidate`] and
     /// `cli::client_endpoint`) > config.toml. This is the answer without runtime.json.
     pub fn for_client_fallback(port_flag: Option<u16>, config_port: u16) -> Self {
         Self::resolve(port_flag, config_port)
@@ -565,7 +565,7 @@ impl HubEndpoint {
 }
 
 /// The port runtime.json offers, when it would change the answer: no `--port`, no
-/// `KRYPTO_HUB_URL`, and a port other than config.toml's. The caller must check that the hub there
+/// `PAWL_HUB_URL`, and a port other than config.toml's. The caller must check that the hub there
 /// is this data dir's (`/health` machineId == machine.toml) before using it: runtime.json is a
 /// plain file, and anything listening on that port could otherwise collect hook events.
 pub fn runtime_candidate(port_flag: Option<u16>, paths: &Paths, config_port: u16) -> Option<u16> {
@@ -646,7 +646,7 @@ match = { toolKind = "read" }
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::in_dir(dir.path());
         if std::env::var(ENV_URL).is_ok() {
-            return; // KRYPTO_HUB_URL set in this environment: it wins by design
+            return; // PAWL_HUB_URL set in this environment: it wins by design
         }
         assert_eq!(runtime_candidate(None, &paths, 48001), None, "no runtime.json: config.toml");
         RuntimeInfo::now(47810).write(&paths).unwrap();

@@ -2,7 +2,7 @@
 // replay-by-seq-bump and wrong-direction rejection, relay auth answer.
 import { describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
-import { RELAY_AUTH_CONTEXT, type PeerBody } from "@krypto/protocol";
+import { RELAY_AUTH_CONTEXT, type PeerBody } from "@pawl/protocol";
 import {
   authAnswer,
   B64Error,

@@ -12,7 +12,7 @@ assignees: ""
 
 ## Proposal
 
-<!-- What should Krypto do? Mention the parts it touches (hub, protocol, desktop, VS Code, phone, relay). -->
+<!-- What should Pawl do? Mention the parts it touches (hub, protocol, desktop, VS Code, phone, relay). -->
 
 ## Alternatives considered
 

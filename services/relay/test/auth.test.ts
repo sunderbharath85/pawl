@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
-import { RELAY_AUTH_CONTEXT } from "@krypto/protocol";
+import { RELAY_AUTH_CONTEXT } from "@pawl/protocol";
 import { decodeStd, encodeStd, randomBytes, utf8 } from "../src/b64";
 import {
   NONCE_DOMAIN_BYTE,

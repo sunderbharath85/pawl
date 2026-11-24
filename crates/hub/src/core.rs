@@ -15,11 +15,11 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use krypto_acp::HostEvent;
-use krypto_brain::chat::{Brain, BrainAction, BrainContext, BrainReply};
-use krypto_brain::watchdog::Watchdog;
-use krypto_peer::PeerNode;
-use krypto_protocol::{
+use pawl_acp::HostEvent;
+use pawl_brain::chat::{Brain, BrainAction, BrainContext, BrainReply};
+use pawl_brain::watchdog::Watchdog;
+use pawl_peer::PeerNode;
+use pawl_protocol::{
     global_id, is_valid_machine_id, parse_global_id, Agent, AgentCapabilities, AgentId, AgentSource, ChatMessage,
     ChatRole, ClientKind, ClientMsg, ErrorPayload, EventType, HistorySession, HookSource, HubEvent, HubNotification,
     Machine, MachineId, NotificationLevel, PermissionOptionKind, PermissionOutcome, PermissionRequest,
@@ -179,7 +179,7 @@ pub struct HubOptions {
     /// This machine (`machine.toml`, see [`machine::load_or_create`]).
     pub machine: MachineIdentity,
     /// Daemon mode: run initial discovery, the watchdog and the daily report.
-    /// In-process CLI use (`krypto start` without a running hub) passes false.
+    /// In-process CLI use (`pawl start` without a running hub) passes false.
     pub background: bool,
 }
 
@@ -301,7 +301,7 @@ struct Inner {
     /// `update_settings` (see `settings.rs`).
     config: RwLock<HubConfig>,
     /// Port the local API was bound to and the keys startup flags / env vars decide (set by
-    /// `krypto serve`, see [`Hub::set_launch`]).
+    /// `pawl serve`, see [`Hub::set_launch`]).
     launch: Mutex<settings::Launch>,
     /// Serializes settings changes (validate, apply, write config.toml, audit, announce).
     settings_write: tokio::sync::Mutex<()>,
@@ -327,7 +327,7 @@ struct Inner {
     watchdog: Mutex<Watchdog>,
     discovery: tokio::sync::Mutex<()>,
     shutdown: watch::Sender<bool>,
-    /// Set by `restart_hub`: `krypto serve` stops, starts a replacement process and exits.
+    /// Set by `restart_hub`: `pawl serve` stops, starts a replacement process and exits.
     restart: watch::Sender<bool>,
     /// Warnings raised while loading (e.g. dropped unsafe rules); replayed to every new client
     /// until the condition is fixed.
@@ -347,7 +347,7 @@ struct Inner {
     /// Woken whenever a decision in flight finishes (see [`Hub::decide`]).
     decide_done: tokio::sync::Notify,
     /// This machine's repo index (see `repo_index.rs`).
-    repos: Mutex<Vec<krypto_protocol::RepoRef>>,
+    repos: Mutex<Vec<pawl_protocol::RepoRef>>,
     /// Session folders seen since startup (a new one triggers an index rebuild).
     seen_cwds: Mutex<HashSet<String>>,
     activity: Mutex<Activity>,
@@ -382,7 +382,7 @@ impl Hub {
             bail!("store belongs to machine {:?}, not {:?}", store.machine_id(), machine.id);
         }
         let machine_id = machine.id.clone();
-        let now = krypto_protocol::now_ms();
+        let now = pawl_protocol::now_ms();
         let retention_days = config.event_retention_days;
         let (agents, mut sessions, mut pets, db_rules, mirror_sessions, mirror_pending, remote_driven) = store
             .run(move |s| {
@@ -454,7 +454,7 @@ impl Hub {
         let (rules_source, loaded) = match (db_rules, config.rules.clone()) {
             (Some(r), _) => ("hub.db", r),
             (None, Some(r)) => ("config.toml", r),
-            (None, None) => ("the built-in defaults", krypto_brain::rules::default_rules()),
+            (None, None) => ("the built-in defaults", pawl_brain::rules::default_rules()),
         };
         let (rules, dropped) = sanitize_rules(loaded);
         let mut startup_notices = Vec::new();
@@ -612,14 +612,14 @@ impl Hub {
 
     /// The machine the user is at right now (see [`active_machine`]).
     pub fn active_machine_id(&self) -> MachineId {
-        active_machine(&self.machines(), &self.inner.machine_id, krypto_protocol::now_ms())
+        active_machine(&self.machines(), &self.inner.machine_id, pawl_protocol::now_ms())
     }
 
     /// ClientMsg `user_activity`: stamp this machine's userActiveAt. Peers hear it with the next
     /// heartbeat, or at once when it moved by ACTIVITY_STEP_MS (the user came back after a pause);
     /// local clients get `machine` under the same rule or when the active machine changes.
     pub fn user_activity(&self) {
-        let now = krypto_protocol::now_ms();
+        let now = pawl_protocol::now_ms();
         let (push, announce) = {
             let mut a = self.activity();
             a.user_active_at = Some(now);
@@ -646,7 +646,7 @@ impl Hub {
     /// `machine` was just broadcast.
     pub(super) fn check_active_machine(&self, local_sent: bool) {
         let machines = self.machines();
-        let active = active_machine(&machines, &self.inner.machine_id, krypto_protocol::now_ms());
+        let active = active_machine(&machines, &self.inner.machine_id, pawl_protocol::now_ms());
         let previous = {
             let mut a = self.activity();
             if a.active.as_deref() == Some(active.as_str()) {
@@ -711,7 +711,7 @@ impl Hub {
     }
 
     pub fn welcome(&self) -> Welcome {
-        let now = krypto_protocol::now_ms();
+        let now = pawl_protocol::now_ms();
         let machine = self.machine();
         let machines = self.machines();
         let devices = self.devices();
@@ -801,14 +801,14 @@ impl Hub {
                 }
             }
             ClientMsg::Prompt { session_id, text, .. } => match self.foreign_owner(&session_id) {
-                Some(m) => self.forward(&m, actor, false, krypto_protocol::Intent::Prompt { session_id, text }).await?,
+                Some(m) => self.forward(&m, actor, false, pawl_protocol::Intent::Prompt { session_id, text }).await?,
                 None => {
                     self.prompt(&session_id, text).await?;
                     json!({})
                 }
             },
             ClientMsg::Cancel { session_id, .. } => match self.foreign_owner(&session_id) {
-                Some(m) => self.forward(&m, actor, false, krypto_protocol::Intent::Cancel { session_id }).await?,
+                Some(m) => self.forward(&m, actor, false, pawl_protocol::Intent::Cancel { session_id }).await?,
                 None => {
                     self.cancel(&session_id, actor).await?;
                     json!({})
@@ -988,7 +988,7 @@ impl Hub {
         self.inner.host.close_session(session_id).await?;
         let mut ended = self.session(session_id).unwrap_or(s);
         if ended.ended_at.is_none() {
-            ended.ended_at = Some(krypto_protocol::now_ms());
+            ended.ended_at = Some(pawl_protocol::now_ms());
             if ended.status != SessionStatus::Error {
                 ended.status = SessionStatus::Done;
             }
@@ -1090,7 +1090,7 @@ impl Hub {
 
     /// Validate (security floor first), then persist and apply. Any error changes nothing.
     pub async fn set_rules(&self, rules: Vec<Rule>) -> Result<Vec<Rule>> {
-        krypto_brain::rules::validate_rules(&rules).map_err(|e| anyhow!("invalid_rule: {e}"))?;
+        pawl_brain::rules::validate_rules(&rules).map_err(|e| anyhow!("invalid_rule: {e}"))?;
         let mut seen = HashSet::new();
         for r in &rules {
             if r.id.trim().is_empty() {
@@ -1205,7 +1205,7 @@ impl Hub {
 
     // ------------------------------------------------------------ pets
 
-    /// Every agent with activity gets a dog (krypto_brain::growth::default_pet), named so it never
+    /// Every agent with activity gets a dog (pawl_brain::growth::default_pet), named so it never
     /// repeats the name of any pet this hub knows (its own and paired hubs').
     async fn ensure_pet(&self, agent_id: &str) {
         let mid = self.inner.machine_id.clone();
@@ -1220,7 +1220,7 @@ impl Hub {
                 agent.machine_id = mid.clone();
                 let mut taken: Vec<String> = st.pets.values().map(|p| p.name.clone()).collect();
                 taken.extend(remote_names);
-                let mut pet = krypto_brain::growth::default_pet(&agent, &taken);
+                let mut pet = pawl_brain::growth::default_pet(&agent, &taken);
                 pet.agent_id = agent_id.to_string();
                 pet.machine_id = mid.clone();
                 if parse_global_id(&pet.id).is_none_or(|(m, _)| m != mid) || st.pets.contains_key(&pet.id) {
@@ -1324,7 +1324,7 @@ impl Hub {
 
     /// Store + broadcast an event, bump the session's `lastEventAt` and grow its pet.
     async fn record_event(&self, session_id: &str, kind: EventType, payload: Value) -> Result<HubEvent> {
-        let ts = krypto_protocol::now_ms();
+        let ts = pawl_protocol::now_ms();
         let sid = session_id.to_string();
         let p = payload.clone();
         let event = self.inner.store.run(move |s| s.insert_event(&sid, kind, &p, ts)).await?;
@@ -1336,7 +1336,7 @@ impl Hub {
             });
             if let Some((machine_id, agent_id)) = owner {
                 if let Some(pet) = st.pet_for_mut(&machine_id, &agent_id) {
-                    if krypto_brain::growth::on_event(pet, kind, &payload) {
+                    if pawl_brain::growth::on_event(pet, kind, &payload) {
                         let id = pet.id.clone();
                         st.dirty_pets.insert(id);
                     }
@@ -1408,7 +1408,7 @@ impl Hub {
     /// answers every request it raises.
     fn rule_action(&self, rules: &[Rule], req: &PermissionRequest) -> RuleAction {
         let cwd = self.session(&req.session_id).map(|s| s.cwd).filter(|c| !c.is_empty());
-        let action = krypto_brain::rules::evaluate_in(rules, req, cwd.as_deref());
+        let action = pawl_brain::rules::evaluate_in(rules, req, cwd.as_deref());
         if action == RuleAction::AutoAllow && self.st().remote_driven.contains(&req.session_id) {
             return RuleAction::Ask;
         }
@@ -1667,7 +1667,7 @@ impl Hub {
     ) {
         let entry = AuditEntry {
             id: 0,
-            ts: krypto_protocol::now_ms(),
+            ts: pawl_protocol::now_ms(),
             machine_id: req.machine_id.clone(),
             request_id: req.request_id.clone(),
             session_id: req.session_id.clone(),
@@ -1697,10 +1697,10 @@ impl Hub {
 
     /// Merge one raw hook payload (`POST /hooks/{source}`) into the session/event feed.
     pub async fn ingest_hook(&self, source: HookSource, raw: Value) -> Result<()> {
-        let Some(n) = krypto_discovery::hooks::normalize(source, raw) else {
+        let Some(n) = pawl_discovery::hooks::normalize(source, raw) else {
             return Ok(());
         };
-        let now = krypto_protocol::now_ms();
+        let now = pawl_protocol::now_ms();
         let session = {
             let mut st = self.st();
             let key = (n.agent_id.clone(), n.external_session_id.clone());
@@ -1790,7 +1790,7 @@ impl Hub {
             pet_id: pet.as_ref().map(|p| p.id.clone()),
             role: ChatRole::User,
             text,
-            ts: krypto_protocol::now_ms(),
+            ts: pawl_protocol::now_ms(),
             session_id: None,
             proposals: Vec::new(),
         };
@@ -1814,7 +1814,7 @@ impl Hub {
     }
 
     async fn brain_context(&self, pet: Option<Pet>) -> BrainContext {
-        let now = krypto_protocol::now_ms();
+        let now = pawl_protocol::now_ms();
         let recent = |s: &Session| s.ended_at.is_none() || now - s.last_event_at <= DAY_MS;
         // Mirrored sessions and requests too: status replies name their machine. Actions on them
         // are refused by the brain (remote control is a later step) and by `check_owned`.
@@ -1857,7 +1857,7 @@ impl Hub {
         let mut repos = std::collections::BTreeMap::new();
         repos.insert(self.inner.machine_id.clone(), self.repos());
         let hubs: Vec<String> =
-            self.devices().into_iter().filter(|d| d.kind == krypto_protocol::DeviceKind::Hub).map(|d| d.id).collect();
+            self.devices().into_iter().filter(|d| d.kind == pawl_protocol::DeviceKind::Hub).map(|d| d.id).collect();
         for id in hubs {
             remote_agents.insert(id.clone(), self.peer_agents(&id).await.unwrap_or_default());
             repos.insert(id.clone(), self.repos_of(Some(&id)).await.unwrap_or_default());
@@ -1916,7 +1916,7 @@ impl Hub {
             pet_id: pet.map(|p| p.id),
             role: ChatRole::Pet,
             text,
-            ts: krypto_protocol::now_ms(),
+            ts: pawl_protocol::now_ms(),
             session_id,
             proposals,
         };
@@ -1963,7 +1963,7 @@ impl Hub {
     }
 
     pub(crate) async fn watchdog_tick(&self) {
-        let now = krypto_protocol::now_ms();
+        let now = pawl_protocol::now_ms();
         let (sessions, pending) = {
             let st = self.st();
             (st.sessions_sorted(|s| s.ended_at.is_none()), st.sorted_pending())
@@ -2083,7 +2083,7 @@ impl Hub {
 
     /// End-of-day report of every session active in the last 24h, as a notification + pet chat line.
     pub async fn send_daily_report(&self) {
-        let since = krypto_protocol::now_ms() - DAY_MS;
+        let since = pawl_protocol::now_ms() - DAY_MS;
         let data = self
             .inner
             .store
@@ -2124,7 +2124,7 @@ impl Hub {
             pet_id: pet.map(|p| p.id),
             role: ChatRole::Pet,
             text,
-            ts: krypto_protocol::now_ms(),
+            ts: pawl_protocol::now_ms(),
             session_id: None,
             proposals: Vec::new(),
         };
@@ -2138,7 +2138,7 @@ impl Hub {
 
 /// Rule decision → option to send. None = no suitable option (fall back to asking).
 fn auto_option(req: &PermissionRequest, action: RuleAction) -> Option<Option<String>> {
-    match (action, krypto_brain::rules::pick_option(req, action)) {
+    match (action, pawl_brain::rules::pick_option(req, action)) {
         (RuleAction::Ask, _) => None,
         (_, Some(o)) => Some(Some(o)),
         // Deny without a reject option: answering `cancelled` still refuses the tool call.
@@ -2147,14 +2147,14 @@ fn auto_option(req: &PermissionRequest, action: RuleAction) -> Option<Option<Str
     }
 }
 
-/// Load-time guard: keep rules that pass `krypto_brain::rules::validate_rules` (the security floor)
+/// Load-time guard: keep rules that pass `pawl_brain::rules::validate_rules` (the security floor)
 /// and have a unique, non-empty id. Returns the kept rules and `(id, reason)` for each dropped one.
 pub fn sanitize_rules(rules: Vec<Rule>) -> (Vec<Rule>, Vec<(String, String)>) {
     let mut kept = Vec::with_capacity(rules.len());
     let mut dropped = Vec::new();
     let mut seen = HashSet::new();
     for r in rules {
-        if let Err(e) = krypto_brain::rules::validate_rules(std::slice::from_ref(&r)) {
+        if let Err(e) = pawl_brain::rules::validate_rules(std::slice::from_ref(&r)) {
             dropped.push((r.id.clone(), e.to_string()));
         } else if r.id.trim().is_empty() {
             dropped.push((r.id.clone(), "empty rule id".into()));
@@ -2177,7 +2177,7 @@ fn name_key(name: &str) -> String {
 }
 
 /// Trimmed pet name, 1..=40 characters, no control or invisible formatting characters (pet names
-/// reach paired devices: the same rule as device names, `krypto_peer::device_name_ok`); else `invalid`.
+/// reach paired devices: the same rule as device names, `pawl_peer::device_name_ok`); else `invalid`.
 pub fn validate_pet_name(name: &str) -> Result<String> {
     let name = name.trim();
     let len = name.chars().count();
@@ -2208,7 +2208,7 @@ pub fn dedupe_pet_names(pets: &mut [Pet], local_machine_id: &str) -> Vec<usize> 
         if !key.is_empty() && kept.insert(key) {
             continue;
         }
-        let name = krypto_brain::growth::default_name(&pet.machine_id, &pet.agent_id, &taken);
+        let name = pawl_brain::growth::default_name(&pet.machine_id, &pet.agent_id, &taken);
         kept.insert(name_key(&name));
         taken.push(name.clone());
         pet.name = name;
@@ -2239,18 +2239,18 @@ fn fallback_report(sessions: &[Session]) -> String {
 pub async fn discover_agents(paths: &Paths, cfg: &HubConfig, machine_id: &str, force: bool) -> Result<Vec<Agent>> {
     let dcfg = cfg.discovery_config(paths, machine_id);
     if !force || cfg.offline {
-        return krypto_discovery::discover(&dcfg).await;
+        return pawl_discovery::discover(&dcfg).await;
     }
     let cache = paths.registry_cache.clone();
     let backup = cache.with_extension("json.bak");
     let moved = cache.exists() && std::fs::rename(&cache, &backup).is_ok();
-    let result = krypto_discovery::discover(&dcfg).await;
+    let result = pawl_discovery::discover(&dcfg).await;
     if moved {
         if cache.exists() {
             let _ = std::fs::remove_file(&backup);
         } else {
             let _ = std::fs::rename(&backup, &cache);
-            return krypto_discovery::discover(&dcfg).await;
+            return pawl_discovery::discover(&dcfg).await;
         }
     }
     result

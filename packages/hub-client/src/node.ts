@@ -1,9 +1,9 @@
-// @krypto/hub-client/node — Node-only helpers (VS Code extension host, CLIs, tests).
+// @pawl/hub-client/node — Node-only helpers (VS Code extension host, CLIs, tests).
 // Never import this from browser/webview code: it uses node:fs/os/path.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { HUB_DATA_DIR_NAME, HUB_DEFAULT_PORT, HUB_TOKEN_FILE, MACHINE_ID_RE } from "@krypto/protocol";
+import { HUB_DATA_DIR_NAME, HUB_DEFAULT_PORT, HUB_TOKEN_FILE, MACHINE_ID_RE } from "@pawl/protocol";
 import { fetchHubHealth, type HubHealth } from "./health";
 import { toHubHttpUrl, toHubWsUrl } from "./url";
 
@@ -15,11 +15,11 @@ export interface HubCredentials {
   token: string;
   /** Where the token came from. */
   tokenSource: "env" | "file";
-  /** Hub data dir (`<os data dir>/krypto`). */
+  /** Hub data dir (`<os data dir>/pawl`). */
   dataDir: string;
   /** Token file path (`<dataDir>/token`), even if the token came from env. */
   tokenFile: string;
-  /** Where the URL came from: `KRYPTO_HUB_URL`, the verified running hub (runtime.json), config.toml (Settings), or the default. */
+  /** Where the URL came from: `PAWL_HUB_URL`, the verified running hub (runtime.json), config.toml (Settings), or the default. */
   urlSource?: "env" | "runtime" | "config" | "default";
 }
 
@@ -63,7 +63,7 @@ export function osDataDir(opts: HubCredentialsOptions = {}): string {
   return join(home, ".local", "share");
 }
 
-/** `<os data dir>/krypto` — holds `hub.db`, `token`, `config.toml`. */
+/** `<os data dir>/pawl` — holds `hub.db`, `token`, `config.toml`. */
 export function hubDataDir(opts: HubCredentialsOptions = {}): string {
   return opts.dataDir ?? join(osDataDir(opts), HUB_DATA_DIR_NAME);
 }
@@ -157,8 +157,8 @@ export function readMachineId(opts: HubCredentialsOptions = {}): string | null {
 }
 
 /**
- * Read the hub URL and token synchronously. `KRYPTO_HUB_TOKEN` / `KRYPTO_HUB_URL` env vars override the token
- * file and the URL; without `KRYPTO_HUB_URL` the port is the one in config.toml, else the default
+ * Read the hub URL and token synchronously. `PAWL_HUB_TOKEN` / `PAWL_HUB_URL` env vars override the token
+ * file and the URL; without `PAWL_HUB_URL` the port is the one in config.toml, else the default
  * `127.0.0.1:47800`. It never uses runtime.json (that port must be verified first: use `resolveHubCredentials`).
  * Throws `HubCredentialsError` when no token can be found (typically: the hub has never been started here).
  */
@@ -166,14 +166,14 @@ export function readHubCredentials(opts: HubCredentialsOptions = {}): HubCredent
   const env = opts.env ?? process.env;
   const dataDir = hubDataDir(opts);
   const tokenFile = join(dataDir, HUB_TOKEN_FILE);
-  const envUrl = nonEmpty(env["KRYPTO_HUB_URL"]);
+  const envUrl = nonEmpty(env["PAWL_HUB_URL"]);
   const configPort = envUrl ? null : readConfigPort(opts);
   const rawUrl = envUrl ?? (configPort !== null && configPort !== HUB_DEFAULT_PORT ? `http://127.0.0.1:${configPort}` : undefined);
   const urlSource: HubCredentials["urlSource"] = envUrl ? "env" : configPort !== null ? "config" : "default";
   const url = toHubWsUrl(rawUrl);
   const httpUrl = toHubHttpUrl(rawUrl);
 
-  const envToken = nonEmpty(env["KRYPTO_HUB_TOKEN"]);
+  const envToken = nonEmpty(env["PAWL_HUB_TOKEN"]);
   if (envToken) return { url, httpUrl, token: envToken, tokenSource: "env", dataDir, tokenFile, urlSource };
 
   let text: string;
@@ -182,10 +182,10 @@ export function readHubCredentials(opts: HubCredentialsOptions = {}): HubCredent
   } catch (err) {
     const code = (err as { code?: string }).code;
     const why = code === "ENOENT" ? "not found (has the hub been started?)" : `unreadable (${code ?? String(err)})`;
-    throw new HubCredentialsError(`Krypto hub token file ${why}: ${tokenFile}`, tokenFile, { cause: err });
+    throw new HubCredentialsError(`Pawl hub token file ${why}: ${tokenFile}`, tokenFile, { cause: err });
   }
   const token = text.replace(/^\uFEFF/, "").trim();
-  if (!token) throw new HubCredentialsError(`Krypto hub token file is empty: ${tokenFile}`, tokenFile);
+  if (!token) throw new HubCredentialsError(`Pawl hub token file is empty: ${tokenFile}`, tokenFile);
   return { url, httpUrl, token, tokenSource: "file", dataDir, tokenFile, urlSource };
 }
 
@@ -213,7 +213,7 @@ export async function verifiedRuntimePort(configured: number, opts: ResolveHubCr
 /**
  * Like `readHubCredentials`, but also finds a hub that runs on a port other than the configured one (a saved Hub
  * port that is not applied yet): runtime.json's port is used only after `/health` there names this machine (see
- * `verifiedRuntimePort`). Order: `KRYPTO_HUB_URL` > verified runtime.json > config.toml > default. The token is
+ * `verifiedRuntimePort`). Order: `PAWL_HUB_URL` > verified runtime.json > config.toml > default. The token is
  * never sent anywhere here. Throws `HubCredentialsError` like `readHubCredentials`.
  */
 export async function resolveHubCredentials(opts: ResolveHubCredentialsOptions = {}): Promise<HubCredentials> {

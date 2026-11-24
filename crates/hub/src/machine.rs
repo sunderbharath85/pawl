@@ -3,14 +3,14 @@
 //! - `id` is 12 characters of `[a-z0-9]` from the OS CSPRNG, generated once. Every global id this hub
 //!   issues (`${id}:${local}`) is prefixed with it, and hub.db records it, so it must never change.
 //! - `name` is the display name ("Mac mini"). It defaults to the OS host name and can be changed with
-//!   `krypto machine --name` or the `update_machine` client message.
+//!   `pawl machine --name` or the `update_machine` client message.
 
 use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use krypto_protocol::{is_valid_machine_id, Machine, MachineId, MachineOs, UnixMs};
+use pawl_protocol::{is_valid_machine_id, Machine, MachineId, MachineOs, UnixMs};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Paths;
@@ -27,10 +27,10 @@ const ID_ALPHABET: &[u8; 36] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 /// Largest multiple of 36 that fits in a byte: bytes below it map uniformly onto the alphabet.
 const ID_BYTE_LIMIT: u8 = 252;
 
-const FILE_HEADER: &str = "# Krypto machine identity.\n\
+const FILE_HEADER: &str = "# Pawl machine identity.\n\
 # `id` was generated once for this machine and is the prefix of every id this hub hands out.\n\
 # Never change it or copy this file to another machine. `name` may be edited\n\
-# (or use `krypto machine --name \"...\"`).\n";
+# (or use `pawl machine --name \"...\"`).\n";
 
 /// Contents of `machine.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,7 +56,7 @@ impl MachineIdentity {
 
     /// This hub's own machine, as reported to its clients right now.
     pub fn local_machine(&self) -> Machine {
-        self.to_machine(true, krypto_protocol::now_ms())
+        self.to_machine(true, pawl_protocol::now_ms())
     }
 }
 
@@ -78,7 +78,7 @@ pub fn generate_id() -> Result<MachineId> {
 }
 
 /// Trimmed name, 1..=40 characters (counted as `char`s), no control characters, and nothing paired
-/// devices would refuse (`krypto_peer::device_name_ok`: no bidi controls or zero-width / invisible
+/// devices would refuse (`pawl_peer::device_name_ok`: no bidi controls or zero-width / invisible
 /// formatting characters). A rejected name's error carries [`AckCode::Invalid`], so the
 /// `update_machine` ack error is exactly `"invalid"`.
 pub fn validate_name(name: &str) -> Result<String> {
@@ -88,7 +88,7 @@ pub fn validate_name(name: &str) -> Result<String> {
         format!("machine name must be 1-{MAX_NAME_CHARS} characters (got {len})")
     } else if name.chars().any(char::is_control) {
         "machine name must not contain control characters".to_string()
-    } else if !krypto_peer::device_name_ok(name) {
+    } else if !pawl_peer::device_name_ok(name) {
         "machine name must not contain invisible characters (bidi controls, zero-width or other formatting characters)".to_string()
     } else {
         return Ok(name.to_string());
@@ -102,9 +102,9 @@ pub fn default_name() -> String {
     host_name().as_deref().and_then(clean_host_name).unwrap_or_else(|| FALLBACK_NAME.to_string())
 }
 
-/// A character a device name may hold anywhere (see `krypto_peer::device_name_ok`).
+/// A character a device name may hold anywhere (see `pawl_peer::device_name_ok`).
 pub(crate) fn name_char_ok(c: char) -> bool {
-    !c.is_control() && krypto_peer::device_name_ok(&format!("x{c}"))
+    !c.is_control() && pawl_peer::device_name_ok(&format!("x{c}"))
 }
 
 /// First line, control and invisible formatting characters dropped, cut to [`MAX_NAME_CHARS`],
@@ -198,7 +198,7 @@ pub fn load_or_create(paths: &Paths) -> Result<MachineIdentity> {
     match write_new(&paths.machine, &render(&ident)?) {
         Ok(()) => Ok(ident),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Another krypto process created it first: use theirs (it may still be writing).
+            // Another pawl process created it first: use theirs (it may still be writing).
             for _ in 0..40 {
                 if let Ok(Some(m)) = load(paths) {
                     return Ok(m);
@@ -260,7 +260,7 @@ mod tests {
         }
         // Names paired devices would refuse are refused here, with a clear reason.
         for bad in ["Mac\u{200B}mini", "\u{202E}inim caM", "a\u{2066}b\u{2069}", "\u{FEFF}Mac", "Mac\u{2060}"] {
-            assert!(!krypto_peer::device_name_ok(bad), "{bad:?}");
+            assert!(!pawl_peer::device_name_ok(bad), "{bad:?}");
             let e = validate_name(bad).unwrap_err();
             assert_eq!(AckCode::find(&e), Some(AckCode::Invalid), "{e:#}");
             assert!(e.to_string().contains("invisible characters"), "{e:#}");
@@ -268,7 +268,7 @@ mod tests {
         // Visible Unicode is fine, and whatever passes here passes the peers' rule.
         for good in ["Sam\u{2019}s Mac \u{1F600}", "Büro-PC", "日本のマシン"] {
             assert_eq!(validate_name(good).unwrap(), good);
-            assert!(krypto_peer::device_name_ok(good));
+            assert!(pawl_peer::device_name_ok(good));
         }
     }
 
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(first.name, default_name());
         assert_eq!(load_or_create(&paths).unwrap(), first);
         let text = std::fs::read_to_string(&paths.machine).unwrap();
-        assert!(text.starts_with("# Krypto machine identity."), "{text}");
+        assert!(text.starts_with("# Pawl machine identity."), "{text}");
 
         let renamed = MachineIdentity { name: "Windows \"PC\" #2".into(), ..first.clone() };
         save(&paths, &renamed).unwrap();

@@ -8,7 +8,7 @@ import {
   proposalDoneText,
   proposalExpired,
   proposalRetryable,
-} from "@krypto/hub-client";
+} from "@pawl/hub-client";
 import type { HubConnection } from "./connection";
 import { confirmModal } from "./remote";
 
@@ -43,6 +43,6 @@ export async function runProposal(hub: HubConnection, messageId: string, proposa
   } catch (err) {
     const text = intentErrorText(err, ownerName(hub.state, p.machineId), p.kind === "start" ? "start" : "prompt");
     proposalLedger.failed(messageId, proposalId, text, proposalRetryable(err));
-    void vscode.window.showWarningMessage(`Krypto: ${text}`);
+    void vscode.window.showWarningMessage(`Pawl: ${text}`);
   }
 }

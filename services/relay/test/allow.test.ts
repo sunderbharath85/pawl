@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { RELAY_MAX_ALLOWED } from "@krypto/protocol";
+import { RELAY_MAX_ALLOWED } from "@pawl/protocol";
 import { ALLOW_KEY, AccessControl, SLOTS_KEY } from "../src/allow";
 import { encodeUrl, randomBytes } from "../src/b64";
 import { PAIRING_MAX_TTL_MS, PAIRING_SLOT_MAX } from "../src/limits";

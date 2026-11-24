@@ -5,7 +5,7 @@ use crate::envelope::RANDOM_LEN;
 use crate::invite::valid_host;
 use crate::{b64, DeviceKeys};
 use crypto_box::aead::Aead;
-use krypto_protocol::RELAY_AUTH_CONTEXT;
+use pawl_protocol::RELAY_AUTH_CONTEXT;
 use std::fmt;
 use std::net::IpAddr;
 use std::time::Duration;
@@ -238,10 +238,10 @@ mod tests {
     #[test]
     fn url_rules() {
         let ok = [
-            ("wss://relay.krypto.dev", "wss://relay.krypto.dev"),
-            ("https://Relay.Krypto.dev/", "wss://relay.krypto.dev"),
-            (" wss://relay.krypto.dev:443 ", "wss://relay.krypto.dev"),
-            ("wss://relay.krypto.dev:8443/r/v-1", "wss://relay.krypto.dev:8443/r/v-1"),
+            ("wss://relay.pawl.dev", "wss://relay.pawl.dev"),
+            ("https://Relay.Pawl.dev/", "wss://relay.pawl.dev"),
+            (" wss://relay.pawl.dev:443 ", "wss://relay.pawl.dev"),
+            ("wss://relay.pawl.dev:8443/r/v-1", "wss://relay.pawl.dev:8443/r/v-1"),
             ("WSS://10.0.0.5", "wss://10.0.0.5"),
             ("wss://[2001:db8::1]:9", "wss://[2001:db8::1]:9"),
             ("ws://127.0.0.1:8787", "ws://127.0.0.1:8787"),
@@ -253,19 +253,19 @@ mod tests {
         }
         let bad = [
             "",
-            "relay.krypto.dev",
-            "ftp://relay.krypto.dev",
-            "ws://relay.krypto.dev",
+            "relay.pawl.dev",
+            "ftp://relay.pawl.dev",
+            "ws://relay.pawl.dev",
             "http://10.0.0.5:8787",
-            "wss://user@relay.krypto.dev",
-            "wss://relay.krypto.dev/?x=1",
-            "wss://relay.krypto.dev/#x",
-            "wss://relay.krypto.dev/a%20b",
-            "wss://relay.krypto.dev/a//b",
-            "wss://relay.krypto.dev/../x",
-            "wss://relay.krypto.dev:0",
-            "wss://relay.krypto.dev:65536",
-            "wss://relay.krypto.dev:",
+            "wss://user@relay.pawl.dev",
+            "wss://relay.pawl.dev/?x=1",
+            "wss://relay.pawl.dev/#x",
+            "wss://relay.pawl.dev/a%20b",
+            "wss://relay.pawl.dev/a//b",
+            "wss://relay.pawl.dev/../x",
+            "wss://relay.pawl.dev:0",
+            "wss://relay.pawl.dev:65536",
+            "wss://relay.pawl.dev:",
             "wss://:443",
             "wss://a..b",
             "wss://-a.dev",
@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(auth_answer(&device, &b64::encode(&[9u8; 24]), &own, "h"), Err("bad_auth"));
         // The real envelope nonces sit exactly in the refused domain.
         let peer = DeviceKeys::generate();
-        let env = crate::seal(&device, "aaaaaaaaaaaa", "bbbbbbbbbbbb", &peer.public_key(), 5, &krypto_protocol::PeerBody::SyncRequest { since_seq: 0 }, false);
+        let env = crate::seal(&device, "aaaaaaaaaaaa", "bbbbbbbbbbbb", &peer.public_key(), 5, &pawl_protocol::PeerBody::SyncRequest { since_seq: 0 }, false);
         let n = b64::decode(&env.nonce).unwrap();
         assert!(n[RANDOM_LEN] < 2);
         assert_eq!(auth_answer(&device, &env.nonce, &b64::encode(&peer.public_key()), "h"), Err("bad_auth"));

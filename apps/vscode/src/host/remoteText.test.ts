@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Machine, PermissionRequest } from "@krypto/protocol";
+import type { Machine, PermissionRequest } from "@pawl/protocol";
 import { machineSuffix, openSettingsErrorText, remoteApprovalText, remoteStartText } from "./remoteText";
 
 const ME = "winpc0000001";

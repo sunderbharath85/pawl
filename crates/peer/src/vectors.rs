@@ -1,7 +1,7 @@
 //! Cross-language test vectors: `crates/peer/tests/vectors/*.json` (format: docs/reports/sde-peer.md).
 //!
 //! `vectors_match_this_crate` regenerates every file in memory and compares it with the committed one
-//! (`KRYPTO_REGEN_VECTORS=1` rewrites them instead). `vector_files_hold` then checks each committed
+//! (`PAWL_REGEN_VECTORS=1` rewrites them instead). `vector_files_hold` then checks each committed
 //! vector against the crate independently: envelopes open to their body, rejects are refused with the
 //! stated error, invites parse to their fields, auth boxes open on the relay side.
 
@@ -12,14 +12,14 @@ use crate::invite::{Invite, InviteError};
 use crate::keys::DeviceKeys;
 use crate::relay::{address, auth_answer};
 use crypto_box::aead::Aead;
-use krypto_protocol::{
+use pawl_protocol::{
     ByeReason, ClientKind, DeviceKind, Intent, IntentStatus, IntroDevice, Machine, MachineOs, PeerBody, PeerEnvelope,
     Presence, RELAY_AUTH_CONTEXT,
 };
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
-const REGEN_ENV: &str = "KRYPTO_REGEN_VECTORS";
+const REGEN_ENV: &str = "PAWL_REGEN_VECTORS";
 
 /// A fixed key pair. The secret is `start, start+1, ..., start+31`.
 struct Party {
@@ -343,7 +343,7 @@ fn invites_file() -> Value {
         ),
         invite_json(
             "IPv6 addr, relay with port and path, no access key",
-            &invite(Some("[fe80::1]:47801"), Some(("wss://relay.example.com:8443/krypto", &rt)), None),
+            &invite(Some("[fe80::1]:47801"), Some(("wss://relay.example.com:8443/pawl", &rt)), None),
         ),
         invite_json("local dev relay (ws on loopback)", &invite(None, Some(("ws://127.0.0.1:8787", &rt)), Some("devkey"))),
     ];
@@ -352,7 +352,7 @@ fn invites_file() -> Value {
     let pk = format!("pk={}", b64::encode_url(&HUB_A.pk()));
     let bad = |name: &str, uri: String| json!({ "name": name, "uri": uri });
     let invalid = vec![
-        bad("other scheme", good.replace("krypto://peer?", "https://peer?")),
+        bad("other scheme", good.replace("pawl://peer?", "https://peer?")),
         bad("version 2", good.replace("v=1", "v=2")),
         bad("upper-case machine id", good.replace(HUB_A.id, "HUBAAAAAAAAA")),
         bad("short public key", good.replace(&pk, "pk=AAAA")),
@@ -368,7 +368,7 @@ fn invites_file() -> Value {
         bad("fragment", format!("{good}#x")),
     ];
     json!({
-        "description": "Invite URIs: krypto://peer?v=1&mid=&pk=(base64url)&addr=(host:port, optional with relay)&code=(base64url \
+        "description": "Invite URIs: pawl://peer?v=1&mid=&pk=(base64url)&addr=(host:port, optional with relay)&code=(base64url \
                         16 bytes)&exp=(unix ms)[&relay=(percent-encoded URL)&rt=(base64url 16 bytes)[&rk=(access key)]]. \
                         Parsing is strict (any invalid or duplicate known parameter refuses the URI; unknown ones are ignored). \
                         publicKey here is the standard base64 form of pk. relay is the normalized URL.",
@@ -581,7 +581,7 @@ fn vectors_match_this_crate() {
             let text = serde_json::to_string_pretty(&value).unwrap() + "\n";
             std::fs::write(dir().join(file), text).unwrap();
         } else {
-            assert!(read(file) == value, "{file} differs from what krypto-peer produces; regenerate with {REGEN_ENV}=1");
+            assert!(read(file) == value, "{file} differs from what pawl-peer produces; regenerate with {REGEN_ENV}=1");
         }
     }
 }

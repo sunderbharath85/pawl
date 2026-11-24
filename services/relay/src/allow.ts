@@ -1,7 +1,7 @@
 // Who may drop frames into a mailbox: the allowed-sender set (paired devices' public keys, replaced wholesale by
 // `allow`) and one-shot pairing slots (`allow_pairing`). Both persist in the mailbox's storage and are bounded.
 
-import { RELAY_MAX_ALLOWED } from "@krypto/protocol";
+import { RELAY_MAX_ALLOWED } from "@pawl/protocol";
 import { bytesEqual, utf8 } from "./b64";
 import { PAIRING_MAX_TTL_MS, PAIRING_SLOT_MAX } from "./limits";
 import type { KvStore } from "./storage";

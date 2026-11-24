@@ -18,7 +18,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
-use krypto_protocol::{ClientMsg, HookSource, ServerMsg, HUB_HOST};
+use pawl_protocol::{ClientMsg, HookSource, ServerMsg, HUB_HOST};
 use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc};
@@ -83,7 +83,7 @@ pub async fn bind(port: u16, retry_for: Duration) -> Result<tokio::net::TcpListe
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
             Err(e) => {
-                return Err(anyhow::Error::new(e).context(format!("could not listen on {addr} (is another krypto already running?)")))
+                return Err(anyhow::Error::new(e).context(format!("could not listen on {addr} (is another pawl already running?)")))
             }
         }
     }
@@ -92,7 +92,7 @@ pub async fn bind(port: u16, retry_for: Duration) -> Result<tokio::net::TcpListe
 /// Serve on a bound listener until `shutdown` resolves.
 pub async fn serve_on(hub: Hub, listener: tokio::net::TcpListener, shutdown: impl std::future::Future<Output = ()> + Send + 'static) -> Result<()> {
     let addr = listener.local_addr().context("hub address")?;
-    tracing::info!("krypto {} listening on http://{addr}", crate::HUB_VERSION);
+    tracing::info!("pawl {} listening on http://{addr}", crate::HUB_VERSION);
     axum::serve(listener, router(hub)).with_graceful_shutdown(shutdown).await.context("server error")
 }
 
@@ -162,7 +162,7 @@ fn salvage_id(raw: &str) -> String {
 }
 
 enum First {
-    Hello(String, krypto_protocol::ClientKind, String),
+    Hello(String, pawl_protocol::ClientKind, String),
     Reject(Option<String>, &'static str),
     Gone,
 }

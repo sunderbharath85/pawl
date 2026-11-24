@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { routeForView } from "../panel/routes";
-import type { HubSettings } from "@krypto/protocol";
+import type { HubSettings } from "@pawl/protocol";
 import {
   agentDraft,
   applyAgentDraft,

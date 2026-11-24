@@ -1,7 +1,7 @@
-// A headless Krypto phone for smoke tests (bun, no device). State persists in a JSON file so the same identity
+// A headless Pawl phone for smoke tests (bun, no device). State persists in a JSON file so the same identity
 // can be reused across runs. Never prints the device secret, invite codes or the relay access key.
 //
-//   bun scripts/headless-phone.ts --state /tmp/phone.json pair "<krypto://peer?... invite>"
+//   bun scripts/headless-phone.ts --state /tmp/phone.json pair "<pawl://peer?... invite>"
 //   bun scripts/headless-phone.ts --state /tmp/phone.json status            # hubs, sessions, pending approvals
 //   bun scripts/headless-phone.ts --state /tmp/phone.json watch [secs]      # print changes for a while
 //   bun scripts/headless-phone.ts --state /tmp/phone.json approve <requestId>   # sends confirmed: true (no biometrics here)

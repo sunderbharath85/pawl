@@ -1,9 +1,9 @@
-# sde-peer — `krypto-peer`, step 7 (phone)
+# sde-peer — `pawl-peer`, step 7 (phone)
 
 Steps 2–6 are committed (f19744a); their reports are in git history. This report covers step 7 only: protocol v8,
 the roster introduction, phone peers over the relay, the offline wake and the cross-language test vectors.
 
-Status: done. `cargo test -p krypto-peer` passed 102 tests (+1 ignored) on each of 5 runs; 12 parallel copies × 3 passed 36/36. `cargo clippy -p krypto-peer --all-targets -- -D warnings`
+Status: done. `cargo test -p pawl-peer` passed 102 tests (+1 ignored) on each of 5 runs; 12 parallel copies × 3 passed 36/36. `cargo clippy -p pawl-peer --all-targets -- -D warnings`
 is clean. The vectors agree byte for byte with tweetnacl (72 checks, see "Test vectors").
 
 ## 1. Protocol v8
@@ -16,7 +16,7 @@ is clean. The vectors agree byte for byte with tweetnacl (72 checks, see "Test v
 
 ## 2. Node API for the hub (final; sent to t13 as API READY)
 
-Everything is exported from `krypto_peer`.
+Everything is exported from `pawl_peer`.
 
 | Item | What it does |
 |---|---|
@@ -205,7 +205,7 @@ are 7 cases:
 
 `valid[]`: `{name, device, relayUrl, accessKey, connectUrl, host, challenge {type, nonce, relayPk, v}, plaintext, auth {type, box}}`.
 
-- `plaintext = "krypto-relay-auth-v1:" + nonce + ":" + host`.
+- `plaintext = "pawl-relay-auth-v1:" + nonce + ":" + host`.
 - `box = nacl.box(utf8(plaintext), nonce, relayPk, deviceSk)`; the relay opens it with its secret from
   `keys.json`.
 - There are 2: a phone on `relay.example.com`, and a hub on `127.0.0.1:8787` (wrangler dev).
@@ -249,7 +249,7 @@ Cross-checked with a JS implementation written only from the file's description:
 | `vectors::fixed_keys_cover_both_directions` | The fixed keys give both direction bytes. |
 
 To regenerate after a deliberate wire change:
-`KRYPTO_REGEN_VECTORS=1 cargo test -p krypto-peer vectors`.
+`PAWL_REGEN_VECTORS=1 cargo test -p pawl-peer vectors`.
 
 Cross-check done: a throwaway bun script loaded `apps/mobile/node_modules/tweetnacl` and passed 72 of 72 checks:
 - key derivation;
@@ -331,16 +331,16 @@ What the three `phone` tests cover:
 
 ## 11. Commands run
 
-- `cargo test -p krypto-peer` ×5: 102 passed, 1 ignored, each run.
+- `cargo test -p pawl-peer` ×5: 102 passed, 1 ignored, each run.
 - Stress: the test binary 12 in parallel × 3 rounds: 36/36. A first round failed 2 of 36 on mock-relay timing:
   - a frame handed to a socket the relay had not yet seen close was lost;
   - frames still in flight were logged after the snapshot.
   
   Fixes: `a_phone_pairs…` and the step-6 `revoked_while_off_the_relay…` now wait for the relay to see the socket close (and for the relay log to go quiet) before acting. No product change.
-- `cargo clippy -p krypto-peer --all-targets -- -D warnings`: clean.
-- `KRYPTO_REGEN_VECTORS=1 cargo test -p krypto-peer vectors`, then twice without the variable: 3 passed each.
+- `cargo clippy -p pawl-peer --all-targets -- -D warnings`: clean.
+- `PAWL_REGEN_VECTORS=1 cargo test -p pawl-peer vectors`, then twice without the variable: 3 passed each.
 - `bun <scratchpad>/check_vectors.cjs <apps/mobile tweetnacl> <vectors dir>`: tweetnacl agrees, 72 checks.
-- After the security review: `cargo test -p krypto-peer` ×5: 105 passed, 1 ignored; stress 12×3 = 36/36 (after widening the step-6 relay ping test's 800 ms window to 2 s); clippy clean; `cargo check -p krypto-hub --tests` passes; JS names check 46/46; tweetnacl still 72/72.
+- After the security review: `cargo test -p pawl-peer` ×5: 105 passed, 1 ignored; stress 12×3 = 36/36 (after widening the step-6 relay ping test's 800 ms window to 2 s); clippy clean; `cargo check -p pawl-hub --tests` passes; JS names check 46/46; tweetnacl still 72/72.
 
 ## 12. Security review fixes (t13)
 
@@ -392,4 +392,4 @@ What the three `phone` tests cover:
 
 The five earlier vector files are unchanged (regenerating gives the same bytes) and still valid. `names.json` is
 new (t13).
-`cargo check -p krypto-hub --tests` passes.
+`cargo check -p pawl-hub --tests` passes.

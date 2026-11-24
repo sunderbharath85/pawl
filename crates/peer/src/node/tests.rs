@@ -5,7 +5,7 @@ use crate::invite::new_code;
 use crate::limits::{MAX_UNAUTH_PER_IP, MAX_UNAUTH_TOTAL, PAIR_MAX_FAILURES};
 use crate::MemoryRoster;
 use futures::{SinkExt, StreamExt};
-use krypto_protocol::{EventType, HubEvent, MachineOs};
+use pawl_protocol::{EventType, HubEvent, MachineOs};
 use std::net::Ipv4Addr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -533,7 +533,7 @@ async fn join_errors() {
     assert_eq!(a.node.join(&other_key.to_uri()).await, Err(JoinError::SelfInvite));
     let b = node(B, fast());
     assert_eq!(b.node.join("nonsense").await, Err(JoinError::BadUri));
-    assert_eq!(b.node.join("krypto://peer?v=1").await, Err(JoinError::BadUri));
+    assert_eq!(b.node.join("pawl://peer?v=1").await, Err(JoinError::BadUri));
     assert_eq!(JoinError::BadUri.to_string(), "bad_uri");
     assert_eq!(JoinError::SelfInvite.to_string(), "self_invite");
     assert_eq!(JoinError::Unreachable.to_string(), "unreachable");
@@ -1008,7 +1008,7 @@ async fn revoked_device_hello_is_answered_with_bye_once_a_minute() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revoked_while_offline_peer_learns_it_when_it_comes_back() {
     let (mut a, _) = listening(A, fast()).await;
-    let path = std::env::temp_dir().join(format!("krypto-peer-revoked-{}", hex::encode(getrandom::u64().unwrap().to_be_bytes())));
+    let path = std::env::temp_dir().join(format!("pawl-peer-revoked-{}", hex::encode(getrandom::u64().unwrap().to_be_bytes())));
     let roster_b = Arc::new(MemoryRoster::new());
     let mut b1 = node_with(B, DeviceKeys::load_or_create(&path).unwrap(), roster_b.clone(), fast());
     pair(&mut a, &mut b1).await;
@@ -1042,7 +1042,7 @@ async fn revoke_while_offline_then_peer_is_refused() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconnect_after_listener_restart_with_backoff() {
-    let dir = std::env::temp_dir().join(format!("krypto-peer-restart-{}", hex::encode(getrandom::u64().unwrap().to_be_bytes())));
+    let dir = std::env::temp_dir().join(format!("pawl-peer-restart-{}", hex::encode(getrandom::u64().unwrap().to_be_bytes())));
     let key_path = dir.join("device.key");
     let roster_a = Arc::new(MemoryRoster::new());
     let mut a1 = node_with(A, DeviceKeys::load_or_create(&key_path).unwrap(), roster_a.clone(), fast());

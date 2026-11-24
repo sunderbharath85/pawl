@@ -1,4 +1,4 @@
-# fe-mobile — `apps/mobile` (@krypto/mobile), step 7 (phone)
+# fe-mobile — `apps/mobile` (@pawl/mobile), step 7 (phone)
 
 Branch `step-7-phone`. Nothing committed (the orchestrator commits). No dependencies added, removed or upgraded.
 
@@ -18,7 +18,7 @@ Branch `step-7-phone`. Nothing committed (the orchestrator commits). No dependen
    - `relay-client.ts`: `RelayClient` (connect `{url}/v1/connect?pk=&k=`, challenge -> auth -> ok, refuses byte-15 < 2 and its own or
      any roster / pending-join key as `relayPk`, `allow` on every session and on change, `register_push` / `unregister_push`, ping 15 s, dead socket
      after 45 s of silence, reconnect 1 s -> 60 s with jitter, close 4000 `replaced` waits the max). `authAnswer`.
-   - `mirror.ts`: per-hub mirror on top of `@krypto/hub-client` (`reduceServerMsg`, `mergeEvents`, `initialHubState` are pure and
+   - `mirror.ts`: per-hub mirror on top of `@pawl/hub-client` (`reduceServerMsg`, `mergeEvents`, `initialHubState` are pure and
      RN-safe). Every item must carry the sender's machine id / id prefix (events `id == ${machineId}:${seq}`); snapshot replaces
      sessions / pets / pending; event cursor `maxSeq`; `Resolution` records who decided (`byMachineId`).
    - `roster.ts`: `evaluateIntro` (≤ 32 devices, kind hub only, id / name (≤ 64 chars, no control chars) / key (canonical, not low
@@ -44,7 +44,7 @@ Branch `step-7-phone`. Nothing committed (the orchestrator commits). No dependen
    -> agent -> optional first message -> biometric confirm), Pair (QR scanner, paste, confirm with key fingerprint / relay /
    expiry), Settings (phone name, relay status, paired computers + remove, push switch, approvals-lock status, roster notices,
    Unpair this phone). Native tabs (Approvals badge = pending count). Light + dark from the existing palette.
-   Deep link: `app/+native-intent.tsx` rewrites `krypto://peer?…` to `/pair?uri=…` (confirm step still required).
+   Deep link: `app/+native-intent.tsx` rewrites `pawl://peer?…` to `/pair?uri=…` (confirm step still required).
 
 ## PhoneNode facade (headless use)
 
@@ -90,9 +90,9 @@ relay the allow list holds only the inviter and no hellos go out; a failed join 
 
 ## Storage (expo-secure-store keys)
 
-`krypto.sk` (device secret, 64 hex), `krypto.identity` {deviceId, name, os}, `krypto.relay` {url, accessKey}, `krypto.hubs`
-[ids], `krypto.hub.<id>` (name, os, publicKey, pairedAt, introducedBy, addr), `krypto.seq.<id>` {rx, tx}, `krypto.revoked`
-{ids, pks} (≤ 64), `krypto.settings` {pushEnabled, pushToken, pushClear} (`pushClear` = the relay still has to be told
+`pawl.sk` (device secret, 64 hex), `pawl.identity` {deviceId, name, os}, `pawl.relay` {url, accessKey}, `pawl.hubs`
+[ids], `pawl.hub.<id>` (name, os, publicKey, pairedAt, introducedBy, addr), `pawl.seq.<id>` {rx, tx}, `pawl.revoked`
+{ids, pks} (≤ 64), `pawl.settings` {pushEnabled, pushToken, pushClear} (`pushClear` = the relay still has to be told
 `unregister_push`). The mirror is memory only (resynced on every hello).
 
 ## Files

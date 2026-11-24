@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { initialHubState, type HubState } from "@krypto/hub-client";
-import type { Machine, Pet } from "@krypto/protocol";
+import { initialHubState, type HubState } from "@pawl/hub-client";
+import type { Machine, Pet } from "@pawl/protocol";
 import { buildFeed } from "../panel/feed";
 import { FALLBACK_PET_ID, petList } from "./pets";
 import { answerErrorText, notifiesHere, onMachine } from "./where";

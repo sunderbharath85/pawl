@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
-import type { HubEvent, ToolCallPayload, ToolKind, ToolLocation } from "@krypto/protocol";
+import type { HubEvent, ToolCallPayload, ToolKind, ToolLocation } from "@pawl/protocol";
 import type { HubConnection } from "./connection";
 import { headUriFor } from "./git";
 import { errorMessage, toFileUri, workspaceFolderOf } from "./util";
@@ -21,7 +21,7 @@ const REOPEN_COOLDOWN_MS = 1500;
 
 /**
  * Watches live `tool_call` / `tool_call_update` events; when an `edit` call completes on files inside this
- * workspace, opens them (or a diff against git HEAD) per `krypto.openEditedFiles`.
+ * workspace, opens them (or a diff against git HEAD) per `pawl.openEditedFiles`.
  */
 export class EditedFilesWatcher implements vscode.Disposable {
   private readonly calls = new Map<string, TrackedCall>();
@@ -41,7 +41,7 @@ export class EditedFilesWatcher implements vscode.Disposable {
   }
 
   private get mode(): OpenMode {
-    const v = vscode.workspace.getConfiguration("krypto").get<string>("openEditedFiles");
+    const v = vscode.workspace.getConfiguration("pawl").get<string>("openEditedFiles");
     return v === "off" || v === "diff" ? v : "open";
   }
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { USER_ACTIVE_WINDOW_MS, type Agent, type Machine, type Pet } from "@krypto/protocol";
+import { USER_ACTIVE_WINDOW_MS, type Agent, type Machine, type Pet } from "@pawl/protocol";
 import {
   activeMachineId,
   agentFor,

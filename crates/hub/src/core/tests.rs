@@ -2,7 +2,7 @@
 
 use super::host::fake::FakeHost;
 use super::*;
-use krypto_protocol::{
+use pawl_protocol::{
     PermissionOption, PermissionOptionKind, RuleMatch, Species, ToolCallPayload, ToolKind, ToolLocation,
 };
 
@@ -129,7 +129,7 @@ fn permission(session_id: &str, kind: ToolKind) -> PermissionRequest {
             PermissionOption { option_id: "allow".into(), name: "Allow".into(), kind: PermissionOptionKind::AllowOnce },
             PermissionOption { option_id: "reject".into(), name: "Reject".into(), kind: PermissionOptionKind::RejectOnce },
         ],
-        created_at: krypto_protocol::now_ms(),
+        created_at: pawl_protocol::now_ms(),
     }
 }
 
@@ -160,9 +160,9 @@ async fn hello_returns_welcome_shape() {
     assert!(!w.rules.is_empty(), "default rules seeded");
     assert_eq!((w.machine.id.as_str(), w.machine.name.as_str()), (MID, "Test PC"));
     assert!(w.machine.online);
-    assert_eq!(w.machine.os, krypto_protocol::MachineOs::current());
+    assert_eq!(w.machine.os, pawl_protocol::MachineOs::current());
     assert_eq!(w.machine.hub_version.as_deref(), Some(crate::HUB_VERSION));
-    assert!(krypto_protocol::now_ms() - w.machine.last_seen < 60_000);
+    assert!(pawl_protocol::now_ms() - w.machine.last_seen < 60_000);
     assert_eq!(w.machines, vec![w.machine.clone()]);
     assert!(w.devices.is_empty(), "nothing paired");
     assert_eq!(w.peer.listening, None, "the peer listener is off by default");
@@ -412,7 +412,7 @@ async fn startup_drops_invalid_rules_from_config() {
     assert!(f.hub.startup_notices().is_empty());
     let f = fixture(None).await;
     assert!(f.hub.startup_notices().is_empty());
-    assert_eq!(f.hub.rules(), krypto_brain::rules::default_rules());
+    assert_eq!(f.hub.rules(), pawl_brain::rules::default_rules());
 }
 
 #[tokio::test]
@@ -432,7 +432,7 @@ async fn cancel_and_session_end_clear_pending() {
     f.hub.on_host_event(HostEvent::PermissionRequest(req2)).await;
     let mut ended = s.clone();
     ended.status = SessionStatus::Done;
-    ended.ended_at = Some(krypto_protocol::now_ms());
+    ended.ended_at = Some(pawl_protocol::now_ms());
     f.hub.on_host_event(HostEvent::Session(ended)).await;
     assert!(f.hub.pending_permissions().is_empty());
     let err = ack_error(f.hub.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "x".into() }, &actor()).await);
@@ -883,7 +883,7 @@ async fn update_pet_names_are_validated_and_unique() {
 // ---------------------------------------------------------------- pairing + presence (step 2)
 
 use crate::store::{PairingAuditEntry, PairingAuditKind};
-use krypto_protocol::{Device, DeviceKind};
+use pawl_protocol::{Device, DeviceKind};
 
 /// A real hub (fake ACP host) in `dir` with its own machine id; `listen` = config.toml [peer] listen.
 async fn peer_hub_in(dir: &std::path::Path, mid: &str, name: &str, listen: Option<&str>) -> Hub {
@@ -985,17 +985,17 @@ async fn pairing_requests_answer_bare_codes() {
     }
     let v = ack_result(invite(&a, Some(60), None).await);
     let expires = v["expiresAt"].as_i64().unwrap();
-    assert!((expires - krypto_protocol::now_ms() - 60_000).abs() < 5_000);
+    assert!((expires - pawl_protocol::now_ms() - 60_000).abs() < 5_000);
     let uri = v["uri"].as_str().unwrap().to_string();
-    assert!(uri.starts_with("krypto://peer?"), "{uri}");
-    assert_eq!(krypto_peer::Invite::parse(&uri).unwrap().addr.as_deref(), Some(listening.as_str()));
+    assert!(uri.starts_with("pawl://peer?"), "{uri}");
+    assert_eq!(pawl_peer::Invite::parse(&uri).unwrap().addr.as_deref(), Some(listening.as_str()));
 
     assert_eq!(ack_error(join(&b, "not an invite").await), "bad_uri");
     assert_eq!(ack_error(join(&a, &uri).await), "self_invite");
 
     // A wrong code is refused (and audited on the inviter) without pairing anything.
-    let mut forged = krypto_peer::Invite::parse(&uri).unwrap();
-    forged.code = krypto_peer::b64::encode_url(&[7u8; 16]);
+    let mut forged = pawl_peer::Invite::parse(&uri).unwrap();
+    forged.code = pawl_peer::b64::encode_url(&[7u8; 16]);
     assert_eq!(ack_error(join(&b, &forged.to_uri()).await), "invite_rejected");
     let rejected = wait_audit(&a, PairingAuditKind::PairRejected).await;
     assert_eq!(rejected.detail.as_deref(), Some("invalid_invite"));
@@ -1145,8 +1145,8 @@ async fn presence_pets_are_taken_names() {
 
 // ---------------------------------------------------------------- mirror + visitors (step 3)
 
-use krypto_peer::RosterEntry;
-use krypto_protocol::{MirrorUpdate, PeerBody, MIRROR_PAYLOAD_MAX_BYTES};
+use pawl_peer::RosterEntry;
+use pawl_protocol::{MirrorUpdate, PeerBody, MIRROR_PAYLOAD_MAX_BYTES};
 
 /// A machine that is neither this hub nor its peer.
 const THIRD: &str = "cccccc333333";
@@ -1168,7 +1168,7 @@ async fn roster_peer(hub: &Hub, peer: &str) {
     let machine = Machine {
         id: peer.into(),
         name: "Mac mini".into(),
-        os: krypto_protocol::MachineOs::Macos,
+        os: pawl_protocol::MachineOs::Macos,
         last_seen: 1,
         online: false,
         hub_version: None,
@@ -1179,7 +1179,7 @@ async fn roster_peer(hub: &Hub, peer: &str) {
 }
 
 fn remote_session(mid: &str, local: &str) -> Session {
-    let now = krypto_protocol::now_ms();
+    let now = pawl_protocol::now_ms();
     Session {
         id: global_id(mid, local),
         machine_id: mid.into(),
@@ -1204,7 +1204,7 @@ fn remote_event(mid: &str, seq: i64, session_id: &str, payload: Value) -> HubEve
         session_id: session_id.into(),
         kind: EventType::AgentMessageChunk,
         payload,
-        ts: krypto_protocol::now_ms(),
+        ts: pawl_protocol::now_ms(),
     }
 }
 
@@ -1578,7 +1578,7 @@ async fn two_hubs_mirror_live_resync_and_revoke() {
     let wa = a.welcome();
     let bm = wa.machines.iter().find(|m| m.id == OTHER).unwrap();
     assert!(bm.online && bm.user_active_at.is_some());
-    assert_eq!(active_machine(&wa.machines, MID, krypto_protocol::now_ms()), OTHER);
+    assert_eq!(active_machine(&wa.machines, MID, pawl_protocol::now_ms()), OTHER);
 
     // Revoke on A: B deletes its mirror of A.
     ack_result(a.handle(ClientMsg::RevokeDevice { id: "rv".into(), device_id: OTHER.into() }, &actor()).await);
@@ -1636,7 +1636,7 @@ async fn mirror_cache_never_outgrows_the_store() {
     let f = fixture(None).await;
     roster_peer(&f.hub, OTHER).await;
     let max = crate::store::MIRROR_MAX_SESSIONS;
-    let now = krypto_protocol::now_ms();
+    let now = pawl_protocol::now_ms();
     for i in 0..(max + 5) {
         let mut s = remote_session(OTHER, &format!("s{i:04}"));
         s.last_event_at = now - (max + 5 - i) * 1000;
@@ -1808,7 +1808,7 @@ async fn brain_context_caps_mirrored_events() {
 async fn peer_timestamps_are_clamped() {
     let f = fixture(None).await;
     roster_peer(&f.hub, OTHER).await;
-    let now = krypto_protocol::now_ms();
+    let now = pawl_protocol::now_ms();
     let mut s = remote_session(OTHER, "s1");
     s.started_at = i64::MIN;
     s.last_event_at = i64::MAX;
@@ -1826,7 +1826,7 @@ async fn peer_timestamps_are_clamped() {
     let m = |at: Option<i64>| Machine {
         id: OTHER.into(),
         name: "x".into(),
-        os: krypto_protocol::MachineOs::Linux,
+        os: pawl_protocol::MachineOs::Linux,
         last_seen: 0,
         online: true,
         hub_version: None,
@@ -1841,7 +1841,7 @@ async fn peer_timestamps_are_clamped() {
 
 use super::intents::{Ack, INTENT_TIMEOUT};
 use crate::store::{AuditOrigin, IntentRole};
-use krypto_protocol::{Intent, IntentRejectReason as Reject, IntentStatus};
+use pawl_protocol::{Intent, IntentRejectReason as Reject, IntentStatus};
 
 /// The owner's answer to an intent from `from` (sent by a desktop client).
 async fn intent(hub: &Hub, from: &str, id: &str, confirmed: bool, i: Intent) -> Ack {
@@ -2237,7 +2237,7 @@ async fn intents_are_rate_limited_per_peer() {
     roster_peer(&f.hub, OTHER).await;
     roster_peer(&f.hub, THIRD).await;
     let deny = |i: usize| Intent::Deny { request_id: global_id(MID, format!("r{i}")), option_id: None };
-    for i in 0..krypto_protocol::INTENT_RATE_PER_SEC as usize {
+    for i in 0..pawl_protocol::INTENT_RATE_PER_SEC as usize {
         assert_eq!(reason(&intent(&f.hub, OTHER, &format!("q{i}"), false, deny(i)).await), Some(Reject::NotFound));
     }
     assert_eq!(reason(&intent(&f.hub, OTHER, "over", false, deny(99)).await), Some(Reject::RateLimited));
@@ -2388,8 +2388,8 @@ async fn two_hubs_approve_start_and_time_out() {
 
 // ---------------------------------------------------------------- repos + remote commands (step 5)
 
-use krypto_peer::PeerEvent;
-use krypto_protocol::{ChatProposalKind, Presence, RepoRef};
+use pawl_peer::PeerEvent;
+use pawl_protocol::{ChatProposalKind, Presence, RepoRef};
 
 fn repo(name: &str, path: &str) -> RepoRef {
     RepoRef { name: name.into(), path: path.into(), last_used_at: Some(1) }
@@ -2397,12 +2397,12 @@ fn repo(name: &str, path: &str) -> RepoRef {
 
 /// A presence from `peer` with these agents and repos.
 fn presence_of(peer: &str, agents: Vec<Agent>, repos: Vec<RepoRef>) -> Presence {
-    let now = krypto_protocol::now_ms();
+    let now = pawl_protocol::now_ms();
     Presence {
         machine: Machine {
             id: peer.into(),
             name: "Mac mini".into(),
-            os: krypto_protocol::MachineOs::Macos,
+            os: pawl_protocol::MachineOs::Macos,
             last_seen: now,
             online: true,
             hub_version: None,
@@ -2474,7 +2474,7 @@ async fn peer_repos_are_validated_stored_and_listed() {
     assert_eq!(v["agents"].as_array().unwrap().len(), 1, "invalid agents dropped: {v}");
     assert_eq!(f.hub.store().device_agents(OTHER).unwrap().unwrap().len(), 1, "and never persisted");
     let got = list_repos(&f.hub, Some(OTHER)).await.unwrap();
-    assert_eq!(got.len(), krypto_protocol::REPO_INDEX_MAX);
+    assert_eq!(got.len(), pawl_protocol::REPO_INDEX_MAX);
     assert_eq!((got[0].name.as_str(), got[1].name.as_str(), got[2].name.as_str()), ("api", "web", "r0"), "invalid entries dropped");
     assert_eq!(f.hub.store().device_repos(OTHER).unwrap().unwrap(), got, "persisted for later");
     assert_eq!(list_repos(&f.hub, Some(THIRD)).await.unwrap_err(), "not_found");
@@ -2484,7 +2484,7 @@ async fn peer_repos_are_validated_stored_and_listed() {
     feed(&f.hub, OTHER, MirrorUpdate::Pet { pet: remote_pet(OTHER, "codex", "Biscuit") }).await;
     let ctx = f.hub.brain_context(None).await;
     assert_eq!(ctx.remote_agents.get(OTHER).map(|a| a[0].id.as_str()), Some("codex"));
-    assert_eq!(ctx.repos.get(OTHER).map(|r| r.len()), Some(krypto_protocol::REPO_INDEX_MAX));
+    assert_eq!(ctx.repos.get(OTHER).map(|r| r.len()), Some(pawl_protocol::REPO_INDEX_MAX));
     assert!(ctx.repos.contains_key(MID), "this machine's index too");
     assert!(ctx.pets.iter().any(|p| p.name == "Biscuit" && p.machine_id == OTHER));
 }
@@ -2513,7 +2513,7 @@ async fn chat_proposals_are_stored_and_broadcast() {
     let mut f = fixture(None).await;
     roster_peer(&f.hub, OTHER).await;
     drain(&mut f.rx);
-    let proposal = |i: usize| krypto_protocol::ChatProposal {
+    let proposal = |i: usize| pawl_protocol::ChatProposal {
         id: format!("p{i}"),
         kind: ChatProposalKind::Start,
         machine_id: OTHER.into(),

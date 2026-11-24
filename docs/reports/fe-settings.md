@@ -35,7 +35,7 @@ relay-only invites). Nothing was run against a real hub; sde-hub builds the hub 
     returned.
   - New helpers: `inviteRoute`, `relayHost`, `maskInviteSecrets` (rk → dots), `relayStatusText` (wording for every
     `lastError` code), `RELAY_ERROR_TEXT`, `linkPathLabel`.
-- **`/node`:** `readHubCredentials` falls back to the top-level `port` in config.toml when `KRYPTO_HUB_URL` is unset. This
+- **`/node`:** `readHubCredentials` falls back to the top-level `port` in config.toml when `PAWL_HUB_URL` is unset. This
   lets clients follow Settings → Hub port. There is a new `urlSource`, plus `configPortFromToml`, `readConfigPort` and
   `hubConfigFile`.
 - **Tests:** new `test/settings.test.ts` and more in `peer.test.ts` cover the parsers, checks, patches, risky wording,
@@ -93,8 +93,8 @@ relay-only invites). Nothing was run against a real hub; sde-hub builds the hub 
   Relay settings.
 
 **Hub port follows Settings:**
-- **Tauri (`hub.rs`):** `hub_http_url()` = `KRYPTO_HUB_URL` > the config.toml top-level `port` > 47800, the same order as
-  the hub. `krypto serve` is now spawned **without `--port`** (the hub reads env and config itself; a flag would pin the
+- **Tauri (`hub.rs`):** `hub_http_url()` = `PAWL_HUB_URL` > the config.toml top-level `port` > 47800, the same order as
+  the hub. `pawl serve` is now spawned **without `--port`** (the hub reads env and config itself; a flag would pin the
   port and lock the setting). New command `lan_address` (std only: a UDP route lookup, no packet sent).
 - **`connection.ts`:** keeps a working connection on the old port until it drops, so a saved port change does not cut the
   running hub off.
@@ -105,13 +105,13 @@ Rust gained `reads_top_level_port_from_config`.
 
 ## VS Code (`apps/vscode`)
 
-- **`Krypto: Open Settings`** (`krypto.openSettings`, in the palette and the Pet view menu) sends `openPanel("settings")`.
-  Without a desktop app it says "Open the Krypto desktop app to change settings." An old hub or a timeout gets clear
+- **`Pawl: Open Settings`** (`pawl.openSettings`, in the palette and the Pet view menu) sends `openPanel("settings")`.
+  Without a desktop app it says "Open the Pawl desktop app to change settings." An old hub or a timeout gets clear
   text (`openSettingsErrorText`, tested).
 - **Show Machines and the status-bar tooltip** label online machines **LAN** / **Relay**.
 - **Credentials** are polled while disconnected (not only when unauthorized), so a new config.toml port is picked up
   after the hub restarts.
-- **`Start Hub`** passes `--port` only for an explicit `krypto.hubUrl` setting.
+- **`Start Hub`** passes `--port` only for an explicit `pawl.hubUrl` setting.
 - README updated.
 
 ## Commands run (final; all pass)
@@ -149,9 +149,9 @@ No dependencies were added, removed or upgraded, and no install was run. Line en
    - a `restart_hub` / `shutdown` ClientMsg (local only);
    - or the desktop restarts a hub it spawned itself. This ends running sessions, and on Windows it can leave agent
      processes behind (the step-5 backlog note).
-2. **Port change before the restart.** `krypto hook` (and now the desktop and VS Code, when they reconnect) resolve the
+2. **Port change before the restart.** `pawl hook` (and now the desktop and VS Code, when they reconnect) resolve the
    port from config.toml. Between saving a new port and restarting, hook POSTs go to a port nobody listens on, so those
-   hook events are lost until the restart. sde-hub may want `krypto hook` to try the old port as well, or apply the
+   hook events are lost until the restart. sde-hub may want `pawl hook` to try the old port as well, or apply the
    port only at restart.
 3. **Field names in `invalid:<field>`.** I sent t13 an FYI: clients expect camelCase wire paths (`peer.startRoots[2]`,
    `customAgents[1].command`) and also accept snake_case config paths.
@@ -164,14 +164,14 @@ No dependencies were added, removed or upgraded, and no install was run. Line en
    - New `HubClient.restartHub()`.
    - In the desktop app, "Restart hub" sits in the restart-needed banner and in the Hub section's header.
    - It asks first with an in-app confirm: "Running sessions end; paired machines reconnect." The confirm also gives
-     the number of Krypto sessions running on this machine, says that sessions started in a terminal keep running,
+     the number of Pawl sessions running on this machine, says that sessions started in a terminal keep running,
      and lists what the restart applies.
    - After the ack, `HubConnection` enters a new `restarting` phase until the new hub says hello. The HubBanner shows
      "Restarting the hub…" with a spinner, and so does the settings banner.
    - The phase also ends after 30 s; if the hub is still not back, a message tells the user to start it.
    - An older hub without `restart_hub` gets "This hub can't restart itself…".
 2. **runtime.json first:**
-   - The Node helper `readHubCredentials` resolves `KRYPTO_HUB_URL` > `runtime.json` `port` > config.toml `port` > 47800
+   - The Node helper `readHubCredentials` resolves `PAWL_HUB_URL` > `runtime.json` `port` > config.toml `port` > 47800
      (`urlSource: "runtime"`; new `readRuntimePort` / `runtimePortFromJson` / `hubRuntimeFile`). VS Code goes through
      this helper.
    - Tauri `hub_http_url()` uses the same order. `start_hub` re-resolves the URL on each health probe, so it finds the
@@ -204,7 +204,7 @@ The rule is the same everywhere a client reads runtime.json:
 - The port is used only when the answer is `ok` and `machineId` equals `id` in machine.toml.
 - Otherwise the client falls back to config.toml, then to 47800.
 - With no machine.toml, the port is not checked and is never used.
-- A runtime.json port equal to the configured port needs no check. `KRYPTO_HUB_URL` wins and skips the check.
+- A runtime.json port equal to the configured port needs no check. `PAWL_HUB_URL` wins and skips the check.
 
 Where it applies:
 - **hub-client `/node`:**
@@ -219,7 +219,7 @@ Where it applies:
   - `HubHealth` / `HealthBody` carry `machineId`.
   - `machine_id_from_toml` accepts both quote styles and the 12-character id rule.
   - The `hub_health` command and `start_hub` reuse the check's answer, so each probe makes one request.
-- **VS Code:** credential lookup is now async (`resolveHubCredentials` without a `krypto.hubUrl` setting), both for
+- **VS Code:** credential lookup is now async (`resolveHubCredentials` without a `pawl.hubUrl` setting), both for
   start and for the disconnected/unauthorized poll. A generation counter drops lookups that finish after a
   stop/restart, and polls never overlap.
 
@@ -317,7 +317,7 @@ Branch `step-7-phone`. Nothing committed. The only new dependency is the approve
   - New error texts: `relay_off`, `unsupported`, and the `create_phone_invite` action.
 - **Settings → Machines & pairing:** new toggle "Accept devices introduced by paired hubs" with on/off explanations and its own save bar.
   - Turning it on goes through the risky confirm.
-  - For a v7 hub it shows "Update krypto…" instead.
+  - For a v7 hub it shows "Update pawl…" instead.
   - The section's summary line also counts phones.
 - **First-run setup:** a new optional "Phone" step (Hub → Name → Hooks → Pair → Phone → Done) uses the same card.
 - **Notifications:** roster-intro `notification` messages already go through the generic path (OS notification and Pet mail). The Pet mail empty text now mentions devices added by other machines.
@@ -325,7 +325,7 @@ Branch `step-7-phone`. Nothing committed. The only new dependency is the approve
 
 ### VS Code
 - The status bar tooltip has a phone line, e.g. "$(device-mobile) 2 phones paired · 1 online". It also shows when no other machine is paired, and it is part of the redraw key.
-- "Krypto: Show Machines" lists phones after the machines: `$(device-mobile)` label, "iOS phone · Relay", presence, "Added by …".
+- "Pawl: Show Machines" lists phones after the machines: `$(device-mobile)` label, "iOS phone · Relay", presence, "Added by …".
 
 ### Commands run (all pass)
 - `packages/hub-client`: `bunx tsc --noEmit`; `bun test`: 245 pass.

@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import type { WebviewToHost } from "./shared/messages";
-import { sessionBackfill } from "@krypto/hub-client";
+import { sessionBackfill } from "@pawl/hub-client";
 import { ActivityReporter } from "./host/activity";
 import { runProposal } from "./host/proposals";
 import { answerRequest, remoteError } from "./host/remote";
@@ -15,7 +15,7 @@ import { toFileUri } from "./host/util";
 let connection: HubConnection | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
-  const log = vscode.window.createOutputChannel("Krypto", { log: true });
+  const log = vscode.window.createOutputChannel("Pawl", { log: true });
   const version = String(context.extension.packageJSON.version ?? "0.0.0");
   const hub = new HubConnection(version, log);
   connection = hub;
@@ -48,7 +48,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   hub.start();
-  log.info(`Krypto for VS Code ${version} activated`);
+  log.info(`Pawl for VS Code ${version} activated`);
 }
 
 export function deactivate(): void {
@@ -57,15 +57,15 @@ export function deactivate(): void {
 }
 
 const WEBVIEW_COMMANDS = {
-  startSession: "krypto.startSession",
-  startHub: "krypto.startHub",
-  installHooks: "krypto.installHooks",
-  changeSpecies: "krypto.changeSpecies",
-  reconnect: "krypto.reconnect",
-  openPanel: "krypto.openPetPanel",
-  renameMachine: "krypto.renameMachine",
-  renamePet: "krypto.renamePet",
-  showMachines: "krypto.showMachines",
+  startSession: "pawl.startSession",
+  startHub: "pawl.startHub",
+  installHooks: "pawl.installHooks",
+  changeSpecies: "pawl.changeSpecies",
+  reconnect: "pawl.reconnect",
+  openPanel: "pawl.openPetPanel",
+  renameMachine: "pawl.renameMachine",
+  renamePet: "pawl.renamePet",
+  showMachines: "pawl.showMachines",
 } as const;
 
 /** The machine a session belongs to (by the held session, else its global id prefix). */

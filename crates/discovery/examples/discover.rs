@@ -1,6 +1,6 @@
 //! Print discovered agents as JSON.
-//! `cargo run -p krypto-discovery --example discover -- [cache_dir] [--offline]`
-use krypto_discovery::{discover, DiscoveryConfig};
+//! `cargo run -p pawl-discovery --example discover -- [cache_dir] [--offline]`
+use pawl_discovery::{discover, DiscoveryConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -10,7 +10,7 @@ async fn main() -> anyhow::Result<()> {
         .iter()
         .find(|a| !a.starts_with("--"))
         .map(std::path::PathBuf::from)
-        .or_else(krypto_protocol::data_dir)
+        .or_else(pawl_protocol::data_dir)
         .ok_or_else(|| anyhow::anyhow!("no cache dir"))?;
     // The example has no hub identity; stamp a fixed placeholder machine id.
     let machine_id = "example00000".to_string();

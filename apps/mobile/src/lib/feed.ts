@@ -1,5 +1,5 @@
 // Pure: turn a session's raw HubEvents into a readable feed (chunks merged, tool updates folded in).
-import { isTruncatedPayload } from "@krypto/protocol";
+import { isTruncatedPayload } from "@pawl/protocol";
 import type {
   ErrorPayload,
   HookPayload,
@@ -12,7 +12,7 @@ import type {
   ToolCallStatus,
   ToolKind,
   ToolLocation,
-} from "@krypto/protocol";
+} from "@pawl/protocol";
 
 export type FeedItem =
   | { kind: "user"; key: string; ts: number; text: string }

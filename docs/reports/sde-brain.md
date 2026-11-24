@@ -1,7 +1,7 @@
-# sde-brain report — step 5: remote commands by machine + repo (`crates/brain/`, crate `krypto-brain`)
+# sde-brain report — step 5: remote commands by machine + repo (`crates/brain/`, crate `pawl-brain`)
 
-Status: **DONE, rev 3** (2026-11-24, branch `step-5-remote-commands`). Gate passes: `cargo test -p krypto-brain` 82 passed / 0
-failed; `cargo clippy -p krypto-brain --all-targets -- -D warnings` clean. `cargo check -p krypto-hub --all-targets` builds.
+Status: **DONE, rev 3** (2026-11-24, branch `step-5-remote-commands`). Gate passes: `cargo test -p pawl-brain` 82 passed / 0
+failed; `cargo clippy -p pawl-brain --all-targets -- -D warnings` clean. `cargo check -p pawl-hub --all-targets` builds.
 Nothing committed.
 
 ## Rev 3 — `Watchdog::set_config` (step 5b follow-up)
@@ -38,8 +38,8 @@ Also touches `crates/brain/src/util.rs`.
 - **(4) Approve numbering:** "approve N" and the status hint number this machine's pending requests only.
   - Another machine's requests count only when that machine (or its pet) is named. The one exception is when nothing on this
     machine waits: then "approve" gives the step-4 panel answer for them.
-  - Lists end with "(N more requests on other machines: answer them in the Krypto panel, or name the machine.)", and the
-    status hint says "(+N on other machines, in the Krypto panel)".
+  - Lists end with "(N more requests on other machines: answer them in the Pawl panel, or name the machine.)", and the
+    status hint says "(+N on other machines, in the Pawl panel)".
   - `mirrored_text_never_turns_into_an_action` was updated: "approve 1" is now the local request even though the mirrored
     one is older; "approve 2" is "no request #2".
 - **(2-brain) Names from data:**
@@ -52,7 +52,7 @@ Also touches `crates/brain/src/util.rs`.
 ## Files changed
 | File | Change |
 |---|---|
-| `crates/brain/Cargo.toml` | `uuid = { workspace = true }` (approved by t13; already a workspace dep). `Cargo.lock` gains the one line `"uuid"` under `krypto-brain`; no new package. |
+| `crates/brain/Cargo.toml` | `uuid = { workspace = true }` (approved by t13; already a workspace dep). `Cargo.lock` gains the one line `"uuid"` under `pawl-brain`; no new package. |
 | `crates/brain/src/chat/mod.rs` | Brain API (below); `handle` builds the cross-machine agent catalog, repo index and `Targets`, routes commands local vs remote, status/approve with targets; local `command()` takes `Option` agent and `Named` repos. |
 | `crates/brain/src/chat/intent.rs` | Parser targets: machines, pets, "here"/"on this machine"; agent-less commands; pet addressing; `RepoIndex` across every machine (`ctx.repos` + all sessions). Returns `Parsed { intent, target }`. |
 | `crates/brain/src/chat/remote.rs` (new) | Routing (`route`), per-machine planning, `ChatProposal` building, machine-scoped status context. |
@@ -60,7 +60,7 @@ Also touches `crates/brain/src/util.rs`.
 | `crates/brain/src/util.rs` | Rev 2: `basename` returns a cleaned String; `clean_name`, `NAME_MAX_CHARS`. |
 
 ## Brain API (as in CONTRACTS.md "Step 5")
-- `BrainContext` + `remote_agents: BTreeMap<MachineId, Vec<Agent>>`, `repos: BTreeMap<MachineId, Vec<krypto_protocol::RepoRef>>`,
+- `BrainContext` + `remote_agents: BTreeMap<MachineId, Vec<Agent>>`, `repos: BTreeMap<MachineId, Vec<pawl_protocol::RepoRef>>`,
   `pets: Vec<Pet>`. `BrainContext::default()` leaves them empty.
 - `BrainReply` + `proposals: Vec<ChatProposal>` (serde default, skipped when empty). **`BrainReply` now derives `PartialEq`
   only** (protocol's `ChatProposal` has no `Eq`). Reported to t13 with the API READY message.
@@ -113,10 +113,10 @@ Also touches `crates/brain/src/util.rs`.
 4. **Status with targets:** "what is the Mac mini's Claude doing?", "what's the mac mini doing?", "what's Rex doing?",
    "is claude busy here?". These use only that machine's sessions and requests, with "(Mac mini is offline, last seen …:
    this is what I saw last.)" when it is offline. Without a target, status is unchanged.
-5. **Approvals:** unchanged (local only; a remote request gets the step-4 "use the panel / `krypto approve`" answer). New: a
+5. **Approvals:** unchanged (local only; a remote request gets the step-4 "use the panel / `pawl approve`" answer). New: a
    named machine or pet narrows the pending list ("approve the mac mini's request", "approve on windows pc").
 
-## Tests added or changed (all in `cargo test -p krypto-brain`)
+## Tests added or changed (all in `cargo test -p pawl-brain`)
 - **intent.rs:**
   - `machine_targets_in_commands`: six phrasings of the example, machine-only commands, prefix (unique and ambiguous),
     here / this machine, words that stay task text, quoted text.
@@ -142,9 +142,9 @@ Also touches `crates/brain/src/util.rs`.
   - `mirrored_text_never_turns_into_an_action` now also asserts no proposals.
 
 ## Commands run
-- `cargo test -p krypto-brain`: 81 passed, 0 failed (rev 2).
-- `cargo clippy -p krypto-brain --all-targets -- -D warnings`: clean.
-- `cargo check -p krypto-hub --all-targets`: builds.
+- `cargo test -p pawl-brain`: 81 passed, 0 failed (rev 2).
+- `cargo clippy -p pawl-brain --all-targets -- -D warnings`: clean.
+- `cargo check -p pawl-hub --all-targets`: builds.
 - `cargo fmt --check`: not used as a gate. The crate (including files I did not touch, e.g. `watchdog.rs` at HEAD) is not
   default-rustfmt formatted, so I kept the existing style.
 
@@ -178,7 +178,7 @@ Also touches `crates/brain/src/util.rs`.
 
 ---
 
-Renamed to Krypto on 2026-11-23; names below are pre-rename.
+Renamed to Pawl on 2026-11-23; names below are pre-rename.
 
 # sde-brain report — crate `pet-brain` (`crates/brain/`)
 

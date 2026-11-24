@@ -1,4 +1,4 @@
-import type { Agent, Session } from "@krypto/protocol";
+import type { Agent, Session } from "@pawl/protocol";
 
 /** "now", "42s", "5m", "3h", "2d", or a short date. */
 export function timeAgo(ts: number | undefined, now: number = Date.now()): string {

@@ -13,8 +13,8 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use krypto_discovery::CustomAgent;
-use krypto_protocol::{
+use pawl_discovery::CustomAgent;
+use pawl_protocol::{
     CustomAgentSetting, HubSettings, HubSettingsBot, HubSettingsHub, HubSettingsPatch, HubSettingsPeer, HubSettingsRelay,
     HubSettingsRepos, HubSettingsWatchdog,
 };
@@ -755,7 +755,7 @@ fn open_private(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
-/// `krypto settings` output: the settings as JSON with secrets shown as set / not set only.
+/// `pawl settings` output: the settings as JSON with secrets shown as set / not set only.
 pub fn masked_lines(s: &HubSettings, restart_required: &[String]) -> Vec<String> {
     let opt = |o: &Option<String>| o.clone().unwrap_or_else(|| "(off)".into());
     let set = |b: bool| if b { "set (hidden)" } else { "not set" }.to_string();

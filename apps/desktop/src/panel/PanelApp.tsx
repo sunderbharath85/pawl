@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useHubState } from "@krypto/hub-client/react";
+import { useHubState } from "@pawl/hub-client/react";
 import { isTauri, native, onNative, type PanelFocus } from "../lib/native";
 import { readSettings, writeSettings } from "../lib/settings";
 import { usePetViews } from "../lib/pets";

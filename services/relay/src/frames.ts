@@ -7,7 +7,7 @@ import {
   type RelayClientFrame,
   type RelayErrorCode,
   type RelayServerFrame,
-} from "@krypto/protocol";
+} from "@pawl/protocol";
 import { decodeUrl, looksStd } from "./b64";
 import { AUTH_FRAME_MAX_BYTES, ENV_ID_MAX_CHARS, ENV_NONCE_MAX_CHARS, ENV_PK_MAX_CHARS } from "./limits";
 

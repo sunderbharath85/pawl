@@ -1,4 +1,4 @@
-//! krypto-peer: device keys, invites, NaCl-box envelopes and the hub-to-hub peer link.
+//! pawl-peer: device keys, invites, NaCl-box envelopes and the hub-to-hub peer link.
 //! API contract: docs/CONTRACTS.md "Step 2 — Pairing + LAN presence" and "Step 6 — Relay".
 //!
 //! Security model, in short:
@@ -32,5 +32,5 @@ pub use keys::DeviceKeys;
 pub use node::{JoinError, Joined, PeerEvent, PeerNode, PeerTimings, SendError, WakeError, MAX_SEND_BODY_BYTES};
 pub use relay::{RelayConfig, RelayConfigError};
 // The wire types the hub reports these with.
-pub use krypto_protocol::{LinkPath, RelayStatusInfo};
+pub use pawl_protocol::{LinkPath, RelayStatusInfo};
 pub use roster::{MemoryRoster, Roster, RosterEntry};

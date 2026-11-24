@@ -1,7 +1,7 @@
 // Owns the desktop's HubClient: reads credentials from the Rust side, watches
 // /health, (re)connects after the hub starts, and exposes a small "phase" model
 // the UI can render ("hub is napping — wake it?").
-import { HubClient, fetchHubHealth, toHubHttpUrl } from "@krypto/hub-client";
+import { HubClient, fetchHubHealth, toHubHttpUrl } from "@pawl/hub-client";
 import { isTauri, native, onNative, type HubCredentials } from "./native";
 
 export const CLIENT_VERSION = "0.1.0";
@@ -9,7 +9,7 @@ export const CLIENT_VERSION = "0.1.0";
 export type HubPhase =
   /** Reading credentials. */
   | "booting"
-  /** /health fails (or no token yet): offer to start `krypto serve`. */
+  /** /health fails (or no token yet): offer to start `pawl serve`. */
   | "hub-down"
   /** We asked Rust to spawn the hub and are waiting for it. */
   | "starting"
@@ -98,11 +98,11 @@ export class HubConnection {
     this.started = false;
   }
 
-  /** Ask Rust to spawn `krypto serve`, then reconnect. */
+  /** Ask Rust to spawn `pawl serve`, then reconnect. */
   async startHub(): Promise<void> {
     if (this.starting) return;
     if (!isTauri) {
-      this.patch({ startError: "Starting the hub needs the desktop app (run `krypto serve` manually)." });
+      this.patch({ startError: "Starting the hub needs the desktop app (run `pawl serve` manually)." });
       return;
     }
     this.starting = true;
@@ -192,8 +192,8 @@ export class HubConnection {
     if (!isTauri) {
       // Plain browser during `vite dev`: allow ?token=… for UI work against a running hub.
       const params = new URLSearchParams(location.search);
-      const token = params.get("token") ?? localStorage.getItem("krypto.devToken") ?? "";
-      if (params.get("token")) localStorage.setItem("krypto.devToken", token);
+      const token = params.get("token") ?? localStorage.getItem("pawl.devToken") ?? "";
+      if (params.get("token")) localStorage.setItem("pawl.devToken", token);
       const url = toHubHttpUrl(params.get("hub") ?? undefined);
       return { url, wsUrl: url.replace(/^http/, "ws") + "/ws", token, tokenSource: token ? "env" : "missing", dataDir: null };
     }

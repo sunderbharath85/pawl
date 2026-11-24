@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { isLocal } from "@krypto/hub-client";
+import { isLocal } from "@pawl/hub-client";
 import { usePanel } from "../context";
 import { PetAvatar } from "../PetAvatar";
 import { PermissionCard } from "./PermissionCard";

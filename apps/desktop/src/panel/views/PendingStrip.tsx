@@ -1,4 +1,4 @@
-import { isLocal } from "@krypto/hub-client";
+import { isLocal } from "@pawl/hub-client";
 import { permissionSummary } from "../../lib/format";
 import { usePanel } from "../context";
 import { PermissionCard } from "./PermissionCard";

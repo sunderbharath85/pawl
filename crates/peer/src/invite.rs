@@ -1,16 +1,16 @@
 //! One-time pairing invites:
-//! `krypto://peer?v=1&mid=<machineId>&pk=<b64url pk>&addr=<host:port>&code=<b64url 16 bytes>&exp=<unix ms>`
+//! `pawl://peer?v=1&mid=<machineId>&pk=<b64url pk>&addr=<host:port>&code=<b64url 16 bytes>&exp=<unix ms>`
 //! plus `&relay=<percent-encoded relay URL>&rt=<b64url 16 bytes>[&rk=<relay access key>]` when the
 //! inviter is on a relay. `addr` may be left out when `relay` is present (an inviter off the LAN has
 //! nothing to dial).
 
 use crate::b64;
 use crate::relay::{normalize_url, valid_access_key};
-use krypto_protocol::{is_valid_machine_id, MachineId, UnixMs};
+use pawl_protocol::{is_valid_machine_id, MachineId, UnixMs};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-const PREFIX: &str = "krypto://peer?";
+const PREFIX: &str = "pawl://peer?";
 const MAX_URI_LEN: usize = 1024;
 pub(crate) const CODE_LEN: usize = 16;
 
@@ -288,7 +288,7 @@ mod tests {
     fn with_relay(addr: Option<&str>) -> Invite {
         Invite {
             addr: addr.map(String::from),
-            relay: Some("wss://relay.krypto.dev/r".into()),
+            relay: Some("wss://relay.pawl.dev/r".into()),
             relay_token: Some(new_code().1),
             relay_key: Some("k3y_-AZ".into()),
             ..sample("10.0.0.2:47801")
@@ -300,7 +300,7 @@ mod tests {
         for addr in ["192.168.1.5:47801", "mac-mini.local:47801", "[fe80::1]:47801", "[::1]:9"] {
             let inv = sample(addr);
             let uri = inv.to_uri();
-            assert!(uri.starts_with("krypto://peer?v=1&mid=abcdef012345&pk="), "{uri}");
+            assert!(uri.starts_with("pawl://peer?v=1&mid=abcdef012345&pk="), "{uri}");
             assert!(!uri.contains('['));
             assert!(!uri.contains("relay=") && !uri.contains("rt="));
             assert_eq!(Invite::parse(&uri).unwrap(), inv);
@@ -313,15 +313,15 @@ mod tests {
         let open_relay = Invite { relay_key: None, ..with_relay(None) };
         for inv in [with_relay(Some("10.0.0.2:47801")), with_relay(None), open_relay] {
             let uri = inv.to_uri();
-            assert!(uri.contains("&relay=wss%3A%2F%2Frelay.krypto.dev%2Fr&rt="), "{uri}");
+            assert!(uri.contains("&relay=wss%3A%2F%2Frelay.pawl.dev%2Fr&rt="), "{uri}");
             assert_eq!(uri.contains("&rk=k3y_-AZ"), inv.relay_key.is_some());
             assert_eq!(uri.contains("addr="), inv.addr.is_some());
             assert_eq!(Invite::parse(&uri).unwrap(), inv);
         }
         // The relay URL is normalized on parse.
         let inv = with_relay(None);
-        let uri = inv.to_uri().replace("wss%3A%2F%2Frelay.krypto.dev%2Fr", "https%3A%2F%2FRELAY.krypto.dev%3A443%2Fr%2F");
-        assert_eq!(Invite::parse(&uri).unwrap().relay.as_deref(), Some("wss://relay.krypto.dev/r"));
+        let uri = inv.to_uri().replace("wss%3A%2F%2Frelay.pawl.dev%2Fr", "https%3A%2F%2FRELAY.pawl.dev%3A443%2Fr%2F");
+        assert_eq!(Invite::parse(&uri).unwrap().relay.as_deref(), Some("wss://relay.pawl.dev/r"));
     }
 
     #[test]
@@ -334,9 +334,9 @@ mod tests {
             no_rt.clone(),
             sample("10.0.0.2:47801").to_uri() + &format!("&rt={rt}"),
             sample("10.0.0.2:47801").to_uri().replace("&addr=10.0.0.2:47801", ""),
-            good.replace("wss%3A%2F%2Frelay.krypto.dev%2Fr", "ws%3A%2F%2Frelay.krypto.dev"),
-            good.replace("wss%3A%2F%2Frelay.krypto.dev%2Fr", "relay.krypto.dev"),
-            good.replace("wss%3A%2F%2Frelay.krypto.dev%2Fr", "wss%3A%2F%2Frelay.krypto.dev%3Fx%3D1"),
+            good.replace("wss%3A%2F%2Frelay.pawl.dev%2Fr", "ws%3A%2F%2Frelay.pawl.dev"),
+            good.replace("wss%3A%2F%2Frelay.pawl.dev%2Fr", "relay.pawl.dev"),
+            good.replace("wss%3A%2F%2Frelay.pawl.dev%2Fr", "wss%3A%2F%2Frelay.pawl.dev%3Fx%3D1"),
             format!("{no_rt}&rt=AAAA"),
             format!("{no_rt}&rt={rt}A"),
             format!("{good}&rt={rt}"),
@@ -355,7 +355,7 @@ mod tests {
     fn parse_ignores_unknown_and_order() {
         let inv = sample("10.0.0.2:47801");
         let uri = format!(
-            "krypto://peer?exp={}&code={}&x=y&addr=10.0.0.2:47801&pk={}&mid=abcdef012345&v=1",
+            "pawl://peer?exp={}&code={}&x=y&addr=10.0.0.2:47801&pk={}&mid=abcdef012345&v=1",
             inv.expires_at,
             inv.code,
             b64::encode_url(&inv.public_key)
@@ -369,7 +369,7 @@ mod tests {
         let bad = [
             "".to_string(),
             "garbage".to_string(),
-            good.replace("krypto://peer?", "http://peer?"),
+            good.replace("pawl://peer?", "http://peer?"),
             good.replace("v=1", "v=2"),
             good.replace("mid=abcdef012345", "mid=ABCDEF012345"),
             good.replace("10.0.0.2:47801", "10.0.0.2"),
@@ -399,7 +399,7 @@ mod tests {
         assert!(!dbg.contains(&inv.code));
         assert!(!dbg.contains(inv.relay_token.as_deref().unwrap()));
         assert!(!dbg.contains("k3y_-AZ"));
-        assert!(dbg.contains("relay.krypto.dev"));
+        assert!(dbg.contains("relay.pawl.dev"));
     }
 
     #[test]
@@ -477,7 +477,7 @@ mod tests {
         assert!(!valid_addr("a..b:1"));
         assert!(!valid_addr("host/x:1"));
         assert!(!valid_addr("[::1]47801"));
-        assert!(valid_host("[::1]") && valid_host("relay.krypto.dev") && valid_host("10.0.0.1"));
+        assert!(valid_host("[::1]") && valid_host("relay.pawl.dev") && valid_host("10.0.0.1"));
         assert!(!valid_host("::1") && !valid_host("[::]") && !valid_host("0.0.0.0") && !valid_host("[::1"));
     }
 }

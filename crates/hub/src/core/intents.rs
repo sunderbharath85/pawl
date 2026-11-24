@@ -17,10 +17,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
-use krypto_peer::SendError;
+use pawl_peer::SendError;
 #[cfg(not(test))]
-use krypto_protocol::INTENT_TIMEOUT_MS;
-use krypto_protocol::{DeviceKind, Intent, IntentRejectReason, IntentStatus, PeerBody, INTENT_RATE_PER_SEC};
+use pawl_protocol::INTENT_TIMEOUT_MS;
+use pawl_protocol::{DeviceKind, Intent, IntentRejectReason, IntentStatus, PeerBody, INTENT_RATE_PER_SEC};
 use tokio::sync::oneshot;
 
 use super::*;
@@ -307,7 +307,7 @@ impl Hub {
         let (tx, rx) = oneshot::channel();
         self.intents().waiting.insert(intent_id.clone(), (target.to_string(), tx));
         let body =
-            PeerBody::Intent { intent_id: intent_id.clone(), client, confirmed, intent, ts: krypto_protocol::now_ms() };
+            PeerBody::Intent { intent_id: intent_id.clone(), client, confirmed, intent, ts: pawl_protocol::now_ms() };
         let outcome: std::result::Result<Ack, AckCode> = match self.inner.peer.send(target, body) {
             Err(SendError::NotLinked) | Err(SendError::Backpressure) => Err(AckCode::Offline),
             Err(e) => {
@@ -328,7 +328,7 @@ impl Hub {
         tracing::info!(intent = %intent_id, kind, device = %target, status = %status, reason = ?reason, "intent sent");
         self.log_intent(IntentLogEntry {
             id: 0,
-            ts: krypto_protocol::now_ms(),
+            ts: pawl_protocol::now_ms(),
             role: IntentRole::Origin,
             intent_id,
             kind: kind.to_string(),
@@ -517,7 +517,7 @@ impl Hub {
         tracing::info!(intent = %intent_id, kind = kind_name(intent), device = %from, status, reason = ?ack.reason, "intent handled");
         self.log_intent(IntentLogEntry {
             id: 0,
-            ts: krypto_protocol::now_ms(),
+            ts: pawl_protocol::now_ms(),
             role: IntentRole::Owner,
             intent_id: intent_id.to_string(),
             kind: kind_name(intent).to_string(),

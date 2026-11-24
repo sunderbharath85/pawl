@@ -133,7 +133,7 @@ mod tests {
     struct TempDir(PathBuf);
     impl TempDir {
         fn new() -> Self {
-            let p = std::env::temp_dir().join(format!("krypto-acp-test-{}", uuid::Uuid::new_v4()));
+            let p = std::env::temp_dir().join(format!("pawl-acp-test-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&p).unwrap();
             TempDir(p)
         }

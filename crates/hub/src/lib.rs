@@ -1,4 +1,4 @@
-//! krypto-hub: the Krypto hub daemon (library half; the `krypto` binary is a thin CLI on top).
+//! pawl-hub: the Pawl hub daemon (library half; the `pawl` binary is a thin CLI on top).
 pub mod bus;
 pub mod cli;
 pub mod config;

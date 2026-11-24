@@ -1,6 +1,6 @@
-# @krypto/relay
+# @pawl/relay
 
-The Krypto relay: a Cloudflare Worker plus one Durable Object **mailbox per device**. It lets paired Krypto
+The Pawl relay: a Cloudflare Worker plus one Durable Object **mailbox per device**. It lets paired Pawl
 devices (hubs today, phones in step 7) reach each other when they are not on the same LAN. Every device connects
 **outbound** over WebSocket; nobody needs an open port. The relay routes end-to-end encrypted envelopes and never
 holds a key that can open them.
@@ -9,7 +9,7 @@ It is a **closed relay**: you deploy it on your own Cloudflare account, and only
 can use it, so strangers cannot create mailboxes on your bill. The access key is the real control; the per-IP
 connect limit and the other budgets below are best-effort backstops.
 
-Wire types live in `@krypto/protocol` (section "relay (migration step 6)"); behaviour is specified in
+Wire types live in `@pawl/protocol` (section "relay (migration step 6)"); behaviour is specified in
 `docs/CONTRACTS.md` "Step 6 — Relay".
 
 ## What the relay sees (and what it does not)
@@ -39,7 +39,7 @@ URLs carry the device public key and the access key.
 device                                          relay
   GET /v1/connect?pk=<b64url pk>&k=<access key>  ──►  Worker: access key, per-IP budget, pk, Host; then idFromName(pk)
                                                  ◄──  {t:"challenge", nonce, relayPk, v:1}   fresh X25519 key per connection
-  {t:"auth", box}                                ──►  box = nacl.box(utf8("krypto-relay-auth-v1:<nonce>:<host>"),
+  {t:"auth", box}                                ──►  box = nacl.box(utf8("pawl-relay-auth-v1:<nonce>:<host>"),
                                                                      nonce, relayPk, deviceSecretKey)   within 10 s
                                                  ◄──  {t:"ok", queued:n}  then n queued {t:"msg"} frames
   {t:"allow", pks:[...]}                         ──►  replace allowed senders (<= 64)

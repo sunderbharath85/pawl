@@ -16,9 +16,9 @@
 use std::net::SocketAddr;
 use std::path::Path;
 
-use krypto_discovery::hooks::{self as hooks, HookChange, HookCheck, HookTarget, InstallEnv};
-use krypto_peer::RelayConfig;
-use krypto_protocol::{HookAction, HookState, HookStatus, HookTargetName, HubSettings, HubSettingsPatch, PanelView};
+use pawl_discovery::hooks::{self as hooks, HookChange, HookCheck, HookTarget, InstallEnv};
+use pawl_peer::RelayConfig;
+use pawl_protocol::{HookAction, HookState, HookStatus, HookTargetName, HubSettings, HubSettingsPatch, PanelView};
 
 use super::*;
 use crate::settings::{self as cfgset, InvalidSetting};
@@ -29,10 +29,10 @@ const MAX_HOOK_REPOS: usize = 20;
 /// `restart_hub` waits this long after its ack before the hub stops.
 const RESTART_ACK_GRACE: Duration = Duration::from_millis(300);
 
-/// What `krypto serve` started with: the bound API port and the keys flags / env vars decide.
+/// What `pawl serve` started with: the bound API port and the keys flags / env vars decide.
 #[derive(Debug, Clone, Default)]
 pub struct Launch {
-    /// `krypto serve` runs this hub (it can restart itself).
+    /// `pawl serve` runs this hub (it can restart itself).
     pub served: bool,
     pub port: u16,
     /// key -> flag or env var ("hub.port" -> "--port", "peer.listen" -> "--peer-listen").
@@ -108,7 +108,7 @@ fn hook_status_of(t: &HookTarget, check: HookCheck, agent_installed: bool) -> Ho
 }
 
 impl Hub {
-    /// `krypto serve`: the port the local API is bound to and the keys its flags / env vars set.
+    /// `pawl serve`: the port the local API is bound to and the keys its flags / env vars set.
     pub fn set_launch(&self, port: u16, overrides: BTreeMap<String, String>) {
         *self.inner.launch.lock().unwrap_or_else(|p| p.into_inner()) = Launch { served: true, port, overrides };
     }
@@ -170,7 +170,7 @@ impl Hub {
     /// Agent ids custom agents may not take: the built-in agents (and their registry ids) and every
     /// registry agent discovery found.
     fn reserved_agent_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = krypto_discovery::BUILTIN_AGENTS
+        let mut ids: Vec<String> = pawl_discovery::BUILTIN_AGENTS
             .iter()
             .flat_map(|b| [b.id.to_string(), b.registry_id.to_string()])
             .collect();
@@ -210,7 +210,7 @@ impl Hub {
         // 1. What can fail at runtime, before anything is written. A new API port must be free now,
         //    or the restart that applies it would find it taken.
         if has(cfgset::HUB_PORT) && next.port != self.launch().port {
-            if let Err(e) = std::net::TcpListener::bind((krypto_protocol::HUB_HOST, next.port)) {
+            if let Err(e) = std::net::TcpListener::bind((pawl_protocol::HUB_HOST, next.port)) {
                 return Err(InvalidSetting { field: cfgset::HUB_PORT.into(), reason: format!("is in use on this machine ({e})") }.into());
             }
         }
@@ -268,7 +268,7 @@ impl Hub {
             self.inner.settings_changed.notify_waiters();
         }
         if has(cfgset::HUB_RETENTION) && next.event_retention_days > 0 {
-            let before = krypto_protocol::now_ms() - next.event_retention_days as i64 * DAY_MS;
+            let before = pawl_protocol::now_ms() - next.event_retention_days as i64 * DAY_MS;
             match self.inner.store.run(move |s| s.prune_events_before(before)).await {
                 Ok(n) if n > 0 => tracing::info!("pruned {n} events older than {} days", next.event_retention_days),
                 Ok(_) => {}
@@ -311,7 +311,7 @@ impl Hub {
     async fn audit_settings(&self, actor: &Actor, kind: SettingsAuditKind, keys: Vec<String>, detail: Option<String>) {
         let entry = SettingsAuditEntry {
             id: 0,
-            ts: krypto_protocol::now_ms(),
+            ts: pawl_protocol::now_ms(),
             machine_id: self.inner.machine_id.clone(),
             kind,
             actor: actor.label.clone(),
@@ -365,8 +365,8 @@ impl Hub {
     fn apply_relay(&self, cfg: &HubConfig) -> Result<()> {
         self.inner.peer.set_relay(relay_config(cfg)).map_err(|e| {
             let (field, reason) = match e {
-                krypto_peer::RelayConfigError::BadUrl => (cfgset::RELAY_URL, "must be wss://host[:port][/path] (ws:// only to this machine)"),
-                krypto_peer::RelayConfigError::BadKey => (cfgset::RELAY_KEY, "must be 1-256 characters of A-Z, a-z, 0-9, - and _"),
+                pawl_peer::RelayConfigError::BadUrl => (cfgset::RELAY_URL, "must be wss://host[:port][/path] (ws:// only to this machine)"),
+                pawl_peer::RelayConfigError::BadKey => (cfgset::RELAY_KEY, "must be 1-256 characters of A-Z, a-z, 0-9, - and _"),
             };
             anyhow::Error::new(InvalidSetting { field: field.into(), reason: reason.into() })
         })
@@ -406,7 +406,7 @@ impl Hub {
     // ------------------------------------------------------------ hooks
 
     fn hook_exe() -> Result<PathBuf> {
-        std::env::current_exe().context("locate the krypto executable")
+        std::env::current_exe().context("locate the pawl executable")
     }
 
     /// `hook_status`: claude, codex, copilot-cli, and copilot-vscode for the repo index's folders.
@@ -415,7 +415,7 @@ impl Hub {
         let home = self.hooks_home();
         let repos: Vec<PathBuf> = self.repos().into_iter().take(MAX_HOOK_REPOS).map(|r| PathBuf::from(r.path)).collect();
         tokio::task::spawn_blocking(move || {
-            let env = krypto_discovery::detect::HostEnv::from_system();
+            let env = pawl_discovery::detect::HostEnv::from_system();
             let mut targets = vec![HookTarget::Claude, HookTarget::Codex, HookTarget::CopilotCli];
             targets.extend(repos.into_iter().map(|repo| HookTarget::CopilotVscode { repo }));
             targets
@@ -434,7 +434,7 @@ impl Hub {
         .context("hook status")?
     }
 
-    /// `install_hooks{target, repo, action}`: the same code as `krypto install-hooks`. preview =
+    /// `install_hooks{target, repo, action}`: the same code as `pawl install-hooks`. preview =
     /// the exact change, nothing written; apply / remove write it (backups first) and are audited.
     pub async fn install_hooks(&self, target: HookTargetName, repo: Option<String>, action: HookAction, actor: &Actor) -> Result<Value> {
         let t = match target {
@@ -454,7 +454,7 @@ impl Hub {
         let (outcome, status) = tokio::task::spawn_blocking(move || -> Result<_> {
             let outcome = hook_change(&t2, &exe, change, apply, home.as_deref())?;
             let check = hook_check(&t2, &exe, home.as_deref())?;
-            let env = krypto_discovery::detect::HostEnv::from_system();
+            let env = pawl_discovery::detect::HostEnv::from_system();
             Ok((outcome, hook_status_of(&t2, check, hooks::agent_found(&t2, &env))))
         })
         .await
@@ -495,12 +495,12 @@ impl Hub {
 
     // ------------------------------------------------------------ restart
 
-    /// `restart_hub`: only a hub `krypto serve` runs can replace itself. The ack goes out first;
-    /// a moment later `krypto serve` sees [`Hub::restart_requested`], says bye to peers, stops,
+    /// `restart_hub`: only a hub `pawl serve` runs can replace itself. The ack goes out first;
+    /// a moment later `pawl serve` sees [`Hub::restart_requested`], says bye to peers, stops,
     /// starts the replacement and exits (see `cli::run_serve`).
     pub async fn restart_hub(&self, actor: &Actor) -> Result<Value> {
         if !self.launch().served {
-            bail!("this hub is not running as `krypto serve`; restart it the way it was started");
+            bail!("this hub is not running as `pawl serve`; restart it the way it was started");
         }
         let pending = self.restart_required();
         tracing::info!(by = %actor.label, pending = %pending.join(","), "hub restart requested");

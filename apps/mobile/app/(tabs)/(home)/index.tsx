@@ -1,6 +1,6 @@
 // Pets: the dog is the hero. Not paired yet -> a friendly welcome that leads to pairing. Paired -> the pet that needs
 // you most up top (with its bubble), then every pet on every computer.
-import { petLine, type PetView } from "@krypto/pet-engine";
+import { petLine, type PetView } from "@pawl/pet-engine";
 import { useRouter } from "expo-router";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import Animated, { FadeInDown, LinearTransition } from "react-native-reanimated";
@@ -14,7 +14,7 @@ function Welcome() {
   const t = useTheme();
   const router = useRouter();
   const steps = [
-    "On your computer, open Krypto → Machines & pairing → Pair a phone.",
+    "On your computer, open Pawl → Machines & pairing → Pair a phone.",
     "Scan the QR code with this phone (or paste the link).",
     "Your pets show up here. Approve from anywhere with Face ID or your fingerprint.",
   ];
@@ -26,7 +26,7 @@ function Welcome() {
         </View>
         <Text style={{ color: t.text, fontSize: 28, fontWeight: "800", fontFamily: Fonts.rounded, textAlign: "center" }}>Woof! Let's get paired.</Text>
         <Body muted style={{ textAlign: "center", maxWidth: 340 }}>
-          Krypto's dogs watch your coding agents on every computer. Pair this phone once and they'll come find you when an agent needs a yes or no.
+          Pawl's dogs watch your coding agents on every computer. Pair this phone once and they'll come find you when an agent needs a yes or no.
         </Body>
       </View>
       <Card>
@@ -144,7 +144,7 @@ export default function PetsScreen() {
               <Body muted style={{ textAlign: "center" }}>
                 {online > 0
                   ? "They'll trot in as soon as the computers send them over."
-                  : "Krypto reaches them over the relay as soon as one is back online."}
+                  : "Pawl reaches them over the relay as soon as one is back online."}
               </Body>
             </Card>
           )}

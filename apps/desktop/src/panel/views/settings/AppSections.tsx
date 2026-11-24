@@ -1,7 +1,7 @@
 // Settings sections that are not in config.toml: This machine (its name, via update_machine), Notifications and
 // the pet strip (desktop preferences kept per machine), and This app (hub process, setup, quit).
 import { useEffect, useRef, useState } from "react";
-import { MACHINE_NAME_MAX, OS_LABEL, checkMachineName, renameErrorText, trimWhiteSpace } from "@krypto/hub-client";
+import { MACHINE_NAME_MAX, OS_LABEL, checkMachineName, renameErrorText, trimWhiteSpace } from "@pawl/hub-client";
 import { isTauri, native, onNative, type HubCredentials } from "../../../lib/native";
 import { notify } from "../../../lib/notifications";
 import { useSettings, type DesktopSettings } from "../../../lib/settings";
@@ -196,7 +196,7 @@ export function AppSection({ configPath }: { configPath?: string | undefined }) 
         <dt>Version</dt>
         <dd>{meta.hubVersion ?? "unknown"}</dd>
         <dt>Token</dt>
-        <dd>{creds ? (creds.tokenSource === "missing" ? "not created yet" : `from ${creds.tokenSource === "env" ? "KRYPTO_HUB_TOKEN" : "data folder"}`) : "…"}</dd>
+        <dd>{creds ? (creds.tokenSource === "missing" ? "not created yet" : `from ${creds.tokenSource === "env" ? "PAWL_HUB_TOKEN" : "data folder"}`) : "…"}</dd>
         <dt>Data folder</dt>
         <dd className="mono">{creds?.dataDir ?? "…"}</dd>
         {configPath && (
@@ -205,8 +205,8 @@ export function AppSection({ configPath }: { configPath?: string | undefined }) 
             <dd className="mono">{configPath}</dd>
           </>
         )}
-        <dt>krypto</dt>
-        <dd className="mono">{hubBin === undefined ? "…" : (hubBin ?? "not found (PATH, next to the app, or KRYPTO_HUB_BIN)")}</dd>
+        <dt>pawl</dt>
+        <dd className="mono">{hubBin === undefined ? "…" : (hubBin ?? "not found (PATH, next to the app, or PAWL_HUB_BIN)")}</dd>
       </dl>
       <div className="form-actions">
         <button className="pill" onClick={() => void conn.refresh(true)}>
@@ -223,7 +223,7 @@ export function AppSection({ configPath }: { configPath?: string | undefined }) 
         <span className="spacer" />
         {isTauri && (
           <button className="pill pill-bad" onClick={() => void native.quit()}>
-            Quit Krypto
+            Quit Pawl
           </button>
         )}
       </div>

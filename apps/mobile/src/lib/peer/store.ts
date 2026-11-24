@@ -1,25 +1,25 @@
 // What the phone persists, split over small keys (expo-secure-store values should stay under ~2 KB):
-//   krypto.sk           device secret key (64 hex chars). Never leaves the device.
-//   krypto.identity     { deviceId, name, os, createdAt }
-//   krypto.relay        { url, accessKey }          (the access key is a secret)
-//   krypto.hubs         [hub ids]
-//   krypto.hub.<id>     StoredHub
-//   krypto.seq.<id>     { rx, tx }                  last accepted / last sent envelope seq for that hub
-//   krypto.revoked      { ids, pks }                devices that revoked us or that we removed (never re-added by intros)
-//   krypto.settings     { pushEnabled, pushToken, pushClear }
+//   pawl.sk           device secret key (64 hex chars). Never leaves the device.
+//   pawl.identity     { deviceId, name, os, createdAt }
+//   pawl.relay        { url, accessKey }          (the access key is a secret)
+//   pawl.hubs         [hub ids]
+//   pawl.hub.<id>     StoredHub
+//   pawl.seq.<id>     { rx, tx }                  last accepted / last sent envelope seq for that hub
+//   pawl.revoked      { ids, pks }                devices that revoked us or that we removed (never re-added by intros)
+//   pawl.settings     { pushEnabled, pushToken, pushClear }
 // Writes are coalesced (write-behind, a few ms) and serialized; `flush()` waits for them.
-import type { MachineId, MachineOs, UnixMs } from "@krypto/protocol";
+import type { MachineId, MachineOs, UnixMs } from "@pawl/protocol";
 import { fromHex, toHex } from "./b64";
 import type { Clock, KeyValueStore, TimerHandle } from "./types";
 
-export const K_SECRET = "krypto.sk";
-export const K_IDENTITY = "krypto.identity";
-export const K_RELAY = "krypto.relay";
-export const K_HUBS = "krypto.hubs";
-export const K_REVOKED = "krypto.revoked";
-export const K_SETTINGS = "krypto.settings";
-export const hubKey = (id: string) => `krypto.hub.${id}`;
-export const seqKey = (id: string) => `krypto.seq.${id}`;
+export const K_SECRET = "pawl.sk";
+export const K_IDENTITY = "pawl.identity";
+export const K_RELAY = "pawl.relay";
+export const K_HUBS = "pawl.hubs";
+export const K_REVOKED = "pawl.revoked";
+export const K_SETTINGS = "pawl.settings";
+export const hubKey = (id: string) => `pawl.hub.${id}`;
+export const seqKey = (id: string) => `pawl.seq.${id}`;
 
 export const REVOKED_MAX = 64;
 

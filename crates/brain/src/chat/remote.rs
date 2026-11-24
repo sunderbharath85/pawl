@@ -8,7 +8,7 @@
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
 
-use krypto_protocol::{Agent, ChatProposal, ChatProposalKind, MachineId, Session, SessionSource, SessionStatus, UnixMs};
+use pawl_protocol::{Agent, ChatProposal, ChatProposalKind, MachineId, Session, SessionSource, SessionStatus, UnixMs};
 
 use super::intent::{AgentRef, CommandIntent, Folder, MachineRef, RepoIndex, RepoRef, Target};
 use super::voice::Voice;

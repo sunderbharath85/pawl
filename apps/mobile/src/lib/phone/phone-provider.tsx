@@ -99,7 +99,7 @@ export function PhoneProvider({ children, fallback }: { children: ReactNode; fal
         n.start();
         setNode(n);
       })
-      .catch(() => setError("Krypto couldn't open its secure storage on this phone."));
+      .catch(() => setError("Pawl couldn't open its secure storage on this phone."));
     return () => {
       cancelled = true;
       void opened?.stop();

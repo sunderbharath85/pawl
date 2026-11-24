@@ -1,4 +1,4 @@
-// @krypto/protocol — wire types shared by hub, desktop, VS Code, mobile.
+// @pawl/protocol — wire types shared by hub, desktop, VS Code, mobile.
 // SOURCE OF TRUTH for hub <-> client messages. The Rust mirror lives in
 // crates/protocol/src/lib.rs and must stay byte-compatible (camelCase fields,
 // snake_case `type` tags). Change both together.
@@ -7,8 +7,8 @@ export const PROTOCOL_VERSION = 8;
 export const HUB_DEFAULT_PORT = 47800;
 export const HUB_HOST = "127.0.0.1";
 /** Folder name under the OS data dir (Win %APPDATA%, mac ~/Library/Application Support, linux ~/.local/share). */
-export const HUB_DATA_DIR_NAME = "krypto";
-/** Plain-text bearer token file inside the data dir. Env override: KRYPTO_HUB_TOKEN. URL override: KRYPTO_HUB_URL. */
+export const HUB_DATA_DIR_NAME = "pawl";
+/** Plain-text bearer token file inside the data dir. Env override: PAWL_HUB_TOKEN. URL override: PAWL_HUB_URL. */
 export const HUB_TOKEN_FILE = "token";
 
 // ---------- primitives ----------
@@ -433,7 +433,7 @@ export const PRESENCE_OFFLINE_MS = 45_000;
 /**
  * Hub <-> hub frame (JSON text over WebSocket). `box` is a NaCl box (X25519 + XSalsa20-Poly1305)
  * of the UTF-8 JSON `PeerBody`, from the sender's secret key to the receiver's public key.
- * Invite URI: `krypto://peer?v=1&mid=<machineId>&pk=<base64url pk>&addr=<host:port>&code=<base64url 16 bytes>&exp=<unix ms>`.
+ * Invite URI: `pawl://peer?v=1&mid=<machineId>&pk=<base64url pk>&addr=<host:port>&code=<base64url 16 bytes>&exp=<unix ms>`.
  */
 export interface PeerEnvelope {
   v: 1;
@@ -569,7 +569,7 @@ export type PeerBodyType = PeerBody["type"];
  */
 export const RELAY_PROTOCOL_VERSION = 1;
 /** Text the device boxes in its auth answer: `${RELAY_AUTH_CONTEXT}:${challengeNonce}:${relayHost}`. */
-export const RELAY_AUTH_CONTEXT = "krypto-relay-auth-v1";
+export const RELAY_AUTH_CONTEXT = "pawl-relay-auth-v1";
 /** A mailbox accepts frames only from these many allowed senders. */
 export const RELAY_MAX_ALLOWED = 64;
 /** Frames queued for an offline device: at most this many, this many bytes, kept this long. */
@@ -668,7 +668,7 @@ export interface HubSettingsPatch {
   customAgents?: CustomAgentSetting[];
 }
 
-/** Agent hooks the hub can install (same targets as `krypto install-hooks`). copilot-vscode is per repo. */
+/** Agent hooks the hub can install (same targets as `pawl install-hooks`). copilot-vscode is per repo. */
 export type HookTargetName = "claude" | "codex" | "copilot-cli" | "copilot-vscode";
 
 export interface HookStatus {

@@ -1,6 +1,6 @@
 // Acting on another machine's session (PLAN.md migration step 4). The owner hub decides; this hub only
 // forwards an intent. Remote approvals and remote starts need a confirmation on this device first.
-import type { IntentKind, MachineId, PermissionRequest } from "@krypto/protocol";
+import type { IntentKind, MachineId, PermissionRequest } from "@pawl/protocol";
 import { isLocal, machineDisplayName } from "./machine";
 import type { HubState } from "./state";
 
@@ -142,7 +142,7 @@ export function intentErrorText(err: unknown, machineName: string, action: Inten
       return "The hub did not accept our token.";
     case "closed":
     case "disconnected":
-      return `Krypto isn't connected to the hub, so it couldn't ${ACTION_WORD[action]}.`;
+      return `Pawl isn't connected to the hub, so it couldn't ${ACTION_WORD[action]}.`;
     default:
       if (code) return `${machineName} couldn't ${ACTION_WORD[action]} (${code}).`;
       return err instanceof Error && err.message ? err.message : `Couldn't ${ACTION_WORD[action]}.`;

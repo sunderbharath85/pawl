@@ -1,24 +1,24 @@
 [package]
-name = "krypto-hub"
+name = "pawl-hub"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Krypto hub daemon: ACP host, session store, rules, WebSocket + hook endpoints, CLI"
+description = "Pawl hub daemon: ACP host, session store, rules, WebSocket + hook endpoints, CLI"
 
 [lib]
-name = "krypto_hub"
+name = "pawl_hub"
 path = "src/lib.rs"
 
 [[bin]]
-name = "krypto"
+name = "pawl"
 path = "src/main.rs"
 
 [dependencies]
-krypto-protocol = { workspace = true }
-krypto-acp = { workspace = true }
-krypto-discovery = { workspace = true }
-krypto-brain = { workspace = true }
-krypto-peer = { workspace = true }
+pawl-protocol = { workspace = true }
+pawl-acp = { workspace = true }
+pawl-discovery = { workspace = true }
+pawl-brain = { workspace = true }
+pawl-peer = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

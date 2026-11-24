@@ -6,7 +6,7 @@ Branch `step-7-phone`, nothing committed. Owned paths only: `crates/hub/`. No ne
 
 | Command | Result |
 |---|---|
-| `cargo test -p krypto-hub` | **177 passed** (was 158) |
+| `cargo test -p pawl-hub` | **177 passed** (was 158) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean |
 | Live smoke: local relay (`wrangler dev` on 127.0.0.1:8797), two scratch hubs, fe-mobile's `headless-phone.ts` | all PASS (below) |
 
@@ -17,12 +17,12 @@ Branch `step-7-phone`, nothing committed. Owned paths only: `crates/hub/`. No ne
 | 1 | `on_roster_intro` is rate-limited per sender. A token bucket gives a burst of 3, then 1 per 10 s (`take_intro`). Drops are audited at most once per 60 s, with a count of the quiet ones, and never notify. The bucket is checked before anything else, including the "not a paired hub" path. | `intros_are_rate_limited_per_sender_and_drops_noted_once_a_minute` (pure); flood part of `received_intros_add_new_devices_once_and_never_replace` |
 | 1 | Roster caps for intros: no Add past **64 stored devices** (paired + revoked rows), nor past **32 added by one introducer** (paired + revoked). Refusals go into the intro's single report. | `intros_never_grow_the_roster_past_its_caps` |
 | 1 | Coalesced reporting. Each added device keeps its own `introduced` row; everything not added is **one audit row + one notification per intro**. The row is `intro_conflict` if any conflict, else `intro_ignored`; its detail is grouped as "conflict: ...; malformed: ...; full: ...; off: ..." with at most 8 named per group, then "and N more". It names a device only when exactly one entry was skipped. So at most 2 notifications per intro, and intros are rate-limited. The >32 refusal is audit-only. | `not_added_outcomes_make_one_report` (pure); `received_intros_...` |
-| 2 | `revoke_device` ack result now lists the devices the revoked one introduced that are **still paired** (sorted by name). They are not revoked automatically. `krypto peer revoke` prints "Laptop added Pixel (phone), Studio here; they stay paired. Revoke them too with ...". | `revoking_an_introducer_lists_what_it_added`; CLI `a_revoke_names_the_devices_it_had_added` |
+| 2 | `revoke_device` ack result now lists the devices the revoked one introduced that are **still paired** (sorted by name). They are not revoked automatically. `pawl peer revoke` prints "Laptop added Pixel (phone), Studio here; they stay paired. Revoke them too with ...". | `revoking_an_introducer_lists_what_it_added`; CLI `a_revoke_names_the_devices_it_had_added` |
 | 3 | `create_invite{forPhone}` now calls the node's `create_phone_invite(ttl)` (purpose-bound: only an ios / android joiner, stored as kind phone). The hub never infers a kind. `update_device_seen` never writes `kind` (hellos may change os, never kind). | `hellos_never_change_a_devices_kind` (store); real-link test: a phone (os ios) joining a **hub** invite gets `invite_rejected`, and a hello from a paired phone keeps kind phone |
 
 **Names (t13 follow-up):**
-- `krypto_peer::device_name_ok` now applies to every name the hub accepts from the UI or CLI that reaches peers:
-  - the machine name: `machine::validate_name`, used by `update_machine`, `krypto machine --name` and machine.toml loading,
+- `pawl_peer::device_name_ok` now applies to every name the hub accepts from the UI or CLI that reaches peers:
+  - the machine name: `machine::validate_name`, used by `update_machine`, `pawl machine --name` and machine.toml loading,
     on top of the 1-40 char limit;
   - pet names: `validate_pet_name`;
   - custom agent names: `invalid:customAgents[i].name`.
@@ -54,7 +54,7 @@ The real-link test changed because of the node's invite purpose binding: a phone
 invite. The test now seeds both rosters, and the phone's LAN hello brings the link up. It still checks the snapshot,
 `sync_done`, live updates, the owed intro and `intent_ack` as mobile.
 
-Gate after the fixes: `cargo test -p krypto-hub` **183 passed**; `cargo clippy --workspace --all-targets -- -D warnings`
+Gate after the fixes: `cargo test -p pawl-hub` **183 passed**; `cargo clippy --workspace --all-targets -- -D warnings`
 clean.
 
 ## What was built
@@ -67,7 +67,7 @@ clean.
 - A phone's `presence` is only a keepalive. Its repos, agents, pets and activity are never stored or used (no pickers, no
   brain context, no active machine).
 - `Device.os` comes from the stored os. `Device.introducedBy` is a new store column.
-- `krypto machines` prints a separate PHONE table: os, status, last seen, path, and "here" or "introduced by Mac mini".
+- `pawl machines` prints a separate PHONE table: os, status, last seen, path, and "here" or "introduced by Mac mini".
 
 ### 2. `create_invite{forPhone: true}`
 - Calls the node's `create_phone_invite(ttl)` (was `create_relay_invite`): a relay-only, purpose-bound invite (no
@@ -76,7 +76,7 @@ clean.
 - Errors:
   - `relay_off` while the relay is not connected;
   - `invalid` when an `addr` is given with forPhone, or for a bad TTL.
-- `krypto peer invite --phone` prints the URI plus a short how-to. `--phone` conflicts with `--addr`.
+- `pawl peer invite --phone` prints the URI plus a short how-to. `--phone` conflicts with `--addr`.
   - `relay_off` gets readable CLI text.
   - No ASCII QR: there is no QR crate in the workspace, and adding one would be a new dependency.
 
@@ -138,7 +138,7 @@ This is sde-peer's report item (a). A direct (re-)pairing `upsert_device` clears
 - `[peer] accept_roster_intros` (default true) appears in `HubSettings.peer.acceptRosterIntros` and in the
   `update_settings` patch.
 - It applies at once (no restart), is written with toml_edit, is audited like any setting (key `peer.acceptRosterIntros`),
-  and is shown in `krypto settings` and the config template.
+  and is shown in `pawl settings` and the config template.
 
 ### 5. Mirror and intents for phone links (`core/mirror.rs`)
 - `on_peer_body` accepts bodies from any paired device. Phone bodies are limited to:
@@ -158,7 +158,7 @@ This is sde-peer's report item (a). A direct (re-)pairing `upsert_device` clears
   - intent_log `client = mobile`;
   - `permission_resolved.byMachineId = <phone id>`, so clients can show the name from `devices`;
   - notification "Approved from <phone name>".
-- `krypto start` now prints "answered allow from iPhone" instead of "by you" when `byMachineId` is set.
+- `pawl start` now prints "answered allow from iPhone" instead of "by you" when `byMachineId` is set.
 
 ### 6. Offline wake
 - `on_permission_request` (a new local request that asks a human) calls `wake_offline_phones()`.
@@ -220,13 +220,13 @@ Setup:
 
 | Check | Result |
 |---|---|
-| A and B relay status | `connected` (`krypto settings`) |
+| A and B relay status | `connected` (`pawl settings`) |
 | B `peer join` A's LAN invite | paired |
-| `krypto peer invite --phone` on A | PASS: no `addr`, has `relay` / `rt` / `rk` |
+| `pawl peer invite --phone` on A | PASS: no `addr`, has `relay` / `rt` / `rk` |
 | Headless phone pairs from that URI | paired with Hub a |
 | Phone status | Hub a online (relay) synced; **Hub b online (relay) synced `introducedBy=Hub a`**: the intro worked and B let the phone in over the relay |
-| `krypto machines` on A | Hub b in machines; PHONE table: Smoke phone, ios, online, relay, "here" |
-| `krypto machines` on B | PHONE table: Smoke phone ... "introduced by Hub a" |
+| `pawl machines` on A | Hub b in machines; PHONE table: Smoke phone, ios, online, relay, "here" |
+| `pawl machines` on B | PHONE table: Smoke phone ... "introduced by Hub a" |
 | B pairing_audit / devices | `introduced` "introduced by Hub a (id)"; the phone stored as kind phone, os ios, `introduced_by` = A, no addr |
 | Mock ACP agent on A asks a permission, phone offline | log `woke an offline phone`; a 2nd request within 60 s: no 2nd wake |
 | Phone `status` | sees A's session `waiting_permission` and the pending request (mirror over the relay) |
@@ -252,21 +252,21 @@ processes were touched. The real `~/.claude` was never touched (no hooks were in
 # sde-hub report — step 5b (settings in the UI) + step 6 phase B (relay wiring)
 
 Branch `step-5b-settings-ui`, nothing committed. Owned paths only: `crates/hub/`, `crates/discovery/` (hook status + remove).
-`Cargo.lock` changed by cargo for the approved `toml_edit` dependency (already in the lock through krypto-discovery).
+`Cargo.lock` changed by cargo for the approved `toml_edit` dependency (already in the lock through pawl-discovery).
 
 ## Gate
 
 | Command | Result |
 |---|---|
-| `cargo test -p krypto-hub -p krypto-discovery` | discovery **39 passed**, hub **158 passed** (was 31 / 128) |
-| `cargo clippy -p krypto-hub -p krypto-discovery --all-targets -- -D warnings` | clean (after t13 boxed `UpdateSettings.patch`) |
+| `cargo test -p pawl-hub -p pawl-discovery` | discovery **39 passed**, hub **158 passed** (was 31 / 128) |
+| `cargo clippy -p pawl-hub -p pawl-discovery --all-targets -- -D warnings` | clean (after t13 boxed `UpdateSettings.patch`) |
 | WebSocket smoke, scratch `--data-dir` + scratch `HOME`/`USERPROFILE`/`CLAUDE_CONFIG_DIR` | all PASS (below) |
-| restart smoke (`restart_hub` + runtime.json + `krypto hook`) | all PASS (below) |
+| restart smoke (`restart_hub` + runtime.json + `pawl hook`) | all PASS (below) |
 
 ## What was built
 
 ### Hub settings (`crates/hub/src/settings.rs`, pure; `crates/hub/src/core/settings.rs`, runtime)
-- `get_settings` -> `{settings, restartRequired, configPath}`; `overriddenBy` from `--port` / `KRYPTO_HUB_URL` /
+- `get_settings` -> `{settings, restartRequired, configPath}`; `overriddenBy` from `--port` / `PAWL_HUB_URL` /
   `--peer-listen` / `ANTHROPIC_API_KEY` (env key only while config.toml has none). Secrets only as `...Set` booleans.
 - `update_settings{patch}`:
   1. `apply_patch` validates the whole patch: first failure -> `invalid:<field>: <reason>`, camelCase wire path with
@@ -286,14 +286,14 @@ Branch `step-5b-settings-ui`, nothing committed. Owned paths only: `crates/hub/`
 - `hook_status` (claude, codex, copilot-cli, plus copilot-vscode for up to 20 repo-index folders) and
   `install_hooks{target, repo, action}`: preview = exact diff, nothing written; apply / remove are audited.
 - `open_panel{view}` -> `send_local(open_panel)`, ack `{delivered}` = a desktop client is connected (counted in server.rs).
-- `restart_hub`: ack, then after 300 ms `krypto serve` stops the server, `hub.shutdown()` (bye{shutdown} to peers,
+- `restart_hub`: ack, then after 300 ms `pawl serve` stops the server, `hub.shutdown()` (bye{shutdown} to peers,
   listener/relay closed, agents stopped), removes runtime.json, spawns `current_exe` with the same args (detached,
-  stdio null, own process group, env `KRYPTO_HUB_RESTARTED=1`), exits 0. The replacement retries binding the API port
+  stdio null, own process group, env `PAWL_HUB_RESTARTED=1`), exits 0. The replacement retries binding the API port
   and the peer listener for 10 s. Audited (kind `restart`, keys = pending restart keys). Refused for in-process hubs.
 - `data_dir/runtime.json` `{port, pid, startedAt}`: written once the API port is bound, removed on clean exit (only
-  if the pid is ours). **Every** CLI client command (`krypto hook` included) resolves `--port` > `KRYPTO_HUB_URL` >
+  if the pid is ours). **Every** CLI client command (`pawl hook` included) resolves `--port` > `PAWL_HUB_URL` >
   runtime.json > config.toml (`HubEndpoint::for_client`). The daemon's own port ignores runtime.json.
-- CLI: `krypto settings [--json]` (running hub, else config.toml; secrets "set (hidden)"; relay status line).
+- CLI: `pawl settings [--json]` (running hub, else config.toml; secrets "set (hidden)"; relay status line).
 
 ### Step 6 phase B (relay wiring)
 - `[relay] url` / `access_key` (secret, redacted in `Debug`) in config.toml; applied with `set_relay` at startup (a bad
@@ -302,13 +302,13 @@ Branch `step-5b-settings-ui`, nothing committed. Owned paths only: `crates/hub/`
 - `PeerEvent::LinkPath` -> `Device.path` (cleared on LinkDown); `devices` broadcast when it changes.
 - `join_peer` uses `join_invite`; an adopted relay is written to config.toml (url + key), audited (kind `pairing`),
   announced with `settings`. Never replaces a configured relay.
-- `krypto machines` shows a PATH column and a `relay:` status line (never the key).
+- `pawl machines` shows a PATH column and a `relay:` status line (never the key).
 
 ### Discovery (`crates/discovery/src/hooks`)
 - `HookChange::{Install, Remove}`, `change_with_home` / `change`, `status_with_home` / `status` (`HookState`:
   installed / outdated / missing / unsupported + detail), `config_path_with_home`, `agent_found`, `agent_home`.
 - Remove takes out only our entries (Claude settings.json, Codex notify + inline hooks + hooks.json, Copilot files);
-  our own `krypto.json` is deleted when nothing else is left; backups first. Status never writes.
+  our own `pawl.json` is deleted when nothing else is left; backups first. Status never writes.
 - "Changed" is now semantic for JSON (a file that differs only in formatting is not rewritten).
 
 ## Smoke (scratch data dir, scratch HOME + USERPROFILE + CLAUDE_CONFIG_DIR/CODEX_HOME/COPILOT_HOME)
@@ -322,7 +322,7 @@ Branch `step-5b-settings-ui`, nothing committed. Owned paths only: `crates/hub/`
 - Port change -> `restartRequired ["hub.port"]`.
 - hook_status claude = missing, config path in the scratch home; install_hooks preview printed the full diff and wrote
   nothing. Real `~/.claude/settings.json` sha256 unchanged before/after.
-- Restart: port 47971 saved (runtime.json keeps 47950), `krypto hook claude` without `--port` reached the running hub;
+- Restart: port 47971 saved (runtime.json keeps 47950), `pawl hook claude` without `--port` reached the running hub;
   `restart_hub` -> old process exited 0, replacement (new pid) wrote runtime.json 47971, answered there with
   `restartRequired []`, and the next hook reached it. Smoke processes stopped by pid afterwards.
 
@@ -336,9 +336,9 @@ Branch `step-5b-settings-ui`, nothing committed. Owned paths only: `crates/hub/`
    marker: on the next start the flag still wins.
 4. Watchdog timing changes use sde-brain's `Watchdog::set_config` (follow-up after review): new timings, nudge state
    kept, so nothing is nudged twice (test `watchdog_timings_change_without_repeating_nudges`).
-5. `agent_home()` matches Node's `os.homedir()` (USERPROFILE on Windows, HOME elsewhere); `krypto install-hooks` uses it
+5. `agent_home()` matches Node's `os.homedir()` (USERPROFILE on Windows, HOME elsewhere); `pawl install-hooks` uses it
    too (was `dirs::home_dir`).
-6. Relay URL/key validation mirrors krypto-peer's rules (wss/https; ws/http to loopback only; key base64url 1-256); the
+6. Relay URL/key validation mirrors pawl-peer's rules (wss/https; ws/http to loopback only; key base64url 1-256); the
    link layer's refusals still map to field errors. The stored URL is the trimmed user text; `peer.relay.url` shows the
    link layer's normalized form.
 7. The replacement is spawned after the old hub has said bye and closed its ports (not before), plus the 10 s bind
@@ -348,12 +348,12 @@ Branch `step-5b-settings-ui`, nothing committed. Owned paths only: `crates/hub/`
 | # | Fix | Test |
 |---|---|---|
 | 1 | `hub.port` equal to the peer listener's port (loopback / every interface) -> `invalid:hub.port: is the peer listener's port`. A port change test-binds `127.0.0.1:<port>` first -> `invalid:hub.port: is in use on this machine (...)`, nothing written. After `restart_hub` the replacement that cannot bind the new port within 10 s stays on the previous one (passed in the restart marker), logs why and tells clients with a notification; `restartRequired` keeps `hub.port`. | `the_api_port_never_shares_the_listener_port`, `a_port_in_use_or_shared_with_the_listener_is_refused`, `markers_parse_to_a_fallback_port`; live fallback smoke (blocked new port -> replacement on 47971, notice, restart still pending) |
-| 2 | Hook writes: random temp name created with `create_new` (O_EXCL, retried on a clash), the original's Unix mode copied onto the temp file (Windows: inherited ACL), then rename. Backups are created with `create_new` too (a planted link at the backup name fails). For copilot-vscode, `.github`, `.github/hooks`, `krypto.json` and the temp path must not be symlinks or junctions: checked before anything is read (preview included), before the folders are created and again before the rename. | `repo_hooks_never_go_through_a_symlink` (runs here through a directory junction, since this account cannot create symlinks), `rewrites_leave_no_temp_files_and_keep_permissions` |
-| 3 | `GET /health` -> `{ok, version, machineId}`. CLI clients (`krypto hook` included) use runtime.json's port only when `/health` there answers within 500 ms with machine.toml's id; otherwise config.toml's port (`cli::client_endpoint`). runtime.json is written 0600 on Unix (same atomic writer as config.toml). | `clients_verify_runtime_json_before_using_it` (real server: verified port, wrong machine id, nothing listening, `--port`) |
+| 2 | Hook writes: random temp name created with `create_new` (O_EXCL, retried on a clash), the original's Unix mode copied onto the temp file (Windows: inherited ACL), then rename. Backups are created with `create_new` too (a planted link at the backup name fails). For copilot-vscode, `.github`, `.github/hooks`, `pawl.json` and the temp path must not be symlinks or junctions: checked before anything is read (preview included), before the folders are created and again before the rename. | `repo_hooks_never_go_through_a_symlink` (runs here through a directory junction, since this account cannot create symlinks), `rewrites_leave_no_temp_files_and_keep_permissions` |
+| 3 | `GET /health` -> `{ok, version, machineId}`. CLI clients (`pawl hook` included) use runtime.json's port only when `/health` there answers within 500 ms with machine.toml's id; otherwise config.toml's port (`cli::client_endpoint`). runtime.json is written 0600 on Unix (same atomic writer as config.toml). | `clients_verify_runtime_json_before_using_it` (real server: verified port, wrong machine id, nothing listening, `--port`) |
 | 5 | start_roots / repos.paths: the whole drive / filesystem root (`/`, `C:\`, `\?\C:\`) refused; stored canonicalized (links and `..` resolved, no verbatim prefix); duplicates compared after resolving. | `folders_are_canonical_and_never_a_whole_drive` |
 | 6 | `install_hooks` repo: absolute, `repos::plain_path` (no UNC / device path), an existing local folder that is in the repo index or has `.git`; the canonical path is used. | `hooks_preview_writes_nothing_then_apply_and_remove` (refused without `.git`, UNC and device paths refused, index folder accepted) |
 | 7 | `adopt_relay` runs `check_relay_url` / `check_relay_key` before writing; an invalid invite relay is never written or audited. | `a_relay_from_a_pairing_invite_is_kept_once` |
-| 8 | `KRYPTO_HUB_RESTARTED` (now the previous port) is read and removed from the environment at the very start of `main`, before the Tokio runtime starts (main builds the runtime by hand), so agents and hooks never inherit it; only the startup binds retry. | `markers_parse_to_a_fallback_port`, `the_replacement_gets_the_same_arguments_and_the_previous_port` |
+| 8 | `PAWL_HUB_RESTARTED` (now the previous port) is read and removed from the environment at the very start of `main`, before the Tokio runtime starts (main builds the runtime by hand), so agents and hooks never inherit it; only the startup binds retry. | `markers_parse_to_a_fallback_port`, `the_replacement_gets_the_same_arguments_and_the_previous_port` |
 
 Also: `Roster::get_revoked` implemented in the store (`Store::revoked_roster_entry`; revoked rows keep key and counters, re-pairing makes them normal entries again), test `revoked_devices_keep_their_key_for_a_bye`. sde-peer's hub spots are real handling now: `LinkPath` -> `Device.path` + `devices` broadcast, `RelayStatus` -> `peer_status`; the invite log at `peers.rs` (create_invite, "relay only" when there is no addr) and `core/tests.rs` (`Invite.addr` is `Option`) are kept as they fit the new API.
 
@@ -370,7 +370,7 @@ Also: `Roster::get_revoked` implemented in the store (`Store::revoked_roster_ent
 
 # Earlier sde-hub report (v1 build, kept as written)
 
-Renamed to Krypto on 2026-11-23; names below are pre-rename.
+Renamed to Pawl on 2026-11-23; names below are pre-rename.
 
 # sde-hub report: `crates/hub` (`pet-hub`, binary and lib)
 

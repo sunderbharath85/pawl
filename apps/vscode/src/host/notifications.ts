@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { describePermission, SPECIES_META } from "@krypto/pet-engine";
+import { describePermission, SPECIES_META } from "@pawl/pet-engine";
 import {
   DEFAULT_SPECIES,
   type HubEvent,
@@ -8,10 +8,10 @@ import {
   type ServerMsg,
   type StopPayload,
   type ErrorPayload,
-} from "@krypto/protocol";
+} from "@pawl/protocol";
 import type { HubConnection } from "./connection";
 import { answerRequest } from "./remote";
-import { activeMachineId, isLocal, machineDisplayName, petFor } from "@krypto/hub-client";
+import { activeMachineId, isLocal, machineDisplayName, petFor } from "@pawl/hub-client";
 import { agentName, errorMessage, isInWorkspace } from "./util";
 
 type NotifyLevel = "all" | "permissions" | "off";
@@ -40,7 +40,7 @@ export class Notifier implements vscode.Disposable {
   }
 
   private get level(): NotifyLevel {
-    const v = vscode.workspace.getConfiguration("krypto").get<string>("notifications");
+    const v = vscode.workspace.getConfiguration("pawl").get<string>("notifications");
     return v === "off" || v === "permissions" ? v : "all";
   }
 
@@ -69,7 +69,7 @@ export class Notifier implements vscode.Disposable {
 
   /** Should this window speak up about the session? (Every VS Code window runs its own copy of the extension.) */
   private relevant(sessionId: string | undefined): boolean {
-    const only = vscode.workspace.getConfiguration("krypto").get<boolean>("notifyOnlyWorkspaceSessions") === true;
+    const only = vscode.workspace.getConfiguration("pawl").get<boolean>("notifyOnlyWorkspaceSessions") === true;
     const session = sessionId ? this.hub.state.sessions[sessionId] : undefined;
     const inWorkspace = session ? isInWorkspace(session.cwd) : false;
     if (only) return inWorkspace;
@@ -122,17 +122,17 @@ export class Notifier implements vscode.Disposable {
 
   private async resolve(requestId: string, approve: boolean): Promise<void> {
     if (!this.hub.connected) {
-      void vscode.window.showWarningMessage("Krypto: the hub is offline; the request could not be answered.");
+      void vscode.window.showWarningMessage("Pawl: the hub is offline; the request could not be answered.");
       return;
     }
     if (!this.hub.state.pending[requestId]) {
-      void vscode.window.showInformationMessage("Krypto: that request was already answered.");
+      void vscode.window.showInformationMessage("Pawl: that request was already answered.");
       return;
     }
     try {
       await answerRequest(this.hub, requestId, { kind: approve ? "approve" : "deny" });
     } catch (err) {
-      void vscode.window.showErrorMessage(`Krypto: could not ${approve ? "approve" : "deny"}: ${errorMessage(err)}`);
+      void vscode.window.showErrorMessage(`Pawl: could not ${approve ? "approve" : "deny"}: ${errorMessage(err)}`);
     }
   }
 

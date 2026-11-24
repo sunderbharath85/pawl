@@ -83,7 +83,7 @@ export class ApprovalGate {
     try {
       return gateAvailability(await this.#auth.capability(), this.#platform);
     } catch {
-      return { available: false, explanation: "Krypto could not check this phone's screen lock. Try again." };
+      return { available: false, explanation: "Pawl could not check this phone's screen lock. Try again." };
     }
   }
 

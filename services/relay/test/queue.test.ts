@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { RELAY_QUEUE_MAX_BYTES, RELAY_QUEUE_MAX_FRAMES, RELAY_QUEUE_TTL_MS } from "@krypto/protocol";
+import { RELAY_QUEUE_MAX_BYTES, RELAY_QUEUE_MAX_FRAMES, RELAY_QUEUE_TTL_MS } from "@pawl/protocol";
 import { MailboxQueue, QUEUE_FRAME_PREFIX, QUEUE_INDEX_KEY } from "../src/queue";
 import { MemoryKv } from "../src/storage";
 

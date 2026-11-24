@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use krypto_protocol::{Machine, Session};
+use pawl_protocol::{Machine, Session};
 
 use super::BrainContext;
 

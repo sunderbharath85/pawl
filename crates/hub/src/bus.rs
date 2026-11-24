@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use krypto_protocol::ServerMsg;
+use pawl_protocol::ServerMsg;
 use tokio::sync::{broadcast, mpsc};
 
 /// Buffered messages per subscriber before it counts as lagging.
@@ -79,7 +79,7 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krypto_protocol::Agent;
+    use pawl_protocol::Agent;
 
     #[test]
     fn tap_sees_only_mirrorable_messages() {
@@ -89,10 +89,10 @@ mod tests {
         bus.send(ServerMsg::Agents { agents: Vec::<Agent>::new() });
         bus.send(ServerMsg::MachineRemoved { machine_id: "abcdef012345".into() });
         let n = ServerMsg::Notification {
-            notification: krypto_protocol::HubNotification {
+            notification: pawl_protocol::HubNotification {
                 id: "abcdef012345:n".into(),
                 machine_id: "abcdef012345".into(),
-                level: krypto_protocol::NotificationLevel::Info,
+                level: pawl_protocol::NotificationLevel::Info,
                 title: "t".into(),
                 body: "b".into(),
                 session_id: None,

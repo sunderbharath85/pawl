@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { PeerEnvelope } from "@krypto/protocol";
+import type { PeerEnvelope } from "@pawl/protocol";
 import { encodeStd, encodeUrl, randomBytes } from "../src/b64";
 import { DEFAULT_INBOX, Inbox, SEEN_KEY, type DeliverRequest } from "../src/inbox";
 import { PUSH_KEY, PUSH_MIN_INTERVAL_MS } from "../src/push";

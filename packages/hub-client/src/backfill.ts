@@ -9,7 +9,7 @@
 //     is a full page or more, the latest window replaces the catch-up (anything
 //     older would be trimmed by the client's cap anyway).
 import { latestEventSeq, type HubState } from "./state";
-import type { HubEvent } from "@krypto/protocol";
+import type { HubEvent } from "@pawl/protocol";
 
 /** Events requested per page; matches hub-client's per-session cap. */
 export const BACKFILL_WINDOW = 500;

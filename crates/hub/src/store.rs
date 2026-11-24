@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use krypto_peer::{Roster, RosterEntry};
-use krypto_protocol::{
+use pawl_peer::{Roster, RosterEntry};
+use pawl_protocol::{
     global_id, is_valid_machine_id, parse_global_id, Agent, ChatMessage, ChatRole, Device, DeviceKind, EventType,
     HubEvent, Machine, MachineId, MachineOs, PermissionOptionKind, PermissionRequest, Pet, ResolvedBy, Rule, Session,
     SessionId, ToolKind, UnixMs,
@@ -600,7 +600,7 @@ impl Store {
         let mut c = self.conn();
         let tx = c.transaction()?;
         tx.execute("DELETE FROM agents", [])?;
-        let now = krypto_protocol::now_ms();
+        let now = pawl_protocol::now_ms();
         for a in agents {
             tx.execute(
                 "INSERT INTO agents (id, machine_id, data, updated_at) VALUES (?1, ?2, ?3, ?4)",
@@ -616,7 +616,7 @@ impl Store {
             "INSERT INTO agents (id, machine_id, data, updated_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(id) DO UPDATE SET machine_id = excluded.machine_id, data = excluded.data,
                                            updated_at = excluded.updated_at",
-            params![a.id, a.machine_id, json(a)?, krypto_protocol::now_ms()],
+            params![a.id, a.machine_id, json(a)?, pawl_protocol::now_ms()],
         )?;
         Ok(())
     }
@@ -975,7 +975,7 @@ impl Store {
     }
 
     /// Remember a paired hub's repo index (its latest presence), for list_repos while it is offline.
-    pub fn set_device_repos(&self, device_id: &str, repos: &[krypto_protocol::RepoRef]) -> Result<()> {
+    pub fn set_device_repos(&self, device_id: &str, repos: &[pawl_protocol::RepoRef]) -> Result<()> {
         self.conn().execute(
             "UPDATE devices SET repos = ?2 WHERE id = ?1 AND revoked_at IS NULL",
             params![device_id, json(&repos)?],
@@ -984,7 +984,7 @@ impl Store {
     }
 
     /// A paired hub's last reported repo index (None if it never reported or is not paired).
-    pub fn device_repos(&self, device_id: &str) -> Result<Option<Vec<krypto_protocol::RepoRef>>> {
+    pub fn device_repos(&self, device_id: &str) -> Result<Option<Vec<pawl_protocol::RepoRef>>> {
         let v: Option<Option<String>> = self
             .conn()
             .query_row("SELECT repos FROM devices WHERE id = ?1 AND revoked_at IS NULL", [device_id], |r| r.get(0))
@@ -1687,7 +1687,7 @@ pub fn sanitize_machine_name(name: &str) -> String {
     }
 }
 
-/// The pairing roster `krypto-peer` reads and updates. Quick synchronous calls on the store's
+/// The pairing roster `pawl-peer` reads and updates. Quick synchronous calls on the store's
 /// connection; a failing write is logged (the link layer has no way to report it).
 impl Roster for Store {
     fn get(&self, device_id: &str) -> Option<RosterEntry> {
@@ -1727,7 +1727,7 @@ impl Roster for Store {
     }
 
     fn revoke(&self, device_id: &str) {
-        if let Err(e) = self.revoke_device(device_id, krypto_protocol::now_ms()) {
+        if let Err(e) = self.revoke_device(device_id, pawl_protocol::now_ms()) {
             tracing::warn!("roster: revoke {device_id}: {e:#}");
         }
     }
@@ -1764,7 +1764,7 @@ fn migrate(conn: &mut Connection, machine_id: &str) -> Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let target = MIGRATIONS.len() as i64;
     if current > target {
-        bail!("hub.db schema v{current} is newer than this krypto (v{target}); upgrade krypto");
+        bail!("hub.db schema v{current} is newer than this pawl (v{target}); upgrade pawl");
     }
     for (i, step) in MIGRATIONS.iter().enumerate().skip(current as usize) {
         let version = i + 1;
@@ -2143,7 +2143,7 @@ pub(crate) fn create_v1_db_for_tests(path: &Path, pets: &[(&str, &str, &str)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krypto_protocol::{AgentSource, PermissionOutcome, RuleAction, RuleMatch, SessionSource, SessionStatus, Species};
+    use pawl_protocol::{AgentSource, PermissionOutcome, RuleAction, RuleMatch, SessionSource, SessionStatus, Species};
     use serde_json::json;
 
     const MID: &str = "abcdef012345";
@@ -2243,7 +2243,7 @@ mod tests {
             assert_eq!(e.id, global_id(MID, e.seq));
             assert_eq!(e.machine_id, MID);
         }
-        let req: krypto_protocol::PermissionRequest = serde_json::from_value(events[0].payload.clone()).unwrap();
+        let req: pawl_protocol::PermissionRequest = serde_json::from_value(events[0].payload.clone()).unwrap();
         assert_eq!((req.request_id.as_str(), req.session_id.as_str(), req.machine_id.as_str()), (gid("r-1").as_str(), gid("s-1").as_str(), MID));
         assert_eq!(events[1].payload["requestId"], gid("r-1").as_str());
         assert_eq!(events[2].payload["stopReason"], "end_turn");
@@ -2378,9 +2378,9 @@ mod tests {
             text: "woof".into(),
             ts: 3,
             session_id: None,
-            proposals: vec![krypto_protocol::ChatProposal {
+            proposals: vec![pawl_protocol::ChatProposal {
                 id: "p1".into(),
-                kind: krypto_protocol::ChatProposalKind::Start,
+                kind: pawl_protocol::ChatProposalKind::Start,
                 machine_id: "zyxwvu987654".into(),
                 agent_id: "codex".into(),
                 cwd: Some("/srv/api".into()),

@@ -1,7 +1,7 @@
 //! Notifications. Desktop/phone notifications are a client concern: the hub only emits
 //! `notification` messages on the bus; clients decide how to surface them.
 
-use krypto_protocol::{
+use pawl_protocol::{
     global_id, AgentId, HubNotification, NotificationLevel, PermissionRequest, Session, SessionId, StopPayload,
     StopReason,
 };
@@ -23,7 +23,7 @@ pub fn make(
         body: body.into(),
         session_id,
         agent_id,
-        ts: krypto_protocol::now_ms(),
+        ts: pawl_protocol::now_ms(),
     }
 }
 
@@ -89,7 +89,7 @@ pub fn for_permission(agent_name: &str, pet_name: Option<&str>, req: &Permission
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krypto_protocol::{SessionSource, SessionStatus};
+    use pawl_protocol::{SessionSource, SessionStatus};
 
     #[test]
     fn labels() {
@@ -114,7 +114,7 @@ mod tests {
         let n = for_stop("Codex", &s, &StopPayload { stop_reason: StopReason::EndTurn }).unwrap();
         assert_eq!(n.level, NotificationLevel::Success);
         assert_eq!(n.machine_id, "abcdef012345");
-        assert_eq!(krypto_protocol::parse_global_id(&n.id).map(|(m, _)| m), Some("abcdef012345"));
+        assert_eq!(pawl_protocol::parse_global_id(&n.id).map(|(m, _)| m), Some("abcdef012345"));
         assert_eq!(n.session_id.as_deref(), Some("abcdef012345:s"));
         assert!(for_stop("Codex", &s, &StopPayload { stop_reason: StopReason::Cancelled }).is_none());
     }

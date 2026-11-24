@@ -1,7 +1,7 @@
 // Built-in react-native-svg pets: the fallback when a sprite strip is missing or fails to load.
 // Simple, friendly faces; expression follows the activity.
-import type { PetActivity } from "@krypto/pet-engine";
-import type { Species } from "@krypto/protocol";
+import type { PetActivity } from "@pawl/pet-engine";
+import type { Species } from "@pawl/protocol";
 import Svg, { Circle, Ellipse, G, Path, Rect, Text as SvgText } from "react-native-svg";
 
 const INK = "#3A2417";

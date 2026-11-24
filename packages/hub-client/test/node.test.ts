@@ -7,7 +7,7 @@ import { toHubHttpUrl, toHubWsUrl } from "../src/url";
 
 let root: string;
 beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), "krypto-cred-"));
+  root = mkdtempSync(join(tmpdir(), "pawl-cred-"));
 });
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
@@ -27,28 +27,28 @@ describe("osDataDir", () => {
     expect(osDataDir({ platform: "linux", env: { XDG_DATA_HOME: "rel" }, homeDir: "/home/x" })).toBe(join("/home/x", ".local", "share"));
     expect(osDataDir({ platform: "linux", env: {}, homeDir: "/home/x" })).toBe(join("/home/x", ".local", "share"));
   });
-  test("hubDataDir appends krypto", () => {
-    expect(hubDataDir({ platform: "linux", env: { XDG_DATA_HOME: "/data" } })).toBe(join("/data", "krypto"));
+  test("hubDataDir appends pawl", () => {
+    expect(hubDataDir({ platform: "linux", env: { XDG_DATA_HOME: "/data" } })).toBe(join("/data", "pawl"));
   });
 });
 
 describe("readHubCredentials", () => {
   test("reads and trims the token file", () => {
     const appdata = join(root, "appdata");
-    mkdirSync(join(appdata, "krypto"), { recursive: true });
-    writeFileSync(join(appdata, "krypto", "token"), "\uFEFFabc123\r\n");
+    mkdirSync(join(appdata, "pawl"), { recursive: true });
+    writeFileSync(join(appdata, "pawl", "token"), "\uFEFFabc123\r\n");
     const c = readHubCredentials({ platform: "win32", env: { APPDATA: appdata } });
     expect(c.token).toBe("abc123");
     expect(c.tokenSource).toBe("file");
     expect(c.url).toBe("ws://127.0.0.1:47800/ws");
     expect(c.httpUrl).toBe("http://127.0.0.1:47800");
-    expect(c.tokenFile).toBe(join(appdata, "krypto", "token"));
+    expect(c.tokenFile).toBe(join(appdata, "pawl", "token"));
   });
 
   test("env overrides token and url", () => {
     const c = readHubCredentials({
       platform: "linux",
-      env: { XDG_DATA_HOME: join(root, "nothing"), KRYPTO_HUB_TOKEN: " envtok ", KRYPTO_HUB_URL: "http://127.0.0.1:5000" },
+      env: { XDG_DATA_HOME: join(root, "nothing"), PAWL_HUB_TOKEN: " envtok ", PAWL_HUB_URL: "http://127.0.0.1:5000" },
     });
     expect(c.token).toBe("envtok");
     expect(c.tokenSource).toBe("env");

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { derivePetViews, lastSignificantEvents, type PetView } from "@krypto/pet-engine";
-import { PetStage } from "@krypto/pet-engine/react";
+import { derivePetViews, lastSignificantEvents, type PetView } from "@pawl/pet-engine";
+import { PetStage } from "@pawl/pet-engine/react";
 import {
   activeMachineId,
   isLocal,
@@ -9,8 +9,8 @@ import {
   machineSummary,
   machinesLine,
   type ProposalEntry,
-} from "@krypto/hub-client";
-import { DEFAULT_SPECIES, type Session } from "@krypto/protocol";
+} from "@pawl/hub-client";
+import { DEFAULT_SPECIES, type Session } from "@pawl/protocol";
 import type { ConnInfo, HostToWebview, SpritesInfo, WebviewHubState } from "../shared/messages";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ApprovalCard, ChatPanel, ConnBanner, SessionDetail, SessionList, Toasts, type Toast } from "./parts";
@@ -31,7 +31,7 @@ const EMPTY_STATE: WebviewHubState = {
 
 /** Shown while offline or before any pet exists: the default dog, asleep in its bed. */
 const SLEEPY_DOG: PetView = {
-  petId: "__krypto-placeholder",
+  petId: "__pawl-placeholder",
   machineId: "",
   agentId: "",
   species: DEFAULT_SPECIES,
@@ -158,7 +158,7 @@ export function App() {
       // Keep the sleepy dog at home when this machine has no pet of its own (visitors only).
       return derived.some((v) => !v.visitor && !v.remoteOffline) ? derived : [SLEEPY_DOG, ...derived];
     } catch (err) {
-      console.error("[krypto] derivePetViews failed", err);
+      console.error("[pawl] derivePetViews failed", err);
       return [SLEEPY_DOG];
     }
   }, [connected, pets, sessions, pending, lastEvents, hub.machines, hub.machine, place, now]);

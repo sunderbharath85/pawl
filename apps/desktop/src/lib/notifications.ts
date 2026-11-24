@@ -2,9 +2,9 @@
 // completions and hub `notification` messages of every machine. Attached once, in the pet
 // window. Only the machine the user is active on speaks up, so they are told once, where they are.
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { petFor, type HubClient } from "@krypto/hub-client";
-import { SPECIES_META } from "@krypto/pet-engine";
-import type { StopPayload } from "@krypto/protocol";
+import { petFor, type HubClient } from "@pawl/hub-client";
+import { SPECIES_META } from "@pawl/pet-engine";
+import type { StopPayload } from "@pawl/protocol";
 import { isTauri } from "./native";
 import { readSettings } from "./settings";
 import { agentName, permissionSummary, sessionTitle } from "./format";

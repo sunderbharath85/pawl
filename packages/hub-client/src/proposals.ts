@@ -1,7 +1,7 @@
 // Chat proposals (PLAN.md migration step 5): commands the bot understood for another machine's agent. The
 // bot never runs them; the user confirms on this device and the client sends the ordinary start_session /
 // prompt ClientMsg (step-4 rules apply). Pure helpers plus a tiny single-use ledger.
-import { MACHINE_ID_RE, parseGlobalId, type ChatMessage, type ChatProposal, type MachineOs, type RepoRef } from "@krypto/protocol";
+import { MACHINE_ID_RE, parseGlobalId, type ChatMessage, type ChatProposal, type MachineOs, type RepoRef } from "@pawl/protocol";
 import { isAlreadyDecided } from "./intents";
 import { machineDisplayName } from "./machine";
 import type { HubState } from "./state";

@@ -1,10 +1,10 @@
-//! Thin seam over `krypto_acp::AcpHost` so the core's message handling can be unit-tested with a fake.
+//! Thin seam over `pawl_acp::AcpHost` so the core's message handling can be unit-tested with a fake.
 
 use std::path::PathBuf;
 
 use anyhow::Result;
-use krypto_acp::{AcpHost, HostEvent};
-use krypto_protocol::{Agent, HistorySession, MachineId, Session, SessionId};
+use pawl_acp::{AcpHost, HostEvent};
+use pawl_protocol::{Agent, HistorySession, MachineId, Session, SessionId};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Clone)]
@@ -108,7 +108,7 @@ impl Host {
 #[cfg(test)]
 pub(crate) mod fake {
     use super::*;
-    use krypto_protocol::{SessionSource, SessionStatus};
+    use pawl_protocol::{SessionSource, SessionStatus};
     use std::sync::{Arc, Mutex};
 
     /// Records every call; sessions start instantly in `idle`.
@@ -129,9 +129,9 @@ pub(crate) mod fake {
 
         pub(crate) fn start_session(&self, agent: &Agent, cwd: PathBuf, id: SessionId, prompt: Option<String>) -> Result<Session> {
             self.record(format!("start {} {}", agent.id, prompt.unwrap_or_default()))?;
-            let now = krypto_protocol::now_ms();
+            let now = pawl_protocol::now_ms();
             // Hub session ids are global; the owning machine is their prefix.
-            let machine_id = krypto_protocol::parse_global_id(&id).map(|(m, _)| m.to_string()).unwrap_or_default();
+            let machine_id = pawl_protocol::parse_global_id(&id).map(|(m, _)| m.to_string()).unwrap_or_default();
             Ok(Session {
                 id,
                 machine_id,

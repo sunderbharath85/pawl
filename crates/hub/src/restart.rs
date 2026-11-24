@@ -1,4 +1,4 @@
-//! `restart_hub` (PLAN step 5b): the running `krypto serve` replaces itself with a new process
+//! `restart_hub` (PLAN step 5b): the running `pawl serve` replaces itself with a new process
 //! started with the same arguments, so a setting that needs a restart (the port) takes effect
 //! from the UI. The replacement is detached (it outlives this process) and waits up to
 //! [`RESTART_BIND_RETRY`] for the ports this process lets go of. If the new API port still cannot
@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 
 /// In the replacement's environment: the previous hub's API port. Taken out of the environment
 /// first thing (see [`take_marker`]) so agents and hooks this hub starts never inherit it.
-pub const RESTARTED_ENV: &str = "KRYPTO_HUB_RESTARTED";
+pub const RESTARTED_ENV: &str = "PAWL_HUB_RESTARTED";
 /// How long a replacement retries binding the API port and the peer listener.
 pub const RESTART_BIND_RETRY: Duration = Duration::from_secs(10);
 
@@ -52,7 +52,7 @@ pub fn marker() -> Option<RestartMarker> {
 }
 
 /// How long to retry a bind that finds its port taken at startup: [`RESTART_BIND_RETRY`] in a
-/// replacement, else not at all (a second `krypto serve` should fail at once).
+/// replacement, else not at all (a second `pawl serve` should fail at once).
 pub fn bind_retry() -> Duration {
     if marker().is_some() {
         RESTART_BIND_RETRY
@@ -84,7 +84,7 @@ pub fn replacement_command(exe: &Path, args: impl IntoIterator<Item = OsString>,
 
 /// Start the replacement: this executable with this process's arguments. Returns its pid.
 pub fn spawn_replacement(previous_port: u16) -> Result<u32> {
-    let exe = std::env::current_exe().context("locate the krypto executable")?;
+    let exe = std::env::current_exe().context("locate the pawl executable")?;
     let child = replacement_command(&exe, std::env::args_os().skip(1), previous_port)
         .spawn()
         .with_context(|| format!("start {}", exe.display()))?;
@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn the_replacement_gets_the_same_arguments_and_the_previous_port() {
-        let exe = Path::new("/opt/krypto/krypto");
+        let exe = Path::new("/opt/pawl/pawl");
         let cmd = replacement_command(exe, ["--data-dir", "/d", "--port", "47950", "serve"].map(OsString::from), 47950);
         assert_eq!(cmd.get_program(), exe.as_os_str());
         let args: Vec<_> = cmd.get_args().collect();

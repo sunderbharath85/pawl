@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "krypto-relay",
+  "name": "pawl-relay",
   "main": "src/index.ts",
   "compatibility_date": "2026-11-20",
   "durable_objects": {

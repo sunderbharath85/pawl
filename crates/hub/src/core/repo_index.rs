@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use krypto_protocol::{DeviceKind, RepoRef};
+use pawl_protocol::{DeviceKind, RepoRef};
 
 use super::*;
 use crate::repos;

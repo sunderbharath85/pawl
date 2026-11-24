@@ -1,7 +1,7 @@
 // Hub settings (PLAN.md migration step 5b): pure helpers shared by the desktop Settings view, the first-run setup
 // and VS Code. Field errors, client-side checks that mirror the hub's validation, patch diffing, the wording of
 // in-app confirms for risky changes, and hook labels. No DOM, Node or React imports here.
-import type { CustomAgentSetting, HookStatus, HookTargetName, HubSettings, HubSettingsPatch, PanelView } from "@krypto/protocol";
+import type { CustomAgentSetting, HookStatus, HookTargetName, HubSettings, HubSettingsPatch, PanelView } from "@pawl/protocol";
 
 /** The first protocol version with `get_settings` / `update_settings` / `hook_status` / `install_hooks` / `open_panel`. */
 export const SETTINGS_PROTOCOL_VERSION = 7;
@@ -127,7 +127,7 @@ export function settingsErrorText(err: unknown): string {
     case "unknown_message":
     case "unsupported":
     case "bad_request":
-      return "This hub is too old to change settings from here. Update krypto and restart the hub.";
+      return "This hub is too old to change settings from here. Update pawl and restart the hub.";
     case "forbidden":
       return "Only apps on this machine can change its settings.";
     case "timeout":
@@ -571,7 +571,7 @@ export function riskyChanges(base: HubSettings, patch: HubSettingsPatch, ctx: Ri
       body:
         `The hub on ${here} will accept connections on ${scope}. ` +
         "That lets you create one-time pairing invites here. Only machines that pair with an invite can link to this hub; " +
-        "any other connection is turned away before it can see anything. Your firewall may ask to allow krypto.",
+        "any other connection is turned away before it can see anything. Your firewall may ask to allow pawl.",
     });
   }
   const acceptIntents = patch.peer?.acceptIntents ?? base.peer.acceptIntents;
@@ -710,12 +710,12 @@ export function hookRemoveConfirm(s: Pick<HookStatus, "target" | "repo" | "confi
   const name = hookLabel(s);
   return {
     key: `hooks.${hookKey(s)}`,
-    title: `Remove Krypto's hooks for ${name}?`,
+    title: `Remove Pawl's hooks for ${name}?`,
     confirm: "Remove hooks",
     body:
-      `Krypto's entries are taken out of ${s.configPath}. ${HOOK_TARGET_LABEL[s.target] ?? s.target} sessions you start outside ` +
-      "Krypto (in a terminal or editor) then stop showing up here: no pet reacts to them, their permission prompts are not " +
-      "shown or remembered, and paired machines no longer see them. Sessions Krypto starts itself are not affected.",
+      `Pawl's entries are taken out of ${s.configPath}. ${HOOK_TARGET_LABEL[s.target] ?? s.target} sessions you start outside ` +
+      "Pawl (in a terminal or editor) then stop showing up here: no pet reacts to them, their permission prompts are not " +
+      "shown or remembered, and paired machines no longer see them. Sessions Pawl starts itself are not affected.",
   };
 }
 

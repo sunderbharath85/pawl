@@ -1,5 +1,5 @@
 // Relay-local limits and close codes. Wire-level caps (RELAY_MAX_ALLOWED, RELAY_QUEUE_*, RELAY_FRAME_MAX_BYTES)
-// come from @krypto/protocol; everything here is an implementation bound of this relay.
+// come from @pawl/protocol; everything here is an implementation bound of this relay.
 
 /** A device must answer the challenge within this long. */
 export const AUTH_TIMEOUT_MS = 10_000;

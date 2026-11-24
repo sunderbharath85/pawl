@@ -1,13 +1,13 @@
 // Per-hub read-only mirror (PLAN.md step 3, as a phone sees it). Pure. Every item must carry the sending hub's
 // machine id (and ids with its prefix); anything else is dropped, so a hub can never write another machine's rows.
-// Live updates reuse @krypto/hub-client's reducer: MirrorUpdate variants are ServerMsg variants.
+// Live updates reuse @pawl/hub-client's reducer: MirrorUpdate variants are ServerMsg variants.
 import {
   DEFAULT_LIMITS,
   initialHubState,
   mergeEvents,
   reduceServerMsg,
   type HubState,
-} from "@krypto/hub-client";
+} from "@pawl/hub-client";
 import {
   parseGlobalId,
   type HubEvent,
@@ -22,7 +22,7 @@ import {
   type ServerMsg,
   type Session,
   type UnixMs,
-} from "@krypto/protocol";
+} from "@pawl/protocol";
 
 /** Mirror caps per hub (the phone keeps less than a hub does). */
 export const MIRROR_MAX_SESSIONS = 500;

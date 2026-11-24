@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { loadSpriteManifest, type PetSpritesConfig } from "@krypto/pet-engine";
+import { loadSpriteManifest, type PetSpritesConfig } from "@pawl/pet-engine";
 
 /** Sprite sheets are served at /pets/ (see vite.config.ts). */
 export const PETS_BASE_URL = "/pets/";

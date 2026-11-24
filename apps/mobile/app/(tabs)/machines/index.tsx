@@ -1,5 +1,5 @@
 // Computers: every paired hub, online state and path (the phone always goes through the relay), what is running.
-import { relayStatusText } from "@krypto/hub-client";
+import { relayStatusText } from "@pawl/hub-client";
 import { useRouter } from "expo-router";
 import { ScrollView, Text, View } from "react-native";
 import Animated, { FadeIn, LinearTransition } from "react-native-reanimated";

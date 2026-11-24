@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
-import type { HubClient, HubState } from "@krypto/hub-client";
-import type { PetSpritesConfig, PetView } from "@krypto/pet-engine";
+import type { HubClient, HubState } from "@pawl/hub-client";
+import type { PetSpritesConfig, PetView } from "@pawl/pet-engine";
 import type { ConnectionMeta, HubConnection } from "../lib/connection";
 
 export type Route =

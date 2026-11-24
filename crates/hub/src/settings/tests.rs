@@ -1,7 +1,7 @@
 //! Settings view, validation table and config.toml round-trip tests (pure; temp dirs only).
 
 use super::*;
-use krypto_protocol::{
+use pawl_protocol::{
     HubSettingsBotPatch, HubSettingsHubPatch, HubSettingsPeerPatch, HubSettingsRelayPatch, HubSettingsReposPatch,
     HubSettingsWatchdogPatch,
 };
@@ -332,7 +332,7 @@ fn a_missing_file_starts_from_the_commented_template() {
     let cur = HubConfig::default();
     let (next, changed) = apply_patch(&cur, &patch(json!({ "peer": { "listen": "127.0.0.1:47901" }, "watchdog": { "tickSecs": 15 } })), &reserved()).unwrap();
     let out = edit_config(None, &next, &changed).unwrap();
-    assert!(out.contains("# Krypto hub configuration"), "{out}");
+    assert!(out.contains("# Pawl hub configuration"), "{out}");
     assert!(out.contains("# [[custom_agents]]"), "template comments kept");
     let back = HubConfig::parse(&out).unwrap();
     assert_eq!(back.peer.listen.as_deref(), Some("127.0.0.1:47901"));

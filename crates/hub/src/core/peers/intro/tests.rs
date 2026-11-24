@@ -1,7 +1,7 @@
 //! Unit tests for the group roster rules (pure: no hub, no links).
 
 use super::*;
-use krypto_peer::DeviceKeys;
+use pawl_peer::DeviceKeys;
 
 const ME: &str = "abcdef012345";
 const SENDER: &str = "bbbbbb000002";
@@ -77,12 +77,12 @@ fn intro_devices_carry_only_what_receivers_take() {
     let out = intro_device(&entry(hub.clone(), MachineOs::Macos));
     assert_eq!(out.addr.as_deref(), Some("192.168.1.20:47801"));
     assert_eq!(out.os, Some(MachineOs::Macos));
-    assert!(krypto_peer::check_intro_device(&out).is_ok(), "what we send passes the receiver's checks");
+    assert!(pawl_peer::check_intro_device(&out).is_ok(), "what we send passes the receiver's checks");
     // A public host name is not something a receiver would dial: left out, the device still goes.
     hub.addr = Some("mac.example.com:47801".into());
     let out = intro_device(&entry(hub, MachineOs::Macos));
     assert_eq!(out.addr, None);
-    assert!(krypto_peer::check_intro_device(&out).is_ok());
+    assert!(pawl_peer::check_intro_device(&out).is_ok());
     // Phones never carry an address; their os comes from the device when the machine view has none.
     let mut phone = device("pppppp000001", DeviceKind::Phone, "iPhone", &key());
     phone.addr = Some("10.0.0.9:47801".into());
@@ -120,7 +120,7 @@ fn intros_are_judged_against_what_this_hub_knows() {
         intro("BAD", DeviceKind::Phone, "Bad id", &key()),
         intro("pppppp000001", DeviceKind::Hub, "iPhone as hub", &phone_pk),
     ];
-    let got = judge_intro(&devices, (ME, &me_key), &sender, &stored, krypto_peer::check_intro_device);
+    let got = judge_intro(&devices, (ME, &me_key), &sender, &stored, pawl_peer::check_intro_device);
     use IntroOutcome::*;
     assert_eq!(
         got,
@@ -140,7 +140,7 @@ fn intros_are_judged_against_what_this_hub_knows() {
         ]
     );
     // Against the roster: another key for a known id, a known key under another id, another kind.
-    let one = |d: IntroDevice| judge_intro(&[d], (ME, &me_key), &sender, &stored, krypto_peer::check_intro_device);
+    let one = |d: IntroDevice| judge_intro(&[d], (ME, &me_key), &sender, &stored, pawl_peer::check_intro_device);
     assert_eq!(one(intro("pppppp000001", DeviceKind::Phone, "iPhone", &key())), [Conflict("known here with another key")]);
     assert_eq!(one(intro("xxxxxx000001", DeviceKind::Phone, "Thief", &phone_pk)), [Conflict("its key belongs to another device here")]);
     assert_eq!(one(intro("pppppp000001", DeviceKind::Hub, "iPhone", &phone_pk)), [Conflict("known here as another kind of device")]);

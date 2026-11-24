@@ -1,14 +1,14 @@
 // Wording for acting on another machine's items from VS Code (PLAN.md migration step 4). Pure: no runtime
 // `vscode` import, so it is unit-tested.
-import { agentFor, isLocal, machineDisplayName, ownerName, type HubState } from "@krypto/hub-client";
-import { describePermission } from "@krypto/pet-engine";
-import type { Agent, PermissionRequest } from "@krypto/protocol";
+import { agentFor, isLocal, machineDisplayName, ownerName, type HubState } from "@pawl/hub-client";
+import { describePermission } from "@pawl/pet-engine";
+import type { Agent, PermissionRequest } from "@pawl/protocol";
 
-/** Why "Krypto: Open Settings" failed (an older hub has no `open_panel`). */
+/** Why "Pawl: Open Settings" failed (an older hub has no `open_panel`). */
 export function openSettingsErrorText(err: unknown): string {
   const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";
   if (code === "unknown_type" || code === "unknown_message" || code === "unsupported" || code === "bad_request") {
-    return "This hub is too old to open the desktop settings. Update krypto and restart the hub.";
+    return "This hub is too old to open the desktop settings. Update pawl and restart the hub.";
   }
   if (code === "timeout") return "The hub did not answer. Check that it is running, then try again.";
   return err instanceof Error && err.message ? err.message : "Could not reach the desktop app.";

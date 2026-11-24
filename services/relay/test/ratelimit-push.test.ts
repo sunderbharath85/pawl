@@ -75,7 +75,7 @@ describe("expo push", () => {
     expect(headers["content-type"]).toBe("application/json");
     expect(headers.authorization).toBeUndefined();
     const body = JSON.parse(init.body as string);
-    expect(body).toEqual([{ to: "ExponentPushToken[abc]", title: "Krypto", body: PUSH_BODY, sound: "default", priority: "high" }]);
+    expect(body).toEqual([{ to: "ExponentPushToken[abc]", title: "Pawl", body: PUSH_BODY, sound: "default", priority: "high" }]);
     expect(body[0].data).toBeUndefined();
     const withAuth = buildExpoPushRequest("ExponentPushToken[abc]", "secret");
     expect((withAuth.init.headers as Record<string, string>).authorization).toBe("Bearer secret");

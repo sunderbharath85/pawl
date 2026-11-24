@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Device, Machine } from "@krypto/protocol";
+import type { Device, Machine } from "@pawl/protocol";
 import {
   groupDevices,
   introducedByRevoked,
@@ -27,7 +27,7 @@ const iphone: Device = { id: "iphone000001", kind: "phone", name: "iPhone", os: 
 const pixel: Device = { id: "pixel0000001", kind: "phone", name: "Pixel", os: "android", publicKey: "cGl4ZWw=", pairedAt: 210 };
 const ipad: Device = { id: "ipad00000001", kind: "phone", name: "Bob's iPad", publicKey: "aXBhZA==", pairedAt: 220, introducedBy: MID2 };
 
-const PHONE_URI = `krypto://peer?v=1&mid=${MID}&pk=cGstd2lucGM&relay=wss://relay.example.dev&rt=AAAA&rk=k3y_SECRET&code=AAAAAAAAAAAAAAAAAAAAAA&exp=1900000000000`;
+const PHONE_URI = `pawl://peer?v=1&mid=${MID}&pk=cGstd2lucGM&relay=wss://relay.example.dev&rt=AAAA&rk=k3y_SECRET&code=AAAAAAAAAAAAAAAAAAAAAA&exp=1900000000000`;
 
 describe("devices grouping", () => {
   test("phones and hubs are split and sorted (online first, then name)", () => {
@@ -123,7 +123,7 @@ describe("phone invites", () => {
     expect(isPhoneInvite(PHONE_URI)).toBe(true);
     expect(isPhoneInvite(inviteFrom2)).toBe(false); // LAN
     expect(isPhoneInvite(`${inviteFrom2}&relay=wss://relay.example.dev&rt=AAAA`)).toBe(false); // LAN + relay
-    expect(isPhoneInvite("krypto://peer?v=1")).toBe(false);
+    expect(isPhoneInvite("pawl://peer?v=1")).toBe(false);
   });
 
   test("the QR warning names the access key and rotation", () => {

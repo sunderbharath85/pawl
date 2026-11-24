@@ -1,8 +1,8 @@
 // Approvals: every machine's pending permission requests. Approve = Face ID / fingerprint / passcode first, then an
 // intent with confirmed: true to the owning computer; deny needs no check. Decisions made elsewhere show who made
 // them ("Approved from Windows PC").
-import { describePermission } from "@krypto/pet-engine";
-import type { PermissionRequest } from "@krypto/protocol";
+import { describePermission } from "@pawl/pet-engine";
+import type { PermissionRequest } from "@pawl/protocol";
 import { useRouter } from "expo-router";
 import { useState } from "react";
 import { ScrollView, Text, View } from "react-native";

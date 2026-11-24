@@ -2,7 +2,7 @@
 // Hub running? (start it) → name this machine → install hooks for the agents found (preview first) → optionally
 // turn on the peer listener and pair a machine → optionally pair a phone by QR code (step 7).
 import { useEffect, useState } from "react";
-import { machineDisplayName, pairingAllowsText } from "@krypto/hub-client";
+import { machineDisplayName, pairingAllowsText } from "@pawl/hub-client";
 import { isTauri, native } from "../../lib/native";
 import { useSettings } from "../../lib/settings";
 import { usePanel } from "../context";
@@ -42,7 +42,7 @@ export function SetupView() {
       <header className="view-head setup-head">
         <PetAvatar species="dog" activity={step === DONE ? "happy" : connected ? "idle" : "napping"} size={64} />
         <div>
-          <h1>Set up Krypto</h1>
+          <h1>Set up Pawl</h1>
           <p>A few steps so your pets can watch your coding agents. Everything here can be changed later in Settings.</p>
         </div>
       </header>
@@ -69,7 +69,7 @@ export function SetupView() {
           <>
             <h2>Hooks for the agents on this machine</h2>
             <p className="hint">
-              Hooks let Krypto follow sessions you start yourself in a terminal or editor. Preview shows the exact change to each agent's
+              Hooks let Pawl follow sessions you start yourself in a terminal or editor. Preview shows the exact change to each agent's
               config before anything is written.
             </p>
             <HooksPanel live={connected} foundOnly />
@@ -129,10 +129,10 @@ function HubStep() {
   return (
     <>
       <h2>The hub</h2>
-      <p className="hint">The hub is the small background program (krypto serve) that talks to your agents. It only listens on this computer.</p>
+      <p className="hint">The hub is the small background program (pawl serve) that talks to your agents. It only listens on this computer.</p>
       {meta.phase === "connected" ? (
         <p className="setup-ok">
-          The hub is running{meta.hubVersion ? ` (krypto ${meta.hubVersion})` : ""}. You're connected.
+          The hub is running{meta.hubVersion ? ` (pawl ${meta.hubVersion})` : ""}. You're connected.
         </p>
       ) : meta.phase === "starting" || meta.phase === "connecting" || meta.phase === "booting" ? (
         <p className="hint">
@@ -148,7 +148,7 @@ function HubStep() {
               {meta.startError}
             </p>
           )}
-          {hubBin === null && <p className="hint">krypto was not found: put it on PATH or next to this app, or set KRYPTO_HUB_BIN.</p>}
+          {hubBin === null && <p className="hint">pawl was not found: put it on PATH or next to this app, or set PAWL_HUB_BIN.</p>}
           <div className="form-actions">
             <button className="pill pill-primary" onClick={() => void conn.startHub()} disabled={!isTauri}>
               Start the hub
@@ -187,7 +187,7 @@ function PhoneStep() {
     <>
       <h2>Pair your phone (optional)</h2>
       <p className="hint">
-        With the Krypto app on your phone you can check on your pets and answer approvals from anywhere. Phones connect through your relay;
+        With the Pawl app on your phone you can check on your pets and answer approvals from anywhere. Phones connect through your relay;
         you can pair one any time in Machines.
       </p>
       <PhoneInviteCard bare />

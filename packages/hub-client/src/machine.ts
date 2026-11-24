@@ -9,7 +9,7 @@ import {
   type MachineId,
   type MachineOs,
   type Pet,
-} from "@krypto/protocol";
+} from "@pawl/protocol";
 import { deviceNameProblem, trimWhiteSpace } from "./names";
 import type { HubState } from "./state";
 
@@ -75,7 +75,7 @@ export function agentFor(agents: readonly Agent[], agentId: string, machineId?: 
 
 const RENAME_ERRORS: Record<string, string> = {
   invalid: `Use 1–${MACHINE_NAME_MAX} characters for the machine name.`,
-  no_machine: "This hub predates machine names. Update krypto and restart the hub, then try again.",
+  no_machine: "This hub predates machine names. Update pawl and restart the hub, then try again.",
   not_owner: "Only this machine's own hub can rename it.",
   not_found: "The hub does not know this machine any more. Reconnect and try again.",
   unauthorized: "The hub did not accept our token.",

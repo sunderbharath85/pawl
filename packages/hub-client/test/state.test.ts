@@ -310,7 +310,7 @@ describe("pairing roster + peer link (protocol v3)", () => {
 
   test("join_peer ack adds the device and machine; replaying it does not duplicate", () => {
     const base = applyWelcome(initialHubState(), welcome);
-    const req = { type: "join_peer" as const, uri: "krypto://peer?x" };
+    const req = { type: "join_peer" as const, uri: "pawl://peer?x" };
     const s = applyAck(base, req, { device: device2, machine: { ...machine2, online: true } });
     expect(s.devices).toEqual([device2]);
     expect(s.machines[MID2]?.online).toBe(true);
@@ -335,7 +335,7 @@ describe("pairing roster + peer link (protocol v3)", () => {
   });
 
   test("create_invite ack leaves state unchanged (the URI is never stored)", () => {
-    const s = applyAck(paired, { type: "create_invite" }, { uri: "krypto://peer?secret", expiresAt: 5 });
+    const s = applyAck(paired, { type: "create_invite" }, { uri: "pawl://peer?secret", expiresAt: 5 });
     expect(s).toBe(paired);
     expect(JSON.stringify(s)).not.toContain("secret");
   });

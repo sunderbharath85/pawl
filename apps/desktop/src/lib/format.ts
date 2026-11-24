@@ -1,5 +1,5 @@
-import type { Agent, PermissionRequest, Session, SessionStatus, ToolKind } from "@krypto/protocol";
-import { agentFor } from "@krypto/hub-client";
+import type { Agent, PermissionRequest, Session, SessionStatus, ToolKind } from "@pawl/protocol";
+import { agentFor } from "@pawl/hub-client";
 
 export const STATUS_META: Record<SessionStatus, { label: string; tone: string }> = {
   idle: { label: "Idle", tone: "idle" },
@@ -49,7 +49,7 @@ export function clockTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-/** Last 2 path segments: `C:\code\krypto\apps` → `krypto/apps`. */
+/** Last 2 path segments: `C:\code\pawl\apps` → `pawl/apps`. */
 export function shortPath(p: string, segments = 2): string {
   const parts = p.split(/[\/]+/).filter(Boolean);
   if (parts.length <= segments) return p;

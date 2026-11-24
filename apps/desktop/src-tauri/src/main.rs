@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    krypto_desktop_lib::run()
+    pawl_desktop_lib::run()
 }

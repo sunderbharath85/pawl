@@ -1,5 +1,5 @@
 {
-  "name": "@krypto/hub-client",
+  "name": "@pawl/hub-client",
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
@@ -16,7 +16,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@krypto/protocol": "workspace:*"
+    "@pawl/protocol": "workspace:*"
   },
   "peerDependencies": {
     "react": ">=18"

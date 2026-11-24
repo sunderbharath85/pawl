@@ -1,6 +1,6 @@
-//! Hub side of hub-to-hub pairing and presence (`krypto-peer`, PLAN step 2).
+//! Hub side of hub-to-hub pairing and presence (`pawl-peer`, PLAN step 2).
 //!
-//! `krypto-peer` owns the sockets, the crypto, invites and the roster writes (through
+//! `pawl-peer` owns the sockets, the crypto, invites and the roster writes (through
 //! `impl Roster for Store`). This module keeps the hub's view of it: a cache of the roster, the
 //! presence snapshot peers receive, the pairing `ClientMsg`s, and the translation of `PeerEvent`s
 //! into `ServerMsg`s. Peer frames never reach `ClientMsg` handling: a peer can only pair, say
@@ -15,8 +15,8 @@ mod intro;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::RangeInclusive;
 
-use krypto_peer::{PeerEvent, PeerNode, RosterEntry};
-use krypto_protocol::{Device, DeviceKind, LinkPath, PairRejectReason, PeerStatus, Presence};
+use pawl_peer::{PeerEvent, PeerNode, RosterEntry};
+use pawl_protocol::{Device, DeviceKind, LinkPath, PairRejectReason, PeerStatus, Presence};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::*;
@@ -49,7 +49,7 @@ pub(super) struct Peers {
     intro_buckets: HashMap<String, intro::IntroBucket>,
 }
 
-/// A link-layer error as its bare snake_case wire code (`krypto-peer` errors display as the code).
+/// A link-layer error as its bare snake_case wire code (`pawl-peer` errors display as the code).
 fn wire(e: impl std::fmt::Display) -> anyhow::Error {
     anyhow!("{e}")
 }
@@ -132,10 +132,10 @@ impl Hub {
         me: Machine,
         store: &Store,
     ) -> Result<(PeerNode, UnboundedReceiver<PeerEvent>)> {
-        let keys = krypto_peer::DeviceKeys::load_or_create(&paths.device_key)
+        let keys = pawl_peer::DeviceKeys::load_or_create(&paths.device_key)
             .with_context(|| format!("load device key {}", paths.device_key.display()))?;
         let (tx, rx) = mpsc::unbounded_channel();
-        let roster: Arc<dyn krypto_peer::Roster> = Arc::new(store.clone());
+        let roster: Arc<dyn pawl_peer::Roster> = Arc::new(store.clone());
         Ok((PeerNode::new(keys, me, roster, tx), rx))
     }
 
@@ -238,7 +238,7 @@ impl Hub {
     }
 
     /// A paired hub's repo index from its latest presence (None until one arrived).
-    pub(super) fn presence_repos(&self, machine_id: &str) -> Option<Vec<krypto_protocol::RepoRef>> {
+    pub(super) fn presence_repos(&self, machine_id: &str) -> Option<Vec<pawl_protocol::RepoRef>> {
         self.peers().presence.get(machine_id).map(|p| p.repos.clone())
     }
 
@@ -280,7 +280,7 @@ impl Hub {
             agents: st.agents.clone(),
             repos: self.repos(),
             pets,
-            ts: krypto_protocol::now_ms(),
+            ts: pawl_protocol::now_ms(),
         }
     }
 
@@ -467,7 +467,7 @@ impl Hub {
                     Some(DeviceKind::Phone) => return,
                     Some(DeviceKind::Hub) => {}
                 }
-                let mut presence = presence_to_local_clock(presence, krypto_protocol::now_ms());
+                let mut presence = presence_to_local_clock(presence, pawl_protocol::now_ms());
                 // Its repo index and agents feed "in repo X", "tell its codex" and the pickers: only
                 // well-formed entries.
                 presence.repos = crate::repos::validate_peer_repos(std::mem::take(&mut presence.repos));
@@ -527,7 +527,7 @@ impl Hub {
             e.or_else(|| peers.departed.remove(device_id))
         };
         let id = device_id.to_string();
-        let now = krypto_protocol::now_ms();
+        let now = pawl_protocol::now_ms();
         if let Err(e) = self.inner.store.run(move |s| s.revoke_device(&id, now)).await {
             tracing::error!("revoke {device_id} in hub.db: {e:#}");
         }
@@ -621,7 +621,7 @@ impl Hub {
     ) {
         let entry = PairingAuditEntry {
             id: 0,
-            ts: krypto_protocol::now_ms(),
+            ts: pawl_protocol::now_ms(),
             machine_id: self.inner.machine_id.clone(),
             kind,
             device_id: device.map(|d| d.id.clone()),
@@ -639,7 +639,7 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krypto_protocol::MachineOs;
+    use pawl_protocol::MachineOs;
 
     fn presence(ts: UnixMs, active: Option<UnixMs>) -> Presence {
         Presence {

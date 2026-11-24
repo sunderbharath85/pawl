@@ -18,8 +18,8 @@ import {
   parseWholeNumber,
   settingsPatch,
   type EditableSettings,
-} from "@krypto/hub-client";
-import type { CustomAgentSetting, HubSettings, HubSettingsPatch } from "@krypto/protocol";
+} from "@pawl/hub-client";
+import type { CustomAgentSetting, HubSettings, HubSettingsPatch } from "@pawl/protocol";
 
 /** Field path → message. */
 export type FormErrors = Record<string, string>;

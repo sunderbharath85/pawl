@@ -1,4 +1,4 @@
-import { globalId, type Agent, type Device, type HubEvent, type Machine, type PeerStatus, type Pet, type PermissionRequest, type Session, type Welcome } from "@krypto/protocol";
+import { globalId, type Agent, type Device, type HubEvent, type Machine, type PeerStatus, type Pet, type PermissionRequest, type Session, type Welcome } from "@pawl/protocol";
 
 /** This hub's machine id (12 chars [a-z0-9]). */
 export const MID = "winpc0000001";
@@ -15,7 +15,7 @@ export const peerOff: PeerStatus = { listening: null, publicKey: "cGstd2lucGM=",
 export const peerOn: PeerStatus = { listening: "192.168.1.10:47801", publicKey: "cGstd2lucGM=", relay: { url: null, connected: false } };
 
 /** A well-formed invite URI from `machine2` (code is a dummy). */
-export const inviteFrom2 = `krypto://peer?v=1&mid=${MID2}&pk=cGstbWFjbWluaQ&addr=192.168.1.20:47801&code=AAAAAAAAAAAAAAAAAAAAAA&exp=1900000000000`;
+export const inviteFrom2 = `pawl://peer?v=1&mid=${MID2}&pk=cGstbWFjbWluaQ&addr=192.168.1.20:47801&code=AAAAAAAAAAAAAAAAAAAAAA&exp=1900000000000`;
 
 export const agent: Agent = { id: "claude-code", machineId: MID, name: "Claude Code", command: ["npx", "x"], installed: true, source: "registry" };
 

@@ -3,7 +3,7 @@
 // stylesheet (styles.ts) animates per activity. Never put a `transform` attribute on an animated
 // element (CSS transforms would override it) — position static wrappers instead.
 import type { JSX } from "react";
-import type { Species } from "@krypto/protocol";
+import type { Species } from "@pawl/protocol";
 
 // ---------------------------------------------------------------- shared FX pieces
 

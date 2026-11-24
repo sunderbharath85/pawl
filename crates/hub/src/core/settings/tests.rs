@@ -3,7 +3,7 @@
 use super::*;
 use crate::core::host::fake::FakeHost;
 use crate::store::SettingsAuditKind;
-use krypto_protocol::{Intent, IntentRejectReason, PeerBody};
+use pawl_protocol::{Intent, IntentRejectReason, PeerBody};
 
 const MID: &str = "abcdef012345";
 const OTHER: &str = "zyxwvu987654";
@@ -452,9 +452,9 @@ async fn nothing_a_paired_machine_sends_reaches_settings() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(path, Some(krypto_protocol::LinkPath::Lan));
-    let status = krypto_protocol::RelayStatusInfo { url: Some("wss://relay.invalid".into()), connected: false, last_error: Some("unreachable".into()) };
-    a.on_peer_event(krypto_peer::PeerEvent::RelayStatus(status.clone())).await;
+    assert_eq!(path, Some(pawl_protocol::LinkPath::Lan));
+    let status = pawl_protocol::RelayStatusInfo { url: Some("wss://relay.invalid".into()), connected: false, last_error: Some("unreachable".into()) };
+    a.on_peer_event(pawl_peer::PeerEvent::RelayStatus(status.clone())).await;
     assert!(drain(&mut arx).iter().any(|m| matches!(m, ServerMsg::PeerStatus { peer } if peer.relay == status)));
 
     let text = config_text(&a);
@@ -476,10 +476,10 @@ async fn nothing_a_paired_machine_sends_reaches_settings() {
         Intent::Cancel { session_id: sid.clone() },
     ];
     for (i, intent) in intents.into_iter().enumerate() {
-        let body = PeerBody::Intent { intent_id: format!("x-{i}"), client: ClientKind::Desktop, confirmed: true, intent, ts: krypto_protocol::now_ms() };
-        a.on_peer_event(krypto_peer::PeerEvent::Body { device_id: OTHER.into(), body }).await;
+        let body = PeerBody::Intent { intent_id: format!("x-{i}"), client: ClientKind::Desktop, confirmed: true, intent, ts: pawl_protocol::now_ms() };
+        a.on_peer_event(pawl_peer::PeerEvent::Body { device_id: OTHER.into(), body }).await;
     }
-    a.on_peer_event(krypto_peer::PeerEvent::Body { device_id: OTHER.into(), body: PeerBody::SyncRequest { since_seq: 0 } }).await;
+    a.on_peer_event(pawl_peer::PeerEvent::Body { device_id: OTHER.into(), body: PeerBody::SyncRequest { since_seq: 0 } }).await;
     let mut log = Vec::new();
     for _ in 0..100 {
         log = a.store().intent_log(50).unwrap();
@@ -515,17 +515,17 @@ async fn restart_hub_acks_first_then_asks_serve_to_restart() {
     let row = &f.hub.store().settings_audit(10).unwrap()[0];
     assert_eq!((row.kind, row.keys.clone(), row.actor.as_str()), (SettingsAuditKind::Restart, vec!["hub.port".to_string()], "desktop#7"));
 
-    // A hub not run by `krypto serve` (e.g. `krypto start` in-process) cannot replace itself.
+    // A hub not run by `pawl serve` (e.g. `pawl start` in-process) cannot replace itself.
     let dir = tempfile::tempdir().unwrap();
     let in_process = hub_in(dir.path(), MID, "Test PC", |_| {}).await;
     let e = err(in_process.handle(ClientMsg::RestartHub { id: "r".into() }, &desktop()).await);
-    assert!(e.contains("krypto serve"), "{e}");
+    assert!(e.contains("pawl serve"), "{e}");
     assert!(!*in_process.restart_requested().borrow());
 }
 
 #[tokio::test]
 async fn watchdog_timings_change_without_repeating_nudges() {
-    use krypto_protocol::{PermissionOption, PermissionOptionKind, ToolCallPayload};
+    use pawl_protocol::{PermissionOption, PermissionOptionKind, ToolCallPayload};
     let mut f = fx().await;
     let req = PermissionRequest {
         request_id: global_id(MID, "req-wd"),
@@ -534,7 +534,7 @@ async fn watchdog_timings_change_without_repeating_nudges() {
         agent_id: "codex".into(),
         tool_call: ToolCallPayload { tool_call_id: "tc".into(), title: Some("cargo test".into()), kind: None, status: None, locations: None, raw_input: None },
         options: vec![PermissionOption { option_id: "allow".into(), name: "Allow".into(), kind: PermissionOptionKind::AllowOnce }],
-        created_at: krypto_protocol::now_ms() - 3_600_000,
+        created_at: pawl_protocol::now_ms() - 3_600_000,
     };
     f.hub.st().pending.insert(req.request_id.clone(), req);
     let nudges = |msgs: &[ServerMsg]| msgs.iter().filter(|m| matches!(m, ServerMsg::Notification { .. })).count();

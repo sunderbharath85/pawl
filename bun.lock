@@ -3,19 +3,19 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "krypto",
+      "name": "pawl",
       "devDependencies": {
         "@types/bun": "latest",
         "typescript": "^5.9.0",
       },
     },
     "apps/desktop": {
-      "name": "@krypto/desktop",
+      "name": "@pawl/desktop",
       "version": "0.1.0",
       "dependencies": {
-        "@krypto/hub-client": "workspace:*",
-        "@krypto/pet-engine": "workspace:*",
-        "@krypto/protocol": "workspace:*",
+        "@pawl/hub-client": "workspace:*",
+        "@pawl/pet-engine": "workspace:*",
+        "@pawl/protocol": "workspace:*",
         "@tauri-apps/api": "^2.12.5",
         "@tauri-apps/plugin-dialog": "^2.8.4",
         "@tauri-apps/plugin-notification": "^2.8.1",
@@ -35,12 +35,12 @@
       },
     },
     "apps/mobile": {
-      "name": "@krypto/mobile",
+      "name": "@pawl/mobile",
       "version": "0.1.0",
       "dependencies": {
-        "@krypto/hub-client": "workspace:*",
-        "@krypto/pet-engine": "workspace:*",
-        "@krypto/protocol": "workspace:*",
+        "@pawl/hub-client": "workspace:*",
+        "@pawl/pet-engine": "workspace:*",
+        "@pawl/protocol": "workspace:*",
         "expo": "~58.0.26",
         "expo-camera": "~58.0.14",
         "expo-constants": "~58.0.16",
@@ -73,12 +73,12 @@
       },
     },
     "apps/vscode": {
-      "name": "krypto-vscode",
+      "name": "pawl-vscode",
       "version": "0.1.0",
       "devDependencies": {
-        "@krypto/hub-client": "workspace:*",
-        "@krypto/pet-engine": "workspace:*",
-        "@krypto/protocol": "workspace:*",
+        "@pawl/hub-client": "workspace:*",
+        "@pawl/pet-engine": "workspace:*",
+        "@pawl/protocol": "workspace:*",
         "@types/node": "^22",
         "@types/react": "^19.3.0",
         "@types/react-dom": "^19.3.0",
@@ -90,10 +90,10 @@
       },
     },
     "packages/hub-client": {
-      "name": "@krypto/hub-client",
+      "name": "@pawl/hub-client",
       "version": "0.1.0",
       "dependencies": {
-        "@krypto/protocol": "workspace:*",
+        "@pawl/protocol": "workspace:*",
       },
       "devDependencies": {
         "@types/react": "^19.3.0",
@@ -108,10 +108,10 @@
       ],
     },
     "packages/pet-engine": {
-      "name": "@krypto/pet-engine",
+      "name": "@pawl/pet-engine",
       "version": "0.1.0",
       "dependencies": {
-        "@krypto/protocol": "workspace:*",
+        "@pawl/protocol": "workspace:*",
       },
       "devDependencies": {
         "@types/react": "^19.3.0",
@@ -128,17 +128,17 @@
       ],
     },
     "packages/protocol": {
-      "name": "@krypto/protocol",
+      "name": "@pawl/protocol",
       "version": "0.1.0",
       "devDependencies": {
         "typescript": "^5.9.0",
       },
     },
     "services/relay": {
-      "name": "@krypto/relay",
+      "name": "@pawl/relay",
       "version": "0.1.0",
       "dependencies": {
-        "@krypto/protocol": "workspace:*",
+        "@pawl/protocol": "workspace:*",
         "tweetnacl": "^1.0.3",
       },
       "devDependencies": {
@@ -519,17 +519,17 @@
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
-    "@krypto/desktop": ["@krypto/desktop@workspace:apps/desktop"],
+    "@pawl/desktop": ["@pawl/desktop@workspace:apps/desktop"],
 
-    "@krypto/hub-client": ["@krypto/hub-client@workspace:packages/hub-client"],
+    "@pawl/hub-client": ["@pawl/hub-client@workspace:packages/hub-client"],
 
-    "@krypto/mobile": ["@krypto/mobile@workspace:apps/mobile"],
+    "@pawl/mobile": ["@pawl/mobile@workspace:apps/mobile"],
 
-    "@krypto/pet-engine": ["@krypto/pet-engine@workspace:packages/pet-engine"],
+    "@pawl/pet-engine": ["@pawl/pet-engine@workspace:packages/pet-engine"],
 
-    "@krypto/protocol": ["@krypto/protocol@workspace:packages/protocol"],
+    "@pawl/protocol": ["@pawl/protocol@workspace:packages/protocol"],
 
-    "@krypto/relay": ["@krypto/relay@workspace:services/relay"],
+    "@pawl/relay": ["@pawl/relay@workspace:services/relay"],
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.2.6", "", { "dependencies": { "@tybys/wasm-util": "^0.10.3" }, "peerDependencies": { "@emnapi/core": "^1.7.1 || 2.0.0-beta.2", "@emnapi/runtime": "^1.7.1 || 2.0.0-beta.2" } }, "sha512-mRyDmEw9/fCDXCGfL1sbgIw/GUK0PVxRW4YwgPN61F3LQ+fSyoBFarJVzgGyhF6kRzEQZ0FejDqm4WLXSeqQmw=="],
 
@@ -1087,7 +1087,7 @@
 
     "kleur": ["kleur@3.0.3", "", {}, "sha512-eTIzlVOSUR+JxdDFepEYcBMtZ9Qqdef+rnzWdRZuMbOywu5tO2w2N7rqjoANZ5k9vywhL6Br1VRjUIgTQx4E8w=="],
 
-    "krypto-vscode": ["krypto-vscode@workspace:apps/vscode"],
+    "pawl-vscode": ["pawl-vscode@workspace:apps/vscode"],
 
     "lan-network": ["lan-network@0.2.1", "", { "bin": { "lan-network": "dist/lan-network-cli.js" } }, "sha512-ONPnazC96VKDntab9j9JKwIWhZ4ZUceB4A9Epu4Ssg0hYFmtHZSeQ+n15nIwTFmcBUKtExOer8WTJ4GF9MO64A=="],
 
@@ -1521,9 +1521,9 @@
 
     "@jest/types/@types/yargs": ["@types/yargs@17.0.35", "", { "dependencies": { "@types/yargs-parser": "*" } }, "sha512-qUHkeCyQFxMXg79wQfTtfndEC+N9ZZg76HJftDJp+qH2tV7Gj4OJi7l+PiWwJ+pWtW8GwSmqsDj/oymhrTWXjg=="],
 
-    "@krypto/mobile/react": ["react@19.3.0", "", {}, "sha512-E8LUcbtBWt20bbl2YoHfx4ZDBdxVTfOKtCZn9cDSJ4l6/nuoApcpIBcj47t2wZoVX8g2ZHuMHbiShgCR1T5Sog=="],
+    "@pawl/mobile/react": ["react@19.3.0", "", {}, "sha512-E8LUcbtBWt20bbl2YoHfx4ZDBdxVTfOKtCZn9cDSJ4l6/nuoApcpIBcj47t2wZoVX8g2ZHuMHbiShgCR1T5Sog=="],
 
-    "@krypto/mobile/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
+    "@pawl/mobile/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
 
     "@poppinss/colors/kleur": ["kleur@4.1.5", "", {}, "sha512-o+NO+8WrRiQEE4/7nwRJhN1HWpVmJm511pBHUxPLtp0BUISzlBplORYSmTclCnJvQq2tKu/sgl3xVpkc7ZWuQQ=="],
 

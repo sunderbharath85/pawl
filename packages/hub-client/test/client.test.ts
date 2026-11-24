@@ -8,7 +8,7 @@ import {
   pickPermissionOption,
   type HubClientOptions,
 } from "../src/index";
-import { USER_ACTIVITY_REPORT_MS } from "@krypto/protocol";
+import { USER_ACTIVITY_REPORT_MS } from "@pawl/protocol";
 import { device2, event, FakeSocket, inviteFrom2, machine, machine2, MID, MID2, peerOff, peerOn, permission, session, tick, welcome } from "./fixtures";
 
 function makeClient(over: Partial<HubClientOptions> = {}): HubClient {
@@ -517,7 +517,7 @@ describe("pairing (protocol v3)", () => {
   });
 
   test("createInvite forPhone: relay-only, v8 hubs only, never with an address", async () => {
-    const phoneUri = `krypto://peer?v=1&mid=${MID}&pk=cGstd2lucGM&relay=wss://relay.example.dev&rt=AAAA&rk=k3y_SECRET&code=AAAAAAAAAAAAAAAAAAAAAA&exp=1900000000000`;
+    const phoneUri = `pawl://peer?v=1&mid=${MID}&pk=cGstd2lucGM&relay=wss://relay.example.dev&rt=AAAA&rk=k3y_SECRET&code=AAAAAAAAAAAAAAAAAAAAAA&exp=1900000000000`;
     // The welcome fixture is protocol v6: refused before anything is sent.
     const old = connected();
     const before = old.ws.sent.length;
@@ -636,13 +636,13 @@ describe("pairing (protocol v3)", () => {
     const p = c.joinPeer(inviteFrom2);
     ws.receive({ type: "ack", id: ws.lastSent().id, ok: false, error: "invite_rejected" });
     const err = (await p.catch((e: unknown) => e)) as Error;
-    expect(err.message).not.toContain("krypto://");
+    expect(err.message).not.toContain("pawl://");
     expect(err.message).not.toContain("AAAAAAAAAAAAAAAAAAAAAA");
     const local = (await c.joinPeer(inviteFrom2.replace("v=1", "v=0")).catch((e: unknown) => e)) as Error;
     expect(local).toMatchObject({ code: "bad_uri" });
     expect(local.message).not.toContain("AAAAAAAAAAAAAAAAAAAAAA");
-    expect(local.message).not.toContain("krypto://");
-    expect(c.getState().lastError ?? "").not.toContain("krypto://");
+    expect(local.message).not.toContain("pawl://");
+    expect(c.getState().lastError ?? "").not.toContain("pawl://");
   });
 });
 

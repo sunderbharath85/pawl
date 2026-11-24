@@ -3,29 +3,29 @@ import { execFile } from "node:child_process";
 import type { HubConnection } from "./connection";
 import { errorMessage, needsShell, quoteWinArg, resolveHubExecutable } from "./util";
 
-const HUB_TERMINAL_NAME = "Krypto hub";
+const HUB_TERMINAL_NAME = "Pawl hub";
 
 /** Find the hub binary or explain how to configure it. */
 async function requireHubExecutable(): Promise<string | null> {
   const exe = resolveHubExecutable();
   if (exe) return exe;
-  const configured = vscode.workspace.getConfiguration("krypto").get<string>("hubExecutable") || "krypto";
+  const configured = vscode.workspace.getConfiguration("pawl").get<string>("hubExecutable") || "pawl";
   const pick = await vscode.window.showErrorMessage(
-    `Krypto: could not find the hub executable “${configured}”. Install krypto on PATH or set “krypto.hubExecutable”.`,
+    `Pawl: could not find the hub executable “${configured}”. Install pawl on PATH or set “pawl.hubExecutable”.`,
     "Open Settings",
   );
   if (pick === "Open Settings") {
-    await vscode.commands.executeCommand("workbench.action.openSettings", "krypto.hubExecutable");
+    await vscode.commands.executeCommand("workbench.action.openSettings", "pawl.hubExecutable");
   }
   return null;
 }
 
 /**
- * Run `krypto serve` in a VS Code terminal (reusing it if it is still alive) and reconnect once it is up.
+ * Run `pawl serve` in a VS Code terminal (reusing it if it is still alive) and reconnect once it is up.
  */
 export async function startHub(hub: HubConnection, log: vscode.LogOutputChannel): Promise<void> {
   if (hub.connected) {
-    void vscode.window.showInformationMessage("Krypto: the hub is already running.");
+    void vscode.window.showInformationMessage("Pawl: the hub is already running.");
     return;
   }
   const existing = vscode.window.terminals.find((t) => t.name === HUB_TERMINAL_NAME && t.exitStatus === undefined);
@@ -61,9 +61,9 @@ export type HookTargetId = "claude" | "codex" | "copilot-cli" | "copilot-vscode"
 
 const HOOK_TARGETS: Array<vscode.QuickPickItem & { id: HookTargetId; needsRepo: boolean }> = [
   { id: "claude", label: "Claude Code", description: "~/.claude/settings.json", detail: "SessionStart, Notification, Stop, SessionEnd hooks (CLI + VS Code extension)", needsRepo: false },
-  { id: "codex", label: "Codex", description: "~/.codex/config.toml", detail: "notify → krypto hook codex", needsRepo: false },
-  { id: "copilot-cli", label: "Copilot CLI", description: "~/.copilot/hooks/krypto.json", detail: "Personal Copilot CLI hooks", needsRepo: false },
-  { id: "copilot-vscode", label: "Copilot in VS Code", description: ".github/hooks/krypto.json", detail: "Agent hooks for this repository (preview)", needsRepo: true },
+  { id: "codex", label: "Codex", description: "~/.codex/config.toml", detail: "notify → pawl hook codex", needsRepo: false },
+  { id: "copilot-cli", label: "Copilot CLI", description: "~/.copilot/hooks/pawl.json", detail: "Personal Copilot CLI hooks", needsRepo: false },
+  { id: "copilot-vscode", label: "Copilot in VS Code", description: ".github/hooks/pawl.json", detail: "Agent hooks for this repository (preview)", needsRepo: true },
 ];
 
 interface RunResult {
@@ -92,7 +92,7 @@ function runHub(exe: string, args: string[], cwd: string | undefined): Promise<R
 async function pickRepoFolder(): Promise<string | undefined> {
   const folders = (vscode.workspace.workspaceFolders ?? []).filter((f) => f.uri.scheme === "file");
   if (folders.length === 0) {
-    void vscode.window.showWarningMessage("Krypto: open a folder first — Copilot hooks are installed per repository.");
+    void vscode.window.showWarningMessage("Pawl: open a folder first — Copilot hooks are installed per repository.");
     return undefined;
   }
   if (folders.length === 1) return folders[0].uri.fsPath;
@@ -101,13 +101,13 @@ async function pickRepoFolder(): Promise<string | undefined> {
 }
 
 /**
- * `krypto install-hooks <target>` dry-run → show the diff → ask → `--apply`.
+ * `pawl install-hooks <target>` dry-run → show the diff → ask → `--apply`.
  */
 export async function installHooks(log: vscode.LogOutputChannel, preselect?: HookTargetId): Promise<void> {
   const target =
     HOOK_TARGETS.find((t) => t.id === preselect) ??
     (await vscode.window.showQuickPick(HOOK_TARGETS, {
-      title: "Krypto: Install Agent Hooks",
+      title: "Pawl: Install Agent Hooks",
       placeHolder: "Which agent should report to your pet?",
       matchOnDescription: true,
       matchOnDetail: true,
@@ -122,13 +122,13 @@ export async function installHooks(log: vscode.LogOutputChannel, preselect?: Hoo
   if (target.needsRepo && cwd) args.push("--repo", cwd);
   log.info(`dry run: ${exe} ${args.join(" ")}${cwd ? ` (cwd ${cwd})` : ""}`);
   const dry = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: `Krypto: checking ${target.label} hooks…` },
+    { location: vscode.ProgressLocation.Notification, title: `Pawl: checking ${target.label} hooks…` },
     () => runHub(exe, args, cwd),
   );
   if (dry.code !== 0) {
     log.error(`install-hooks dry run failed (${dry.code}): ${dry.stderr || dry.stdout}`);
     const choice = await vscode.window.showErrorMessage(
-      `Krypto: “krypto ${args.join(" ")}” failed: ${firstLine(dry.stderr || dry.stdout) || `exit code ${dry.code}`}`,
+      `Pawl: “pawl ${args.join(" ")}” failed: ${firstLine(dry.stderr || dry.stdout) || `exit code ${dry.code}`}`,
       "Show Log",
     );
     if (choice === "Show Log") log.show(true);
@@ -139,7 +139,7 @@ export async function installHooks(log: vscode.LogOutputChannel, preselect?: Hoo
   const doc = await vscode.workspace.openTextDocument({ content: preview + "\n", language: looksLikeDiff(preview) ? "diff" : "plaintext" });
   await vscode.window.showTextDocument(doc, { preview: true, viewColumn: vscode.ViewColumn.Active });
   if (/already (installed|up to date)|no changes/i.test(preview) && !looksLikeDiff(preview)) {
-    void vscode.window.showInformationMessage(`Krypto: ${target.label} hooks are already installed.`);
+    void vscode.window.showInformationMessage(`Pawl: ${target.label} hooks are already installed.`);
     return;
   }
 
@@ -151,13 +151,13 @@ export async function installHooks(log: vscode.LogOutputChannel, preselect?: Hoo
   if (apply !== "Apply") return;
 
   const applied = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: `Krypto: installing ${target.label} hooks…` },
+    { location: vscode.ProgressLocation.Notification, title: `Pawl: installing ${target.label} hooks…` },
     () => runHub(exe, [...args, "--apply"], cwd),
   );
   if (applied.code !== 0) {
     log.error(`install-hooks --apply failed (${applied.code}): ${applied.stderr || applied.stdout}`);
     const choice = await vscode.window.showErrorMessage(
-      `Krypto: installing ${target.label} hooks failed: ${firstLine(applied.stderr || applied.stdout) || `exit code ${applied.code}`}`,
+      `Pawl: installing ${target.label} hooks failed: ${firstLine(applied.stderr || applied.stdout) || `exit code ${applied.code}`}`,
       "Show Log",
     );
     if (choice === "Show Log") log.show(true);
@@ -166,7 +166,7 @@ export async function installHooks(log: vscode.LogOutputChannel, preselect?: Hoo
   log.info(`install-hooks ${target.id} applied:\n${applied.stdout}`);
   const msg = firstLine(applied.stdout) || `${target.label} hooks installed.`;
   const extra = target.id === "claude" ? " Restart running Claude Code sessions to pick them up." : "";
-  void vscode.window.showInformationMessage(`Krypto: ${msg}${extra}`);
+  void vscode.window.showInformationMessage(`Pawl: ${msg}${extra}`);
 }
 
 function firstLine(s: string): string {

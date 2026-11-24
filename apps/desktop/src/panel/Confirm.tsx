@@ -1,7 +1,7 @@
 // In-app confirm dialog (never window.confirm): risky settings changes say exactly what they allow, and the
 // user picks between a safe "Cancel" (focused first) and the named go-ahead button.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import type { RiskyChange } from "@krypto/hub-client";
+import type { RiskyChange } from "@pawl/hub-client";
 
 export interface ConfirmOptions {
   title: string;

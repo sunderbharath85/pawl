@@ -1,5 +1,5 @@
 {
-  "name": "@krypto/mobile",
+  "name": "@pawl/mobile",
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
@@ -14,9 +14,9 @@
     "doctor": "expo-doctor"
   },
   "dependencies": {
-    "@krypto/hub-client": "workspace:*",
-    "@krypto/pet-engine": "workspace:*",
-    "@krypto/protocol": "workspace:*",
+    "@pawl/hub-client": "workspace:*",
+    "@pawl/pet-engine": "workspace:*",
+    "@pawl/protocol": "workspace:*",
     "expo": "~58.0.26",
     "expo-camera": "~58.0.14",
     "expo-constants": "~58.0.16",

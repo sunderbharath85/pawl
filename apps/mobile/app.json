@@ -1,22 +1,22 @@
 {
   "expo": {
-    "name": "Krypto",
-    "slug": "krypto",
+    "name": "Pawl",
+    "slug": "pawl",
     "version": "0.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "krypto",
+    "scheme": "pawl",
     "userInterfaceStyle": "automatic",
     "platforms": ["ios", "android"],
     "ios": {
-      "bundleIdentifier": "dev.krypto.mobile",
+      "bundleIdentifier": "dev.pawl.mobile",
       "supportsTablet": true,
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
-      "package": "dev.krypto.mobile",
+      "package": "dev.pawl.mobile",
       "adaptiveIcon": {
         "backgroundColor": "#FFF4E6",
         "foregroundImage": "./assets/images/adaptive-icon.png"
@@ -40,7 +40,7 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Krypto uses the camera to scan the pairing QR code shown by your desktop hub.",
+          "cameraPermission": "Pawl uses the camera to scan the pairing QR code shown by your desktop hub.",
           "microphonePermission": false,
           "recordAudioAndroid": false
         }
@@ -48,7 +48,7 @@
       [
         "expo-local-authentication",
         {
-          "faceIDPermission": "Krypto asks for Face ID before approving an agent's request from your phone."
+          "faceIDPermission": "Pawl asks for Face ID before approving an agent's request from your phone."
         }
       ],
       [

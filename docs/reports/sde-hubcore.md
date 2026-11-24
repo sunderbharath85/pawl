@@ -1,4 +1,4 @@
-# sde-hubcore report: Step 5 (remote commands by machine + repo) in `krypto-hub`
+# sde-hubcore report: Step 5 (remote commands by machine + repo) in `pawl-hub`
 
 Branch: `step-5-remote-commands`. Nothing committed. I edited `crates/hub/` (including the CLI) and this report, which replaces the step 4 report. `crates/brain` is sde-brain's this step; I only coded against its API. No dependencies were added. Files keep their LF line endings. No secrets, prompt text or chat text are logged.
 
@@ -13,7 +13,7 @@ Branch: `step-5-remote-commands`. Nothing committed. I edited `crates/hub/` (inc
 | `crates/hub/src/core/intents.rs` | `remote_start_dir` now uses `is_known_folder`. The duplicated path helpers are gone. |
 | `crates/hub/src/store.rs` | **Schema v6:** `chat.proposals` (JSON) and `devices.repos`. `insert_chat` / `recent_chat` keep proposals. `local_session_folders` (cwd + last activity). `set_device_repos` / `device_repos`. |
 | `crates/hub/src/config.rs` | `[repos] paths = [...]` (documented in the template). |
-| `crates/hub/src/cli.rs` | `krypto repos [--machine <name\|id>] [--json]`, which works without a hub from hub.db (this machine) or the last known index (a peer). `krypto start <agent> --repo <name> [--machine X]`: the repo name becomes a path via that machine's index; an unknown or ambiguous name errors, listing what it has. `krypto chat "<text>" [--pick N]`: prints the reply and numbered proposals; `--pick N` executes one through the normal path. A remote start asks on the TTY (`--yes` never applies); a prompt is sent as is. |
+| `crates/hub/src/cli.rs` | `pawl repos [--machine <name\|id>] [--json]`, which works without a hub from hub.db (this machine) or the last known index (a peer). `pawl start <agent> --repo <name> [--machine X]`: the repo name becomes a path via that machine's index; an unknown or ambiguous name errors, listing what it has. `pawl chat "<text>" [--pick N]`: prints the reply and numbered proposals; `--pick N` executes one through the normal path. A remote start asks on the TTY (`--yes` never applies); a prompt is sent as is. |
 | `crates/hub/src/lib.rs`, `core/tests.rs` | `pub mod repos`; tests below. |
 
 ## Behaviour
@@ -38,7 +38,7 @@ Branch: `step-5-remote-commands`. Nothing committed. I edited `crates/hub/` (inc
 
 ## Tests
 
-- `cargo test -p krypto-hub`: **126 passed**; `cargo test -p krypto-brain`: **78 passed** (both twice). `cargo clippy -p krypto-hub -p krypto-brain --all-targets -- -D warnings`: clean (forced re-check).
+- `cargo test -p pawl-hub`: **126 passed**; `cargo test -p pawl-brain`: **78 passed** (both twice). `cargo clippy -p pawl-hub -p pawl-brain --all-targets -- -D warnings`: clean (forced re-check).
 - **Repo index** (`repos.rs`):
   - `the_index_is_canonical_deduped_named_and_newest_first`: `..` and (Windows) case variants collapse to one entry with the latest use; missing folders and blanks dropped; config paths last; plain canonical paths.
   - `the_index_is_capped`: 220 folders → 200 newest.
@@ -54,7 +54,7 @@ Branch: `step-5-remote-commands`. Nothing committed. I edited `crates/hub/` (inc
   - Neither chat started or prompted anything on A.
 - **CLI:** `repo_commands_parse_and_repos_resolve` (exact name first, unique prefix, ambiguous lists both, unknown lists what the machine has, empty index).
 
-## Smoke (binary, scratch dirs under `%TEMP%\krypto-smoke-step5`; the real data dir untouched)
+## Smoke (binary, scratch dirs under `%TEMP%\pawl-smoke-step5`; the real data dir untouched)
 
 Setup:
 - A = "Smoke A" `2famf9h2lw2k` (peer listener 47911), B = "Smoke B" `cwxlm5zn8ayc`; later C = "Smoke C" `orzffmbt0znq` (listener 47931) and D = "Smoke D".
@@ -63,41 +63,41 @@ Setup:
 - TTY confirmations were typed into the CLI's own console, as in step 4.
 
 ```
-$ krypto --data-dir <tmpA> --port 47910 repos
+$ pawl --data-dir <tmpA> --port 47910 repos
 Repos on Smoke A:
 NAME    LAST USED  PATH
-webapp  1s ago     C:\Users\sunde\AppData\Local\Temp\krypto-smoke-step5\a-work\webapp
+webapp  1s ago     C:\Users\sunde\AppData\Local\Temp\pawl-smoke-step5\a-work\webapp
 
-$ krypto --data-dir <tmpB> --port 47920 peer join "<uri, code=<redacted>>"
+$ pawl --data-dir <tmpB> --port 47920 peer join "<uri, code=<redacted>>"
 Paired with Smoke A (2famf9h2lw2k, windows) at 127.0.0.1:47911
 
-$ krypto --data-dir <tmpB> --port 47920 repos --machine "Smoke A"
+$ pawl --data-dir <tmpB> --port 47920 repos --machine "Smoke A"
 Repos on Smoke A:
 NAME    LAST USED  PATH
-webapp  10s ago    C:\Users\sunde\AppData\Local\Temp\krypto-smoke-step5\a-work\webapp
+webapp  10s ago    C:\Users\sunde\AppData\Local\Temp\pawl-smoke-step5\a-work\webapp
 
-$ krypto --data-dir <tmpB> --port 47920 chat "tell Smoke A's smoke agent to run the tests in repo webapp"
+$ pawl --data-dir <tmpB> --port 47920 chat "tell Smoke A's smoke agent to run the tests in repo webapp"
 Woof! Ready: Start Smoke Agent on Smoke A in webapp: run the tests. It runs on Smoke A, so it needs your OK first: confirm it to go ahead.
 
   1) Start Smoke Agent on Smoke A in webapp: run the tests
 
-Run one with `krypto chat "<same text>" --pick N`.
+Run one with `pawl chat "<same text>" --pick N`.
 ```
 
 `--pick 1` with the TTY confirmation ("y" typed):
 
 ```
-$ krypto --data-dir <tmpB> --port 47920 chat "tell Smoke A's smoke agent to run the tests in repo webapp" --pick 1
+$ pawl --data-dir <tmpB> --port 47920 chat "tell Smoke A's smoke agent to run the tests in repo webapp" --pick 1
 …
   1) Start Smoke Agent on Smoke A in webapp: run the tests
 …
 Run on Smoke A: Start Smoke Agent on Smoke A in webapp: run the tests? [y/N] Started smoke-agent on Smoke A: session c6c14041 in C:\…\a-work\webapp
 
-$ krypto --data-dir <tmpA> --port 47910 sessions
+$ pawl --data-dir <tmpA> --port 47910 sessions
 ID        MACHINE  AGENT        SOURCE    STATUS              LAST     TITLE          CWD
 c6c14041  Smoke A  smoke-agent  owned     waiting_permission  2s ago   run the tests  C:\…\a-work\webapp
 6c36508f  Smoke A  claude-code  cli_hook  idle                26s ago  webapp         C:\…\a-work\webapp
-$ krypto --data-dir <tmpA> --port 47910 pending
+$ pawl --data-dir <tmpA> --port 47910 pending
 2dabc3d4  Smoke A  smoke-agent  bun test  allow,always,reject  2s ago        <- the new session's own first request
 ```
 
@@ -106,16 +106,16 @@ $ krypto --data-dir <tmpA> --port 47910 pending
 The demonstration therefore uses hub D, which has no sessions of its own, paired with A and C. Both have a `webapp` folder with a smoke-agent session in it (C's ran a read and is idle):
 
 ```
-$ krypto --data-dir <tmpD> --port 47940 repos --machine "Smoke A"     ->  webapp  …\a-work\webapp
-$ krypto --data-dir <tmpD> --port 47940 repos --machine "Smoke C"     ->  webapp  …\c-work\webapp
+$ pawl --data-dir <tmpD> --port 47940 repos --machine "Smoke A"     ->  webapp  …\a-work\webapp
+$ pawl --data-dir <tmpD> --port 47940 repos --machine "Smoke C"     ->  webapp  …\c-work\webapp
 
-$ krypto --data-dir <tmpD> --port 47940 chat "tell the smoke agent to run the tests in repo webapp"
+$ pawl --data-dir <tmpD> --port 47940 chat "tell the smoke agent to run the tests in repo webapp"
 *barks* That matches more than one place: webapp on Smoke A, webapp on Smoke C. Which one did you mean? Pick one to confirm.
 
   1) Start Smoke Agent on Smoke A in webapp: run the tests
   2) Send to Smoke Agent on Smoke C (webapp): run the tests
 
-$ krypto --data-dir <tmpD> --port 47940 chat "tell Smoke C's smoke agent to run the tests in repo webapp"
+$ pawl --data-dir <tmpD> --port 47940 chat "tell Smoke C's smoke agent to run the tests in repo webapp"
 Ruff! Ready: Send to Smoke Agent on Smoke C (webapp): run the tests. It runs on Smoke C, so it needs your OK first: confirm it to go ahead.
   1) Send to Smoke Agent on Smoke C (webapp): run the tests
 ```
@@ -126,17 +126,17 @@ The proposals follow the contract: A's session is waiting on a permission, so A 
 
 1. **Local-first routing.** With the same repo on this machine and a paired one, the brain runs locally without asking. Its `route` doc says this ("a repo in this machine's index stays local (today's behaviour)"). Your smoke step expected "a repo on both machines asks (2 proposals)"; it asks only between other machines (shown above with hub D).
 2. **Stale local repos.** The brain also treats folders of this machine's recent *sessions* as local repos, not just `BrainContext.repos`. After B's webapp folder was deleted, B's index no longer had it, but B's earlier sessions there still made the brain route locally. The local start then failed with "cwd …\b-work\webapp is not an existing directory". Suggestion: treat `ctx.repos[this machine]` (existing folders only) as the authority for local repos.
-3. **Orphaned agents (pre-existing, not step 5).** Killing a hub with `taskkill /F` on Windows leaves its ACP agent child processes running; I cleaned them up by hand in the smoke. The agents are spawned by `krypto-acp`; a Windows job object on the hub would let them die with it.
+3. **Orphaned agents (pre-existing, not step 5).** Killing a hub with `taskkill /F` on Windows leaves its ACP agent child processes running; I cleaned them up by hand in the smoke. The agents are spawned by `pawl-acp`; a Windows job object on the hub would let them die with it.
 
 ## Decisions for t13 to check
 
-- `krypto chat --pick N` sends the same text again to get fresh proposals, then executes proposal N. Proposals are single-use per reply and nothing is cached across CLI runs. A remote **prompt** proposal is sent without an extra question; the user picked it explicitly, and prompts needed no confirmation in step 4.
-- `krypto repos` without a running hub builds this machine's index from hub.db + config, and for `--machine` shows the last index that peer reported (labelled "last known").
+- `pawl chat --pick N` sends the same text again to get fresh proposals, then executes proposal N. Proposals are single-use per reply and nothing is cached across CLI runs. A remote **prompt** proposal is sent without an extra question; the user picked it explicitly, and prompts needed no confirmation in step 4.
+- `pawl repos` without a running hub builds this machine's index from hub.db + config, and for `--machine` shows the last index that peer reported (labelled "last known").
 - Proposals are capped at 5 on the hub as well (defence in depth; the brain already caps).
 
 ## Review fixes (step 5)
 
-1. **`krypto chat --pick` (CLI).**
+1. **`pawl chat --pick` (CLI).**
    - **Asks for both kinds:** a proposal for another machine, start or **prompt**, is confirmed by a person on this terminal (`Run on <machine>: <summary>? [y/N]`). Without a TTY it is refused ("this needs a confirmation on an interactive terminal"), so a script cannot run proposals on another machine.
    - **Consistency check before running** (`check_proposal`):
      - the proposal's machine must be one this hub knows;
@@ -157,4 +157,4 @@ The proposals follow the contract: A's session is waiting on a permission, so A 
      - the chat reply goes through `printable_lines`, which keeps line breaks and replaces every other control character;
      - proposal summaries, agent ids, session ids and folders in `--pick` output go through `printable`.
 
-After these fixes: `cargo test -p krypto-hub` **128 passed** (twice), and `cargo clippy -p krypto-hub --all-targets -- -D warnings` is clean (forced re-check). The new checks extend existing tests, so the test count is unchanged.
+After these fixes: `cargo test -p pawl-hub` **128 passed** (twice), and `cargo clippy -p pawl-hub --all-targets -- -D warnings` is clean (forced re-check). The new checks extend existing tests, so the test count is unchanged.

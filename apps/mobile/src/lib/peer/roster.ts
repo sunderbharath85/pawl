@@ -3,7 +3,7 @@
 // structural checks of Rust `check_intro_device` (bad_id, bad_name, bad_kind, bad_key, bad_addr, in that order);
 // phones are never introduced to phones; a device whose id or key already exists with a different key / id is a
 // conflict (skipped, never a replacement); a revoked id or key is never re-added.
-import { MACHINE_ID_RE, type IntroDevice, type MachineOs } from "@krypto/protocol";
+import { MACHINE_ID_RE, type IntroDevice, type MachineOs } from "@pawl/protocol";
 import { bytesEqual, decodeKey, encode } from "./b64";
 import { isLowOrderKey } from "./keys";
 import { peerAddrOk } from "./net";

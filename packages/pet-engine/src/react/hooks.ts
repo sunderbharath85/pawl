@@ -1,5 +1,5 @@
 import { useEffect, useInsertionEffect, useMemo, useState } from "react";
-import type { HubEvent, Pet, PermissionRequest, Session } from "@krypto/protocol";
+import type { HubEvent, Pet, PermissionRequest, Session } from "@pawl/protocol";
 import { lastSignificantEvents } from "../activity";
 import { derivePetViews, nextPetViewChange, type PetView } from "../views";
 import { ensurePetStyles } from "./styles";

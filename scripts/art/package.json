@@ -1,10 +1,10 @@
 {
-  "name": "@krypto/art",
+  "name": "@pawl/art",
   "private": true,
   "license": "MIT",
   "version": "0.1.0",
   "type": "module",
-  "description": "Gemini-driven sprite pipeline for Krypto pets (assets/pets).",
+  "description": "Gemini-driven sprite pipeline for Pawl pets (assets/pets).",
   "scripts": {
     "generate": "bun run generate.ts",
     "process": "bun run process.ts",

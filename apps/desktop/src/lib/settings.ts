@@ -17,7 +17,7 @@ export interface DesktopSettings {
   setupDone: boolean;
 }
 
-const KEY = "krypto.desktop.settings.v1";
+const KEY = "pawl.desktop.settings.v1";
 
 export const DEFAULT_SETTINGS: DesktopSettings = {
   notifyPermissions: true,
@@ -49,7 +49,7 @@ export function writeSettings(patch: Partial<DesktopSettings>): DesktopSettings 
   } catch {
     /* storage full/disabled: keep in-memory only */
   }
-  window.dispatchEvent(new CustomEvent("krypto-settings", { detail: next }));
+  window.dispatchEvent(new CustomEvent("pawl-settings", { detail: next }));
   return next;
 }
 
@@ -62,10 +62,10 @@ export function useSettings(): [DesktopSettings, (patch: Partial<DesktopSettings
     };
     const onLocal = () => setSettings(readSettings());
     window.addEventListener("storage", onStorage);
-    window.addEventListener("krypto-settings", onLocal);
+    window.addEventListener("pawl-settings", onLocal);
     return () => {
       window.removeEventListener("storage", onStorage);
-      window.removeEventListener("krypto-settings", onLocal);
+      window.removeEventListener("pawl-settings", onLocal);
     };
   }, []);
   const update = useCallback((patch: Partial<DesktopSettings>) => setSettings(writeSettings(patch)), []);

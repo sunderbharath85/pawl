@@ -1,5 +1,5 @@
 use super::*;
-use krypto_protocol::{EventType, HookSource, HookState, NotificationLevel, SessionSource, SessionStatus};
+use pawl_protocol::{EventType, HookSource, HookState, NotificationLevel, SessionSource, SessionStatus};
 use serde_json::json;
 
 fn n(source: HookSource, raw: Value) -> NormalizedHook {
@@ -198,7 +198,7 @@ fn env_meta_reads_only_known_vars() {
     assert_eq!(m["claude_entrypoint"], "cli");
     assert_eq!(m["vscode_ext_host"], false);
     assert!(!m.to_string().contains("sk-secret"));
-    assert_eq!(normalize(HookSource::Claude, json!({ "hook_event_name": "Stop", "_krypto": m })).unwrap().source, SessionSource::CliHook);
+    assert_eq!(normalize(HookSource::Claude, json!({ "hook_event_name": "Stop", "_pawl": m })).unwrap().source, SessionSource::CliHook);
 
     // Extension host (e.g. Copilot agent hooks in VS Code).
     let ext = std::collections::HashMap::from([
@@ -209,7 +209,7 @@ fn env_meta_reads_only_known_vars() {
     let m = env_meta_from(|k| ext.get(k).map(|v| v.to_string()));
     assert_eq!(m["vscode_ext_host"], true);
     assert_eq!(m["vscode_process_type"], "extensionHost");
-    assert_eq!(normalize(HookSource::Copilot, json!({ "hook_event_name": "Stop", "_krypto": m })).unwrap().source, SessionSource::VscodeHook);
+    assert_eq!(normalize(HookSource::Copilot, json!({ "hook_event_name": "Stop", "_pawl": m })).unwrap().source, SessionSource::VscodeHook);
     let mut raw = json!({ "a": 1 });
     enrich(&mut raw);
     assert!(raw.get(META_KEY).is_some());
@@ -372,7 +372,7 @@ fn target_and_source_parsing() {
 // ---------- install (temp dirs only; never the real user config) ----------
 
 fn hub_exe(dir: &Path) -> PathBuf {
-    dir.join("bin").join(if cfg!(windows) { "krypto.exe" } else { "krypto" })
+    dir.join("bin").join(if cfg!(windows) { "pawl.exe" } else { "pawl" })
 }
 
 fn backups(dir: &Path, prefix: &str) -> Vec<PathBuf> {
@@ -446,7 +446,7 @@ fn install_claude_merges_without_clobbering() {
     assert_eq!(backups(&settings_dir, "settings.json.").len(), 1);
 
     // Hub moved: our entry is replaced in place, user hooks untouched, still one of ours.
-    let moved = tmp.path().join("other").join(if cfg!(windows) { "krypto.exe" } else { "krypto" });
+    let moved = tmp.path().join("other").join(if cfg!(windows) { "pawl.exe" } else { "pawl" });
     install_with_home(HookTarget::Claude, &moved, true, &home, &env).unwrap();
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     let stop = v["hooks"]["Stop"].as_array().unwrap();
@@ -465,13 +465,13 @@ fn install_claude_replaces_entry_written_by_other_hub_copy() {
         "hooks": {
             "Stop": [
                 { "hooks": [ { "type": "command", "command": "say done" } ] },
-                { "hooks": [ { "type": "command", "command": "C:/tools/krypto.exe hook claude" } ] }
+                { "hooks": [ { "type": "command", "command": "C:/tools/pawl.exe hook claude" } ] }
             ]
         }
     });
     std::fs::write(&settings, serde_json::to_string_pretty(&old).unwrap()).unwrap();
     // Running from a copy with another file name: the entry is still recognised by the
-    // `krypto` binary name and replaced, not duplicated.
+    // `pawl` binary name and replaced, not duplicated.
     let exe = tmp.path().join("dev").join(if cfg!(windows) { "hub-dev.exe" } else { "hub-dev" });
     install_with_home(HookTarget::Claude, &exe, true, &home, &InstallEnv::default()).unwrap();
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
@@ -497,7 +497,7 @@ fn install_claude_creates_file_and_respects_config_dir() {
 #[test]
 fn install_claude_exec_form_for_paths_with_spaces() {
     let tmp = tempfile::tempdir().unwrap();
-    let exe = tmp.path().join("Program Files").join("Krypto").join("krypto.exe");
+    let exe = tmp.path().join("Program Files").join("Pawl").join("pawl.exe");
     install_with_home(HookTarget::Claude, &exe, true, tmp.path(), &InstallEnv::default()).unwrap();
     let v: Value = serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".claude/settings.json")).unwrap()).unwrap();
     let h = &v["hooks"]["Stop"][0]["hooks"][0];
@@ -577,7 +577,7 @@ fn install_copilot_cli_and_vscode() {
     let exe = hub_exe(tmp.path());
     let out = install_with_home(HookTarget::CopilotCli, &exe, true, tmp.path(), &InstallEnv::default()).unwrap();
     assert!(out.contains("created"), "{out}");
-    let path = tmp.path().join(".copilot").join("hooks").join("krypto.json");
+    let path = tmp.path().join(".copilot").join("hooks").join("pawl.json");
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(v["version"], 1);
     let pre = &v["hooks"]["PreToolUse"][0];
@@ -603,15 +603,15 @@ fn install_copilot_cli_and_vscode() {
     assert!(out.contains(".gitignore"), "{out}");
     assert!(!repo.join(".github").exists(), "dry run writes nothing");
     install_with_home(HookTarget::CopilotVscode { repo: repo.clone() }, &exe, true, tmp.path(), &InstallEnv::default()).unwrap();
-    assert!(repo.join(".github").join("hooks").join("krypto.json").is_file());
+    assert!(repo.join(".github").join("hooks").join("pawl.json").is_file());
 }
 
 #[test]
 fn powershell_and_posix_quoting() {
     let tmp = tempfile::tempdir().unwrap();
-    let exe = tmp.path().join("it's here").join("krypto.exe");
+    let exe = tmp.path().join("it's here").join("pawl.exe");
     install_with_home(HookTarget::CopilotCli, &exe, true, tmp.path(), &InstallEnv::default()).unwrap();
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".copilot/hooks/krypto.json")).unwrap()).unwrap();
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(tmp.path().join(".copilot/hooks/pawl.json")).unwrap()).unwrap();
     let h = &v["hooks"]["Stop"][0];
     assert!(h["powershell"].as_str().unwrap().contains("it''s here"));
     assert!(h["bash"].as_str().unwrap().contains(r"it'\''s here"));
@@ -650,7 +650,7 @@ fn claude_status_follows_install_and_remove() {
     assert!(!again.changed, "{}", again.text);
 
     // Another hub executable: ours are there but stale.
-    let moved = tmp.path().join("other").join(if cfg!(windows) { "krypto.exe" } else { "krypto" });
+    let moved = tmp.path().join("other").join(if cfg!(windows) { "pawl.exe" } else { "pawl" });
     let check = status_with_home(&HookTarget::Claude, &moved, &home, &env);
     assert_eq!(check.state, HookState::Outdated);
     assert!(check.detail.is_some());
@@ -666,7 +666,7 @@ fn claude_status_follows_install_and_remove() {
     assert_eq!(v, user, "back to the user's own settings");
     assert_eq!(state(&HookTarget::Claude, &exe, &home, &env), HookState::Missing);
     let none = change_with_home(&HookTarget::Claude, &exe, HookChange::Remove, true, &home, &env).unwrap();
-    assert!(!none.changed && none.text.contains("no Krypto hooks"), "{}", none.text);
+    assert!(!none.changed && none.text.contains("no Pawl hooks"), "{}", none.text);
 
     // Removing from a machine without the file creates nothing.
     let empty = tmp.path().join("empty-home");
@@ -723,13 +723,13 @@ fn copilot_remove_deletes_our_file_unless_the_user_added_to_it() {
     let tmp = tempfile::tempdir().unwrap();
     let exe = hub_exe(tmp.path());
     let env = InstallEnv::default();
-    let path = tmp.path().join(".copilot").join("hooks").join("krypto.json");
+    let path = tmp.path().join(".copilot").join("hooks").join("pawl.json");
     change_with_home(&HookTarget::CopilotCli, &exe, HookChange::Install, true, tmp.path(), &env).unwrap();
     assert_eq!(state(&HookTarget::CopilotCli, &exe, tmp.path(), &env), HookState::Installed);
     let out = change_with_home(&HookTarget::CopilotCli, &exe, HookChange::Remove, true, tmp.path(), &env).unwrap();
     assert!(out.text.contains("deleted"), "{}", out.text);
     assert!(!path.exists());
-    assert_eq!(backups(path.parent().unwrap(), "krypto.json.").len(), 1);
+    assert_eq!(backups(path.parent().unwrap(), "pawl.json.").len(), 1);
     assert_eq!(state(&HookTarget::CopilotCli, &exe, tmp.path(), &env), HookState::Missing);
 
     change_with_home(&HookTarget::CopilotCli, &exe, HookChange::Install, true, tmp.path(), &env).unwrap();
@@ -747,9 +747,9 @@ fn config_paths_honour_agent_env_overrides() {
     let env = InstallEnv { claude_config_dir: Some("/cfg/claude".into()), codex_home: None, copilot_home: Some("/cfg/copilot".into()) };
     assert_eq!(config_path_with_home(&HookTarget::Claude, home, &env), Path::new("/cfg/claude").join("settings.json"));
     assert_eq!(config_path_with_home(&HookTarget::Codex, home, &env), home.join(".codex").join("config.toml"));
-    assert_eq!(config_path_with_home(&HookTarget::CopilotCli, home, &env), Path::new("/cfg/copilot").join("hooks").join("krypto.json"));
+    assert_eq!(config_path_with_home(&HookTarget::CopilotCli, home, &env), Path::new("/cfg/copilot").join("hooks").join("pawl.json"));
     let repo = PathBuf::from("/r");
-    assert_eq!(config_path_with_home(&HookTarget::CopilotVscode { repo: repo.clone() }, home, &env), repo.join(".github").join("hooks").join("krypto.json"));
+    assert_eq!(config_path_with_home(&HookTarget::CopilotVscode { repo: repo.clone() }, home, &env), repo.join(".github").join("hooks").join("pawl.json"));
 }
 
 // ---------- forward ----------
@@ -833,7 +833,7 @@ fn repo_hooks_never_go_through_a_symlink() {
     let outside = tmp.path().join("outside");
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::create_dir_all(outside.join("hooks")).unwrap();
-    std::fs::write(outside.join("hooks").join("krypto.json"), r#"{"secret":"do not show"}"#).unwrap();
+    std::fs::write(outside.join("hooks").join("pawl.json"), r#"{"secret":"do not show"}"#).unwrap();
     if try_symlink_dir(&outside, &repo.join(".github")).is_none() {
         eprintln!("skipped: this account cannot create symlinks");
         return;
@@ -846,7 +846,7 @@ fn repo_hooks_never_go_through_a_symlink() {
     let check = status_with_home(&target, &exe, tmp.path(), &env);
     assert_eq!(check.state, HookState::Unsupported);
     assert!(!check.detail.unwrap_or_default().contains("do not show"), "the linked file is never read");
-    assert_eq!(std::fs::read_to_string(outside.join("hooks").join("krypto.json")).unwrap(), r#"{"secret":"do not show"}"#);
+    assert_eq!(std::fs::read_to_string(outside.join("hooks").join("pawl.json")).unwrap(), r#"{"secret":"do not show"}"#);
     assert_eq!(std::fs::read_dir(outside.join("hooks")).unwrap().count(), 1, "no backup or temp file outside the repo");
 }
 
@@ -866,7 +866,7 @@ fn rewrites_leave_no_temp_files_and_keep_permissions() {
     }
     change_with_home(&HookTarget::Claude, &exe, HookChange::Install, true, tmp.path(), &env).unwrap();
     let names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-    assert!(names.iter().all(|n| !n.contains("krypto-tmp")), "{names:?}");
+    assert!(names.iter().all(|n| !n.contains("pawl-tmp")), "{names:?}");
     assert_eq!(names.iter().filter(|n| n.ends_with(".bak")).count(), 1, "{names:?}");
     #[cfg(unix)]
     {

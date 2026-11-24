@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { ChatProposal } from "@krypto/protocol";
+import type { ChatProposal } from "@pawl/protocol";
 import {
   applyWelcome,
   HubClient,
@@ -70,8 +70,8 @@ describe("listRepos", () => {
     const { c, ws } = connected();
     const mine = c.listRepos();
     expect(ws.lastSent()).toEqual({ type: "list_repos", id: ws.lastSent().id });
-    ws.receive({ type: "ack", id: ws.lastSent().id, ok: true, result: { repos: [{ name: "krypto", path: "C:/code/krypto" }] } });
-    expect(await mine).toEqual([{ name: "krypto", path: "C:/code/krypto" }]);
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: true, result: { repos: [{ name: "pawl", path: "C:/code/pawl" }] } });
+    expect(await mine).toEqual([{ name: "pawl", path: "C:/code/pawl" }]);
 
     const own = c.listRepos({ machineId: MID });
     expect(ws.lastSent()).toEqual({ type: "list_repos", id: ws.lastSent().id });
@@ -226,7 +226,7 @@ describe("proposal helpers", () => {
     expect(repoIndexHas(macRepos, "/Users/me/ai-pet/")).toBe(true);
     expect(repoIndexHas(macRepos, "/users/me/AI-PET", "macos")).toBe(true);
     expect(repoIndexHas(macRepos, "/users/me/AI-PET", "linux")).toBe(false);
-    expect(repoIndexHas([{ name: "k", path: "C:\\code\\krypto" }], "c:\\Code\\Krypto\\", "windows")).toBe(true);
+    expect(repoIndexHas([{ name: "k", path: "C:\\code\\pawl" }], "c:\\Code\\Pawl\\", "windows")).toBe(true);
     expect(repoIndexHas(macRepos, "/Users/me")).toBe(false);
     expect(repoIndexHas(macRepos, "/Users/me/ai-pet/sub")).toBe(false);
     expect(repoIndexHas(macRepos, "  ")).toBe(false);

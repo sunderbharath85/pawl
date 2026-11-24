@@ -2,7 +2,7 @@
 // pruned first, then the oldest are dropped until a new frame fits. Each frame is one storage value (the ready
 // `msg` JSON); a small index value keeps order, sizes and ages so nothing has to list storage.
 
-import { RELAY_QUEUE_MAX_BYTES, RELAY_QUEUE_MAX_FRAMES, RELAY_QUEUE_TTL_MS } from "@krypto/protocol";
+import { RELAY_QUEUE_MAX_BYTES, RELAY_QUEUE_MAX_FRAMES, RELAY_QUEUE_TTL_MS } from "@pawl/protocol";
 import type { KvStore } from "./storage";
 
 export const QUEUE_INDEX_KEY = "q:idx";

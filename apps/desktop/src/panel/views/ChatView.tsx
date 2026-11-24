@@ -1,6 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { isLocal } from "@krypto/hub-client";
-import { SPECIES_META } from "@krypto/pet-engine";
+import { isLocal } from "@pawl/hub-client";
+import { SPECIES_META } from "@pawl/pet-engine";
 import { agentName, clockTime, errorText } from "../../lib/format";
 import { petList } from "../../lib/pets";
 import { usePanel } from "../context";

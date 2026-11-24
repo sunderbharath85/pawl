@@ -1,6 +1,6 @@
 // Pet views for the phone (all machines' pets; the phone has no "home" machine), re-derived when a decay / nap
 // timer would change them.
-import { derivePetViews, lastSignificantEvents, nextPetViewChange, type PetActivity, type PetView } from "@krypto/pet-engine";
+import { derivePetViews, lastSignificantEvents, nextPetViewChange, type PetActivity, type PetView } from "@pawl/pet-engine";
 import { useEffect, useMemo, useState } from "react";
 import type { PhoneSnapshot } from "@/lib/peer";
 

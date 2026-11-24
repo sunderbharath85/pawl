@@ -1,4 +1,4 @@
-// Agents & hooks: per-agent hook status with preview → apply / remove (the same code as `krypto install-hooks`),
+// Agents & hooks: per-agent hook status with preview → apply / remove (the same code as `pawl install-hooks`),
 // the agents found on this machine, and the custom agents list. `HooksPanel` is also the first-run setup's step.
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -11,8 +11,8 @@ import {
   hookRemovable,
   hookRemoveConfirm,
   settingsErrorText,
-} from "@krypto/hub-client";
-import type { CustomAgentSetting, HookStatus, HubSettings } from "@krypto/protocol";
+} from "@pawl/hub-client";
+import type { CustomAgentSetting, HookStatus, HubSettings } from "@pawl/protocol";
 import { agentDraft, applyAgentDraft, customAgentsPatch, suggestAgentId, type AgentDraft, type FormErrors } from "../../../lib/settingsForms";
 import { useConfirm, withCode } from "../../Confirm";
 import { usePanel } from "../../context";
@@ -340,7 +340,7 @@ export function AgentsSection({ settings, live }: SectionProps) {
     <SettingsSection
       id="agents"
       title="Agents & hooks"
-      description="Hooks let Krypto follow agent sessions you start yourself (in a terminal or editor). Krypto's own sessions need no hooks."
+      description="Hooks let Pawl follow agent sessions you start yourself (in a terminal or editor). Pawl's own sessions need no hooks."
     >
       <p className="hint">
         Agents on this machine: {found.length > 0 ? found.map((a) => a.name).join(", ") : live ? "none found yet" : "…"}.

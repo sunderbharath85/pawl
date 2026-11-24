@@ -1,7 +1,7 @@
 // Intents from the phone (PLAN.md step 4 rules, `client: "mobile"`). Pure helpers + the error type. The owner hub
 // is the authority; the phone checks what it can before sending (confirmation, option kinds, link state).
-import { intentErrorText, type IntentAction } from "@krypto/hub-client";
-import type { Intent, IntentRejectReason, PermissionRequest } from "@krypto/protocol";
+import { intentErrorText, type IntentAction } from "@pawl/hub-client";
+import type { Intent, IntentRejectReason, PermissionRequest } from "@pawl/protocol";
 
 /** Phone-side codes on top of the owner's IntentRejectReason. */
 export type PhoneIntentCode =
@@ -74,9 +74,9 @@ export function phoneIntentErrorText(err: unknown, machineName: string, action: 
     case "auth_required":
       return "Confirm with Face ID, fingerprint or your passcode to do that.";
     case "closed":
-      return `Not connected to the relay, so Krypto couldn't reach ${machineName}.`;
+      return `Not connected to the relay, so Pawl couldn't reach ${machineName}.`;
     case "offline":
-      return `${machineName} is offline. Krypto will reach it again when it's back.`;
+      return `${machineName} is offline. Pawl will reach it again when it's back.`;
     default:
       return intentErrorText(err, machineName, action);
   }

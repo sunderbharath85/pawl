@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
 import WebSocket from "ws";
-import { DEFAULT_HUB_WS_URL, HubClient, toHubWsUrl, type HubState } from "@krypto/hub-client";
-import { readHubCredentials, resolveHubCredentials } from "@krypto/hub-client/node";
-import type { ServerMsg } from "@krypto/protocol";
+import { DEFAULT_HUB_WS_URL, HubClient, toHubWsUrl, type HubState } from "@pawl/hub-client";
+import { readHubCredentials, resolveHubCredentials } from "@pawl/hub-client/node";
+import type { ServerMsg } from "@pawl/protocol";
 import type { ConnInfo } from "../shared/messages";
 import { errorMessage } from "./util";
 
@@ -34,7 +34,7 @@ export function emptyHubState(status: HubState["status"] = "disconnected"): HubS
 
 export class HubOfflineError extends Error {
   constructor() {
-    super("The Krypto hub is offline. Run “Krypto: Start Hub” and try again.");
+    super("The Pawl hub is offline. Run “Pawl: Start Hub” and try again.");
     this.name = "HubOfflineError";
   }
 }
@@ -67,7 +67,7 @@ export class HubConnection implements vscode.Disposable {
   ) {
     this.disposables.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration("krypto.hubUrl") || e.affectsConfiguration("krypto.hubToken")) {
+        if (e.affectsConfiguration("pawl.hubUrl") || e.affectsConfiguration("pawl.hubToken")) {
           this.log.info("hub settings changed; reconnecting");
           this.restart();
         }
@@ -98,11 +98,11 @@ export class HubConnection implements vscode.Disposable {
   }
 
   /**
-   * The port to pass to `krypto serve`, or null. Only an address from the `krypto.hubUrl` setting needs one: the
-   * hub reads KRYPTO_HUB_URL and config.toml itself, and a flag would pin the port (locking Settings → Hub port).
+   * The port to pass to `pawl serve`, or null. Only an address from the `pawl.hubUrl` setting needs one: the
+   * hub reads PAWL_HUB_URL and config.toml itself, and a flag would pin the port (locking Settings → Hub port).
    */
   servePort(): number | null {
-    const setting = vscode.workspace.getConfiguration("krypto").get<string>("hubUrl")?.trim();
+    const setting = vscode.workspace.getConfiguration("pawl").get<string>("hubUrl")?.trim();
     return setting ? portOf(toHubWsUrl(setting)) : null;
   }
 
@@ -178,15 +178,15 @@ export class HubConnection implements vscode.Disposable {
   }
 
   /**
-   * Settings > env > hub data dir. Without a `krypto.hubUrl` setting the hub-client helper also finds a hub on a
+   * Settings > env > hub data dir. Without a `pawl.hubUrl` setting the hub-client helper also finds a hub on a
    * not-yet-applied port through runtime.json, but only after that port's /health names this machine (the token
    * is never sent before that check).
    */
   private async resolveCredentials(): Promise<Credentials> {
-    const cfg = vscode.workspace.getConfiguration("krypto");
+    const cfg = vscode.workspace.getConfiguration("pawl");
     const urlSetting = cfg.get<string>("hubUrl")?.trim() || "";
     const tokenSetting = cfg.get<string>("hubToken")?.trim() || "";
-    let url = urlSetting || process.env.KRYPTO_HUB_URL?.trim() || DEFAULT_HUB_WS_URL;
+    let url = urlSetting || process.env.PAWL_HUB_URL?.trim() || DEFAULT_HUB_WS_URL;
     let token: string | null = tokenSetting || null;
     if (!token || !urlSetting) {
       try {
@@ -310,7 +310,7 @@ export class HubConnection implements vscode.Disposable {
   }
 }
 
-/** Port the hub should listen on for this URL (for `krypto serve --port`), or null for the default. */
+/** Port the hub should listen on for this URL (for `pawl serve --port`), or null for the default. */
 export function portOf(url: string): number | null {
   try {
     const u = new URL(url);

@@ -1,4 +1,4 @@
-Renamed to Krypto on 2026-11-23; names below are pre-rename.
+Renamed to Pawl on 2026-11-23; names below are pre-rename.
 
 # fe-engine report: `@ai-pet/hub-client` + `@ai-pet/pet-engine`
 

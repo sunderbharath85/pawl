@@ -14,8 +14,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use krypto_peer::SendError;
-use krypto_protocol::{
+use pawl_peer::SendError;
+use pawl_protocol::{
     truncated_payload, DeviceKind, MirrorUpdate, PeerBody, MIRROR_FRAME_MAX_BYTES, MIRROR_PAYLOAD_MAX_BYTES,
     MIRROR_SYNC_MAX_EVENTS,
 };
@@ -276,7 +276,7 @@ impl Hub {
 
     /// Re-read one machine's mirror from the store into the cache.
     async fn reload_mirror(&self, machine_id: &str) -> Result<()> {
-        let since = krypto_protocol::now_ms() - MIRROR_RETENTION_MS;
+        let since = pawl_protocol::now_ms() - MIRROR_RETENTION_MS;
         let mid = machine_id.to_string();
         let (sessions, pets, pending) = self
             .inner
@@ -305,7 +305,7 @@ impl Hub {
     /// can cause at most MAX_PEER_RENAMES_PER_HOUR renames: beyond that the clash stays (warn).
     /// Renames are saved, broadcast and mirrored back.
     pub(super) async fn settle_pet_names(&self) {
-        let now = krypto_protocol::now_ms();
+        let now = pawl_protocol::now_ms();
         let mid = self.inner.machine_id.clone();
         let foreign = self.mirror_pets();
         let local = self.st().sorted_pets();
@@ -342,7 +342,7 @@ impl Hub {
                     continue;
                 }
                 budget.push(now);
-                let name = krypto_brain::growth::default_name(&mid, &p.agent_id, &taken);
+                let name = pawl_brain::growth::default_name(&mid, &p.agent_id, &taken);
                 taken.push(name.clone());
                 plan.push((p.id.clone(), name));
             }
@@ -403,7 +403,7 @@ impl Hub {
         loop {
             tokio::select! {
                 _ = iv.tick() => {
-                    let now = krypto_protocol::now_ms();
+                    let now = pawl_protocol::now_ms();
                     if let Err(e) = self.inner.store.run(move |s| s.prune_intent_log(now, crate::store::INTENT_LOG_MAX_ROWS)).await {
                         tracing::warn!("prune the intent log: {e:#}");
                     }
@@ -495,7 +495,7 @@ impl Hub {
     /// Answer a peer's `sync_request`: snapshot, then the events it lacks, then `sync_done`.
     pub(super) async fn answer_sync(self, device_id: String, since_seq: i64) {
         let since_seq = since_seq.max(0);
-        let now = krypto_protocol::now_ms();
+        let now = pawl_protocol::now_ms();
         let stored = match self.inner.store.run(move |s| s.sync_sessions(now - MIRROR_RETENTION_MS, SYNC_MAX_SESSIONS)).await {
             Ok(v) => v,
             Err(e) => {
@@ -767,7 +767,7 @@ impl Hub {
                 if let Some(why) = check_session(&session, from) {
                     return dropped(from, "session", why);
                 }
-                let session = clamp_session(session, krypto_protocol::now_ms());
+                let session = clamp_session(session, pawl_protocol::now_ms());
                 let s = session.clone();
                 let evicted = match store.run(move |st| st.mirror_upsert_session(&s)).await {
                     Ok(v) => v,
@@ -816,7 +816,7 @@ impl Hub {
                 if let Some(why) = check_request(&request, from) {
                     return dropped(from, "permission_request", why);
                 }
-                let request = clamp_request(request, krypto_protocol::now_ms());
+                let request = clamp_request(request, pawl_protocol::now_ms());
                 let r = request.clone();
                 if let Err(e) = store.run(move |st| st.mirror_put_pending(&r)).await {
                     return dropped(from, "permission_request", &format!("{e:#}"));
@@ -842,14 +842,14 @@ impl Hub {
                     return dropped(from, "notification", why);
                 }
                 let mut notification = notification;
-                notification.ts = clamp_ts(notification.ts, krypto_protocol::now_ms());
+                notification.ts = clamp_ts(notification.ts, pawl_protocol::now_ms());
                 self.inner.bus.send_local(ServerMsg::Notification { notification });
             }
         }
     }
 
     async fn apply_events(&self, from: &str, events: Vec<HubEvent>) {
-        let now = krypto_protocol::now_ms();
+        let now = pawl_protocol::now_ms();
         let mut valid = Vec::with_capacity(events.len());
         for e in events {
             match check_event(&e, from) {
@@ -883,7 +883,7 @@ impl Hub {
     }
 
     async fn apply_snapshot(&self, from: &str, sessions: Vec<Session>, pets: Vec<Pet>, pending: Vec<PermissionRequest>) {
-        let now = krypto_protocol::now_ms();
+        let now = pawl_protocol::now_ms();
         let sessions: Vec<Session> = sessions
             .into_iter()
             .filter(|s| match check_session(s, from) {
@@ -1006,7 +1006,7 @@ fn fit_snapshot(mut sessions: Vec<Session>, pets: Vec<Pet>, mut pending: Vec<Per
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krypto_protocol::{PermissionOption, PermissionOptionKind, Species, ToolCallPayload};
+    use pawl_protocol::{PermissionOption, PermissionOptionKind, Species, ToolCallPayload};
 
     const PEER: &str = "zyxwvu987654";
     const ME: &str = "abcdef012345";
@@ -1169,7 +1169,7 @@ mod tests {
         let m = |id: &str, online: bool, at: Option<i64>| Machine {
             id: id.into(),
             name: id.into(),
-            os: krypto_protocol::MachineOs::Linux,
+            os: pawl_protocol::MachineOs::Linux,
             last_seen: now,
             online,
             hub_version: None,

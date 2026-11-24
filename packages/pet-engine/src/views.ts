@@ -10,7 +10,7 @@ import type {
   SessionStatus,
   Species,
   ToolCallPayload,
-} from "@krypto/protocol";
+} from "@pawl/protocol";
 import { activityForEvent, activityForStatus, HAPPY_DECAY_MS, NAP_AFTER_MS, SAD_DECAY_MS, type PetActivity } from "./activity";
 import { hashString, petLine } from "./lines";
 

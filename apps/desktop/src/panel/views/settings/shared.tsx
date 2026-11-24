@@ -16,8 +16,8 @@ import {
   settingsFieldLabel,
   type HubClient,
   type SettingsFieldError,
-} from "@krypto/hub-client";
-import type { HubSettings, HubSettingsPatch } from "@krypto/protocol";
+} from "@pawl/hub-client";
+import type { HubSettings, HubSettingsPatch } from "@pawl/protocol";
 import { homeFolder, isTauri } from "../../../lib/native";
 import type { FormErrors } from "../../../lib/settingsForms";
 import { useConfirm } from "../../Confirm";
@@ -130,7 +130,7 @@ export function useSaveSettings(): (patch: HubSettingsPatch, opts?: SaveOptions)
 export function restartErrorText(err: unknown): string {
   const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";
   if (code === "unknown_type" || code === "unknown_message" || code === "unsupported" || code === "bad_request") {
-    return "This hub can't restart itself. Update krypto, or restart it where it runs.";
+    return "This hub can't restart itself. Update pawl, or restart it where it runs.";
   }
   return settingsErrorText(err);
 }
@@ -153,8 +153,8 @@ export function useRestartHub(): { restart(pending?: readonly string[]): Promise
         body: [
           "Running sessions end; paired machines reconnect.",
           running > 0
-            ? `${running} session${running === 1 ? "" : "s"} Krypto started on this machine will stop. Sessions you started yourself in a terminal or editor keep running.`
-            : "No Krypto session is running on this machine right now.",
+            ? `${running} session${running === 1 ? "" : "s"} Pawl started on this machine will stop. Sessions you started yourself in a terminal or editor keep running.`
+            : "No Pawl session is running on this machine right now.",
           "The hub starts again by itself in a few seconds" + (applies ? ` and applies what was saved (${applies.replace(/^Restart the hub to apply: /, "").replace(/\.$/, "")}).` : "."),
         ].join(" "),
         confirmLabel: "Restart hub",

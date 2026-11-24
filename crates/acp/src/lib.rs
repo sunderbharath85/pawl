@@ -1,8 +1,8 @@
-//! krypto-acp: the Krypto hub's ACP (Agent Client Protocol) client host.
+//! pawl-acp: the Pawl hub's ACP (Agent Client Protocol) client host.
 //!
 //! [`AcpHost`] spawns ACP agents as stdio subprocesses, drives them with the
 //! official [`agent_client_protocol`] SDK (protocol v1) and turns everything
-//! they report into [`HostEvent`]s carrying `krypto-protocol` wire types.
+//! they report into [`HostEvent`]s carrying `pawl-protocol` wire types.
 //!
 //! # Process granularity
 //!
@@ -43,13 +43,13 @@ mod spawn;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use krypto_protocol::{Agent, AgentId, HistorySession, MachineId, Session, SessionId};
+use pawl_protocol::{Agent, AgentId, HistorySession, MachineId, Session, SessionId};
 
 /// Events emitted by the host to the hub.
 #[derive(Debug, Clone)]
 pub enum HostEvent {
     /// Upsert (status changes, title, ended).
-    Session(krypto_protocol::Session),
+    Session(pawl_protocol::Session),
     /// Normalized ACP update for the event log. payload = protocol payload shapes
     /// (TextPayload, ToolCallPayload, PlanPayload, StopPayload, ErrorPayload,
     /// PermissionResolvedPayload).
@@ -59,10 +59,10 @@ pub enum HostEvent {
     /// [`AcpHost::cancel`], `by: system` for automatic cancels (turn end, agent
     /// withdrew it, [`AcpHost::close_session`], process exit, shutdown). Requests the
     /// hub resolves through [`AcpHost::resolve_permission`] are not echoed.
-    Event { session_id: SessionId, kind: krypto_protocol::EventType, payload: serde_json::Value },
+    Event { session_id: SessionId, kind: pawl_protocol::EventType, payload: serde_json::Value },
     /// Agent asked `session/request_permission`. Host waits for resolve_permission().
-    PermissionRequest(krypto_protocol::PermissionRequest),
-    AgentCapabilities { agent_id: AgentId, capabilities: krypto_protocol::AgentCapabilities },
+    PermissionRequest(pawl_protocol::PermissionRequest),
+    AgentCapabilities { agent_id: AgentId, capabilities: pawl_protocol::AgentCapabilities },
 }
 
 /// ACP client host. Cheap to clone; all clones share the same processes.

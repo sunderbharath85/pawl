@@ -1,6 +1,6 @@
 // A session: status, the read-only transcript (from the mirror), its pending approvals, a prompt box (owned sessions
 // only: hook sessions can't take prompts) and cancel. Everything acts through intents to the owning computer.
-import { describePermission } from "@krypto/pet-engine";
+import { describePermission } from "@pawl/pet-engine";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useMemo, useState } from "react";
 import { KeyboardAvoidingView, ScrollView, Text, TextInput, View } from "react-native";
@@ -205,7 +205,7 @@ export default function SessionScreen() {
         ) : !ended ? (
           <View style={{ gap: 8 }}>
             <Body muted style={{ fontSize: 13 }}>
-              This session runs in {sourceLabel(session.source)}, so it takes prompts there, not from Krypto.
+              This session runs in {sourceLabel(session.source)}, so it takes prompts there, not from Pawl.
             </Body>
             {isBusy(session) ? <Button title="Stop" kind="danger" icon="stop.circle.fill" onPress={() => void stop()} busy={busy === "cancel"} disabled={!online || busy !== null} /> : null}
           </View>

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { HubRequestError } from "@krypto/hub-client";
-import type { Device } from "@krypto/protocol";
+import { HubRequestError } from "@pawl/hub-client";
+import type { Device } from "@pawl/protocol";
 import {
   InviteHolder,
   formatCountdown,
@@ -39,7 +39,7 @@ function fakeTimers(start = 1_000) {
 }
 
 const invite = (over: Partial<ShownInvite> = {}): ShownInvite => ({
-  uri: "krypto://peer?v=1&code=secret",
+  uri: "pawl://peer?v=1&code=secret",
   expiresAt: 61_000,
   createdAt: 1_000,
   knownDeviceIds: [],
@@ -76,10 +76,10 @@ describe("InviteHolder", () => {
     const t = fakeTimers();
     const h = new InviteHolder(t);
     h.show(invite());
-    h.show(invite({ uri: "krypto://peer?second", expiresAt: 121_000 }));
+    h.show(invite({ uri: "pawl://peer?second", expiresAt: 121_000 }));
     expect(t.pending()).toBe(1);
     t.advance(60_000);
-    expect(h.get()?.uri).toBe("krypto://peer?second");
+    expect(h.get()?.uri).toBe("pawl://peer?second");
     h.clear();
     expect(h.get()).toBeNull();
     expect(t.pending()).toBe(0);
@@ -178,5 +178,5 @@ test("presenceText", () => {
 });
 
 test("joinCommand quotes the URI for the shell", () => {
-  expect(joinCommand("krypto://peer?v=1&mid=a")).toBe('krypto peer join "krypto://peer?v=1&mid=a"');
+  expect(joinCommand("pawl://peer?v=1&mid=a")).toBe('pawl peer join "pawl://peer?v=1&mid=a"');
 });

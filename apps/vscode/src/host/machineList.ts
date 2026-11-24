@@ -1,4 +1,4 @@
-// Items for "Krypto: Show Machines" (read-only). Pure: no runtime `vscode` import, so it is unit-tested.
+// Items for "Pawl: Show Machines" (read-only). Pure: no runtime `vscode` import, so it is unit-tested.
 import {
   OS_LABEL,
   groupDevices,
@@ -11,7 +11,7 @@ import {
   phoneOs,
   sortedMachines,
   type HubState,
-} from "@krypto/hub-client";
+} from "@pawl/hub-client";
 import { presenceLabel } from "../shared/machine";
 
 export interface MachinePickItem {
@@ -40,7 +40,7 @@ export function machinePickItems(
     return {
       label: `${online ? "$(circle-filled)" : "$(circle-outline)"} ${machineDisplayName(m)}`,
       description: [self ? "this machine" : undefined, OS_LABEL[m.os] ?? m.os, via ?? undefined].filter(Boolean).join(" · "),
-      detail: [presence, addr, m.hubVersion ? `krypto ${m.hubVersion}` : undefined].filter(Boolean).join(" · "),
+      detail: [presence, addr, m.hubVersion ? `pawl ${m.hubVersion}` : undefined].filter(Boolean).join(" · "),
     };
   });
   const { hubs, phones, other } = groupDevices(state.devices);
@@ -50,9 +50,9 @@ export function machinePickItems(
     items.push({ label: `$(circle-outline) ${d.name}`, description: "paired", detail: d.addr });
   }
   const { total, online } = machineCounts(state);
-  const title = total === 0 ? "Krypto: Machines" : `Krypto: ${connected ? machinesLine(total, online) : `${total} machine${total === 1 ? "" : "s"} · hub offline`}`;
+  const title = total === 0 ? "Pawl: Machines" : `Pawl: ${connected ? machinesLine(total, online) : `${total} machine${total === 1 ? "" : "s"} · hub offline`}`;
   if (items.length === 0) items.push({ label: "$(info) The hub has not introduced this machine yet." });
-  else if (items.length === 1) items.push({ label: "$(info) No other machines paired yet", detail: "Pair one from the Krypto desktop app (Machines) or with `krypto peer invite`." });
+  else if (items.length === 1) items.push({ label: "$(info) No other machines paired yet", detail: "Pair one from the Pawl desktop app (Machines) or with `pawl peer invite`." });
   // Phones are devices, never machines: listed after them.
   for (const p of phones) {
     const linked = connected && !!p.path;

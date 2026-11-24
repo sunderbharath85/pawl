@@ -19,7 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use krypto_protocol::{Agent, AgentId, MachineId, Pet, Session};
+use pawl_protocol::{Agent, AgentId, MachineId, Pet, Session};
 
 use crate::util::{basename, clean_name, path_key};
 
@@ -661,7 +661,7 @@ fn alnum(s: &str) -> String {
 pub(crate) type Folder = (String, String);
 
 impl RepoIndex {
-    pub fn build(sessions: &[Session], index: &BTreeMap<MachineId, Vec<krypto_protocol::RepoRef>>) -> Self {
+    pub fn build(sessions: &[Session], index: &BTreeMap<MachineId, Vec<pawl_protocol::RepoRef>>) -> Self {
         let mut entries = Vec::new();
         for (machine_id, repos) in index {
             for r in repos.iter().filter(|r| !r.path.trim().is_empty()) {
@@ -1281,7 +1281,7 @@ pub(crate) fn talk_kind(text: &str) -> Talk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krypto_protocol::{AgentSource, SessionSource, SessionStatus};
+    use pawl_protocol::{AgentSource, SessionSource, SessionStatus};
 
     fn agent(id: &str, name: &str) -> Agent {
         Agent {
@@ -1326,7 +1326,7 @@ mod tests {
         // The hub's index: here the sessions' folders (it drops the ones that no longer exist).
         let index = BTreeMap::from([(
             "abcdef012345".to_string(),
-            sessions.iter().map(|s| krypto_protocol::RepoRef { name: basename(&s.cwd), path: s.cwd.clone(), last_used_at: None }).collect(),
+            sessions.iter().map(|s| pawl_protocol::RepoRef { name: basename(&s.cwd), path: s.cwd.clone(), last_used_at: None }).collect(),
         )]);
         (AgentCatalog::build(&agents, &sessions, |m| m == "abcdef012345"), RepoIndex::build(&sessions, &index))
     }
@@ -1481,7 +1481,7 @@ mod tests {
             id: id.into(),
             machine_id: machine.into(),
             agent_id: agent.into(),
-            species: krypto_protocol::Species::Dog,
+            species: pawl_protocol::Species::Dog,
             skin: "default".into(),
             name: name.into(),
             personality: String::new(),
@@ -1497,7 +1497,7 @@ mod tests {
         mac_session.machine_id = MAC.into();
         let sessions = vec![session("s1", "claude-code", "E:\\workspace\\ai-pet"), mac_session];
         let mut index = BTreeMap::new();
-        let repo = |name: &str, path: &str| krypto_protocol::RepoRef { name: name.into(), path: path.into(), last_used_at: Some(1) };
+        let repo = |name: &str, path: &str| pawl_protocol::RepoRef { name: name.into(), path: path.into(), last_used_at: Some(1) };
         index.insert(MAC.to_string(), vec![repo("api", "/Users/me/api"), repo("web (work)", "/Users/me/work/web")]);
         index.insert(PC.to_string(), vec![repo("ai-pet", "E:\\workspace\\ai-pet")]);
         let repos = RepoIndex::build(&sessions, &index);

@@ -1,6 +1,6 @@
 // Pairing helpers (migration step 2; relay invites step 6). Pure, no I/O. Invite URIs carry secrets (the one-time
 // `code`, the relay pairing token `rt` and the relay access key `rk`): nothing here logs, stores or returns them.
-import { MACHINE_ID_RE, type LinkPath, type MachineId, type RelayStatus, type UnixMs } from "@krypto/protocol";
+import { MACHINE_ID_RE, type LinkPath, type MachineId, type RelayStatus, type UnixMs } from "@pawl/protocol";
 
 /** Invite lifetime bounds the hub enforces (seconds). */
 export const INVITE_TTL_MIN_SECS = 60;
@@ -8,7 +8,7 @@ export const INVITE_TTL_MAX_SECS = 3600;
 export const INVITE_TTL_DEFAULT_SECS = 600;
 
 /** Every invite URI starts with this. */
-export const INVITE_URI_PREFIX = "krypto://peer?";
+export const INVITE_URI_PREFIX = "pawl://peer?";
 
 /** The non-secret parts of an invite URI (the code, relay token and relay access key are deliberately left out). */
 export interface InviteInfo {
@@ -40,7 +40,7 @@ const B64URL_RE = /^[A-Za-z0-9_-]+=*$/;
 
 /**
  * Find an invite URI in pasted text: the bare URI, the URI in quotes, or the whole
- * `krypto peer join "<uri>"` line. Returns the URI or null.
+ * `pawl peer join "<uri>"` line. Returns the URI or null.
  */
 export function extractInviteUri(text: string): string | null {
   const start = text.indexOf(INVITE_URI_PREFIX);
@@ -52,7 +52,7 @@ export function extractInviteUri(text: string): string | null {
 }
 
 /**
- * Check an invite URI's shape (`krypto://peer?v=1&mid=…&pk=…&addr=…&code=…&exp=…`) and return its
+ * Check an invite URI's shape (`pawl://peer?v=1&mid=…&pk=…&addr=…&code=…&exp=…`) and return its
  * public parts, or null if it is not one. The hub stays the authority (`bad_uri`); this only lets a
  * client explain a bad paste before sending it.
  */
@@ -102,8 +102,8 @@ export const RELAY_ERROR_TEXT: Record<string, string> = {
   unavailable: "The relay is not accepting connections right now (it may be down or have no access key set up).",
   rate_limited: "The relay is limiting connections for now. The hub tries again by itself.",
   bad_auth: "The relay could not verify this hub's identity.",
-  bad_frame: "The relay and this hub misunderstood each other. Update krypto if this keeps happening.",
-  unsupported_version: "The relay runs a different protocol version. Update krypto or the relay.",
+  bad_frame: "The relay and this hub misunderstood each other. Update pawl if this keeps happening.",
+  unsupported_version: "The relay runs a different protocol version. Update pawl or the relay.",
   replaced: "Another connection with this hub's identity took over (is this hub running twice?).",
   closed: "The relay closed the connection. The hub reconnects by itself.",
 };

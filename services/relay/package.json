@@ -1,5 +1,5 @@
 {
-  "name": "@krypto/relay",
+  "name": "@pawl/relay",
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
@@ -12,7 +12,7 @@
     "smoke": "bun run scripts/smoke.ts"
   },
   "dependencies": {
-    "@krypto/protocol": "workspace:*",
+    "@pawl/protocol": "workspace:*",
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
@@ -20,5 +20,5 @@
     "typescript": "^5.9.0",
     "wrangler": "^4.167.0"
   },
-  "description": "Krypto relay: Cloudflare Worker + Durable Object mailboxes routing end-to-end encrypted envelopes"
+  "description": "Pawl relay: Cloudflare Worker + Durable Object mailboxes routing end-to-end encrypted envelopes"
 }

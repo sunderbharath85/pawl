@@ -1,3 +1,6 @@
+> Superseded on 2026-11-24: the brand is now **Pawl** (crates `pawl-*`, npm `@pawl/*`, binary `pawl`).
+> This report is kept as the record of the earlier AI Pet Hub to Krypto rename.
+
 # sde-rename report: AI Pet Hub → Krypto (whole repo)
 
 Branch `step-0.5-rename`, nothing committed. 162 files changed (+848 / −788), no files added or

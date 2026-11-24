@@ -2,8 +2,8 @@ import * as vscode from "vscode";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
-import type { Agent, Session, SessionStatus } from "@krypto/protocol";
-import { agentFor } from "@krypto/hub-client";
+import type { Agent, Session, SessionStatus } from "@pawl/protocol";
+import { agentFor } from "@pawl/hub-client";
 
 export function nonce(): string {
   return randomBytes(18).toString("base64").replace(/[^A-Za-z0-9]/g, "");
@@ -89,14 +89,14 @@ export function which(cmd: string): string | null {
 }
 
 /**
- * Locate the hub binary: the `krypto.hubExecutable` setting (PATH lookup), else a cargo build output in a
+ * Locate the hub binary: the `pawl.hubExecutable` setting (PATH lookup), else a cargo build output in a
  * workspace folder (target/release, target/debug). Returns null when nothing was found.
  */
 export function resolveHubExecutable(): string | null {
-  const configured = vscode.workspace.getConfiguration("krypto").get<string>("hubExecutable")?.trim() || "krypto";
+  const configured = vscode.workspace.getConfiguration("pawl").get<string>("hubExecutable")?.trim() || "pawl";
   const found = which(configured);
   if (found) return found;
-  const exe = WIN ? "krypto.exe" : "krypto";
+  const exe = WIN ? "pawl.exe" : "pawl";
   for (const folder of vscode.workspace.workspaceFolders ?? []) {
     if (folder.uri.scheme !== "file") continue;
     for (const profile of ["release", "debug"]) {

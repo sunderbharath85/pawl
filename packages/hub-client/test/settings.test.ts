@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HookStatus, HubSettings } from "@krypto/protocol";
+import type { HookStatus, HubSettings } from "@pawl/protocol";
 import {
   broadFolderReason,
   isBroadFolder,
@@ -468,7 +468,7 @@ describe("HubClient settings calls", () => {
 describe("config.toml port (clients follow Settings → Hub port)", () => {
   let root: string;
   beforeAll(() => {
-    root = mkdtempSync(join(tmpdir(), "krypto-port-"));
+    root = mkdtempSync(join(tmpdir(), "pawl-port-"));
   });
   afterAll(() => rmSync(root, { recursive: true, force: true }));
 
@@ -483,18 +483,18 @@ describe("config.toml port (clients follow Settings → Hub port)", () => {
 
   test("readHubCredentials: env URL > config port > default", () => {
     const appdata = join(root, "appdata");
-    mkdirSync(join(appdata, "krypto"), { recursive: true });
-    writeFileSync(join(appdata, "krypto", "token"), "tok");
+    mkdirSync(join(appdata, "pawl"), { recursive: true });
+    writeFileSync(join(appdata, "pawl", "token"), "tok");
     const opts = { platform: "win32", env: { APPDATA: appdata } as Record<string, string | undefined> };
     let c = readHubCredentials(opts);
     expect(c.url).toBe("ws://127.0.0.1:47800/ws");
     expect(c.urlSource).toBe("default");
-    writeFileSync(join(appdata, "krypto", "config.toml"), "port = 47900\n[peer]\naccept_intents = true\n");
+    writeFileSync(join(appdata, "pawl", "config.toml"), "port = 47900\n[peer]\naccept_intents = true\n");
     c = readHubCredentials(opts);
     expect(c.url).toBe("ws://127.0.0.1:47900/ws");
     expect(c.httpUrl).toBe("http://127.0.0.1:47900");
     expect(c.urlSource).toBe("config");
-    c = readHubCredentials({ ...opts, env: { ...opts.env, KRYPTO_HUB_URL: "http://127.0.0.1:48001" } });
+    c = readHubCredentials({ ...opts, env: { ...opts.env, PAWL_HUB_URL: "http://127.0.0.1:48001" } });
     expect(c.url).toBe("ws://127.0.0.1:48001/ws");
     expect(c.urlSource).toBe("env");
   });
@@ -503,7 +503,7 @@ describe("config.toml port (clients follow Settings → Hub port)", () => {
 describe("runtime.json: used only after /health names this machine", () => {
   let root: string;
   beforeAll(() => {
-    root = mkdtempSync(join(tmpdir(), "krypto-runtime-"));
+    root = mkdtempSync(join(tmpdir(), "pawl-runtime-"));
   });
   afterAll(() => rmSync(root, { recursive: true, force: true }));
 
@@ -523,7 +523,7 @@ describe("runtime.json: used only after /health names this machine", () => {
 
   function setup(name: string) {
     const appdata = join(root, name);
-    const dir = join(appdata, "krypto");
+    const dir = join(appdata, "pawl");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "token"), "tok");
     writeFileSync(join(dir, "machine.toml"), 'id = "abcdef012345"\nname = "PC"\n');
@@ -586,11 +586,11 @@ describe("runtime.json: used only after /health names this machine", () => {
     expect(await verifiedRuntimePort(47950, { platform: "win32", env, fetchHealth: never })).toBeNull();
   });
 
-  test("KRYPTO_HUB_URL wins and skips the check", async () => {
+  test("PAWL_HUB_URL wins and skips the check", async () => {
     const { env } = setup("env");
     const c = await resolveHubCredentials({
       platform: "win32",
-      env: { ...env, KRYPTO_HUB_URL: "ws://127.0.0.1:48001/ws" },
+      env: { ...env, PAWL_HUB_URL: "ws://127.0.0.1:48001/ws" },
       fetchHealth: async () => {
         throw new Error("no check expected");
       },

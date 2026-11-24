@@ -57,7 +57,7 @@ describe("parseInviteUri", () => {
   test("rejects anything else", () => {
     const bad = [
       "",
-      "krypto://hub?v=1",
+      "pawl://hub?v=1",
       "https://example.com",
       inviteFrom2.replace("v=1", "v=2"),
       inviteFrom2.replace(MID2, "NOT-A-MID"),
@@ -74,12 +74,12 @@ describe("extractInviteUri", () => {
   test("finds the URI in a bare paste, in quotes, or in the CLI line", () => {
     expect(extractInviteUri(inviteFrom2)).toBe(inviteFrom2);
     expect(extractInviteUri(`"${inviteFrom2}"`)).toBe(inviteFrom2);
-    expect(extractInviteUri(`krypto peer join "${inviteFrom2}"\n`)).toBe(inviteFrom2);
+    expect(extractInviteUri(`pawl peer join "${inviteFrom2}"\n`)).toBe(inviteFrom2);
     expect(extractInviteUri(`  ${inviteFrom2} trailing words`)).toBe(inviteFrom2);
   });
 
   test("returns null without an invite", () => {
-    expect(extractInviteUri("krypto peer join")).toBeNull();
+    expect(extractInviteUri("pawl peer join")).toBeNull();
     expect(extractInviteUri(INVITE_URI_PREFIX)).toBeNull();
   });
 });
@@ -112,7 +112,7 @@ describe("relay status + link path", () => {
 
 test("maskInviteSecrets hides the relay access key only", () => {
   const uri = `${inviteFrom2}&relay=wss%3A%2F%2Fr.dev&rt=BBBBBBBBBBBBBBBBBBBBBB&rk=s3cr3t-Key_1`;
-  const masked = maskInviteSecrets(`krypto peer join "${uri}"`);
+  const masked = maskInviteSecrets(`pawl peer join "${uri}"`);
   expect(masked).not.toContain("s3cr3t");
   expect(masked).toContain("&rk=••••••\"");
   expect(masked).toContain("rt=BBBB");

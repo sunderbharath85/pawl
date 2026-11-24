@@ -1,5 +1,5 @@
 // Flavor text per species/activity + species metadata. Pure data.
-import type { Species } from "@krypto/protocol";
+import type { Species } from "@pawl/protocol";
 import type { PetActivity } from "./activity";
 
 export const SPECIES_META: Record<Species, { label: string; emoji: string; sound: string }> = {

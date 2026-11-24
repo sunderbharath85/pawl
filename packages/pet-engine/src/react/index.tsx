@@ -1,4 +1,4 @@
-// @krypto/pet-engine/react — pure SVG + CSS keyframes pets (sprite sheets optional), no other assets needed.
+// @pawl/pet-engine/react — pure SVG + CSS keyframes pets (sprite sheets optional), no other assets needed.
 export { PetSprite, type PetSpriteProps } from "./PetSprite";
 export { PetBubble, type PetBubbleProps } from "./PetBubble";
 export { PetStage, type PetStageProps } from "./PetStage";

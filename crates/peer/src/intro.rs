@@ -4,7 +4,7 @@
 
 use crate::b64;
 use crate::invite::peer_addr_ok;
-use krypto_protocol::{is_valid_machine_id, DeviceKind, IntroDevice, MachineOs};
+use pawl_protocol::{is_valid_machine_id, DeviceKind, IntroDevice, MachineOs};
 
 /// Most devices one `roster_intro` may carry; a bigger intro is dropped whole.
 pub const MAX_INTRO_DEVICES: usize = 32;
@@ -127,7 +127,7 @@ mod tests {
     use super::*;
     use crate::DeviceKeys;
     use crypto_box::aead::Aead;
-    use krypto_protocol::MachineOs;
+    use pawl_protocol::MachineOs;
 
     fn dev(id: &str, name: &str, pk: &str, addr: Option<&str>) -> IntroDevice {
         IntroDevice {

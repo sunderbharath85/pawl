@@ -16,8 +16,8 @@ import {
   phonePairingBlock,
   phonesLine,
   relayHost,
-} from "@krypto/hub-client";
-import type { Device } from "@krypto/protocol";
+} from "@pawl/hub-client";
+import type { Device } from "@pawl/protocol";
 import { clockTime, timeAgo } from "../../lib/format";
 import {
   INVITE_TTL_CHOICES,
@@ -137,7 +137,7 @@ export function PhoneInviteCard({ onPaired, bare }: { onPaired?: (phone: Device)
             expires in {formatCountdown(invite.expiresAt, now)}
           </span>
         </div>
-        <p className="hint">Open Krypto on your phone, tap Pair and point the camera at this code.</p>
+        <p className="hint">Open Pawl on your phone, tap Pair and point the camera at this code.</p>
         <div className="qr-frame">
           <QrCode text={invite.uri} label="Pairing code for a phone" />
         </div>
@@ -145,7 +145,7 @@ export function PhoneInviteCard({ onPaired, bare }: { onPaired?: (phone: Device)
           <I.Shield size={14} /> <span>{PHONE_QR_WARNING}</span>
         </p>
         <p className="hint">
-          Single use: it pairs one phone, until {clockTime(invite.expiresAt)}. Can't scan? Copy the link and paste it into Krypto on the
+          Single use: it pairs one phone, until {clockTime(invite.expiresAt)}. Can't scan? Copy the link and paste it into Pawl on the
           phone, but only send it through something private.
         </p>
         <CopyField label="Phone invite link" text={invite.uri} shown={maskInviteSecrets(invite.uri)} />
@@ -181,7 +181,7 @@ export function PhoneInviteCard({ onPaired, bare }: { onPaired?: (phone: Device)
       ) : (
         <>
           <p className="hint">
-            Show a one-time QR code here and scan it with the Krypto app. The phone links through your relay{" "}
+            Show a one-time QR code here and scan it with the Pawl app. The phone links through your relay{" "}
             <span className="mono">{relayUrl ? relayHost(relayUrl) : ""}</span>, so it works away from this network too.
           </p>
           <label className="field">

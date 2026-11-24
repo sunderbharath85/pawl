@@ -1,4 +1,4 @@
-# sde-libs — Step 1 (machine identity) for krypto-acp, krypto-discovery, krypto-brain
+# sde-libs — Step 1 (machine identity) for pawl-acp, pawl-discovery, pawl-brain
 
 Branch `step-1-machine-identity`. Nothing committed. Every change is inside `crates/acp`, `crates/discovery` and `crates/brain`.
 
@@ -6,11 +6,11 @@ Branch `step-1-machine-identity`. Nothing committed. Every change is inside `cra
 
 | Crate | Change |
 |---|---|
-| krypto-acp | `AcpHost::new(machine_id: MachineId, events)`. Every `Session` / `HistorySession` / `PermissionRequest` the host builds carries `machine_id`. Permission request ids are `global_id(machine_id, uuid_v4)`. `hub_session_id` is used exactly as passed in (already global). **Extra:** `AcpHost::machine_id()`. **Extra:** `start_session` / `list_history` / `resume_session` refuse an `Agent` whose `machine_id` is non-empty and not the host's ("a hub never runs another machine's agents"). An empty `machine_id` counts as local. |
-| krypto-discovery | `DiscoveryConfig.machine_id` (first field; `Default` still derives, giving `""`). Every discovered agent (built-in, registry or custom) gets `Agent.machine_id = cfg.machine_id`. `hooks::NormalizedHook` is unchanged. |
-| krypto-brain `growth` | `default_pet(agent, taken_names)`: id `${machine_id}:pet-${agent_id}`, `machine_id` from the agent. Name: start at `fnv1a(machine_id + "/" + agent_id) % len` in `DOG_NAMES` and take the first name not in `taken_names` (trimmed, case-insensitive). When the whole list is taken it loops again with "II", "III" and so on ("Biscuit II"). Helpers changed: `pet_id_for(machine_id, agent_id)` and `default_name(machine_id, agent_id, taken)`. `DOG_NAMES` is now `pub` and has 32 names (was 16), so collisions are rarer. |
-| krypto-brain `watchdog` | `Watchdog::new(cfg, machine_id)`. Notifications carry `machine_id`, and their ids are global: `${machine}:watchdog:<key>:<n>`. **Behaviour:** `tick` only nudges sessions and requests whose `machine_id` equals its own, so the owner nudges and mirrored remote sessions are skipped. **Extra:** `Watchdog::machine_id()`. |
-| krypto-brain `chat` | `BrainContext` gains `machine: Machine` (per contract). **Extra field:** `machines: Vec<Machine>` (every known machine including self; may be empty). `BrainContext` still implements `Default`, with a placeholder machine that has an empty id. |
+| pawl-acp | `AcpHost::new(machine_id: MachineId, events)`. Every `Session` / `HistorySession` / `PermissionRequest` the host builds carries `machine_id`. Permission request ids are `global_id(machine_id, uuid_v4)`. `hub_session_id` is used exactly as passed in (already global). **Extra:** `AcpHost::machine_id()`. **Extra:** `start_session` / `list_history` / `resume_session` refuse an `Agent` whose `machine_id` is non-empty and not the host's ("a hub never runs another machine's agents"). An empty `machine_id` counts as local. |
+| pawl-discovery | `DiscoveryConfig.machine_id` (first field; `Default` still derives, giving `""`). Every discovered agent (built-in, registry or custom) gets `Agent.machine_id = cfg.machine_id`. `hooks::NormalizedHook` is unchanged. |
+| pawl-brain `growth` | `default_pet(agent, taken_names)`: id `${machine_id}:pet-${agent_id}`, `machine_id` from the agent. Name: start at `fnv1a(machine_id + "/" + agent_id) % len` in `DOG_NAMES` and take the first name not in `taken_names` (trimmed, case-insensitive). When the whole list is taken it loops again with "II", "III" and so on ("Biscuit II"). Helpers changed: `pet_id_for(machine_id, agent_id)` and `default_name(machine_id, agent_id, taken)`. `DOG_NAMES` is now `pub` and has 32 names (was 16), so collisions are rarer. |
+| pawl-brain `watchdog` | `Watchdog::new(cfg, machine_id)`. Notifications carry `machine_id`, and their ids are global: `${machine}:watchdog:<key>:<n>`. **Behaviour:** `tick` only nudges sessions and requests whose `machine_id` equals its own, so the owner nudges and mirrored remote sessions are skipped. **Extra:** `Watchdog::machine_id()`. |
+| pawl-brain `chat` | `BrainContext` gains `machine: Machine` (per contract). **Extra field:** `machines: Vec<Machine>` (every known machine including self; may be empty). `BrainContext` still implements `Default`, with a placeholder machine that has an empty id. |
 
 ### Brain chat behaviour
 - New `chat/machines.rs` → `MachineNames`. A reply goes into multi-machine mode when more than one distinct machine id shows up across `machine`, `machines`, agents, sessions and pending requests. A machine missing from `machines` is labelled by its id.
@@ -30,10 +30,10 @@ Branch `step-1-machine-identity`. Nothing committed. Every change is inside `cra
 - chat: `single_machine_replies_never_name_the_machine`, `status_names_machines_when_several_are_known`, `machine_names_also_come_from_ids_alone`, `commands_only_target_this_machine`. summary: `summaries_name_the_machine_when_several_are_known`.
 
 ## Commands run
-- `cargo check -p krypto-acp -p krypto-discovery -p krypto-brain --all-targets` → ok
-- `cargo test -p krypto-acp -p krypto-discovery -p krypto-brain` → acp 23 passed, brain 63 passed, discovery 32 passed, 0 failed
-- `cargo clippy -p krypto-acp -p krypto-discovery -p krypto-brain --all-targets -- -D warnings` → exit 0, no warnings
-- `cargo check -p krypto-hub` (information only, not my crate) → 6 errors, all from sde-hubcore's in-progress `HubOptions.machine` / `Welcome.machine(s)` work. None come from the lib APIs.
+- `cargo check -p pawl-acp -p pawl-discovery -p pawl-brain --all-targets` → ok
+- `cargo test -p pawl-acp -p pawl-discovery -p pawl-brain` → acp 23 passed, brain 63 passed, discovery 32 passed, 0 failed
+- `cargo clippy -p pawl-acp -p pawl-discovery -p pawl-brain --all-targets -- -D warnings` → exit 0, no warnings
+- `cargo check -p pawl-hub` (information only, not my crate) → 6 errors, all from sde-hubcore's in-progress `HubOptions.machine` / `Welcome.machine(s)` work. None come from the lib APIs.
 
 ## Known gaps / notes
 - `cargo fmt --check` already reports diffs in files I didn't touch (for example `crates/acp/examples/smoke.rs` line 31). The repo isn't rustfmt-clean and fmt isn't a gate, so I left formatting alone.

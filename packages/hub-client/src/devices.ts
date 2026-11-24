@@ -1,7 +1,7 @@
 // Paired devices (PLAN.md migration step 7): phones next to hubs, the group roster ("Added by …"), and the state of
 // a pairing invite on screen (single use, expiry). Pure, no I/O. Invite URIs hold secrets (the one-time code, the relay
 // pairing token and the relay access key): nothing here logs, stores or returns them.
-import type { AckResults, Device, DeviceKind, MachineId } from "@krypto/protocol";
+import type { AckResults, Device, DeviceKind, MachineId } from "@pawl/protocol";
 import { machineDisplayName } from "./machine";
 import { parseInviteUri, relayStatusText } from "./peer";
 import type { HubState } from "./state";
@@ -156,7 +156,7 @@ export function phonePairingBlock(
   if (!connected) return { code: "disconnected", text: "Connect to the hub first." };
   const v = state.protocolVersion;
   if ((v !== undefined && v < PHONE_PROTOCOL_VERSION) || !state.peer) {
-    return { code: "old_hub", text: "This hub can't pair phones yet. Update krypto on this machine and restart the hub." };
+    return { code: "old_hub", text: "This hub can't pair phones yet. Update pawl on this machine and restart the hub." };
   }
   const relay = state.peer.relay;
   if (!relay?.url) {

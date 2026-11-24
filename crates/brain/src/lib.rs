@@ -1,6 +1,6 @@
-//! krypto-brain: permission rules, chat bot, watchdog and pet growth for Krypto.
+//! pawl-brain: permission rules, chat bot, watchdog and pet growth for Pawl.
 //!
-//! The public API is fixed by `docs/CONTRACTS.md` (section `krypto-brain`).
+//! The public API is fixed by `docs/CONTRACTS.md` (section `pawl-brain`).
 //!
 //! Safety invariant: actions ([`chat::BrainAction`]) only ever come from the
 //! deterministic intent parser. LLM output (Anthropic or Ollama) is used for

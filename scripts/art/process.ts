@@ -18,7 +18,7 @@ import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import sharp, { type OverlayOptions } from "sharp";
-import type { Species } from "@krypto/protocol";
+import type { Species } from "@pawl/protocol";
 import {
   ACTIVITIES,
   ANIMATIONS,

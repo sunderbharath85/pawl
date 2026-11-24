@@ -1,7 +1,7 @@
 // Where the user is, for notifications (PLAN.md migration step 3): the machine the user is active
 // on tells them once; every other machine stays quiet.
-import { activeMachineId, intentErrorText, isLocal, machineDisplayName, ownerName, type HubState, type IntentAction } from "@krypto/hub-client";
-import { parseGlobalId } from "@krypto/protocol";
+import { activeMachineId, intentErrorText, isLocal, machineDisplayName, ownerName, type HubState, type IntentAction } from "@pawl/hub-client";
+import { parseGlobalId } from "@pawl/protocol";
 import { errorText } from "./format";
 
 /** Notify here only when the user is active on this machine (else the active machine does). */

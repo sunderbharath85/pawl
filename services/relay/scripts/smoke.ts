@@ -14,7 +14,7 @@ import https from "node:https";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import type { PeerEnvelope, RelayClientFrame, RelayServerFrame } from "@krypto/protocol";
+import type { PeerEnvelope, RelayClientFrame, RelayServerFrame } from "@pawl/protocol";
 import { encodeStd, encodeUrl, randomBytes, utf8 } from "../src/b64";
 import { answerChallenge, isChallengeNonce } from "../src/auth";
 
@@ -356,7 +356,7 @@ async function main(): Promise<void> {
 
   await check("register_push then unregister_push (twice) accepted without errors", async () => {
     b!.conn.frames.length = 0;
-    b!.conn.send({ t: "register_push", expoToken: "ExponentPushToken[krypto-smoke]" });
+    b!.conn.send({ t: "register_push", expoToken: "ExponentPushToken[pawl-smoke]" });
     b!.conn.send({ t: "unregister_push" });
     b!.conn.send({ t: "unregister_push" }); // already off: still fine (nothing to write)
     await b!.conn.sync();

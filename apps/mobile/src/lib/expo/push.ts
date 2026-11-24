@@ -50,12 +50,12 @@ export async function setupPush(): Promise<PushSetup> {
     let { status } = await Notifications.getPermissionsAsync();
     if (status !== "granted") status = (await Notifications.requestPermissionsAsync()).status;
     if (status !== "granted") {
-      return { ok: false, reason: "denied", message: "Notifications are off for Krypto. Turn them on in the phone's settings." };
+      return { ok: false, reason: "denied", message: "Notifications are off for Pawl. Turn them on in the phone's settings." };
     }
     const token = await Notifications.getExpoPushTokenAsync({ projectId });
     return { ok: true, token: token.data };
   } catch {
-    return { ok: false, reason: "error", message: "Couldn't get a push token right now. Krypto will try again." };
+    return { ok: false, reason: "error", message: "Couldn't get a push token right now. Pawl will try again." };
   }
 }
 

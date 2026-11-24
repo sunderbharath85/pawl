@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PeerBody, PeerEnvelope } from "@krypto/protocol";
+import type { PeerBody, PeerEnvelope } from "@pawl/protocol";
 import {
   authAnswer,
   checkIntroDevice,

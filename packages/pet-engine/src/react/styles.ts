@@ -304,7 +304,7 @@ ${SP("bird")}[data-walking="true"] .ap-leg-f1{animation:ap-walk .36s ease-in-out
 .ap-reduced-motion .ap-pet *,.ap-reduced-motion.ap-pet *,.ap-reduced-motion .ap-bubble{animation:none!important;transition:none!important}
 `;
 
-const STYLE_ID = "krypto-engine-styles";
+const STYLE_ID = "pawl-engine-styles";
 
 interface StyleConfig {
   inject: boolean;

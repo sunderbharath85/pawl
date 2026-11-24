@@ -19,7 +19,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
-use krypto_protocol::{
+use pawl_protocol::{
     now_ms, Agent, AgentId, ChatProposal, HubEvent, Machine, MachineId, MachineOs, PermissionOptionKind,
     PermissionRequest, Pet, RequestId, Session, SessionId, SessionSource, SessionStatus, UnixMs,
 };
@@ -69,14 +69,14 @@ impl fmt::Debug for BrainConfig {
 }
 
 impl BrainConfig {
-    /// Read `ANTHROPIC_API_KEY`, `KRYPTO_HUB_BRAIN_MODEL`, `KRYPTO_HUB_OLLAMA_URL`, `KRYPTO_HUB_OLLAMA_MODEL`.
+    /// Read `ANTHROPIC_API_KEY`, `PAWL_HUB_BRAIN_MODEL`, `PAWL_HUB_OLLAMA_URL`, `PAWL_HUB_OLLAMA_MODEL`.
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
         Self {
             anthropic_api_key: var("ANTHROPIC_API_KEY"),
-            model: var("KRYPTO_HUB_BRAIN_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            ollama_url: var("KRYPTO_HUB_OLLAMA_URL"),
-            ollama_model: var("KRYPTO_HUB_OLLAMA_MODEL"),
+            model: var("PAWL_HUB_BRAIN_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            ollama_url: var("PAWL_HUB_OLLAMA_URL"),
+            ollama_model: var("PAWL_HUB_OLLAMA_MODEL"),
         }
     }
 
@@ -98,8 +98,8 @@ pub struct BrainContext {
     pub agents: Vec<Agent>,
     /// Paired machines' agents, from their latest presence (offline machines: last known).
     pub remote_agents: BTreeMap<MachineId, Vec<Agent>>,
-    /// Repo index per machine, this one included (`krypto_protocol::RepoRef`, newest first).
-    pub repos: BTreeMap<MachineId, Vec<krypto_protocol::RepoRef>>,
+    /// Repo index per machine, this one included (`pawl_protocol::RepoRef`, newest first).
+    pub repos: BTreeMap<MachineId, Vec<pawl_protocol::RepoRef>>,
     /// Every known machine's pets (for "tell Biscuit to ...").
     pub pets: Vec<Pet>,
     /// Sessions of this machine and mirrored ones of paired machines.
@@ -552,10 +552,10 @@ fn overview(ctx: &BrainContext, voice: &Voice, seed: u64, now: UnixMs, full: boo
     let pending_line = match (here, elsewhere) {
         (0, 0) => String::new(),
         (0, 1) | (1, 0) => " 1 request needs your OK: say “approve” or “deny”.".to_string(),
-        (0, n) => format!(" {n} requests need your OK on other machines: answer them in the Krypto panel."),
-        (1, n) => format!(" 1 request needs your OK: say “approve” or “deny” (+{n} on other machines, in the Krypto panel)."),
+        (0, n) => format!(" {n} requests need your OK on other machines: answer them in the Pawl panel."),
+        (1, n) => format!(" 1 request needs your OK: say “approve” or “deny” (+{n} on other machines, in the Pawl panel)."),
         (h, 0) => format!(" {h} requests need your OK: say “approve 1”, “deny 2”…"),
-        (h, n) => format!(" {h} requests need your OK: say “approve 1”, “deny 2”… (+{n} on other machines, in the Krypto panel)."),
+        (h, n) => format!(" {h} requests need your OK: say “approve 1”, “deny 2”… (+{n} on other machines, in the Pawl panel)."),
     };
     if !full {
         return format!("{} open, {} busy.{pending_line}", plural(live.len(), "session"), busy);
@@ -707,7 +707,7 @@ fn resolve_request(
     let elsewhere_note = match elsewhere {
         0 => String::new(),
         n => format!(
-            "\n({} on other machines: answer {} in the Krypto panel, or name the machine.)",
+            "\n({} on other machines: answer {} in the Pawl panel, or name the machine.)",
             plural(n, "more request"),
             if n == 1 { "it" } else { "them" }
         ),
@@ -775,14 +775,14 @@ fn resolve_request(
         // Another machine's request: chat never forwards it. Approving there needs a confirmation on
         // the device that asks (the panel or the CLI), so the reply says where to do it.
         let machine = MachineNames::from_ctx(ctx).label(&chosen.machine_id).unwrap_or_else(|| chosen.machine_id.clone());
-        let short: String = krypto_protocol::parse_global_id(&chosen.request_id)
+        let short: String = pawl_protocol::parse_global_id(&chosen.request_id)
             .map_or(chosen.request_id.as_str(), |(_, l)| l)
             .chars()
             .take(8)
             .collect();
         return say(format!(
             "{} {name} is waiting for your OK to: {what}. That request lives on {machine}, so I won't {verb} it from chat: \
-             answer it in the Krypto panel (it asks you to confirm), or run `krypto {verb} {short}` in a terminal.",
+             answer it in the Pawl panel (it asks you to confirm), or run `pawl {verb} {short}` in a terminal.",
             voice.thinking(seed)
         ));
     }

@@ -5,7 +5,7 @@
 use super::*;
 use crate::relay::parse_address;
 use crypto_box::aead::Aead;
-use krypto_protocol::{RelayErrorCode, RelayServerFrame, RELAY_AUTH_CONTEXT};
+use pawl_protocol::{RelayErrorCode, RelayServerFrame, RELAY_AUTH_CONTEXT};
 use std::collections::VecDeque;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request as WsRequest, Response as WsResponse};
 use tokio_tungstenite::tungstenite::http;
@@ -426,7 +426,7 @@ async fn relay_refusals_are_reported_and_retried() {
     assert_eq!(a.node.relay_status().last_error, None);
 
     // A newer socket with the same key takes the mailbox: the old one reports `replaced`.
-    let path = std::env::temp_dir().join(format!("krypto-relay-key-{}", hex::encode(getrandom::u64().unwrap().to_be_bytes())));
+    let path = std::env::temp_dir().join(format!("pawl-relay-key-{}", hex::encode(getrandom::u64().unwrap().to_be_bytes())));
     let k1 = DeviceKeys::load_or_create(&path).unwrap();
     let mut b1 = node_with(B, k1, Arc::new(MemoryRoster::new()), fast());
     b1.node.set_relay(Some(relay.config())).unwrap();
@@ -534,7 +534,7 @@ async fn relay_restart_drops_relay_links_then_they_come_back() {
 async fn peer_restart_over_relay_relinks_without_link_down() {
     let relay = MockRelay::start().await;
     let mut a = on_relay(A, &relay, fast()).await;
-    let path = std::env::temp_dir().join(format!("krypto-relay-restart-{}", hex::encode(getrandom::u64().unwrap().to_be_bytes())));
+    let path = std::env::temp_dir().join(format!("pawl-relay-restart-{}", hex::encode(getrandom::u64().unwrap().to_be_bytes())));
     let roster_b = Arc::new(MemoryRoster::new());
     let mut b1 = node_with(B, DeviceKeys::load_or_create(&path).unwrap(), roster_b.clone(), fast());
     b1.node.set_relay(Some(relay.config())).unwrap();
@@ -716,15 +716,15 @@ async fn disconnect_drops_relay_frames_during_the_cooldown() {
     assert_eq!(b.bodies(A, 1).await, [sync_request(3)]);
 }
 
-/// Against a real relay (ignored by default): `KRYPTO_RELAY_SMOKE_URL=ws://127.0.0.1:8787` (e.g.
-/// `wrangler dev` in services/relay) and `KRYPTO_RELAY_SMOKE_KEY=<access key>`, then
-/// `cargo test -p krypto-peer -- --ignored relay_smoke`. Auth, allow, relay-only pairing through the
+/// Against a real relay (ignored by default): `PAWL_RELAY_SMOKE_URL=ws://127.0.0.1:8787` (e.g.
+/// `wrangler dev` in services/relay) and `PAWL_RELAY_SMOKE_KEY=<access key>`, then
+/// `cargo test -p pawl-peer -- --ignored relay_smoke`. Auth, allow, relay-only pairing through the
 /// pairing slot, bodies both ways, a refused second join, revoke.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a running relay"]
 async fn relay_smoke_against_a_real_relay() {
-    let url = std::env::var("KRYPTO_RELAY_SMOKE_URL").expect("KRYPTO_RELAY_SMOKE_URL");
-    let key = std::env::var("KRYPTO_RELAY_SMOKE_KEY").ok();
+    let url = std::env::var("PAWL_RELAY_SMOKE_URL").expect("PAWL_RELAY_SMOKE_URL");
+    let key = std::env::var("PAWL_RELAY_SMOKE_KEY").ok();
     let config = RelayConfig { url, access_key: key };
     let t = PeerTimings { offline_after: Duration::from_secs(30), ..fast() };
     let up = |id: &'static str| {

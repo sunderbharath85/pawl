@@ -1,12 +1,12 @@
 [package]
-name = "krypto-discovery"
+name = "pawl-discovery"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Agent discovery (ACP registry + PATH detection) and agent hook normalization/forwarding/installation for Krypto"
+description = "Agent discovery (ACP registry + PATH detection) and agent hook normalization/forwarding/installation for Pawl"
 
 [dependencies]
-krypto-protocol = { workspace = true }
+pawl-protocol = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }

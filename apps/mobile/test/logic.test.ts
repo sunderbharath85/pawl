@@ -1,7 +1,7 @@
 // Pure logic: mirror reducers, roster_intro rules, intent helpers, the biometric gate (mocked) and the relay client's
 // auth / reconnect behaviour against the in-memory relay.
 import { describe, expect, test } from "bun:test";
-import type { IntroDevice } from "@krypto/protocol";
+import type { IntroDevice } from "@pawl/protocol";
 import {
   applyMirrorBody,
   cleanDeviceName,

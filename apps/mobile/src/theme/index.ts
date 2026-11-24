@@ -1,6 +1,6 @@
 // Cozy palette pulled from the dog sprite: honey fur, cocoa outline, cream belly, red collar.
-import type { PetActivity } from "@krypto/pet-engine";
-import type { SessionStatus } from "@krypto/protocol";
+import type { PetActivity } from "@pawl/pet-engine";
+import type { SessionStatus } from "@pawl/protocol";
 import { Platform, useColorScheme } from "react-native";
 
 export interface Palette {

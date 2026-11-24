@@ -1,5 +1,5 @@
-import { activeMachineId, type HubState } from "@krypto/hub-client";
-import { derivePetViews, lastSignificantEvents, type PetActivity, type PetView } from "@krypto/pet-engine";
+import { activeMachineId, type HubState } from "@pawl/hub-client";
+import { derivePetViews, lastSignificantEvents, type PetActivity, type PetView } from "@pawl/pet-engine";
 
 /** Higher = more important to surface in the status bar. */
 export const ACTIVITY_PRIORITY: Record<PetActivity, number> = {

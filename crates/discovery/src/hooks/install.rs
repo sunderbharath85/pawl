@@ -12,11 +12,11 @@
 //!
 //! Our entries are recognised by containing the hub executable name plus `hook <source>`, so
 //! re-running replaces them in place and every other hook is left untouched. Removing takes out
-//! only our entries (and the `krypto.json` files we own once nothing else is left in them).
+//! only our entries (and the `pawl.json` files we own once nothing else is left in them).
 
 use super::{HookTarget, HOOK_EVENT_ENV};
 use anyhow::{bail, Context};
-use krypto_protocol::HookState;
+use pawl_protocol::HookState;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, InlineTable, Item, TableLike, Value as TVal};
@@ -109,7 +109,7 @@ const COPILOT_EVENTS: &[&str] = &[
 
 /// Hub binary name. A hook entry whose command mentions it counts as ours even when the hub
 /// running `install-hooks` now has another file name (e.g. a renamed dev copy).
-const HUB_BIN_NAME: &str = "krypto";
+const HUB_BIN_NAME: &str = "pawl";
 
 struct HubCmd {
     exe: PathBuf,
@@ -723,7 +723,7 @@ fn copilot_plan(cmd: &HubCmd, path: PathBuf, label: &'static str, repo_scoped: b
     Ok((vec![json_change(label, path, old, &doc)?], notes))
 }
 
-/// Our `krypto.json` loses our handlers; once nothing but `version` is left, the file goes.
+/// Our `pawl.json` loses our handlers; once nothing but `version` is left, the file goes.
 fn copilot_remove_plan(cmd: &HubCmd, path: PathBuf, label: &'static str) -> anyhow::Result<Plan> {
     let Some(old) = read_opt(&path)? else { return Ok((Vec::new(), Vec::new())) };
     let mut doc = parse_json_doc(&path, Some(&old))?;
@@ -778,7 +778,7 @@ pub(crate) fn refuse_symlinks_below(root: &Path, path: &Path) -> anyhow::Result<
             break;
         }
         if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
-            bail!("{} is a symbolic link; Krypto does not write hooks through links inside a repository", p.display());
+            bail!("{} is a symbolic link; Pawl does not write hooks through links inside a repository", p.display());
         }
         cur = p.parent();
     }
@@ -833,7 +833,7 @@ fn write_atomic(path: &Path, content: &str, confine: Option<&Path>) -> anyhow::R
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mut attempt = 0;
     let (tmp, mut file) = loop {
-        let tmp = dir.join(format!(".{name}.{:016x}.krypto-tmp", random_suffix()));
+        let tmp = dir.join(format!(".{name}.{:016x}.pawl-tmp", random_suffix()));
         match create_new(&tmp) {
             Ok(f) => break (tmp, f),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 8 => attempt += 1,
@@ -869,11 +869,11 @@ fn render_diff(c: &FileChange) -> String {
 fn run(changes: Vec<FileChange>, notes: Vec<String>, apply: bool, change: HookChange, title: &str) -> anyhow::Result<HookOutcome> {
     let mut out = String::new();
     let verb = match change {
-        HookChange::Install => "Krypto hooks for",
-        HookChange::Remove => "Removing Krypto hooks for",
+        HookChange::Install => "Pawl hooks for",
+        HookChange::Remove => "Removing Pawl hooks for",
     };
     out.push_str(&format!("{verb} {title}{}\n", if apply { "" } else { " (dry run: nothing written)" }));
-    let stamp = utc_stamp(krypto_protocol::now_ms() / 1000);
+    let stamp = utc_stamp(pawl_protocol::now_ms() / 1000);
     let mut any_change = false;
     if changes.is_empty() {
         out.push_str("\nno hook files found; nothing to change\n");
@@ -883,7 +883,7 @@ fn run(changes: Vec<FileChange>, notes: Vec<String>, apply: bool, change: HookCh
         if !c.changed {
             out.push_str(match change {
                 HookChange::Install => "already up to date; nothing to change\n",
-                HookChange::Remove => "no Krypto hooks here; nothing to change\n",
+                HookChange::Remove => "no Pawl hooks here; nothing to change\n",
             });
             continue;
         }
@@ -936,9 +936,9 @@ pub fn config_path_with_home(target: &HookTarget, home: &Path, env: &InstallEnv)
         HookTarget::Claude => env.claude_config_dir.clone().unwrap_or_else(|| home.join(".claude")).join("settings.json"),
         HookTarget::Codex => env.codex_home.clone().unwrap_or_else(|| home.join(".codex")).join("config.toml"),
         HookTarget::CopilotCli => {
-            env.copilot_home.clone().unwrap_or_else(|| home.join(".copilot")).join("hooks").join("krypto.json")
+            env.copilot_home.clone().unwrap_or_else(|| home.join(".copilot")).join("hooks").join("pawl.json")
         }
-        HookTarget::CopilotVscode { repo } => repo.join(".github").join("hooks").join("krypto.json"),
+        HookTarget::CopilotVscode { repo } => repo.join(".github").join("hooks").join("pawl.json"),
     }
 }
 
@@ -1015,7 +1015,7 @@ pub fn status_with_home(target: &HookTarget, hub_exe: &Path, home: &Path, env: &
         Err(e) => (HookState::Unsupported, Some(format!("{e:#}"))),
         Ok((false, true, _)) => (HookState::Installed, None),
         Ok((true, true, _)) => {
-            (HookState::Outdated, Some("some Krypto hooks are missing or point at another krypto executable".to_string()))
+            (HookState::Outdated, Some("some Pawl hooks are missing or point at another pawl executable".to_string()))
         }
         Ok((true, false, _)) => (HookState::Missing, None),
         Ok((false, false, notes)) => (HookState::Unsupported, Some(notes.join("; ")).filter(|s| !s.is_empty())),

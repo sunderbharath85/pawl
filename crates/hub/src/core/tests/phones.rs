@@ -2,8 +2,8 @@
 //! links (mirror + intents as `mobile`), phone invites and the offline wake.
 
 use super::*;
-use krypto_peer::{DeviceKeys, MemoryRoster, PeerNode};
-use krypto_protocol::{IntroDevice, LinkPath, MachineOs};
+use pawl_peer::{DeviceKeys, MemoryRoster, PeerNode};
+use pawl_protocol::{IntroDevice, LinkPath, MachineOs};
 
 const PHONE: &str = "pppppp000001";
 const PIXEL: &str = "pppppp000002";
@@ -105,7 +105,7 @@ async fn phones_are_devices_never_machines() {
     f.hub.on_peer_event(PeerEvent::LinkPath { device_id: PHONE.into(), path: LinkPath::Relay }).await;
     assert_eq!(f.hub.devices().iter().find(|d| d.id == PHONE).and_then(|d| d.path), Some(LinkPath::Relay));
     // A phone's presence carries nothing we keep: no repos, agents, pets or activity.
-    let now = krypto_protocol::now_ms();
+    let now = pawl_protocol::now_ms();
     let presence = Presence {
         machine: Machine { online: true, user_active_at: Some(now), ..entry(PHONE, DeviceKind::Phone, "iPhone").machine },
         agents: vec![agent("codex")],
@@ -321,7 +321,7 @@ async fn intros_wait_for_the_setting_and_never_come_from_phones() {
     assert!(msgs.iter().any(|m| matches!(m, ServerMsg::Devices { .. })));
 
     // Turned on from Settings (audited like any setting), the next intro is applied.
-    let patch: krypto_protocol::HubSettingsPatch = serde_json::from_value(json!({ "peer": { "acceptRosterIntros": true } })).unwrap();
+    let patch: pawl_protocol::HubSettingsPatch = serde_json::from_value(json!({ "peer": { "acceptRosterIntros": true } })).unwrap();
     let v = ack_result(f.hub.handle(ClientMsg::UpdateSettings { id: "u".into(), patch: Box::new(patch) }, &actor()).await);
     assert_eq!(v["settings"]["peer"]["acceptRosterIntros"], true);
     assert_eq!(v["applied"], json!(["peer.acceptRosterIntros"]));
@@ -359,7 +359,7 @@ async fn a_phone_reads_the_mirror_and_acts_as_mobile() {
         client: ClientKind::Desktop,
         confirmed: false,
         intent: approve(&req.request_id, "allow"),
-        ts: krypto_protocol::now_ms(),
+        ts: pawl_protocol::now_ms(),
     };
     f.hub.on_peer_event(PeerEvent::Body { device_id: PHONE.into(), body }).await;
     let mut log = None;
@@ -438,7 +438,7 @@ async fn a_linked_phone_gets_this_hubs_items_only() {
     let roster = Arc::new(MemoryRoster::new());
     let phone = PeerNode::new(keys, me, roster.clone(), tx);
     // A hub invite is for hubs: a joiner that says it is a phone is refused (invite purpose).
-    assert_eq!(phone.join_invite(&uri).await.unwrap_err(), krypto_peer::JoinError::Rejected);
+    assert_eq!(phone.join_invite(&uri).await.unwrap_err(), pawl_peer::JoinError::Rejected);
     assert!(!f.hub.devices().iter().any(|d| d.id == PHONE));
 
     // Paired as a phone (as a phone invite over the relay would store it), with an intro owed to it.
@@ -470,7 +470,7 @@ async fn a_linked_phone_gets_this_hubs_items_only() {
             user_active_at: None,
         },
     };
-    krypto_peer::Roster::upsert(&*roster, hub_entry);
+    pawl_peer::Roster::upsert(&*roster, hub_entry);
     phone.connect_known();
 
     let mut linked = false;
@@ -537,7 +537,7 @@ async fn a_linked_phone_gets_this_hubs_items_only() {
         client: ClientKind::Desktop,
         confirmed: false,
         intent: Intent::Cancel { session_id: global_id(MID, "missing") },
-        ts: krypto_protocol::now_ms(),
+        ts: pawl_protocol::now_ms(),
     };
     phone.send(MID, body).unwrap();
     let ack = tokio::time::timeout(Duration::from_secs(5), async {

@@ -13,7 +13,7 @@ import {
   type ToolCallStatus,
   type ToolKind,
   type ToolLocation,
-} from "@krypto/protocol";
+} from "@pawl/protocol";
 
 export type TranscriptItem =
   | { kind: "user"; key: string; text: string; ts: number }

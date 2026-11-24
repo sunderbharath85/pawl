@@ -130,7 +130,7 @@ mod tests {
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let mut r = [0u8; 8];
         getrandom::fill(&mut r).unwrap();
-        std::env::temp_dir().join(format!("krypto-peer-{tag}-{}", hex::encode(r)))
+        std::env::temp_dir().join(format!("pawl-peer-{tag}-{}", hex::encode(r)))
     }
 
     #[test]

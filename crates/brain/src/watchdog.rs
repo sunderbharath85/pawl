@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use krypto_protocol::{
+use pawl_protocol::{
     global_id, HubNotification, MachineId, NotificationLevel, PermissionRequest, Session, SessionSource,
     SessionStatus, UnixMs,
 };
@@ -249,7 +249,7 @@ fn done_nudge(machine_id: &str, s: &Session, waited: i64, count: u32, key: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krypto_protocol::{PermissionOption, PermissionOptionKind, ToolCallPayload};
+    use pawl_protocol::{PermissionOption, PermissionOptionKind, ToolCallPayload};
 
     const MIN: i64 = 60_000;
     const ME: &str = "abcdef012345";
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(n[0].level, NotificationLevel::Alert);
         assert_eq!(n[0].session_id.as_deref(), Some("s1"));
         assert_eq!(n[0].machine_id, ME);
-        assert_eq!(krypto_protocol::parse_global_id(&n[0].id).map(|(m, _)| m), Some(ME), "{}", n[0].id);
+        assert_eq!(pawl_protocol::parse_global_id(&n[0].id).map(|(m, _)| m), Some(ME), "{}", n[0].id);
         assert!(n[0].body.contains("Run cargo test"), "{}", n[0].body);
         assert!(n[0].body.contains("ai-pet"));
         // Deduped until the repeat interval passes.

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { HubEvent } from "@krypto/protocol";
+import type { HubEvent } from "@pawl/protocol";
 import { buildTranscript } from "./transcript";
 
 const MID = "abc123def456";

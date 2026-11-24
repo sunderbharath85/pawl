@@ -1,9 +1,9 @@
 {
-  "name": "krypto-vscode",
-  "displayName": "Krypto for VS Code",
-  "description": "A dog (or cat, bird, robot) that watches and drives your coding agents through the Krypto hub.",
+  "name": "pawl-vscode",
+  "displayName": "Pawl for VS Code",
+  "description": "A dog (or cat, bird, robot) that watches and drives your coding agents through the Pawl hub.",
   "version": "0.1.0",
-  "publisher": "krypto",
+  "publisher": "pawl",
   "private": true,
   "license": "MIT",
   "engines": {
@@ -23,197 +23,197 @@
   "main": "./dist/extension.js",
   "activationEvents": [
     "onStartupFinished",
-    "onWebviewPanel:krypto.petPanel"
+    "onWebviewPanel:pawl.petPanel"
   ],
   "contributes": {
     "commands": [
       {
-        "command": "krypto.startSession",
+        "command": "pawl.startSession",
         "title": "Start Session",
-        "category": "Krypto",
+        "category": "Pawl",
         "icon": "$(add)"
       },
       {
-        "command": "krypto.promptSession",
+        "command": "pawl.promptSession",
         "title": "Prompt Session",
-        "category": "Krypto",
+        "category": "Pawl",
         "icon": "$(comment)"
       },
       {
-        "command": "krypto.cancelSession",
+        "command": "pawl.cancelSession",
         "title": "Cancel Session",
-        "category": "Krypto",
+        "category": "Pawl",
         "icon": "$(debug-stop)"
       },
       {
-        "command": "krypto.approvePending",
+        "command": "pawl.approvePending",
         "title": "Approve Pending",
-        "category": "Krypto",
+        "category": "Pawl",
         "icon": "$(check)"
       },
       {
-        "command": "krypto.denyPending",
+        "command": "pawl.denyPending",
         "title": "Deny Pending",
-        "category": "Krypto",
+        "category": "Pawl",
         "icon": "$(close)"
       },
       {
-        "command": "krypto.showPet",
+        "command": "pawl.showPet",
         "title": "Show Pet",
-        "category": "Krypto"
+        "category": "Pawl"
       },
       {
-        "command": "krypto.openPetPanel",
+        "command": "pawl.openPetPanel",
         "title": "Open Pet in Editor",
-        "category": "Krypto",
+        "category": "Pawl",
         "icon": "$(open-preview)"
       },
       {
-        "command": "krypto.changeSpecies",
+        "command": "pawl.changeSpecies",
         "title": "Change Pet Species",
-        "category": "Krypto",
+        "category": "Pawl",
         "icon": "$(symbol-color)"
       },
       {
-        "command": "krypto.renamePet",
+        "command": "pawl.renamePet",
         "title": "Rename Pet",
-        "category": "Krypto",
+        "category": "Pawl",
         "icon": "$(edit)"
       },
       {
-        "command": "krypto.installHooks",
+        "command": "pawl.installHooks",
         "title": "Install Agent Hooks",
-        "category": "Krypto"
+        "category": "Pawl"
       },
       {
-        "command": "krypto.startHub",
+        "command": "pawl.startHub",
         "title": "Start Hub",
-        "category": "Krypto",
+        "category": "Pawl",
         "icon": "$(play)"
       },
       {
-        "command": "krypto.reconnect",
+        "command": "pawl.reconnect",
         "title": "Reconnect to Hub",
-        "category": "Krypto",
+        "category": "Pawl",
         "icon": "$(refresh)"
       },
       {
-        "command": "krypto.renameMachine",
+        "command": "pawl.renameMachine",
         "title": "Rename This Machine",
-        "category": "Krypto",
+        "category": "Pawl",
         "icon": "$(device-desktop)"
       },
       {
-        "command": "krypto.showMachines",
+        "command": "pawl.showMachines",
         "title": "Show Machines",
-        "category": "Krypto",
+        "category": "Pawl",
         "icon": "$(remote-explorer)"
       },
       {
-        "command": "krypto.openSettings",
+        "command": "pawl.openSettings",
         "title": "Open Settings",
-        "category": "Krypto",
+        "category": "Pawl",
         "icon": "$(settings-gear)"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "krypto",
-          "title": "Krypto",
+          "id": "pawl",
+          "title": "Pawl",
           "icon": "media/pet.svg"
         }
       ]
     },
     "views": {
-      "krypto": [
+      "pawl": [
         {
           "type": "webview",
-          "id": "krypto.petView",
+          "id": "pawl.petView",
           "name": "Pet",
           "icon": "media/pet.svg",
-          "contextualTitle": "Krypto"
+          "contextualTitle": "Pawl"
         }
       ]
     },
     "menus": {
       "view/title": [
         {
-          "command": "krypto.startSession",
-          "when": "view == krypto.petView",
+          "command": "pawl.startSession",
+          "when": "view == pawl.petView",
           "group": "navigation@1"
         },
         {
-          "command": "krypto.openPetPanel",
-          "when": "view == krypto.petView",
+          "command": "pawl.openPetPanel",
+          "when": "view == pawl.petView",
           "group": "navigation@2"
         },
         {
-          "command": "krypto.renamePet",
-          "when": "view == krypto.petView",
+          "command": "pawl.renamePet",
+          "when": "view == pawl.petView",
           "group": "1_pet@0"
         },
         {
-          "command": "krypto.changeSpecies",
-          "when": "view == krypto.petView",
+          "command": "pawl.changeSpecies",
+          "when": "view == pawl.petView",
           "group": "1_pet@1"
         },
         {
-          "command": "krypto.installHooks",
-          "when": "view == krypto.petView",
+          "command": "pawl.installHooks",
+          "when": "view == pawl.petView",
           "group": "1_pet@2"
         },
         {
-          "command": "krypto.reconnect",
-          "when": "view == krypto.petView",
+          "command": "pawl.reconnect",
+          "when": "view == pawl.petView",
           "group": "1_pet@3"
         },
         {
-          "command": "krypto.renameMachine",
-          "when": "view == krypto.petView",
+          "command": "pawl.renameMachine",
+          "when": "view == pawl.petView",
           "group": "1_pet@4"
         },
         {
-          "command": "krypto.showMachines",
-          "when": "view == krypto.petView",
+          "command": "pawl.showMachines",
+          "when": "view == pawl.petView",
           "group": "1_pet@5"
         },
         {
-          "command": "krypto.openSettings",
-          "when": "view == krypto.petView",
+          "command": "pawl.openSettings",
+          "when": "view == pawl.petView",
           "group": "1_pet@6"
         }
       ],
       "commandPalette": [
         {
-          "command": "krypto.approvePending",
-          "when": "krypto.hasPending"
+          "command": "pawl.approvePending",
+          "when": "pawl.hasPending"
         },
         {
-          "command": "krypto.denyPending",
-          "when": "krypto.hasPending"
+          "command": "pawl.denyPending",
+          "when": "pawl.hasPending"
         }
       ]
     },
     "configuration": {
-      "title": "Krypto",
+      "title": "Pawl",
       "properties": {
-        "krypto.hubUrl": {
+        "pawl.hubUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "WebSocket URL of the Krypto hub. Empty = `KRYPTO_HUB_URL` env var, else `ws://127.0.0.1:47800/ws`."
+          "markdownDescription": "WebSocket URL of the Pawl hub. Empty = `PAWL_HUB_URL` env var, else `ws://127.0.0.1:47800/ws`."
         },
-        "krypto.hubToken": {
+        "pawl.hubToken": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Hub token override. Empty = `KRYPTO_HUB_TOKEN` env var, else the `token` file in the hub data dir. Prefer leaving this empty."
+          "markdownDescription": "Hub token override. Empty = `PAWL_HUB_TOKEN` env var, else the `token` file in the hub data dir. Prefer leaving this empty."
         },
-        "krypto.hubExecutable": {
+        "pawl.hubExecutable": {
           "type": "string",
-          "default": "krypto",
-          "markdownDescription": "Command used for **Krypto: Start Hub** and **Krypto: Install Agent Hooks** (`krypto` on PATH by default)."
+          "default": "pawl",
+          "markdownDescription": "Command used for **Pawl: Start Hub** and **Pawl: Install Agent Hooks** (`pawl` on PATH by default)."
         },
-        "krypto.openEditedFiles": {
+        "pawl.openEditedFiles": {
           "type": "string",
           "enum": [
             "off",
@@ -228,7 +228,7 @@
           "default": "open",
           "markdownDescription": "What to do when an agent edits a file inside this workspace."
         },
-        "krypto.notifications": {
+        "pawl.notifications": {
           "type": "string",
           "enum": [
             "all",
@@ -243,15 +243,15 @@
           "default": "all",
           "markdownDescription": "Which events show a VS Code notification."
         },
-        "krypto.notifyOnlyWorkspaceSessions": {
+        "pawl.notifyOnlyWorkspaceSessions": {
           "type": "boolean",
           "default": false,
           "markdownDescription": "Only notify for sessions whose working directory is inside this workspace."
         },
-        "krypto.defaultAgent": {
+        "pawl.defaultAgent": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Agent id preselected by **Krypto: Start Session** (e.g. `claude-code`). Empty = last used."
+          "markdownDescription": "Agent id preselected by **Pawl: Start Session** (e.g. `claude-code`). Empty = last used."
         }
       }
     }
@@ -263,9 +263,9 @@
     "package": "bun run build && bunx @vscode/vsce package --no-dependencies"
   },
   "devDependencies": {
-    "@krypto/hub-client": "workspace:*",
-    "@krypto/pet-engine": "workspace:*",
-    "@krypto/protocol": "workspace:*",
+    "@pawl/hub-client": "workspace:*",
+    "@pawl/pet-engine": "workspace:*",
+    "@pawl/protocol": "workspace:*",
     "@types/node": "^22",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

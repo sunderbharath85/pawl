@@ -1,4 +1,4 @@
-// Build Krypto for VS Code with Bun's bundler.
+// Build Pawl for VS Code with Bun's bundler.
 //   dist/extension.js  — extension host (node, CommonJS, `vscode` external)
 //   dist/webview.js    — webview UI (browser, IIFE) + dist/webview.css
 //   dist/media/pets/   — sprite sheets copied from repo-root assets/pets (optional)

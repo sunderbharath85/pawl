@@ -1,12 +1,12 @@
 [package]
-name = "krypto-peer"
+name = "pawl-peer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Hub-to-hub pairing and E2E-encrypted peer links for Krypto"
+description = "Hub-to-hub pairing and E2E-encrypted peer links for Pawl"
 
 [dependencies]
-krypto-protocol = { workspace = true }
+pawl-protocol = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

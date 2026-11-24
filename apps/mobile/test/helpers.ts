@@ -15,7 +15,7 @@ import {
   type Session,
   type HubEvent,
   type Pet,
-} from "@krypto/protocol";
+} from "@pawl/protocol";
 import {
   DeviceKeys,
   decode,
@@ -349,7 +349,7 @@ export class FakeHub {
     this.relay.mailbox(this.keys.address).slots.set(rt, exp);
     const relay = encodeURIComponent(this.relay.url);
     const rk = this.relay.accessKey ? `&rk=${this.relay.accessKey}` : "";
-    return `krypto://peer?v=1&mid=${this.id}&pk=${encodeUrl(this.keys.publicKey)}&code=${code}&exp=${exp}&relay=${relay}&rt=${rt}${rk}`;
+    return `pawl://peer?v=1&mid=${this.id}&pk=${encodeUrl(this.keys.publicKey)}&code=${code}&exp=${exp}&relay=${relay}&rt=${rt}${rk}`;
   }
 
   #syncAllow(): void {

@@ -1,7 +1,7 @@
 //! Dry-run (or apply) hook installation against a chosen home directory.
-//! `cargo run -p krypto-discovery --example install_hooks -- <claude|codex|copilot-cli|copilot-vscode> <hub_exe> <home_dir> [--apply]`
+//! `cargo run -p pawl-discovery --example install_hooks -- <claude|codex|copilot-cli|copilot-vscode> <hub_exe> <home_dir> [--apply]`
 //! Pass a scratch directory as `home_dir` to try it without touching your real configs.
-use krypto_discovery::hooks::{install_with_home, HookTarget, InstallEnv};
+use pawl_discovery::hooks::{install_with_home, HookTarget, InstallEnv};
 use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {

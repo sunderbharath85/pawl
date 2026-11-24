@@ -2,7 +2,7 @@
 // frame (deliver live, queue, refuse), config frames from its owner, and when a push wake is allowed. The Durable
 // Object (mailbox.ts) only adds sockets, RPC and alarms around this.
 
-import { RELAY_FRAME_MAX_BYTES, type PeerEnvelope } from "@krypto/protocol";
+import { RELAY_FRAME_MAX_BYTES, type PeerEnvelope } from "@pawl/protocol";
 import { AccessControl, type SlotResult } from "./allow";
 import { isValidPk, isValidToken, msgFrame, utf8Length } from "./frames";
 import {

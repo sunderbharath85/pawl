@@ -1,7 +1,7 @@
 // Revoke a paired device; for a hub that had introduced devices here (group roster, step 7), then ask in-app whether
 // to remove those too, and revoke each one on yes.
 import { useCallback } from "react";
-import { introducedByRevoked, revokeIntroducedPrompt, revokeManyText } from "@krypto/hub-client";
+import { introducedByRevoked, revokeIntroducedPrompt, revokeManyText } from "@pawl/hub-client";
 import { useConfirm } from "./Confirm";
 import { usePanel } from "./context";
 

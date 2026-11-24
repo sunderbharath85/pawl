@@ -6,7 +6,7 @@ import type { KvStore } from "./storage";
 
 export const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 export const PUSH_MIN_INTERVAL_MS = 60_000;
-export const PUSH_TITLE = "Krypto";
+export const PUSH_TITLE = "Pawl";
 export const PUSH_BODY = "Your pet needs you";
 export const PUSH_KEY = "push";
 

@@ -1,8 +1,8 @@
 // PhoneNode end to end against the in-memory relay and fake hubs: pairing (joiner side), hello / presence, sync,
 // live mirror, intents, roster_intro rules, not_allowed retries, revocation, persistence across restarts.
 import { describe, expect, test } from "bun:test";
-import { INTENT_TIMEOUT_MS } from "@krypto/protocol";
-import type { PeerEnvelope } from "@krypto/protocol";
+import { INTENT_TIMEOUT_MS } from "@pawl/protocol";
+import type { PeerEnvelope } from "@pawl/protocol";
 import { IntentError, MemoryStore, PairError, PhoneNode, encode, seal } from "../src/lib/peer";
 import { FakeClock, FakeHub, FakeRelay, flush, sampleEvent, sampleRequest, sampleSession, seededRandom } from "./helpers";
 
@@ -58,9 +58,9 @@ describe("PhoneNode pairing", () => {
     expect(hub.bodiesFrom(phone.deviceId, "presence").length).toBeGreaterThan(0);
     // Relay config + roster persisted.
     await phone.flush();
-    expect(store.data.get("krypto.hubs")).toBe(JSON.stringify([hub.id]));
-    expect(JSON.parse(store.data.get("krypto.relay")!).url).toBe(relay.url);
-    expect(store.data.get("krypto.sk")).toMatch(/^[0-9a-f]{64}$/);
+    expect(store.data.get("pawl.hubs")).toBe(JSON.stringify([hub.id]));
+    expect(JSON.parse(store.data.get("pawl.relay")!).url).toBe(relay.url);
+    expect(store.data.get("pawl.sk")).toMatch(/^[0-9a-f]{64}$/);
   });
 
   test("a used invite is rejected (relay not_allowed) and the adopted relay is turned off", async () => {
@@ -98,8 +98,8 @@ describe("PhoneNode pairing", () => {
     p.catch(() => {});
     await clock.advance(11_000);
     await expect(p).rejects.toMatchObject({ code: "timeout" });
-    await expect(phone.pair("krypto://peer?v=1")).rejects.toMatchObject({ code: "bad_uri" });
-    const lan = `krypto://peer?v=1&mid=macmini00001&pk=${hub.keys.address}&addr=10.0.0.2:47801&code=${"A".repeat(22)}&exp=1`;
+    await expect(phone.pair("pawl://peer?v=1")).rejects.toMatchObject({ code: "bad_uri" });
+    const lan = `pawl://peer?v=1&mid=macmini00001&pk=${hub.keys.address}&addr=10.0.0.2:47801&code=${"A".repeat(22)}&exp=1`;
     await expect(phone.pair(lan)).rejects.toMatchObject({ code: "no_relay" });
   });
 
@@ -370,7 +370,7 @@ describe("PhoneNode roster_intro", () => {
     expect(phone.deviceId).not.toBe(oldId);
     expect(phone.publicKey).not.toBe(oldPk);
     expect(phone.getSnapshot().hubs).toEqual([]);
-    expect(store.data.has("krypto.hubs")).toBe(false);
+    expect(store.data.has("pawl.hubs")).toBe(false);
     void flush;
   });
 });
@@ -508,7 +508,7 @@ describe("PhoneNode name rules + write-ahead rx", () => {
     };
     let storedAtEvent = -1;
     phone.onEvent((e) => {
-      if (e.type === "permission_request") storedAtEvent = JSON.parse(inner.data.get(`krypto.seq.${hub.id}`)!).rx;
+      if (e.type === "permission_request") storedAtEvent = JSON.parse(inner.data.get(`pawl.seq.${hub.id}`)!).rx;
     });
     hold = true;
     hub.mirror({ type: "permission_request", request: sampleRequest(hub.id, "wa1") });

@@ -2,8 +2,8 @@
 // An invite URI holds a one-time secret (and, with a relay, its access key): it lives only in memory here (never
 // logged, never in localStorage) and is dropped the moment it expires.
 import { useSyncExternalStore } from "react";
-import { inviteUsedBy, type PendingInvite } from "@krypto/hub-client";
-import { PEER_DEFAULT_PORT, type Machine } from "@krypto/protocol";
+import { inviteUsedBy, type PendingInvite } from "@pawl/hub-client";
+import { PEER_DEFAULT_PORT, type Machine } from "@pawl/protocol";
 import { timeAgo } from "./format";
 
 export { inviteUsedBy };
@@ -11,13 +11,13 @@ export { inviteUsedBy };
 /** Request kinds whose failures we explain. */
 export type PairingAction = "create_invite" | "create_phone_invite" | "join_peer" | "revoke_device";
 
-const NOT_CONNECTED = "Krypto isn't connected to the hub right now. Try again once it's back.";
+const NOT_CONNECTED = "Pawl isn't connected to the hub right now. Try again once it's back.";
 
 const PAIRING_ERRORS: Record<string, string> = {
   peer_listener_off:
     "This hub isn't listening for other machines yet. Turn on its peer listener (see below), then create the invite again.",
-  bad_uri: "That isn't a Krypto invite. Copy the whole krypto://peer?… link (or the krypto peer join line) from the other machine.",
-  self_invite: "That invite was made on this machine. Paste it into Krypto on the other machine instead.",
+  bad_uri: "That isn't a Pawl invite. Copy the whole pawl://peer?… link (or the pawl peer join line) from the other machine.",
+  self_invite: "That invite was made on this machine. Paste it into Pawl on the other machine instead.",
   unreachable:
     "Couldn't reach the other machine. Check that both are on the same network, its peer listener is on, and its firewall allows the port (or that both machines are connected to the relay).",
   invite_rejected:
@@ -27,7 +27,7 @@ const PAIRING_ERRORS: Record<string, string> = {
   unauthorized: "The hub did not accept our token. Reconnect from Settings.",
   relay_off:
     "Phones pair through your relay, and this hub isn't connected to one. Set up the relay in Settings → Relay, then create the code again.",
-  unsupported: "This hub can't pair phones yet. Update krypto on this machine and restart the hub.",
+  unsupported: "This hub can't pair phones yet. Update pawl on this machine and restart the hub.",
   closed: NOT_CONNECTED,
   disconnected: NOT_CONNECTED,
 };
@@ -35,7 +35,7 @@ const PAIRING_ERRORS: Record<string, string> = {
 /** `invalid` means different things per request. */
 const INVALID_BY_ACTION: Record<PairingAction, string> = {
   create_invite: `The hub can't tell other machines where to find it (its listener binds every network). Enter this machine's LAN address and port, e.g. 192.168.1.20:${PEER_DEFAULT_PORT}.`,
-  create_phone_invite: "The hub turned down that phone invite. Try another lifetime, or update krypto on this machine.",
+  create_phone_invite: "The hub turned down that phone invite. Try another lifetime, or update pawl on this machine.",
   join_peer: "That invite isn't valid. Ask for a new one.",
   revoke_device: "The hub refused to unpair that machine.",
 };
@@ -74,7 +74,7 @@ export function presenceText(machine: Pick<Machine, "online" | "lastSeen">, now:
 
 /** The CLI equivalent shown next to an invite. */
 export function joinCommand(uri: string): string {
-  return `krypto peer join "${uri}"`;
+  return `pawl peer join "${uri}"`;
 }
 
 /** Invite lifetimes offered in the UI (seconds); the hub allows 60..3600. */

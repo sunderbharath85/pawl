@@ -3,7 +3,7 @@
 //! Mood is clamped to 0..=100, xp only grows (saturating). Finished turns and plans make
 //! the pet happy and earn xp; errors, refusals and failed tools make it droop.
 
-use krypto_protocol::{
+use pawl_protocol::{
     global_id, Agent, EventType, HookPayload, PermissionResolvedPayload, Pet, ResolvedBy, Species, StopPayload,
     StopReason, ToolCallStatus,
 };
@@ -186,7 +186,7 @@ pub fn on_event(pet: &mut Pet, kind: EventType, payload: &serde_json::Value) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krypto_protocol::{AgentSource, HookSource, PermissionOutcome};
+    use pawl_protocol::{AgentSource, HookSource, PermissionOutcome};
     use serde_json::json;
 
     const M1: &str = "abcdef012345";
@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(p.agent_id, "codex");
         assert_eq!(p.machine_id, M1);
         assert_eq!(p.id, "abcdef012345:pet-codex");
-        assert_eq!(krypto_protocol::parse_global_id(&p.id), Some((M1, "pet-codex")));
+        assert_eq!(pawl_protocol::parse_global_id(&p.id), Some((M1, "pet-codex")));
         assert_eq!(p.skin, "default");
         assert!(DOG_NAMES.contains(&p.name.as_str()));
         assert_eq!(p, default_pet(&agent("codex"), &[]), "deterministic");

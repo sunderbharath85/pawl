@@ -13,7 +13,7 @@ import {
   type ToolCallStatus,
   type ToolKind,
   type ToolLocation,
-} from "@krypto/protocol";
+} from "@pawl/protocol";
 
 export type FeedItem =
   | { kind: "text"; key: string; role: "agent" | "thought" | "user"; text: string; ts: number }

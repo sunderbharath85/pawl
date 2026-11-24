@@ -1,5 +1,5 @@
 // One session in a list: agent + folder, status pill, last activity; opens the transcript.
-import type { Agent, Session } from "@krypto/protocol";
+import type { Agent, Session } from "@pawl/protocol";
 import { useRouter } from "expo-router";
 import { Pressable, Text, View } from "react-native";
 import { Icon, Pill } from "@/components/ui";

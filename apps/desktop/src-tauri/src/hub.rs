@@ -1,5 +1,5 @@
 //! Hub discovery for the desktop shell: credentials (URL + bearer token from the
-//! shared data dir), a tiny `/health` probe, and spawning `krypto serve` when the
+//! shared data dir), a tiny `/health` probe, and spawning `pawl serve` when the
 //! hub is not running.
 //!
 //! The hub only ever listens on localhost, so `/health` is probed with a minimal
@@ -14,8 +14,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Folder under the OS data dir. Mirrors `HUB_DATA_DIR_NAME` in `@krypto/protocol` / `krypto-protocol`.
-pub const HUB_DATA_DIR_NAME: &str = "krypto";
+/// Folder under the OS data dir. Mirrors `HUB_DATA_DIR_NAME` in `@pawl/protocol` / `pawl-protocol`.
+pub const HUB_DATA_DIR_NAME: &str = "pawl";
 /// Token file inside the data dir. Mirrors `HUB_TOKEN_FILE`.
 pub const HUB_TOKEN_FILE: &str = "token";
 /// The hub's config file inside the data dir (its top-level `port` is where clients find the hub).
@@ -73,7 +73,7 @@ struct HealthBody {
     machine_id: Option<String>,
 }
 
-/// The `krypto serve` child we launched (if any). The hub is a background daemon:
+/// The `pawl serve` child we launched (if any). The hub is a background daemon:
 /// it keeps running after the desktop app quits, so we never kill it.
 #[derive(Default)]
 pub struct HubProcess {
@@ -87,7 +87,7 @@ pub fn data_dir() -> Option<PathBuf> {
 /// How long checking a runtime.json port may take (localhost: a closed port fails at once).
 const VERIFY_TIMEOUT: Duration = Duration::from_millis(800);
 
-/// Hub HTTP base URL: `KRYPTO_HUB_URL` (http/ws, with or without `/ws`), else the port the running hub bound
+/// Hub HTTP base URL: `PAWL_HUB_URL` (http/ws, with or without `/ws`), else the port the running hub bound
 /// (`runtime.json`, only once its `/health` names this machine), else the `port` saved in config.toml
 /// (Settings → Hub port), else the default. A saved port that is not applied yet therefore never hides the
 /// running hub, and a stale or planted runtime.json never receives the token.
@@ -103,7 +103,7 @@ pub fn hub_health_now(timeout: Duration) -> HubHealth {
 
 /// The URL, plus the `/health` answer when it came from a verified runtime.json port.
 fn resolve_hub_url() -> (String, Option<HubHealth>) {
-    if let Ok(raw) = std::env::var("KRYPTO_HUB_URL") {
+    if let Ok(raw) = std::env::var("PAWL_HUB_URL") {
         let raw = raw.trim();
         if !raw.is_empty() {
             return (normalize_http_url(raw), None);
@@ -241,7 +241,7 @@ pub fn credentials() -> HubCredentials {
     let url = hub_http_url();
     let ws_url = ws_url_for(&url);
     let dir = data_dir();
-    let (token, token_source) = match std::env::var("KRYPTO_HUB_TOKEN") {
+    let (token, token_source) = match std::env::var("PAWL_HUB_TOKEN") {
         Ok(t) if !t.trim().is_empty() => (t.trim().to_string(), "env"),
         _ => match dir
             .as_ref()
@@ -324,7 +324,7 @@ fn probe_health_inner(http_url: &str, timeout: Duration) -> Result<HealthBody, S
     stream.set_write_timeout(Some(timeout)).ok();
     let host_header = if hp.host.contains(':') { format!("[{}]:{}", hp.host, hp.port) } else { format!("{}:{}", hp.host, hp.port) };
     let req = format!(
-        "GET /health HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: krypto-desktop\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        "GET /health HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: pawl-desktop\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(req.as_bytes()).map_err(|e| format!("write: {e}"))?;
 
@@ -410,9 +410,9 @@ fn decode_chunked(mut data: &[u8]) -> Vec<u8> {
 
 fn hub_exe_name() -> &'static str {
     if cfg!(windows) {
-        "krypto.exe"
+        "pawl.exe"
     } else {
-        "krypto"
+        "pawl"
     }
 }
 
@@ -420,7 +420,7 @@ fn is_file(p: &Path) -> bool {
     p.metadata().map(|m| m.is_file()).unwrap_or(false)
 }
 
-/// Look for `krypto` in PATH (honours PATHEXT on Windows).
+/// Look for `pawl` in PATH (honours PATHEXT on Windows).
 fn which_in_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let exts: Vec<String> = if cfg!(windows) {
@@ -452,10 +452,10 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Where `krypto` lives: `KRYPTO_HUB_BIN`, next to this executable (bundled installs),
+/// Where `pawl` lives: `PAWL_HUB_BIN`, next to this executable (bundled installs),
 /// on PATH, or (debug builds only) the repo's cargo target dirs.
 pub fn find_hub_binary() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("KRYPTO_HUB_BIN") {
+    if let Ok(p) = std::env::var("PAWL_HUB_BIN") {
         let p = PathBuf::from(p);
         if is_file(&p) {
             return Some(p);
@@ -466,7 +466,7 @@ pub fn find_hub_binary() -> Option<PathBuf> {
         if is_file(&candidate) {
             return Some(candidate);
         }
-        // macOS bundles: Contents/MacOS/<app> → Contents/Resources/krypto
+        // macOS bundles: Contents/MacOS/<app> → Contents/Resources/pawl
         let resources = dir.join("../Resources").join(hub_exe_name());
         if is_file(&resources) {
             return Some(resources);
@@ -494,7 +494,7 @@ fn open_spawn_log() -> Option<File> {
     OpenOptions::new().create(true).write(true).truncate(true).open(dir.join(SPAWN_LOG_FILE)).ok()
 }
 
-/// Blocking: if the hub is healthy return immediately, otherwise spawn `krypto serve`
+/// Blocking: if the hub is healthy return immediately, otherwise spawn `pawl serve`
 /// detached and wait up to ~10 s for `/health`.
 pub fn start_hub_blocking(proc_state: &HubProcess) -> Result<StartHubResult, String> {
     let health = hub_health_now(Duration::from_millis(800));
@@ -515,12 +515,12 @@ pub fn start_hub_blocking(proc_state: &HubProcess) -> Result<StartHubResult, Str
     } else {
         let bin = find_hub_binary().ok_or_else(|| {
             format!(
-                "Could not find `{}`. Install it on PATH, place it next to the desktop app, or set KRYPTO_HUB_BIN.",
+                "Could not find `{}`. Install it on PATH, place it next to the desktop app, or set PAWL_HUB_BIN.",
                 hub_exe_name()
             )
         })?;
         let mut cmd = Command::new(&bin);
-        // No --port: the hub reads KRYPTO_HUB_URL (inherited) and config.toml itself, in the same order as
+        // No --port: the hub reads PAWL_HUB_URL (inherited) and config.toml itself, in the same order as
         // hub_http_url(). A flag would pin the port and lock the Hub port setting in the UI.
         cmd.arg("serve");
         cmd.stdin(Stdio::null());
@@ -565,7 +565,7 @@ pub fn start_hub_blocking(proc_state: &HubProcess) -> Result<StartHubResult, Str
                 let log_hint = data_dir()
                     .map(|d| format!(" See {}.", d.join(SPAWN_LOG_FILE).display()))
                     .unwrap_or_default();
-                return Err(format!("krypto exited early ({status}).{log_hint}"));
+                return Err(format!("pawl exited early ({status}).{log_hint}"));
             }
         }
         if Instant::now() >= deadline {

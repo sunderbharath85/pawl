@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { PermissionRequest } from "@krypto/protocol";
+import type { PermissionRequest } from "@pawl/protocol";
 import {
   applyAck,
   applyWelcome,

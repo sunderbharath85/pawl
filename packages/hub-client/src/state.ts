@@ -17,7 +17,7 @@ import type {
   ServerMsg,
   Session,
   Welcome,
-} from "@krypto/protocol";
+} from "@pawl/protocol";
 import { isPhoneOs } from "./machine";
 
 /** `Omit` that distributes over unions (keeps discriminated unions intact). */

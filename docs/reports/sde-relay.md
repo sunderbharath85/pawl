@@ -1,6 +1,6 @@
 # sde-relay report — migration step 6, relay service (phase A)
 
-Branch `step-5-remote-commands` (nothing committed). Scope: `services/relay/` (`@krypto/relay`), per CONTRACTS.md
+Branch `step-5-remote-commands` (nothing committed). Scope: `services/relay/` (`@pawl/relay`), per CONTRACTS.md
 "Step 6 — Relay" → "Relay service (sde-relay)" incl. "Access key + abuse limits". **Not deployed.**
 
 Two rounds: the initial build (decisions 1–6 accepted by t13), then the security-review fixes A + 1–8 (below).
@@ -12,8 +12,8 @@ round 1; no dependency changes in round 2):
 
 | File | What |
 |---|---|
-| `package.json` | `@krypto/relay`; deps `@krypto/protocol` (workspace:*), `tweetnacl` ^1.0.3; dev `wrangler` ^4.167.0, `@cloudflare/workers-types` ^5.20261124.1, `typescript`; scripts typecheck (both configs) / test / dev / smoke |
-| `wrangler.jsonc` | Worker `krypto-relay`, compat date 2026-11-20, DO `MAILBOX` → `Mailbox` (`v1` `new_sqlite_classes`), `ratelimits` `CONNECT_LIMIT` 30/60 s, observability + logs + invocation logs + logpush **off**, dev 127.0.0.1:8787. No secrets |
+| `package.json` | `@pawl/relay`; deps `@pawl/protocol` (workspace:*), `tweetnacl` ^1.0.3; dev `wrangler` ^4.167.0, `@cloudflare/workers-types` ^5.20261124.1, `typescript`; scripts typecheck (both configs) / test / dev / smoke |
+| `wrangler.jsonc` | Worker `pawl-relay`, compat date 2026-11-20, DO `MAILBOX` → `Mailbox` (`v1` `new_sqlite_classes`), `ratelimits` `CONNECT_LIMIT` 30/60 s, observability + logs + invocation logs + logpush **off**, dev 127.0.0.1:8787. No secrets |
 | `.gitignore` | `.dev.vars`, `.dev.vars.*`, `.wrangler/` |
 | `.dev.vars` | **local only, git-ignored, not for commit**: a fresh random `RELAY_ACCESS_KEY` for `wrangler dev` |
 | `tsconfig.json` / `tsconfig.bun.json` | worker (`src/`, workers-types, ES2022) / tests + scripts (bun types, ES2022) |

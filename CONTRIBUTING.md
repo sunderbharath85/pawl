@@ -1,4 +1,4 @@
-# Contributing to Krypto
+# Contributing to Pawl
 
 Thanks for helping. This file covers setting up a dev environment, the checks a pull request must pass, and the conventions the project uses. By taking part you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md). Security problems go through [SECURITY.md](SECURITY.md), not public issues.
 
@@ -16,7 +16,7 @@ Thanks for helping. This file covers setting up a dev environment, the checks a 
 
 Per OS:
 
-- **Windows:** use Git Bash or PowerShell. The Rust toolchain needs the MSVC build tools (rustup offers to install them). WebView2, which Tauri needs, ships with Windows 11. Binaries end in `.exe` (`.\target\debug\krypto.exe` in PowerShell).
+- **Windows:** use Git Bash or PowerShell. The Rust toolchain needs the MSVC build tools (rustup offers to install them). WebView2, which Tauri needs, ships with Windows 11. Binaries end in `.exe` (`.\target\debug\pawl.exe` in PowerShell).
 - **macOS:** install the Xcode Command Line Tools (`xcode-select --install`).
 - **Linux:** install the WebKitGTK and other system packages listed in the Tauri prerequisites for your distribution.
 
@@ -24,7 +24,7 @@ Per OS:
 
 ```sh
 bun install                    # at the repository root: installs every workspace package
-cargo build -p krypto-hub      # builds the hub and the `krypto` CLI into target/debug/
+cargo build -p pawl-hub      # builds the hub and the `pawl` CLI into target/debug/
 ```
 
 The [README quickstart](README.md#quickstart-from-source) shows how to run the hub, the desktop app and the VS Code extension.
@@ -78,7 +78,7 @@ Add focused unit tests for new logic. Rust tests live next to the code (`#[cfg(t
 ## Contracts and wire types
 
 - [docs/CONTRACTS.md](docs/CONTRACTS.md) defines the interfaces between the parts of the system: crate APIs, the hub's endpoints, the client packages, and who owns which directory. Read the sections for the code you are changing.
-- [packages/protocol/src/index.ts](packages/protocol/src/index.ts) (`@krypto/protocol`) is the source of truth for every type that goes over the wire. [crates/protocol/src/lib.rs](crates/protocol/src/lib.rs) (`krypto-protocol`) mirrors it in Rust.
+- [packages/protocol/src/index.ts](packages/protocol/src/index.ts) (`@pawl/protocol`) is the source of truth for every type that goes over the wire. [crates/protocol/src/lib.rs](crates/protocol/src/lib.rs) (`pawl-protocol`) mirrors it in Rust.
 - Import the shared types; do not redefine them in another package or crate.
 - A change to the wire format updates both files in the same pull request, keeps them in step (field names, enum values, optional fields), and updates `docs/CONTRACTS.md`. Bump `PROTOCOL_VERSION` in both files when the change is breaking.
 - [PLAN.md](PLAN.md) describes the target design and the order of the migration steps. Larger changes should fit it, or start with an issue that proposes changing it.
@@ -96,11 +96,11 @@ Add focused unit tests for new logic. Rust tests live next to the code (`#[cfg(t
   Types: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `build`, `ci`, `chore`. Use the part of the repo as the scope: `hub`, `acp`, `discovery`, `brain`, `protocol`, `hub-client`, `pet-engine`, `desktop`, `vscode`, `mobile`, `art`, or `security`. Mark breaking changes with `!` after the type or scope and a `BREAKING CHANGE:` footer. Examples:
 
   ```
-  feat(hub): add `krypto machine` to show and rename this machine
+  feat(hub): add `pawl machine` to show and rename this machine
   fix(discovery): honour PATHEXT when detecting agents on Windows
   feat(protocol)!: make every wire id global
   ```
 
 ## Reporting bugs and asking for features
 
-Use the issue templates. For bugs, include `krypto --version`, your OS, the agent and adapter involved, and the relevant part of `hub.log` from the hub's data directory. Remove tokens, keys and private paths before you paste anything.
+Use the issue templates. For bugs, include `pawl --version`, your OS, the agent and adapter involved, and the relevant part of `hub.log` from the hub's data directory. Remove tokens, keys and private paths before you paste anything.

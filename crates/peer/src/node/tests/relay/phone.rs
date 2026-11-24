@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::intro::MAX_INTRO_DEVICES;
-use krypto_protocol::{ClientKind, Intent, IntentStatus};
+use pawl_protocol::{ClientKind, Intent, IntentStatus};
 
 const P: &str = "pppppppppppp";
 const D: &str = "dddddddddddd";

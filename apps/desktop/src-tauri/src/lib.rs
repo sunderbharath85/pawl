@@ -1,6 +1,6 @@
-//! Krypto desktop shell (Tauri 2): pet strip window, panel window, tray, and
+//! Pawl desktop shell (Tauri 2): pet strip window, panel window, tray, and
 //! the small amount of native glue the React UI needs (hub credentials, health,
-//! spawning `krypto serve`, click-through hit-testing).
+//! spawning `pawl serve`, click-through hit-testing).
 
 mod hub;
 mod pet_window;
@@ -27,7 +27,7 @@ async fn hub_health() -> Result<HubHealth, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Spawn `krypto serve` (PATH, next to the app, or `KRYPTO_HUB_BIN`) unless already healthy.
+/// Spawn `pawl serve` (PATH, next to the app, or `PAWL_HUB_BIN`) unless already healthy.
 #[tauri::command]
 async fn start_hub(app: tauri::AppHandle) -> Result<StartHubResult, String> {
     let handle = app.clone();
@@ -38,7 +38,7 @@ async fn start_hub(app: tauri::AppHandle) -> Result<StartHubResult, String> {
     Ok(res)
 }
 
-/// Path of the `krypto` binary we would launch, if any.
+/// Path of the `pawl` binary we would launch, if any.
 #[tauri::command]
 fn locate_hub() -> Option<String> {
     hub::find_hub_binary().map(|p| p.display().to_string())
@@ -99,5 +99,5 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running Krypto desktop");
+        .expect("error while running Pawl desktop");
 }

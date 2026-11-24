@@ -1,4 +1,4 @@
-// Pair: scan the QR code the desktop shows under "Pair a phone" (or paste the link, or open a krypto:// link), check
+// Pair: scan the QR code the desktop shows under "Pair a phone" (or paste the link, or open a pawl:// link), check
 // what it is, then confirm. Nothing pairs without the confirm tap. The invite's code, relay token and access key are
 // never shown or logged.
 import { CameraView, useCameraPermissions } from "expo-camera";
@@ -19,13 +19,13 @@ type Step =
   | { kind: "done"; hub: HubView };
 
 const PAIR_ERROR_TEXT: Record<string, string> = {
-  bad_uri: "That isn't a Krypto pairing code.",
+  bad_uri: "That isn't a Pawl pairing code.",
   no_relay: "That's a computer-to-computer invite. On the desktop, use Machines & pairing → Pair a phone to get a phone QR code.",
-  other_relay: "That computer uses a different relay than the ones already paired. Pair phones within one Krypto group.",
+  other_relay: "That computer uses a different relay than the ones already paired. Pair phones within one Pawl group.",
   self_invite: "That code belongs to this phone.",
   busy: "Already pairing — one moment.",
   unreachable: "Couldn't reach the relay. Check this phone's internet connection, then scan again.",
-  timeout: "The computer didn't answer in time. Make sure Krypto is running there, then try a fresh code.",
+  timeout: "The computer didn't answer in time. Make sure Pawl is running there, then try a fresh code.",
   invite_rejected: "That code was already used or has expired. Make a new one on the computer.",
 };
 
@@ -45,11 +45,11 @@ function Scanner({ onCode }: { onCode: (text: string) => void }) {
   if (!permission.granted) {
     return (
       <Card style={{ alignItems: "center" }}>
-        <Body style={{ textAlign: "center" }}>Krypto needs the camera to scan the pairing QR code on your computer's screen.</Body>
+        <Body style={{ textAlign: "center" }}>Pawl needs the camera to scan the pairing QR code on your computer's screen.</Body>
         {permission.canAskAgain ? (
           <Button title="Allow camera" kind="primary" onPress={() => void request()} style={{ alignSelf: "stretch" }} />
         ) : (
-          <Body muted style={{ textAlign: "center" }}>Camera access is off for Krypto. Turn it on in Settings, or paste the link below.</Body>
+          <Body muted style={{ textAlign: "center" }}>Camera access is off for Pawl. Turn it on in Settings, or paste the link below.</Body>
         )}
       </Card>
     );
@@ -101,7 +101,7 @@ export default function PairScreen() {
     setStep({ kind: "confirm", uri, summary: inviteSummary(inv) });
   };
 
-  // Opened from a krypto://peer link: go straight to the confirm step.
+  // Opened from a pawl://peer link: go straight to the confirm step.
   useEffect(() => {
     if (typeof params.uri === "string" && params.uri) consider(params.uri);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -134,7 +134,7 @@ export default function PairScreen() {
       {step.kind === "scan" ? (
         <Animated.View entering={FadeIn} style={{ gap: 16 }}>
           <Body muted>
-            On your computer, open Krypto → Machines & pairing → <Text style={{ fontWeight: "800", color: t.text }}>Pair a phone</Text>, then point this camera at the QR code.
+            On your computer, open Pawl → Machines & pairing → <Text style={{ fontWeight: "800", color: t.text }}>Pair a phone</Text>, then point this camera at the QR code.
           </Body>
           <Scanner onCode={consider} />
           <Card>
@@ -146,7 +146,7 @@ export default function PairScreen() {
                 // A whole link pasted at once: go on without another tap.
                 if (v.length - paste.length > 40 && tryParseInvite(extractInviteUri(v) ?? v)) consider(v);
               }}
-              placeholder="krypto://peer?…"
+              placeholder="pawl://peer?…"
               placeholderTextColor={t.textFaint}
               autoCapitalize="none"
               autoCorrect={false}

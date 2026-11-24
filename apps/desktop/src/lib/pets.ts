@@ -1,7 +1,7 @@
 import { useMemo } from "react";
-import { activeMachineId, lastEventsBySession, type HubState } from "@krypto/hub-client";
-import { derivePetViews, type PetView } from "@krypto/pet-engine";
-import { DEFAULT_SPECIES, type Pet } from "@krypto/protocol";
+import { activeMachineId, lastEventsBySession, type HubState } from "@pawl/hub-client";
+import { derivePetViews, type PetView } from "@pawl/pet-engine";
+import { DEFAULT_SPECIES, type Pet } from "@pawl/protocol";
 
 /** Client-only placeholder id (never sent to the hub; real pet ids are global). */
 export const FALLBACK_PET_ID = "local-dog";

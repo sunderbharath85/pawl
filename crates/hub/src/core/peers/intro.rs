@@ -12,8 +12,8 @@
 //! is not linked gets one small envelope through its relay mailbox (so the relay sends it a
 //! content-free push), at most once per phone per [`PHONE_WAKE_INTERVAL`].
 
-use krypto_peer::{WakeError, MAX_INTRO_DEVICES};
-use krypto_protocol::{IntroDevice, MachineOs};
+use pawl_peer::{WakeError, MAX_INTRO_DEVICES};
+use pawl_protocol::{IntroDevice, MachineOs};
 
 use super::*;
 /// At most one offline wake per phone this often.
@@ -47,7 +47,7 @@ pub(crate) fn intro_device(e: &RosterEntry) -> IntroDevice {
         kind: e.device.kind,
         name: e.device.name.clone(),
         public_key: e.device.public_key.clone(),
-        addr: e.device.addr.clone().filter(|a| e.device.kind == DeviceKind::Hub && krypto_peer::peer_addr_ok(a)),
+        addr: e.device.addr.clone().filter(|a| e.device.kind == DeviceKind::Hub && pawl_peer::peer_addr_ok(a)),
         os,
     }
 }
@@ -73,11 +73,11 @@ pub(crate) struct Stored<'a> {
 
 /// Decoded public key bytes (None if the stored string is not a 32-byte base64 key).
 fn key_bytes(b64: &str) -> Option<[u8; 32]> {
-    krypto_peer::b64::decode(b64).ok().and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok())
+    pawl_peer::b64::decode(b64).ok().and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok())
 }
 
 /// Judge each device of an intro from `sender` (already known to be a paired hub). `structural`
-/// is the link layer's check of one entry (`krypto_peer::check_intro_device`: id, name, addr, key
+/// is the link layer's check of one entry (`pawl_peer::check_intro_device`: id, name, addr, key
 /// of 32 bytes and not low-order); it returns the key bytes. Everything that needs this hub's
 /// roster is checked here: never us, never the sender, never a replacement, never a revoked id or
 /// key.
@@ -121,7 +121,7 @@ pub(crate) fn judge_intro(
             if let Some(s) = stored.iter().find(|s| key_bytes(&s.entry.device.public_key) == Some(key)) {
                 return IntroOutcome::Conflict(if s.revoked { "its key was revoked here" } else { "its key belongs to another device here" });
             }
-            IntroOutcome::Add { public_key: krypto_peer::b64::encode(&key) }
+            IntroOutcome::Add { public_key: pawl_peer::b64::encode(&key) }
         })
         .collect()
 }
@@ -288,7 +288,7 @@ impl Hub {
             return;
         }
         let (new, list) = (new_id.to_string(), group.clone());
-        let now = krypto_protocol::now_ms();
+        let now = pawl_protocol::now_ms();
         let queued = self
             .inner
             .store
@@ -344,7 +344,7 @@ impl Hub {
         for chunk in send.chunks(MAX_INTRO_DEVICES) {
             match self.inner.peer.send_roster_intro(recipient, chunk.to_vec()) {
                 Ok(()) => done.extend(chunk.iter().map(|d| d.id.clone())),
-                Err(krypto_peer::SendError::NotLinked) => break,
+                Err(pawl_peer::SendError::NotLinked) => break,
                 Err(e) => {
                     tracing::warn!(device = %recipient, "roster_intro not sent: {e}");
                     break;
@@ -405,7 +405,7 @@ impl Hub {
         };
         let my_key = key_bytes(&self.inner.peer.public_b64()).unwrap_or([0; 32]);
         let known: Vec<Stored<'_>> = stored.iter().map(|(entry, revoked)| Stored { entry, revoked: *revoked }).collect();
-        let mut outcomes = judge_intro(&devices, (&self.inner.machine_id, &my_key), &sender, &known, krypto_peer::check_intro_device);
+        let mut outcomes = judge_intro(&devices, (&self.inner.machine_id, &my_key), &sender, &known, pawl_peer::check_intro_device);
         let mut devices = devices;
         for (d, why) in invalid {
             devices.push(d);
@@ -432,7 +432,7 @@ impl Hub {
                     skipped.push(skip(SkipWhy::Full, "this machine introduced too many devices"))
                 }
                 IntroOutcome::Add { public_key } => {
-                    let now = krypto_protocol::now_ms();
+                    let now = pawl_protocol::now_ms();
                     let addr = d.addr.clone().filter(|_| d.kind == DeviceKind::Hub);
                     let entry = RosterEntry {
                         device: Device {

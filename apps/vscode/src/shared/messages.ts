@@ -1,7 +1,7 @@
 // Messages between the extension host and the pet webview (view or editor panel).
 // The webview opens no socket: the host owns the HubClient and relays state here.
-import type { HubState, ProposalEntry } from "@krypto/hub-client";
-import type { SpriteManifest } from "@krypto/pet-engine";
+import type { HubState, ProposalEntry } from "@pawl/hub-client";
+import type { SpriteManifest } from "@pawl/pet-engine";
 
 /** Host-side view of the hub connection. */
 export interface ConnInfo {

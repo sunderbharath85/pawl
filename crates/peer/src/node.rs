@@ -27,7 +27,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use krypto_protocol::{
+use pawl_protocol::{
     is_valid_machine_id, now_ms, ByeReason, Device, DeviceKind, IntroDevice, LinkPath, Machine, MachineOs, PairRejectReason, PeerBody,
     PeerEnvelope, Presence, RelayClientFrame, RelayStatusInfo, UnixMs, MIRROR_FRAME_MAX_BYTES, PEER_PATH, PRESENCE_INTERVAL_MS, PRESENCE_OFFLINE_MS,
 };
@@ -1346,7 +1346,7 @@ impl Inner {
         if io.send(serde_json::to_string(&env).expect("PeerEnvelope serializes")).is_err() {
             return Err(JoinError::Unreachable);
         }
-        // Closed without a reply: no live invite there (expired or used), or not a Krypto listener.
+        // Closed without a reply: no live invite there (expired or used), or not a Pawl listener.
         let Some(text) = io.rx.recv().await else { return Err(JoinError::Rejected) };
         let reply = serde_json::from_str::<PeerEnvelope>(&text).map_err(|_| JoinError::Rejected)?;
         let PairReply::Accept(machine) = self.open_pair_reply(invite, req_seq, &reply) else {

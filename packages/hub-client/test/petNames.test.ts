@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Pet } from "@krypto/protocol";
+import type { Pet } from "@pawl/protocol";
 import { checkPetName, HubRequestError, PET_NAME_MAX, petRenameErrorText } from "../src/index";
 
 const pet = (id: string, name: string, machineId = "aaaaaaaaaaaa"): Pet => ({

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { globalId, type HubEvent, type Machine, type Pet, type PermissionRequest, type Session } from "@krypto/protocol";
+import { globalId, type HubEvent, type Machine, type Pet, type PermissionRequest, type Session } from "@pawl/protocol";
 import {
   activityForEvent,
   derivePetViews,

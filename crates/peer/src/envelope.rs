@@ -15,7 +15,7 @@
 
 use crate::{b64, keys::DeviceKeys};
 use crypto_box::aead::Aead;
-use krypto_protocol::{PeerBody, PeerEnvelope, PEER_PROTOCOL_VERSION};
+use pawl_protocol::{PeerBody, PeerEnvelope, PEER_PROTOCOL_VERSION};
 use std::fmt;
 
 /// Why an envelope did not open. Deliberately coarse: none of these is ever sent to the peer.
@@ -162,7 +162,7 @@ pub(crate) fn parse_pk(s: &str) -> Option<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krypto_protocol::ByeReason;
+    use pawl_protocol::ByeReason;
 
     fn body() -> PeerBody {
         PeerBody::Bye { reason: ByeReason::Shutdown, ts: 42 }

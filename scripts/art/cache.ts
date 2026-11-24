@@ -5,7 +5,7 @@
  */
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Species } from "@krypto/protocol";
+import type { Species } from "@pawl/protocol";
 import { RAW_DIR, type Activity, type Overrides } from "./config.ts";
 
 export type RawName = "reference" | `${Activity}.f${number}`;

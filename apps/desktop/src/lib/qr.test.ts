@@ -13,7 +13,7 @@ describe("qrPath", () => {
 
 describe("qrSvg", () => {
   const uri =
-    "krypto://peer?v=1&mid=winpc0000001&pk=cGstd2lucGMcGstd2lucGMcGstd2lucGMcGstd2lucGM&relay=wss://relay.example.dev" +
+    "pawl://peer?v=1&mid=winpc0000001&pk=cGstd2lucGMcGstd2lucGMcGstd2lucGMcGstd2lucGM&relay=wss://relay.example.dev" +
     "&rt=AAAAAAAAAAAAAAAAAAAAAA&rk=k3y_SECRETk3y_SECRETk3y_SECRET&code=AAAAAAAAAAAAAAAAAAAAAA&exp=1900000000000";
 
   test("a phone invite fits a scannable code with a quiet zone", () => {

@@ -30,7 +30,7 @@
     {
       "accessKey": "k3y_example-123",
       "auth": {
-        "box": "RSTewv6s4JcU3oDKR93dsYUGMC6ZxkHs9p2LGOFpyH/WavQ/d/IFivLkvWK1lcuc/dHEJXrrYTVcSyFvEzrkmSpW2dYs0GSq+N11yQDrqb9AJpgwPnf/",
+        "box": "u6OtoJBE8GLWCDA4kMMA0J4VPjLA2wny8ojHALl81SbIdrhDCfo4gvH49n3uuJWwnfGnGgmLDkQcSAh8OiXKhTpexLYWj3qu7ZJpnwT+uL5VZJ5xMA==",
         "type": "auth"
       },
       "challenge": {
@@ -43,13 +43,13 @@
       "device": "phone",
       "host": "relay.example.com",
       "name": "phone on a deployed relay",
-      "plaintext": "krypto-relay-auth-v1:MDEyMzQ1Njc4OTo7PD0+AkBBQkNERUZH:relay.example.com",
+      "plaintext": "pawl-relay-auth-v1:MDEyMzQ1Njc4OTo7PD0+AkBBQkNERUZH:relay.example.com",
       "relayUrl": "wss://relay.example.com"
     },
     {
       "accessKey": "devkey",
       "auth": {
-        "box": "3ENG7q85k33XT6LeSkAdbMGH24A1vWBVaVzNjt1iqbwdGxuLWbPlZwiX5vAYFNHp3wnYLEmItoFzo1obSTbhIUwRYscT11pIK2X/ch24mrWJ9D9n",
+        "box": "qTb1V6HMNW2hqPIzYOdZmdqU1ZxsoChLbUmBloV3tOUDB1f3J7vYbwuLre9DOY/Fvym7Ezro2cgdmF0IYCnPPVwZf6dq31xULGX/chysk7iJ9A==",
         "type": "auth"
       },
       "challenge": {
@@ -62,7 +62,7 @@
       "device": "hubA",
       "host": "127.0.0.1:8787",
       "name": "hub on wrangler dev",
-      "plaintext": "krypto-relay-auth-v1:MDEyMzQ1Njc4OTo7PD0+yEBBQkNERUZH:127.0.0.1:8787",
+      "plaintext": "pawl-relay-auth-v1:MDEyMzQ1Njc4OTo7PD0+yEBBQkNERUZH:127.0.0.1:8787",
       "relayUrl": "ws://127.0.0.1:8787"
     }
   ]

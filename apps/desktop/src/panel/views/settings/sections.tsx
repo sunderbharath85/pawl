@@ -1,7 +1,7 @@
 // Settings sections backed by the hub's config.toml: Hub, Remote control, Repos, Bot, Nudges & reports, Relay.
 import { useEffect, useMemo, useState } from "react";
-import { relayStatusText, secretPatch, type SecretKey } from "@krypto/hub-client";
-import type { HubSettings, RepoRef } from "@krypto/protocol";
+import { relayStatusText, secretPatch, type SecretKey } from "@pawl/hub-client";
+import type { HubSettings, RepoRef } from "@pawl/protocol";
 import { timeAgo } from "../../../lib/format";
 import {
   botForm,
@@ -79,7 +79,7 @@ export function HubSection({ settings, restartRequired, live, configPath }: Sect
       }
       description={
         <>
-          The krypto hub on this machine.{" "}
+          The pawl hub on this machine.{" "}
           {configPath && (
             <>
               Saved to <span className="mono">{configPath}</span>.
@@ -127,11 +127,11 @@ export function HubSection({ settings, restartRequired, live, configPath }: Sect
           onChange={(v) => update({ eventRetentionDays: v })}
         />
         <NumberField
-          label="End idle Krypto sessions after"
+          label="End idle Pawl sessions after"
           unit="hours"
           value={draft.ownedSessionIdleHours}
           error={err("hub.ownedSessionIdleHours")}
-          hint="Sessions Krypto started are closed after this long without activity, which stops their agent process. 0 = never."
+          hint="Sessions Pawl started are closed after this long without activity, which stops their agent process. 0 = never."
           disabled={!live || save.saving}
           onChange={(v) => update({ ownedSessionIdleHours: v })}
         />

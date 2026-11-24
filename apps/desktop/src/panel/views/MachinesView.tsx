@@ -17,8 +17,8 @@ import {
   machinesLine,
   parseInviteUri,
   sortedMachines,
-} from "@krypto/hub-client";
-import { PEER_DEFAULT_PORT, type Device, type LinkPath, type MachineOs } from "@krypto/protocol";
+} from "@pawl/hub-client";
+import { PEER_DEFAULT_PORT, type Device, type LinkPath, type MachineOs } from "@pawl/protocol";
 import { clockTime, timeAgo } from "../../lib/format";
 import {
   INVITE_TTL_CHOICES,
@@ -110,14 +110,14 @@ export function MachinesView() {
         <h1>Machines</h1>
         <p>
           {counts.total > 0 ? `${machinesLine(counts.total, connected ? counts.online : undefined)}. ` : ""}
-          Pair the Krypto hubs on your machines so they can see each other's sessions, pets and approvals. They link on your network,
+          Pair the Pawl hubs on your machines so they can see each other's sessions, pets and approvals. They link on your network,
           or through your relay when one is set up. Phones pair with a QR code and link through the relay.
         </p>
       </header>
 
       {connected && !pairing && (
         <div className="card notice-card">
-          <strong>This hub can't pair yet.</strong> Update krypto on this machine and restart the hub to pair machines.
+          <strong>This hub can't pair yet.</strong> Update pawl on this machine and restart the hub to pair machines.
         </div>
       )}
 
@@ -216,7 +216,7 @@ function MachineRow({ row, connected, now, stale }: { row: Row; connected: boole
           {row.hubVersion && (
             <>
               <span aria-hidden>·</span>
-              <span className="muted">krypto {row.hubVersion}</span>
+              <span className="muted">pawl {row.hubVersion}</span>
             </>
           )}
           {row.addedBy && (
@@ -437,13 +437,13 @@ function ListenerHelp() {
       <strong>Turn on the peer listener first</strong>
       <span className="hint">
         Inviting needs this hub to accept connections from your network, which is off by default. Only the machine that invites needs
-        it; the joining machine dials out. Allow krypto through the firewall if it asks.
+        it; the joining machine dials out. Allow pawl through the firewall if it asks.
       </span>
       {hs.settings ? (
         <ListenerControl settings={hs.settings} live={hs.connected} compact />
       ) : (
         <span className="hint">
-          {!hs.connected ? "Connect the hub first." : !hs.supported ? "Update krypto on this machine to turn it on from here." : (hs.loadError ?? "Loading…")}
+          {!hs.connected ? "Connect the hub first." : !hs.supported ? "Update pawl on this machine to turn it on from here." : (hs.loadError ?? "Loading…")}
         </span>
       )}
       <span className="hint">
@@ -500,7 +500,7 @@ function JoinCard() {
   return (
     <div className="card join-card">
       <h3>Join a machine</h3>
-      <p className="hint">Paste the invite link (or the whole krypto peer join line) created on the other machine.</p>
+      <p className="hint">Paste the invite link (or the whole pawl peer join line) created on the other machine.</p>
       <div className="field">
         <label className="field-label" htmlFor="join-uri">
           Invite
@@ -510,7 +510,7 @@ function JoinCard() {
           className={`input mono join-input${shownError ? " is-invalid" : ""}`}
           rows={3}
           value={text}
-          placeholder="krypto://peer?v=1&mid=…"
+          placeholder="pawl://peer?v=1&mid=…"
           spellCheck={false}
           autoComplete="off"
           autoCorrect="off"

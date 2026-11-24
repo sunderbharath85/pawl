@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
-import { OS_LABEL, isLocal, linkPathLabel, machineCounts, machineDisplayName, machinesLine, sortedMachines, type HubState } from "@krypto/hub-client";
-import { SPECIES_META } from "@krypto/pet-engine";
-import { DEFAULT_SPECIES } from "@krypto/protocol";
+import { OS_LABEL, isLocal, linkPathLabel, machineCounts, machineDisplayName, machinesLine, sortedMachines, type HubState } from "@pawl/hub-client";
+import { SPECIES_META } from "@pawl/pet-engine";
+import { DEFAULT_SPECIES } from "@pawl/protocol";
 import { presenceLabel } from "../shared/machine";
 import type { HubConnection } from "./connection";
 import { phonesTooltipLine } from "./machineList";
@@ -19,9 +19,9 @@ export class PetStatusBar implements vscode.Disposable {
   private lastHasPending: boolean | null = null;
 
   constructor(private readonly hub: HubConnection) {
-    this.item = vscode.window.createStatusBarItem("krypto.status", vscode.StatusBarAlignment.Right, 100);
-    this.item.name = "Krypto";
-    this.item.command = "krypto.showPet";
+    this.item = vscode.window.createStatusBarItem("pawl.status", vscode.StatusBarAlignment.Right, 100);
+    this.item.name = "Pawl";
+    this.item.command = "pawl.showPet";
     this.disposables.push(this.item, hub.onState(() => this.render()));
     this.timer = setInterval(() => this.render(), TICK_MS);
     this.render();
@@ -38,7 +38,7 @@ export class PetStatusBar implements vscode.Disposable {
     const hasPending = conn.status === "connected" && pendingCount > 0;
     if (hasPending !== this.lastHasPending) {
       this.lastHasPending = hasPending;
-      void vscode.commands.executeCommand("setContext", "krypto.hasPending", hasPending);
+      void vscode.commands.executeCommand("setContext", "pawl.hasPending", hasPending);
     }
 
     if (conn.status !== "connected") {
@@ -51,7 +51,7 @@ export class PetStatusBar implements vscode.Disposable {
         this.item.tooltip = this.offlineTooltip(state, conn.status === "unauthorized", conn.missingToken);
       } else {
         this.item.text = `$(sync~spin) ${SPECIES_META[DEFAULT_SPECIES].emoji}`;
-        this.item.tooltip = "Krypto: connecting to the hub…";
+        this.item.tooltip = "Pawl: connecting to the hub…";
       }
       return;
     }
@@ -82,15 +82,15 @@ export class PetStatusBar implements vscode.Disposable {
 
   private offlineTooltip(state: HubState, unauthorized: boolean, missingToken: boolean): vscode.MarkdownString {
     const md = new vscode.MarkdownString(undefined, true);
-    md.isTrusted = { enabledCommands: ["krypto.startHub", "krypto.reconnect", "krypto.showPet"] };
-    md.appendMarkdown("**Krypto — hub offline**");
+    md.isTrusted = { enabledCommands: ["pawl.startHub", "pawl.reconnect", "pawl.showPet"] };
+    md.appendMarkdown("**Pawl — hub offline**");
     // The last machine name we heard from this hub (kept across reconnects).
     if (state.machine) md.appendMarkdown(` · ${escapeMd(machineDisplayName(state.machine))}`);
     md.appendMarkdown("\n\n");
     if (unauthorized) md.appendMarkdown("The hub rejected our token. It may have been regenerated.\n\n");
     else if (missingToken) md.appendMarkdown("No hub token yet — the hub has never run on this machine.\n\n");
     else md.appendMarkdown("Reconnecting quietly in the background.\n\n");
-    md.appendMarkdown("[$(play) Start hub](command:krypto.startHub) · [$(refresh) Retry](command:krypto.reconnect) · [Show pet](command:krypto.showPet)");
+    md.appendMarkdown("[$(play) Start hub](command:pawl.startHub) · [$(refresh) Retry](command:pawl.reconnect) · [Show pet](command:pawl.showPet)");
     return md;
   }
 
@@ -104,20 +104,20 @@ export class PetStatusBar implements vscode.Disposable {
     const md = new vscode.MarkdownString(undefined, true);
     md.isTrusted = {
       enabledCommands: [
-        "krypto.showPet",
-        "krypto.approvePending",
-        "krypto.denyPending",
-        "krypto.startSession",
-        "krypto.renameMachine",
-        "krypto.showMachines",
+        "pawl.showPet",
+        "pawl.approvePending",
+        "pawl.denyPending",
+        "pawl.startSession",
+        "pawl.renameMachine",
+        "pawl.showMachines",
       ],
     };
-    md.appendMarkdown("**Krypto**");
+    md.appendMarkdown("**Pawl**");
     const machine = state.machine;
     if (machine) {
       const os = OS_LABEL[machine.os] ?? machine.os;
       md.appendMarkdown(
-        ` · $(device-desktop) ${escapeMd(machineDisplayName(machine))} _(${escapeMd(os)})_ [$(edit)](command:krypto.renameMachine "Rename this machine")`,
+        ` · $(device-desktop) ${escapeMd(machineDisplayName(machine))} _(${escapeMd(os)})_ [$(edit)](command:pawl.renameMachine "Rename this machine")`,
       );
     }
     md.appendMarkdown("\n\n");
@@ -140,11 +140,11 @@ export class PetStatusBar implements vscode.Disposable {
     if (pendingCount > 0) {
       const elsewhere = remotePending > 0 ? ` (${remotePending} on other machines; approving those asks you to confirm)` : "";
       md.appendMarkdown(` · **${pendingCount} waiting for approval**${elsewhere}\n\n`);
-      md.appendMarkdown("[$(check) Approve](command:krypto.approvePending) · [$(close) Deny](command:krypto.denyPending) · ");
+      md.appendMarkdown("[$(check) Approve](command:pawl.approvePending) · [$(close) Deny](command:pawl.denyPending) · ");
     } else {
       md.appendMarkdown("\n\n");
     }
-    md.appendMarkdown("[Show pet](command:krypto.showPet) · [$(add) Start session](command:krypto.startSession)");
+    md.appendMarkdown("[Show pet](command:pawl.showPet) · [$(add) Start session](command:pawl.startSession)");
     return md;
   }
 
@@ -152,7 +152,7 @@ export class PetStatusBar implements vscode.Disposable {
   private appendMachines(md: vscode.MarkdownString, state: HubState): void {
     const { total, online } = machineCounts(state);
     if (total === 0) return;
-    const show = "[$(list-flat) Machines](command:krypto.showMachines \"Show machines\")";
+    const show = "[$(list-flat) Machines](command:pawl.showMachines \"Show machines\")";
     const phones = phonesTooltipLine(state, true);
     if (total === 1) {
       md.appendMarkdown(`$(remote-explorer) No other machines paired yet · ${show}\n\n`);

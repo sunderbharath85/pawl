@@ -8,8 +8,8 @@ import {
   type PeerEnvelope,
   type RelayClientFrame,
   type RelayErrorCode,
-} from "@krypto/protocol";
-import { RELAY_AUTH_CONTEXT } from "@krypto/protocol";
+} from "@pawl/protocol";
+import { RELAY_AUTH_CONTEXT } from "@pawl/protocol";
 import { bytesEqual, encode, tryDecode, utf8Encode } from "./b64";
 import { parseEnvelope, NONCE_RANDOM_LEN } from "./envelope";
 import { NONCE_BYTES, type DeviceKeys } from "./keys";

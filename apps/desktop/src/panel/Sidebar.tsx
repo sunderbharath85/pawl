@@ -7,8 +7,8 @@ import {
   machineSummary,
   machinesLine,
   type MachineGroup,
-} from "@krypto/hub-client";
-import type { Session } from "@krypto/protocol";
+} from "@pawl/hub-client";
+import type { Session } from "@pawl/protocol";
 import { STATUS_META, SOURCE_LABEL, agentName, isActive, sessionTitle, timeAgo } from "../lib/format";
 import { usePanel, type Route } from "./context";
 import * as I from "./icons";

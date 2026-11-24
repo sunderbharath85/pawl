@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Agent, MachineId, RepoRef } from "@krypto/protocol";
+import type { Agent, MachineId, RepoRef } from "@pawl/protocol";
 import { errorText, shortPath } from "../../lib/format";
 import {
   OS_LABEL,
@@ -10,7 +10,7 @@ import {
   petFor,
   sortedMachines,
   startNeedsConfirmation,
-} from "@krypto/hub-client";
+} from "@pawl/hub-client";
 import { isTauri } from "../../lib/native";
 import { useSettings } from "../../lib/settings";
 import { usePanel } from "../context";

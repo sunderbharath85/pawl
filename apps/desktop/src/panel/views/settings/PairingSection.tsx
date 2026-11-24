@@ -2,8 +2,8 @@
 // by paired hubs are accepted (step 7), and a way to the Machines view. `ListenerControl` is also used by the first-run
 // setup and the Machines view's invite card.
 import { useEffect, useMemo, useState } from "react";
-import { isWildcardListen, linkPathLabel, machineCounts, machinesLine, pairingAllowsText, phoneCounts, phonesLine } from "@krypto/hub-client";
-import { PEER_DEFAULT_PORT, type HubSettings } from "@krypto/protocol";
+import { isWildcardListen, linkPathLabel, machineCounts, machinesLine, pairingAllowsText, phoneCounts, phonesLine } from "@pawl/hub-client";
+import { PEER_DEFAULT_PORT, type HubSettings } from "@pawl/protocol";
 import { isTauri, native } from "../../../lib/native";
 import { introsForm, introsPatch, pairingForm, pairingPatch } from "../../../lib/settingsForms";
 import { usePanel } from "../../context";
@@ -109,7 +109,7 @@ function RosterIntrosControl({ settings, live }: Pick<SectionProps, "settings" |
   const { draft, update, dirty, reset } = useDraft(source);
   const save = useSectionSave(["peer.acceptRosterIntros"]);
   if (!supported) {
-    return <p className="hint">Update krypto on this machine to choose whether paired machines may introduce new devices here.</p>;
+    return <p className="hint">Update pawl on this machine to choose whether paired machines may introduce new devices here.</p>;
   }
   const pinned = !!settings.overriddenBy["peer.acceptRosterIntros"];
   return (
@@ -149,7 +149,7 @@ export function PairingSection({ settings, live }: SectionProps) {
     <SettingsSection
       id="pairing"
       title="Machines & pairing"
-      description="Pair the Krypto hubs on your machines so each one sees the others' sessions and pets. Only the machine that creates an invite needs its listener on."
+      description="Pair the Pawl hubs on your machines so each one sees the others' sessions and pets. Only the machine that creates an invite needs its listener on."
       aside={
         <button className="pill" onClick={() => navigate({ view: "machines" })}>
           Open Machines →
