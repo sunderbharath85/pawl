@@ -369,6 +369,9 @@ body::after {
 .foot__links a { text-decoration: none; transition: color 0.3s; }
 .foot__links a:hover { color: var(--on-dark); }
 
+/* keep big headings from leaving one orphaned word on the last line */
+.inline-head, .day__head h2, .everywhere__title, .why__text, .quote__text, .cta__title { text-wrap: balance; }
+
 /* ------------------------------------------------------------------ responsive */
 @media (max-width: 960px) {
   .nav__links { display: none; }

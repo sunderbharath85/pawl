@@ -134,13 +134,19 @@ if (!reduced) {
   slabs.forEach((slab, i) => {
     const next = slabs[i + 1];
     if (!next) return;
-    gsap.to(slab, {
-      scale: 0.9,
-      y: -24,
-      filter: "brightness(0.82)",
-      ease: "none",
-      scrollTrigger: { trigger: next, start: "top bottom", end: "top 14%", scrub: true },
-    });
+    // fromTo with an explicit brightness(1): tweening from the computed "none" starts at brightness(0),
+    // which left every card black until the next one covered it.
+    gsap.fromTo(
+      slab,
+      { scale: 1, y: 0, filter: "brightness(1)" },
+      {
+        scale: 0.9,
+        y: -24,
+        filter: "brightness(0.82)",
+        ease: "none",
+        scrollTrigger: { trigger: next, start: "top bottom", end: "top 14%", scrub: true },
+      },
+    );
   });
 }
 
