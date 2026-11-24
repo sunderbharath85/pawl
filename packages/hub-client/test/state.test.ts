@@ -295,6 +295,24 @@ describe("pairing roster + peer link (protocol v3)", () => {
     expect(paired.machines[MID2]).toEqual(machine2); // immutable
   });
 
+  test("machine_removed also drops that machine's mirrored sessions, pets, requests and events", () => {
+    const remote = { machineId: MID2 };
+    let s = reduceServerMsg(paired, { type: "session", session: session("s1") });
+    s = reduceServerMsg(s, { type: "session", session: session(`${MID2}:r1`, remote) });
+    s = reduceServerMsg(s, { type: "pet", pet: { ...pet, id: "p2", ...remote } });
+    s = reduceServerMsg(s, { type: "permission_request", request: permission(`${MID2}:q1`, { ...remote, sessionId: `${MID2}:r1` }) });
+    s = reduceServerMsg(s, { type: "event", event: event(1, `${MID2}:r1`, remote) });
+    s = reduceServerMsg(s, { type: "event", event: event(2, "s1") });
+    const gone = reduceServerMsg(s, { type: "machine_removed", machineId: MID2 });
+    const local = (rec: Record<string, { machineId: string }>) => Object.keys(rec).filter((k) => rec[k]!.machineId !== MID2).sort();
+    expect(Object.keys(gone.sessions).sort()).toEqual(local(s.sessions));
+    expect(Object.keys(gone.pets).sort()).toEqual(local(s.pets));
+    expect(Object.keys(gone.pending).sort()).toEqual(local(s.pending));
+    expect(gone.events[`${MID2}:r1`]).toBeUndefined();
+    expect(gone.events.s1).toBe(s.events.s1);
+    expect(Object.values(s.sessions).some((x) => x.machineId === MID2)).toBe(true); // immutable
+  });
+
   test("machine_removed never drops this hub's own machine; unknown ids are a no-op", () => {
     expect(reduceServerMsg(paired, { type: "machine_removed", machineId: MID })).toBe(paired);
     expect(reduceServerMsg(paired, { type: "machine_removed", machineId: "nobody000000" })).toBe(paired);

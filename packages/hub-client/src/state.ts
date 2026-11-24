@@ -163,7 +163,27 @@ export function removeDevice(state: HubState, deviceId: string): HubState {
     const { [deviceId]: _gone, ...rest } = state.machines;
     machines = rest;
   }
-  return { ...state, machines, devices: devices.length === state.devices.length ? state.devices : devices };
+  const next = { ...state, machines, devices: devices.length === state.devices.length ? state.devices : devices };
+  // A removed hub's mirror is gone on the hub (revoke deletes every mirrored row of that machine):
+  // drop its sessions, pets, waiting requests and events here too, or they linger until a reconnect.
+  return own ? next : dropMachineData(next, deviceId);
+}
+
+function dropMachineData(state: HubState, machineId: string): HubState {
+  const keep = <T extends { machineId: string }>(rec: Record<string, T>): Record<string, T> => {
+    const entries = Object.entries(rec);
+    const kept = entries.filter(([, v]) => v.machineId !== machineId);
+    return kept.length === entries.length ? rec : Object.fromEntries(kept);
+  };
+  const sessions = keep(state.sessions);
+  const pets = keep(state.pets);
+  const pending = keep(state.pending);
+  const gone = (sid: string) => state.sessions[sid]?.machineId === machineId || sid.startsWith(`${machineId}:`);
+  const eventKeys = Object.keys(state.events);
+  const keptKeys = eventKeys.filter((sid) => !gone(sid));
+  const events = keptKeys.length === eventKeys.length ? state.events : Object.fromEntries(keptKeys.map((sid) => [sid, state.events[sid]!]));
+  if (sessions === state.sessions && pets === state.pets && pending === state.pending && events === state.events) return state;
+  return { ...state, sessions, pets, pending, events };
 }
 
 /** Insert or replace a device in the roster (by id). */
