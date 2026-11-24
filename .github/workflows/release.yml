@@ -74,7 +74,8 @@ jobs:
           case "${{ runner.os }}" in
             Windows) grep -q 'pawl.exe' "$B/nsis/x64/installer.nsi" && grep -qi 'pawl.exe' "$B/wix/x64/main.wxs" ;;
             macOS)   test -x "$B/bundle/macos/Pawl.app/Contents/MacOS/pawl" ;;
-            Linux)   dpkg -c dist/release/*.deb | grep -E ' \./usr/bin/pawl$' ;;
+            Linux)   dpkg -c dist/release/*.deb | grep -i pawl
+                     dpkg -c dist/release/*.deb | grep -qE '(^|[[:space:]]|\./)usr/bin/pawl$' ;;
           esac
       - uses: actions/upload-artifact@v7
         with:
