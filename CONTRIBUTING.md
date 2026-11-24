@@ -108,6 +108,16 @@ Add focused unit tests for new logic. Rust tests live next to the code (`#[cfg(t
   feat(protocol)!: make every wire id global
   ```
 
+## Releasing
+
+1. `bun scripts/set-version.ts 0.1.2` sets the version everywhere; build once so the lockfiles follow, then commit.
+2. Tag and push: `git tag -a v0.1.2 -m "Pawl 0.1.2" && git push origin v0.1.2`.
+3. The Release workflow (`.github/workflows/release.yml`) builds Windows x64, macOS (Apple silicon and Intel) and Linux x64
+   with `scripts/release.sh`, checks that each desktop app carries the `pawl` hub, and publishes one GitHub release with
+   every installer, the CLI archives and `SHA256SUMS.txt`. Versions 0.x are marked pre-release.
+
+`bash scripts/release.sh` builds the same files for your own machine into `dist/release/`.
+
 ## Reporting bugs and asking for features
 
 Use the issue templates. For bugs, include `pawl --version`, your OS, the agent and adapter involved, and the relevant part of `hub.log` from the hub's data directory. Remove tokens, keys and private paths before you paste anything.

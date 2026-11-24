@@ -1,0 +1,127 @@
+name: Release
+
+# Push a tag vX.Y.Z (matching Cargo.toml's version; see scripts/set-version.ts) to build every platform and
+# publish one GitHub release. Run it by hand with an existing tag to rebuild and re-upload that release's files.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build, e.g. v0.1.1
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-latest, target: "" }
+          - { name: macos-arm64, os: macos-latest, target: "" }
+          - { name: macos-x64, os: macos-latest, target: x86_64-apple-darwin }
+          - { name: linux-x64, os: ubuntu-22.04, target: "" }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - name: Tag matches the version
+        shell: bash
+        run: |
+          V="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$TAG" != "v$V" ]; then echo "::error::tag $TAG does not match Cargo.toml version $V"; exit 1; fi
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - run: bun install --frozen-lockfile
+      - name: Build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash scripts/release.sh
+      - name: The desktop app carries pawl next to itself
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          B="apps/desktop/src-tauri/target/${TARGET:+$TARGET/}release"
+          case "${{ runner.os }}" in
+            Windows) grep -q 'pawl.exe' "$B/nsis/x64/installer.nsi" && grep -qi 'pawl.exe' "$B/wix/x64/main.wxs" ;;
+            macOS)   test -x "$B/bundle/macos/Pawl.app/Contents/MacOS/pawl" ;;
+            Linux)   dpkg -c dist/release/*.deb | grep -E ' \./usr/bin/pawl$' ;;
+          esac
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.name }}
+          path: dist/release/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: out
+      - name: One checksum file
+        run: |
+          cd out
+          cat SHA256SUMS-*.txt | sort -k2 > SHA256SUMS.txt
+          rm SHA256SUMS-*.txt
+          ls -l
+      - name: Release notes
+        run: |
+          V="${TAG#v}"
+          sed "s/{{VERSION}}/$V/g" .github/release-notes.md > notes.md
+          PREV="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
+          {
+            echo
+            echo "## Changes${PREV:+ since $PREV}"
+            echo
+            git log --no-merges --format='- %s (%h)' ${PREV:+$PREV..}"$TAG"
+          } >> notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${TAG#v}"
+          PRE=""
+          case "$V" in 0.*|*-*) PRE="--prerelease" ;; esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" out/* --title "Pawl $V" --notes-file notes.md $PRE --verify-tag
+          fi
