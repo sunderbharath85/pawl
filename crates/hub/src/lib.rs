@@ -6,8 +6,10 @@ pub mod core;
 pub mod logging;
 pub mod machine;
 pub mod repos;
+pub mod restart;
 pub mod notify;
 pub mod server;
+pub mod settings;
 pub mod store;
 
 pub const HUB_VERSION: &str = env!("CARGO_PKG_VERSION");

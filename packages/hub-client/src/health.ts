@@ -4,6 +4,8 @@ import { toHubHttpUrl } from "./url";
 export interface HubHealth {
   ok: boolean;
   version?: string;
+  /** The answering hub's machine id (protocol v7+): lets a client check a port before sending it the token. */
+  machineId?: string;
 }
 
 /**
@@ -17,9 +19,13 @@ export async function fetchHubHealth(url?: string, timeoutMs = 2000): Promise<Hu
   try {
     const res = await fetch(`${toHubHttpUrl(url)}/health`, controller ? { signal: controller.signal } : undefined);
     if (!res.ok) return null;
-    const body = (await res.json()) as { ok?: unknown; version?: unknown };
+    const body = (await res.json()) as { ok?: unknown; version?: unknown; machineId?: unknown };
     if (typeof body !== "object" || body === null) return null;
-    return { ok: body.ok === true, ...(typeof body.version === "string" ? { version: body.version } : {}) };
+    return {
+      ok: body.ok === true,
+      ...(typeof body.version === "string" ? { version: body.version } : {}),
+      ...(typeof body.machineId === "string" ? { machineId: body.machineId } : {}),
+    };
   } catch {
     return null;
   } finally {

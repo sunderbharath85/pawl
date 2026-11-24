@@ -1,5 +1,5 @@
 // Items for "Krypto: Show Machines" (read-only). Pure: no runtime `vscode` import, so it is unit-tested.
-import { OS_LABEL, machineCounts, machineDisplayName, machinesLine, sortedMachines, type HubState } from "@krypto/hub-client";
+import { OS_LABEL, linkPathLabel, machineCounts, machineDisplayName, machinesLine, sortedMachines, type HubState } from "@krypto/hub-client";
 import { presenceLabel } from "../shared/machine";
 
 export interface MachinePickItem {
@@ -24,9 +24,10 @@ export function machinePickItems(
         ? `listening on ${state.peer.listening}`
         : "peer listener off"
       : devices.get(m.id)?.addr;
+    const via = online && !self ? linkPathLabel(devices.get(m.id)?.path) : null;
     return {
       label: `${online ? "$(circle-filled)" : "$(circle-outline)"} ${machineDisplayName(m)}`,
-      description: [self ? "this machine" : undefined, OS_LABEL[m.os] ?? m.os].filter(Boolean).join(" · "),
+      description: [self ? "this machine" : undefined, OS_LABEL[m.os] ?? m.os, via ?? undefined].filter(Boolean).join(" · "),
       detail: [presence, addr, m.hubVersion ? `krypto ${m.hubVersion}` : undefined].filter(Boolean).join(" · "),
     };
   });

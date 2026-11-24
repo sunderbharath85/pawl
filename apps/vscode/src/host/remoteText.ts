@@ -4,6 +4,16 @@ import { agentFor, isLocal, machineDisplayName, ownerName, type HubState } from 
 import { describePermission } from "@krypto/pet-engine";
 import type { Agent, PermissionRequest } from "@krypto/protocol";
 
+/** Why "Krypto: Open Settings" failed (an older hub has no `open_panel`). */
+export function openSettingsErrorText(err: unknown): string {
+  const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";
+  if (code === "unknown_type" || code === "unknown_message" || code === "unsupported" || code === "bad_request") {
+    return "This hub is too old to open the desktop settings. Update krypto and restart the hub.";
+  }
+  if (code === "timeout") return "The hub did not answer. Check that it is running, then try again.";
+  return err instanceof Error && err.message ? err.message : "Could not reach the desktop app.";
+}
+
 export interface ConfirmText {
   /** Modal title line, machine name first. */
   message: string;

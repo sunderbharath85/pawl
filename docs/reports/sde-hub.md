@@ -1,3 +1,124 @@
+# sde-hub report — step 5b (settings in the UI) + step 6 phase B (relay wiring)
+
+Branch `step-5b-settings-ui`, nothing committed. Owned paths only: `crates/hub/`, `crates/discovery/` (hook status + remove).
+`Cargo.lock` changed by cargo for the approved `toml_edit` dependency (already in the lock through krypto-discovery).
+
+## Gate
+
+| Command | Result |
+|---|---|
+| `cargo test -p krypto-hub -p krypto-discovery` | discovery **39 passed**, hub **158 passed** (was 31 / 128) |
+| `cargo clippy -p krypto-hub -p krypto-discovery --all-targets -- -D warnings` | clean (after t13 boxed `UpdateSettings.patch`) |
+| WebSocket smoke, scratch `--data-dir` + scratch `HOME`/`USERPROFILE`/`CLAUDE_CONFIG_DIR` | all PASS (below) |
+| restart smoke (`restart_hub` + runtime.json + `krypto hook`) | all PASS (below) |
+
+## What was built
+
+### Hub settings (`crates/hub/src/settings.rs`, pure; `crates/hub/src/core/settings.rs`, runtime)
+- `get_settings` -> `{settings, restartRequired, configPath}`; `overriddenBy` from `--port` / `KRYPTO_HUB_URL` /
+  `--peer-listen` / `ANTHROPIC_API_KEY` (env key only while config.toml has none). Secrets only as `...Set` booleans.
+- `update_settings{patch}`:
+  1. `apply_patch` validates the whole patch: first failure -> `invalid:<field>: <reason>`, camelCase wire path with
+     indices (`peer.startRoots[2]`, `customAgents[1].command`), as fe-settings asked. Nothing written or applied.
+  2. Runtime changes that can fail run first: peer listener (`stop_listening` / `listen`, bind failure ->
+     `invalid:peer.listen: could not listen on ...`, old listener restored), relay (`set_relay`, `bad_url` / `bad_key`
+     -> `invalid:relay.url` / `invalid:relay.accessKey`).
+  3. config.toml is edited with `toml_edit`: only the changed keys. Comments above a key and after a value are kept,
+     as are unknown keys/sections and the `env` of custom agents that keep their id. The result is parsed back and
+     must give the new values. Written atomically (temp file in the same dir + rename, 0600 on Unix). A write
+     failure undoes steps 2.
+  4. Runtime: brain rebuilt (bot keys), watchdog `set_config` (timings, nudge state kept), watchdog / daily-report loops re-read the config
+     (`Notify`), retention prunes now, repos index rebuilt, discovery re-run (custom agents / offline);
+     accept_intents, start_roots and session timeouts are read at use time. `hub.port` -> `restartRequired`.
+  5. Audit row (`settings_audit`, schema v7: ts, actor, client kind, kind, keys; never values), log line with key
+     names only, `ServerMsg settings` via `send_local`.
+- `hook_status` (claude, codex, copilot-cli, plus copilot-vscode for up to 20 repo-index folders) and
+  `install_hooks{target, repo, action}`: preview = exact diff, nothing written; apply / remove are audited.
+- `open_panel{view}` -> `send_local(open_panel)`, ack `{delivered}` = a desktop client is connected (counted in server.rs).
+- `restart_hub`: ack, then after 300 ms `krypto serve` stops the server, `hub.shutdown()` (bye{shutdown} to peers,
+  listener/relay closed, agents stopped), removes runtime.json, spawns `current_exe` with the same args (detached,
+  stdio null, own process group, env `KRYPTO_HUB_RESTARTED=1`), exits 0. The replacement retries binding the API port
+  and the peer listener for 10 s. Audited (kind `restart`, keys = pending restart keys). Refused for in-process hubs.
+- `data_dir/runtime.json` `{port, pid, startedAt}`: written once the API port is bound, removed on clean exit (only
+  if the pid is ours). **Every** CLI client command (`krypto hook` included) resolves `--port` > `KRYPTO_HUB_URL` >
+  runtime.json > config.toml (`HubEndpoint::for_client`). The daemon's own port ignores runtime.json.
+- CLI: `krypto settings [--json]` (running hub, else config.toml; secrets "set (hidden)"; relay status line).
+
+### Step 6 phase B (relay wiring)
+- `[relay] url` / `access_key` (secret, redacted in `Debug`) in config.toml; applied with `set_relay` at startup (a bad
+  value -> warning + startup notice, the hub still starts) and on update.
+- `PeerEvent::RelayStatus` -> `ServerMsg peer_status`; `Welcome.peer.relay` = `relay_status()`.
+- `PeerEvent::LinkPath` -> `Device.path` (cleared on LinkDown); `devices` broadcast when it changes.
+- `join_peer` uses `join_invite`; an adopted relay is written to config.toml (url + key), audited (kind `pairing`),
+  announced with `settings`. Never replaces a configured relay.
+- `krypto machines` shows a PATH column and a `relay:` status line (never the key).
+
+### Discovery (`crates/discovery/src/hooks`)
+- `HookChange::{Install, Remove}`, `change_with_home` / `change`, `status_with_home` / `status` (`HookState`:
+  installed / outdated / missing / unsupported + detail), `config_path_with_home`, `agent_found`, `agent_home`.
+- Remove takes out only our entries (Claude settings.json, Codex notify + inline hooks + hooks.json, Copilot files);
+  our own `krypto.json` is deleted when nothing else is left; backups first. Status never writes.
+- "Changed" is now semantic for JSON (a file that differs only in formatting is not rewritten).
+
+## Smoke (scratch data dir, scratch HOME + USERPROFILE + CLAUDE_CONFIG_DIR/CODEX_HOME/COPILOT_HOME)
+- get_settings over WebSocket: config.toml values, `overriddenBy {"hub.port":"--port"}`.
+- update_settings listen on `127.0.0.1:47951` -> TCP connect succeeds, create_invite works; listen null -> connect
+  refused, create_invite `peer_listener_off`.
+- Hand-written comments, trailing comments and `[unknown_future]` kept in config.toml; `listen` removed.
+- Invalid patch (`acceptIntents:false` + `dailyReportTime:"7pm"`) -> `invalid:hub.dailyReportTime: ...`, config.toml
+  byte-identical (sha256), acceptIntents unchanged.
+- API key set/clear: only `anthropicApiKeySet`; the key never in hub.log or the serve output.
+- Port change -> `restartRequired ["hub.port"]`.
+- hook_status claude = missing, config path in the scratch home; install_hooks preview printed the full diff and wrote
+  nothing. Real `~/.claude/settings.json` sha256 unchanged before/after.
+- Restart: port 47971 saved (runtime.json keeps 47950), `krypto hook claude` without `--port` reached the running hub;
+  `restart_hub` -> old process exited 0, replacement (new pid) wrote runtime.json 47971, answered there with
+  `restartRequired []`, and the next hook reached it. Smoke processes stopped by pid afterwards.
+
+## Decisions for t13
+1. **0 = off is accepted** for `hookSessionStaleHours`, `ownedSessionIdleHours` (<= 8760) and `eventRetentionDays`
+   (<= 3650): config.toml documents 0 as "never"/"keep forever", and the UI must be able to keep a value it reads.
+   The contract says "> 0"; watchdog values are strictly bounded (10 s-24 h, tick 5-3600 s).
+2. `""` clears optional non-secret strings (ollamaUrl/Model, listen, relay.url); secrets need `null`, `""` is
+   `invalid:<field>: is empty; send null to clear it` (guards against an accidental clear).
+3. A UI change of `peer.listen` drops the `--peer-listen` override marker (the setting now decides). `--port` keeps its
+   marker: on the next start the flag still wins.
+4. Watchdog timing changes use sde-brain's `Watchdog::set_config` (follow-up after review): new timings, nudge state
+   kept, so nothing is nudged twice (test `watchdog_timings_change_without_repeating_nudges`).
+5. `agent_home()` matches Node's `os.homedir()` (USERPROFILE on Windows, HOME elsewhere); `krypto install-hooks` uses it
+   too (was `dirs::home_dir`).
+6. Relay URL/key validation mirrors krypto-peer's rules (wss/https; ws/http to loopback only; key base64url 1-256); the
+   link layer's refusals still map to field errors. The stored URL is the trimmed user text; `peer.relay.url` shows the
+   link layer's normalized form.
+7. The replacement is spawned after the old hub has said bye and closed its ports (not before), plus the 10 s bind
+   retry; a hub started by the desktop app as a child continues detached, so the desktop must reconnect via runtime.json.
+
+## Security review fixes (t13's list)
+| # | Fix | Test |
+|---|---|---|
+| 1 | `hub.port` equal to the peer listener's port (loopback / every interface) -> `invalid:hub.port: is the peer listener's port`. A port change test-binds `127.0.0.1:<port>` first -> `invalid:hub.port: is in use on this machine (...)`, nothing written. After `restart_hub` the replacement that cannot bind the new port within 10 s stays on the previous one (passed in the restart marker), logs why and tells clients with a notification; `restartRequired` keeps `hub.port`. | `the_api_port_never_shares_the_listener_port`, `a_port_in_use_or_shared_with_the_listener_is_refused`, `markers_parse_to_a_fallback_port`; live fallback smoke (blocked new port -> replacement on 47971, notice, restart still pending) |
+| 2 | Hook writes: random temp name created with `create_new` (O_EXCL, retried on a clash), the original's Unix mode copied onto the temp file (Windows: inherited ACL), then rename. Backups are created with `create_new` too (a planted link at the backup name fails). For copilot-vscode, `.github`, `.github/hooks`, `krypto.json` and the temp path must not be symlinks or junctions: checked before anything is read (preview included), before the folders are created and again before the rename. | `repo_hooks_never_go_through_a_symlink` (runs here through a directory junction, since this account cannot create symlinks), `rewrites_leave_no_temp_files_and_keep_permissions` |
+| 3 | `GET /health` -> `{ok, version, machineId}`. CLI clients (`krypto hook` included) use runtime.json's port only when `/health` there answers within 500 ms with machine.toml's id; otherwise config.toml's port (`cli::client_endpoint`). runtime.json is written 0600 on Unix (same atomic writer as config.toml). | `clients_verify_runtime_json_before_using_it` (real server: verified port, wrong machine id, nothing listening, `--port`) |
+| 5 | start_roots / repos.paths: the whole drive / filesystem root (`/`, `C:\`, `\?\C:\`) refused; stored canonicalized (links and `..` resolved, no verbatim prefix); duplicates compared after resolving. | `folders_are_canonical_and_never_a_whole_drive` |
+| 6 | `install_hooks` repo: absolute, `repos::plain_path` (no UNC / device path), an existing local folder that is in the repo index or has `.git`; the canonical path is used. | `hooks_preview_writes_nothing_then_apply_and_remove` (refused without `.git`, UNC and device paths refused, index folder accepted) |
+| 7 | `adopt_relay` runs `check_relay_url` / `check_relay_key` before writing; an invalid invite relay is never written or audited. | `a_relay_from_a_pairing_invite_is_kept_once` |
+| 8 | `KRYPTO_HUB_RESTARTED` (now the previous port) is read and removed from the environment at the very start of `main`, before the Tokio runtime starts (main builds the runtime by hand), so agents and hooks never inherit it; only the startup binds retry. | `markers_parse_to_a_fallback_port`, `the_replacement_gets_the_same_arguments_and_the_previous_port` |
+
+Also: `Roster::get_revoked` implemented in the store (`Store::revoked_roster_entry`; revoked rows keep key and counters, re-pairing makes them normal entries again), test `revoked_devices_keep_their_key_for_a_bye`. sde-peer's hub spots are real handling now: `LinkPath` -> `Device.path` + `devices` broadcast, `RelayStatus` -> `peer_status`; the invite log at `peers.rs` (create_invite, "relay only" when there is no addr) and `core/tests.rs` (`Invite.addr` is `Option`) are kept as they fit the new API.
+
+## Known gaps
+- Relay adoption is unit-tested (`adopt_relay`) but not end to end over a real relay (needs sde-relay's worker).
+- No client-facing read API for the settings audit (store only: `Store::settings_audit`).
+- Removing a key keeps the comment lines above it by moving them to the next key in its table; if it was the last
+  key, those lines go.
+- `agentInstalled` is PATH detection (`claude`, `codex`, `copilot`, `code`/`code-insiders`).
+- Housekeeping: sde-peer's patch had turned `core/peers.rs` and `core/tests.rs` into CRLF files; I restored LF (content
+  unchanged) so the diff shows only real changes.
+
+---
+
+# Earlier sde-hub report (v1 build, kept as written)
+
 Renamed to Krypto on 2026-11-23; names below are pre-rename.
 
 # sde-hub report: `crates/hub` (`pet-hub`, binary and lib)

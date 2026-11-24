@@ -65,6 +65,13 @@ impl Watchdog {
         self.cfg
     }
 
+    /// Apply new timings (e.g. after a settings change) without forgetting what was already nudged:
+    /// a request or turn nudged under the old timings is not nudged again just because the threshold
+    /// changed; repeats follow the new interval, counted from the last nudge.
+    pub fn set_config(&mut self, cfg: WatchdogConfig) {
+        self.cfg = cfg;
+    }
+
     pub fn machine_id(&self) -> &str {
         &self.machine_id
     }
@@ -310,6 +317,35 @@ mod tests {
         assert_eq!(again.len(), 1);
         assert_ne!(again[0].id, n[0].id);
         assert!(again[0].body.starts_with("Still waiting"));
+    }
+
+    #[test]
+    fn set_config_keeps_nudge_state() {
+        let mut w = dog();
+        let s = vec![
+            session("s1", SessionStatus::WaitingPermission, 0, SessionSource::Owned),
+            session("s2", SessionStatus::Done, 0, SessionSource::Owned),
+        ];
+        let p = vec![request("r1", "s1", 0)];
+        assert_eq!(w.tick(&s, &p, 5 * MIN).len(), 2, "request + finished turn");
+        // Lower threshold, longer repeat: nothing already nudged is nudged again.
+        let cfg = WatchdogConfig { waiting_nudge_after_ms: MIN, repeat_every_ms: 30 * MIN };
+        w.set_config(cfg);
+        assert_eq!(w.config(), cfg);
+        assert!(w.tick(&s, &p, 6 * MIN).is_empty());
+        // The old 10 min repeat no longer applies; the new one counts from the last nudge (5 + 30).
+        assert!(w.tick(&s, &p, 15 * MIN).is_empty());
+        assert!(w.tick(&s, &p, 34 * MIN).is_empty());
+        let again = w.tick(&s, &p, 35 * MIN);
+        assert_eq!(again.len(), 1);
+        assert!(again[0].body.starts_with("Still waiting"), "{}", again[0].body);
+        // New items use the new threshold.
+        let p2 = vec![request("r1", "s1", 0), request("r2", "s1", 35 * MIN)];
+        assert!(w.tick(&s, &p2, 35 * MIN + MIN / 2).is_empty());
+        assert_eq!(w.tick(&s, &p2, 36 * MIN).len(), 1);
+        // Repeats turned off: no more nudges for what was nudged.
+        w.set_config(WatchdogConfig { waiting_nudge_after_ms: MIN, repeat_every_ms: 0 });
+        assert!(w.tick(&s, &p2, 200 * MIN).is_empty());
     }
 
     #[test]

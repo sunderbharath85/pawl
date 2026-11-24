@@ -6,10 +6,12 @@ mod intents;
 mod mirror;
 mod peers;
 mod repo_index;
+mod settings;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -33,6 +35,7 @@ use crate::machine::{self, MachineIdentity};
 use crate::notify;
 use crate::store::{AuditEntry, AuditOrigin, AuditOutcome, Store};
 use host::Host;
+pub use settings::ClientGuard;
 
 const DAY_MS: i64 = 86_400_000;
 /// Sessions kept in memory: open ones plus those active in this window.
@@ -294,7 +297,20 @@ impl State {
 
 struct Inner {
     paths: Paths,
-    config: HubConfig,
+    /// The running configuration: config.toml + defaults + startup flags, then every
+    /// `update_settings` (see `settings.rs`).
+    config: RwLock<HubConfig>,
+    /// Port the local API was bound to and the keys startup flags / env vars decide (set by
+    /// `krypto serve`, see [`Hub::set_launch`]).
+    launch: Mutex<settings::Launch>,
+    /// Serializes settings changes (validate, apply, write config.toml, audit, announce).
+    settings_write: tokio::sync::Mutex<()>,
+    /// Woken after a settings change so the watchdog / daily report loops pick it up at once.
+    settings_changed: tokio::sync::Notify,
+    /// Local desktop clients connected right now (`open_panel` reports whether one got it).
+    desktop_clients: AtomicUsize,
+    /// Tests only: the home directory hook status / install use instead of the real one.
+    hooks_home: Mutex<Option<PathBuf>>,
     token: String,
     /// This hub's machine id (never changes while the hub runs).
     machine_id: MachineId,
@@ -305,11 +321,14 @@ struct Inner {
     store: Store,
     bus: Bus,
     host: Host,
-    brain: Brain,
+    /// Rebuilt when the bot settings change.
+    brain: RwLock<Brain>,
     state: Mutex<State>,
     watchdog: Mutex<Watchdog>,
     discovery: tokio::sync::Mutex<()>,
     shutdown: watch::Sender<bool>,
+    /// Set by `restart_hub`: `krypto serve` stops, starts a replacement process and exits.
+    restart: watch::Sender<bool>,
     /// Warnings raised while loading (e.g. dropped unsafe rules); replayed to every new client
     /// until the condition is fixed.
     startup_notices: Mutex<Vec<HubNotification>>,
@@ -470,12 +489,18 @@ impl Hub {
 
         let (peer, peer_rx) = Self::new_peer_node(&paths, machine.local_machine(), &store)?;
         let (shutdown, _) = watch::channel(false);
+        let (restart, _) = watch::channel(false);
         let hub = Hub {
             inner: Arc::new(Inner {
-                brain: Brain::new(config.brain.to_brain_config()),
+                brain: RwLock::new(Brain::new(config.brain.to_brain_config())),
                 watchdog: Mutex::new(Watchdog::new(config.watchdog.to_watchdog_config(), machine_id.clone())),
                 paths,
-                config,
+                launch: Mutex::new(settings::Launch { served: false, port: config.port, overrides: BTreeMap::new() }),
+                config: RwLock::new(config),
+                settings_write: tokio::sync::Mutex::new(()),
+                settings_changed: tokio::sync::Notify::new(),
+                desktop_clients: AtomicUsize::new(0),
+                hooks_home: Mutex::new(None),
                 token,
                 machine_id,
                 machine: Mutex::new(machine),
@@ -486,6 +511,7 @@ impl Hub {
                 state: Mutex::new(state),
                 discovery: tokio::sync::Mutex::new(()),
                 shutdown,
+                restart,
                 startup_notices: Mutex::new(startup_notices.clone()),
                 peer,
                 peers: Mutex::new(peers::Peers::default()),
@@ -545,8 +571,19 @@ impl Hub {
         &self.inner.token
     }
 
-    pub fn config(&self) -> &HubConfig {
-        &self.inner.config
+    /// The running configuration (a copy).
+    pub fn config(&self) -> HubConfig {
+        self.cfg().clone()
+    }
+
+    /// The running configuration; never hold the guard across an await.
+    fn cfg(&self) -> RwLockReadGuard<'_, HubConfig> {
+        self.inner.config.read().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The pet brain for the current bot settings.
+    fn brain(&self) -> Brain {
+        self.inner.brain.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     pub fn paths(&self) -> &Paths {
@@ -797,7 +834,7 @@ impl Hub {
                 json!({ "machine": self.update_machine(&machine_id, &name).await? })
             }
             ClientMsg::CreateInvite { ttl_secs, addr, .. } => self.create_invite(ttl_secs, addr)?,
-            ClientMsg::JoinPeer { uri, .. } => self.join_peer(&uri).await?,
+            ClientMsg::JoinPeer { uri, .. } => self.join_peer(&uri, actor).await?,
             ClientMsg::RevokeDevice { device_id, .. } => {
                 self.revoke_device(&device_id, actor).await?;
                 json!({})
@@ -807,6 +844,14 @@ impl Hub {
                 json!({})
             }
             ClientMsg::ListRepos { machine_id, .. } => json!({ "repos": self.repos_of(machine_id.as_deref()).await? }),
+            // Settings: only local clients send ClientMsgs (peers, intents and the mirror never
+            // reach this function), see settings.rs.
+            ClientMsg::GetSettings { .. } => self.get_settings(),
+            ClientMsg::UpdateSettings { patch, .. } => self.update_settings(&patch, actor).await?,
+            ClientMsg::HookStatus { .. } => json!({ "hooks": self.hook_status().await? }),
+            ClientMsg::InstallHooks { target, repo, action, .. } => self.install_hooks(target, repo, action, actor).await?,
+            ClientMsg::OpenPanel { view, .. } => self.open_panel(view),
+            ClientMsg::RestartHub { .. } => self.restart_hub(actor).await?,
         })
     }
 
@@ -1108,7 +1153,8 @@ impl Hub {
     /// persist, broadcast `agents`, and give every installed agent its pet.
     pub async fn refresh_agents(&self, force: bool) -> Result<Vec<Agent>> {
         let _guard = self.inner.discovery.lock().await;
-        let mut found = discover_agents(&self.inner.paths, &self.inner.config, &self.inner.machine_id, force).await?;
+        let cfg = self.config();
+        let mut found = discover_agents(&self.inner.paths, &cfg, &self.inner.machine_id, force).await?;
         let agents = {
             let mut st = self.st();
             for a in found.iter_mut() {
@@ -1834,7 +1880,7 @@ impl Hub {
 
     async fn chat_reply(&self, user: ChatMessage, pet: Option<Pet>, actor: Actor) {
         let ctx = self.brain_context(pet.clone()).await;
-        let reply = match self.inner.brain.handle(&user.text, &ctx).await {
+        let reply = match self.brain().handle(&user.text, &ctx).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("brain failed: {e:#}");
@@ -1902,14 +1948,14 @@ impl Hub {
 
     // ------------------------------------------------------------ watchdog & daily report
 
+    /// Ticks every `[watchdog] tick_secs` (re-read after every settings change).
     async fn watchdog_loop(self) {
         let mut shutdown = self.shutdown_rx();
-        let secs = self.inner.config.watchdog.tick_secs.max(5);
-        let mut iv = tokio::time::interval(Duration::from_secs(secs));
-        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            let secs = self.cfg().watchdog.tick_secs.clamp(5, 3600);
             tokio::select! {
-                _ = iv.tick() => self.watchdog_tick().await,
+                _ = tokio::time::sleep(Duration::from_secs(secs)) => self.watchdog_tick().await,
+                _ = self.inner.settings_changed.notified() => {}
                 _ = shutdown.changed() => break,
             }
         }
@@ -1930,7 +1976,7 @@ impl Hub {
         }
 
         // Hook sessions never get a final word if the app was killed; close them after a while.
-        let stale_ms = self.inner.config.hook_session_stale_hours as i64 * 3_600_000;
+        let stale_ms = self.cfg().hook_session_stale_hours as i64 * 3_600_000;
         let stale: Vec<Session> = if stale_ms > 0 {
             let mut st = self.st();
             st.sessions
@@ -1952,7 +1998,7 @@ impl Hub {
         }
 
         // Idle owned sessions hold an agent process; close them after a while.
-        let idle_ms = self.inner.config.owned_session_idle_hours as i64 * 3_600_000;
+        let idle_ms = self.cfg().owned_session_idle_hours as i64 * 3_600_000;
         if idle_ms > 0 {
             let idle: Vec<SessionId> = {
                 let st = self.st();
@@ -1995,8 +2041,8 @@ impl Hub {
         }
     }
 
+    /// Checks every minute against `daily_report_time` (re-read each time: settings can change it).
     async fn daily_report_loop(self) {
-        let Some(minutes) = self.inner.config.daily_report_minutes() else { return };
         let mut shutdown = self.shutdown_rx();
         let mut iv = tokio::time::interval(Duration::from_secs(60));
         iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2005,6 +2051,7 @@ impl Hub {
                 _ = iv.tick() => {}
                 _ = shutdown.changed() => break,
             }
+            let Some(minutes) = self.cfg().daily_report_minutes() else { continue };
             use chrono::Timelike;
             let now = chrono::Local::now();
             let cur = now.hour() * 60 + now.minute();
@@ -2052,7 +2099,7 @@ impl Hub {
                 return;
             }
         };
-        let text = match self.inner.brain.daily_report(&sessions, &events).await {
+        let text = match self.brain().daily_report(&sessions, &events).await {
             Ok(t) if !t.trim().is_empty() => t,
             Ok(_) => fallback_report(&sessions),
             Err(e) => {

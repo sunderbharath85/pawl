@@ -811,6 +811,23 @@ Dependencies approved by the user ("complete all steps, use recommended choices"
   sender still gets `error{queue_full, to}` although its frame is queued. `pong.ts` = relay clock. Close codes: 1008
   bad_auth / auth timeout, 4000 replaced by a newer authenticated socket.
 
+- **Access key + abuse limits (after security review):** the Worker requires `k=<RELAY_ACCESS_KEY>` on
+  `/v1/connect` (constant-time compare, checked before `idFromName`; missing/wrong -> 401, no DO touched; secret unset ->
+  refuse to serve with 503 unless `RELAY_OPEN = "1"` is set, documented as not recommended). Per-IP connect limit via a
+  Workers Rate Limiting binding (e.g. 30/min). Per-recipient token bucket in `deliver` before the allowlist read (shed
+  with `rate_limited`). Pending-socket eviction prefers sockets that have not sent `auth`. Unchanged `allow` /
+  `register_push` / same pairing token writes are skipped; config frames budget 5/s per mailbox. Push only if the
+  mailbox has authenticated and has a non-empty allowlist. `allow` changes drop queued frames from senders no longer
+  allowed. Size is checked before a pairing slot is consumed. `wrangler.jsonc` sets observability and logpush off.
+  Invite URIs carry `rk=<access key>` next to `relay=`; hub settings store it write-only (`relay.accessKey`).
+
+- **Auth nonce domain (after the transport review):** the relay's challenge nonce has byte 15 >= 2; envelope nonces
+  have 0/1 there, so the auth box (long-term key, relay-chosen relay_pk) can never share a (key, nonce) pair with an
+  envelope. Clients refuse other nonces and any relay_pk equal to their own or a roster key. During a join with an
+  adopted relay the client allows only the inviter and sends no hellos until pairing succeeds. Relay-origin pairing
+  attempts share one limiter bucket plus a global cap. Hello / presence more than 1 h from local time are dropped.
+  The relay access key travels in invite URIs: anyone who saw an invite can use the relay until the key is rotated.
+
 ### Relay transport (sde-peer, crates/peer)
 - `PeerNode::set_relay(&self, url: Option<String>)` (runtime; None = off). Connect outbound to
   `{url}/v1/connect?pk=<own pk b64url>`, answer the challenge with `crypto_box` (same key as the LAN link), send
@@ -830,3 +847,64 @@ Dependencies approved by the user ("complete all steps, use recommended choices"
 - Tests: an in-process mock relay (Rust, tokio-tungstenite server implementing the frames above) — auth, allow,
   relay-only pairing, link over relay, LAN takeover and fallback, from/env.from mismatch dropped, relay restart
   reconnect. Gate: cargo test -p krypto-peer + clippy -D warnings.
+
+## Step 5b — Settings in the UI (PLAN.md migration step 5b) — protocol v7
+
+Rule (PLAN.md Decisions): every setting can be changed in the desktop UI; CLI / config.toml are for initial setup.
+Protocol already updated by the orchestrator (PROTOCOL_VERSION = 7): `HubSettings`, `HubSettingsPatch`,
+`CustomAgentSetting`, `HookTargetName`, `HookStatus` (Rust `HookState`, `HookAction`), `PanelView`, ClientMsgs `get_settings` / `update_settings{patch}` /
+`hook_status` / `install_hooks{target, action}` / `open_panel{view}`, ServerMsgs `settings` / `open_panel`.
+Read the doc comments; they are the spec.
+
+### Ownership (step 5b)
+| Role | Owns |
+|---|---|
+| sde-hub (new, replaces sde-hubcore) | `crates/hub/`, `crates/discovery/` (hook status + remove) |
+| fe-settings (new, replaces fe-apps) | `packages/hub-client/`, `packages/pet-engine/`, `apps/desktop/`, `apps/vscode/` |
+(sde-peer adds `PeerNode::stop_listening()` in its step-6 pass; sde-hub uses it for the runtime listener toggle.)
+
+Dependency approved by the user ("use recommended choices"): `toml_edit` in crates/hub (edit config.toml in place,
+keeping comments). Nothing else without asking t13.
+
+### Hub (sde-hub)
+- `get_settings` returns the effective settings (config.toml + defaults; CLI flags that override a value are reported
+  in `overriddenBy`). Secrets are never returned: only `anthropicApiKeySet: boolean`.
+- `update_settings{patch}`: validate everything first (ports 1024-65535, durations > 0 and bounded, "HH:MM" or "",
+  listen = IP literal[:port], URLs http(s) / ws(s), paths absolute + existing for start_roots / repos, custom agent
+  id [a-z0-9-]{1,40} unique and not a built-in id, command non-empty argv, <= 16 custom agents). Invalid ->
+  `ack error "invalid:<field>: <reason>"` and nothing changes (`<field>` = camelCase wire path of the patch, e.g.
+  `hub.port`, `peer.startRoots[2]`, `customAgents[1].command`). Then write config.toml with `toml_edit` (keep comments
+  and unknown keys; atomic write via temp file + rename) and apply at runtime where possible: peer listener start /
+  stop / rebind, accept_intents, start_roots, repos paths (rebuild index), watchdog timings, bot model / keys / ollama,
+  retention, daily report time, custom agents (re-run discovery), relay url (stored; wired in step 6). `port` needs a
+  restart -> listed in `restartRequired`. Broadcast `ServerMsg settings` to all local clients after every change.
+- Settings audit: every update logged with client kind, changed keys (never secret values) and time.
+- Settings calls are local-only by construction (only local WebSocket clients send ClientMsgs); no peer body, intent,
+  mirror or relay frame may ever reach them. Test that.
+- `hook_status` / `install_hooks{target, action: "preview" | "apply" | "remove"}` reuse `krypto-discovery`'s hook
+  install code (the same code as `krypto install-hooks`); preview returns the exact change without writing.
+- `open_panel{view}` -> broadcast `ServerMsg open_panel{view}` (VS Code asks the desktop app to open a view).
+- `restart_hub`: ack, spawn a replacement (`current_exe` with the same args, detached; it retries binding the port for
+  ~10 s), send `bye{shutdown}` to peers, exit. The UI confirms first ("running sessions end").
+- `data_dir/runtime.json` `{port, pid, startedAt}` is written at startup (removed on clean exit). `krypto hook`, the
+  desktop app and VS Code resolve the port from it first, then config.toml, so a saved-but-not-yet-applied port change
+  never loses hook events.
+- CLI stays as is (initial setup); add `krypto settings [--json]` (print effective settings, secrets masked).
+- Tests: validation table, toml_edit round-trip keeps comments, runtime apply (listener on/off, accept_intents,
+  start_roots), restartRequired for port, audit rows without secret values, hooks preview does not write.
+
+### Clients (fe-settings)
+- hub-client: `getSettings()`, `updateSettings(patch)`, `hookStatus()`, `installHooks(target, action)`,
+  `openPanel(view)`; HubState.settings updated from `settings` msgs; error parsing for `invalid:<field>`.
+- Desktop Settings view, sections: Hub (port, offline, retention, idle timeouts), This machine (name — exists),
+  Machines & pairing (link to Machines view + peer listener on/off and address), Remote control (accept_intents,
+  start_roots list), Repos (paths list + the live repo index), Agents & hooks (per-agent hook status with
+  preview -> apply / remove, custom agents list add/edit/remove), Bot (model, Anthropic key write-only with
+  set/clear, Ollama URL/model), Notifications (client-side, exists), Relay (url; status arrives in step 6).
+  Field-level errors from `invalid:<field>`; "Restart the hub to apply" banner for restartRequired.
+- In-app confirms (never window.confirm) that say what the change allows: turning the peer listener on, enabling
+  remote control, adding a start root, adding or changing a custom agent command, removing hooks.
+- First-run setup (desktop, shown once; reopen from Settings): hub running? (start it) -> name this machine ->
+  install hooks for the agents found (preview + apply) -> optional: turn on the listener and pair a machine.
+- VS Code: command "Krypto: Open Settings" -> `openPanel("settings")`; if no desktop app is connected, say
+  "Open the Krypto desktop app to change settings". Desktop handles `open_panel` by showing the panel at that view.

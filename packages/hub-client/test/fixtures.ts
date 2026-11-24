@@ -11,8 +11,8 @@ export const machine2: Machine = { id: MID2, name: "Mac mini", os: "macos", last
 /** The roster entry for `machine2` (a hub's device id is its machine id). */
 export const device2: Device = { id: MID2, kind: "hub", name: "Mac mini", publicKey: "cGstbWFjbWluaQ==", pairedAt: 100, lastSeen: 1, addr: "192.168.1.20:47801" };
 
-export const peerOff: PeerStatus = { listening: null, publicKey: "cGstd2lucGM=" };
-export const peerOn: PeerStatus = { listening: "192.168.1.10:47801", publicKey: "cGstd2lucGM=" };
+export const peerOff: PeerStatus = { listening: null, publicKey: "cGstd2lucGM=", relay: { url: null, connected: false } };
+export const peerOn: PeerStatus = { listening: "192.168.1.10:47801", publicKey: "cGstd2lucGM=", relay: { url: null, connected: false } };
 
 /** A well-formed invite URI from `machine2` (code is a dummy). */
 export const inviteFrom2 = `krypto://peer?v=1&mid=${MID2}&pk=cGstbWFjbWluaQ&addr=192.168.1.20:47801&code=AAAAAAAAAAAAAAAAAAAAAA&exp=1900000000000`;

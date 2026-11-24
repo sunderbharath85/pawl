@@ -3,7 +3,7 @@
 // crates/protocol/src/lib.rs and must stay byte-compatible (camelCase fields,
 // snake_case `type` tags). Change both together.
 
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 export const HUB_DEFAULT_PORT = 47800;
 export const HUB_HOST = "127.0.0.1";
 /** Folder name under the OS data dir (Win %APPDATA%, mac ~/Library/Application Support, linux ~/.local/share). */
@@ -354,6 +354,8 @@ export interface Device {
   lastSeen?: UnixMs;
   /** The device's peer-listener address "host:port", when known. */
   addr?: string;
+  /** Live link path (absent when offline). */
+  path?: LinkPath;
 }
 
 /** This hub's peer-link status. */
@@ -362,7 +364,22 @@ export interface PeerStatus {
   listening: string | null;
   /** This hub's base64 X25519 public key. */
   publicKey: string;
+  /** Relay connection (migration step 6). `url` null = relay off. */
+  relay: RelayStatus;
 }
+
+/**
+ * `lastError`: unreachable | timeout | bad_key | unavailable | rate_limited | bad_auth | bad_frame |
+ * unsupported_version | replaced | closed.
+ */
+export interface RelayStatus {
+  url: string | null;
+  connected: boolean;
+  lastError?: string;
+}
+
+/** How a paired machine is reached right now. */
+export type LinkPath = "lan" | "relay";
 
 /**
  * A folder a hub runs agents in (its repo index, migration step 5): canonical cwds of its local sessions plus
@@ -523,7 +540,10 @@ export type PeerBodyType = PeerBody["type"];
  * The relay (Cloudflare Worker + one Durable Object mailbox per device) routes PeerEnvelopes between devices that
  * are not on the same LAN. It sees only public keys and ciphertext. A device's relay address IS its X25519 public key
  * (base64url, unpadded, 43 chars), so nobody can claim another device's mailbox.
- * Connect: `wss://<relay>/v1/connect?pk=<pk>`. Every frame is JSON text.
+ * Connect: `wss://<relay>/v1/connect?pk=<pk>&k=<relay access key>`. Every frame is JSON text.
+ * The access key (base64url, 32 random bytes, a Worker secret RELAY_ACCESS_KEY) is checked by the Worker in constant
+ * time before any mailbox is touched, so only the owner's devices can use a deployed relay. It travels inside invite
+ * URIs (`rk=`) and is stored write-only in hub settings.
  */
 export const RELAY_PROTOCOL_VERSION = 1;
 /** Text the device boxes in its auth answer: `${RELAY_AUTH_CONTEXT}:${challengeNonce}:${relayHost}`. */
@@ -539,7 +559,12 @@ export const RELAY_FRAME_MAX_BYTES = 320 * 1024;
 
 /** Relay -> device. */
 export type RelayServerFrame =
-  /** First frame: prove you hold the secret key for `pk`. `relayPk` is a fresh X25519 key for this connection. */
+  /**
+   * First frame: prove you hold the secret key for `pk`. `relayPk` is a fresh X25519 key for this connection.
+   * `nonce` byte 15 is always >= 2: envelope nonces use 0/1 there, so the auth box (same long-term key) can never reuse
+   * an envelope's nonce. Clients refuse a challenge whose nonce byte 15 is 0 or 1, or whose relayPk is their own key
+   * or any paired device's key.
+   */
   | { t: "challenge"; nonce: string; relayPk: string; v: 1 }
   | { t: "ok"; queued: number }
   /** A frame from an authenticated sender (`from` = its public key). Check it matches the roster key for env.from. */
@@ -568,6 +593,71 @@ export type RelayClientFrame =
   /** Phone only: content-free wake ("Your pet needs you") when a frame is queued while it is offline. */
   | { t: "register_push"; expoToken: string }
   | { t: "ping"; ts: UnixMs };
+
+// ---------- settings (migration step 5b: everything configurable in the UI) ----------
+/** A user-defined ACP agent (config.toml [[custom_agents]]). The hub runs `command` when a session starts. */
+export interface CustomAgentSetting {
+  id: string;
+  name: string;
+  command: string[];
+}
+
+/**
+ * The hub's editable settings (config.toml + defaults). Secrets are never sent: only whether they are set.
+ * `overriddenBy` lists keys whose effective value comes from a CLI flag or env var instead (e.g. "hub.port": "--port").
+ */
+export interface HubSettings {
+  hub: {
+    port: number;
+    offline: boolean;
+    hookSessionStaleHours: number;
+    ownedSessionIdleHours: number;
+    eventRetentionDays: number;
+    /** "HH:MM" local time, or "" for off. */
+    dailyReportTime: string;
+  };
+  bot: { model: string; anthropicApiKeySet: boolean; ollamaUrl: string | null; ollamaModel: string | null };
+  watchdog: { waitingNudgeAfterMs: number; repeatEveryMs: number; tickSecs: number };
+  /** `listen` = peer-listener address ("ip:port") or null when off; `acceptIntents` = remote control on. */
+  peer: { listen: string | null; acceptIntents: boolean; startRoots: string[] };
+  repos: { paths: string[] };
+  /** Relay URL (wss://...) or null when off (migration step 6); the access key is write-only. */
+  relay: { url: string | null; accessKeySet: boolean };
+  customAgents: CustomAgentSetting[];
+  overriddenBy: Record<string, string>;
+}
+
+/**
+ * Partial update. Omitted keys are unchanged. Arrays replace the whole list. `bot.anthropicApiKey`: a string sets it,
+ * null clears it (write-only; never read back).
+ */
+export interface HubSettingsPatch {
+  hub?: Partial<HubSettings["hub"]>;
+  bot?: Partial<Omit<HubSettings["bot"], "anthropicApiKeySet">> & { anthropicApiKey?: string | null };
+  watchdog?: Partial<HubSettings["watchdog"]>;
+  peer?: Partial<HubSettings["peer"]>;
+  repos?: Partial<HubSettings["repos"]>;
+  relay?: { url?: string | null; accessKey?: string | null };
+  customAgents?: CustomAgentSetting[];
+}
+
+/** Agent hooks the hub can install (same targets as `krypto install-hooks`). copilot-vscode is per repo. */
+export type HookTargetName = "claude" | "codex" | "copilot-cli" | "copilot-vscode";
+
+export interface HookStatus {
+  target: HookTargetName;
+  /** copilot-vscode only: the repo whose .github/hooks it covers. */
+  repo?: string;
+  /** The agent itself was found on this machine. */
+  agentInstalled: boolean;
+  state: "installed" | "outdated" | "missing" | "unsupported";
+  /** The agent config file the hooks live in. */
+  configPath: string;
+  detail?: string;
+}
+
+/** Views the desktop panel can be asked to show (`open_panel`). */
+export type PanelView = "home" | "settings" | "machines" | "approvals" | "pets" | "rules" | "chat" | "setup";
 
 // ---------- hooks ----------
 export type HookSource = "claude" | "codex" | "copilot";
@@ -616,7 +706,24 @@ export type ClientMsg =
   /** The user is active on this machine (throttled by clients to USER_ACTIVITY_REPORT_MS). Hub stamps the time. */
   | { type: "user_activity"; id: string }
   /** A machine's repo index (default: this machine; another machine: from its latest presence). */
-  | { type: "list_repos"; id: string; machineId?: MachineId };
+  | { type: "list_repos"; id: string; machineId?: MachineId }
+  /** Settings are local-only: only clients on this machine's localhost API can read or change them. */
+  | { type: "get_settings"; id: string }
+  /**
+   * Validated first (error "invalid:<field>: <reason>", nothing changed), then written to config.toml (comments kept)
+   * and applied at runtime where possible; keys that need a hub restart come back in `restartRequired`.
+   */
+  | { type: "update_settings"; id: string; patch: HubSettingsPatch }
+  | { type: "hook_status"; id: string }
+  /** preview = the exact change, nothing written; apply / remove write the agent's config. */
+  | { type: "install_hooks"; id: string; target: HookTargetName; repo?: string; action: "preview" | "apply" | "remove" }
+  /** Ask the desktop app to show a view (e.g. from VS Code). Ack `{delivered}` = a desktop client was connected. */
+  | { type: "open_panel"; id: string; view: PanelView }
+  /**
+   * Local only. The hub acks, starts a replacement process with the same arguments, says bye to peers and exits;
+   * running sessions end. Clients reconnect on their own. The running port is in data_dir/runtime.json.
+   */
+  | { type: "restart_hub"; id: string };
 
 export type ClientMsgType = ClientMsg["type"];
 
@@ -641,6 +748,12 @@ export interface AckResults {
   revoke_device: Record<string, never>;
   user_activity: Record<string, never>;
   list_repos: { repos: RepoRef[] };
+  get_settings: { settings: HubSettings; restartRequired: string[]; configPath: string };
+  update_settings: { settings: HubSettings; restartRequired: string[]; applied: string[] };
+  hook_status: { hooks: HookStatus[] };
+  install_hooks: { plan: string; applied: boolean; status: HookStatus };
+  open_panel: { delivered: boolean };
+  restart_hub: Record<string, never>;
 }
 
 // ---------- hub -> client ----------
@@ -685,6 +798,10 @@ export type ServerMsg =
   /** The full pairing roster after any change. */
   | { type: "devices"; devices: Device[] }
   /** Peer listener started or stopped. */
-  | { type: "peer_status"; peer: PeerStatus };
+  | { type: "peer_status"; peer: PeerStatus }
+  /** Settings changed (by any local client). */
+  | { type: "settings"; settings: HubSettings; restartRequired: string[] }
+  /** A client asked the desktop app to show this view. */
+  | { type: "open_panel"; view: PanelView };
 
 export type ServerMsgType = ServerMsg["type"];

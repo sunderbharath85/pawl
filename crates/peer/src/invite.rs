@@ -1,7 +1,11 @@
 //! One-time pairing invites:
-//! `krypto://peer?v=1&mid=<machineId>&pk=<b64url pk>&addr=<host:port>&code=<b64url 16 bytes>&exp=<unix ms>`.
+//! `krypto://peer?v=1&mid=<machineId>&pk=<b64url pk>&addr=<host:port>&code=<b64url 16 bytes>&exp=<unix ms>`
+//! plus `&relay=<percent-encoded relay URL>&rt=<b64url 16 bytes>[&rk=<relay access key>]` when the
+//! inviter is on a relay. `addr` may be left out when `relay` is present (an inviter off the LAN has
+//! nothing to dial).
 
 use crate::b64;
+use crate::relay::{normalize_url, valid_access_key};
 use krypto_protocol::{is_valid_machine_id, MachineId, UnixMs};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -14,11 +18,19 @@ pub(crate) const CODE_LEN: usize = 16;
 pub struct Invite {
     pub machine_id: MachineId,
     pub public_key: [u8; 32],
-    /// "host:port" of the inviter's peer listener (IPv6 as "[addr]:port").
-    pub addr: String,
+    /// "host:port" of the inviter's peer listener (IPv6 as "[addr]:port"). `None` only when `relay` is set.
+    pub addr: Option<String>,
     /// Base64url (no padding) of 16 random bytes. Secret: never log it (nor the URI).
     pub code: String,
     pub expires_at: UnixMs,
+    /// Normalized URL of the relay the inviter is connected to (see `PeerNode::set_relay`).
+    pub relay: Option<String>,
+    /// The inviter's one-shot relay pairing slot: base64url (no padding) of 16 random bytes. Set iff
+    /// `relay` is. Never log it.
+    pub relay_token: Option<String>,
+    /// The relay's access key, so a joiner without a relay can pair through it. Only with `relay`.
+    /// Secret: never log it.
+    pub relay_key: Option<String>,
 }
 
 /// Errors from parsing an invite URI or creating an invite. `Display` is the wire error code.
@@ -26,6 +38,7 @@ pub struct Invite {
 pub enum InviteError {
     #[error("bad_uri")]
     BadUri,
+    /// Neither the peer listener nor the relay is on: nobody could reach us.
     #[error("peer_listener_off")]
     ListenerOff,
     #[error("invalid")]
@@ -40,24 +53,32 @@ impl fmt::Debug for Invite {
             .field("addr", &self.addr)
             .field("code", &"<redacted>")
             .field("expires_at", &self.expires_at)
+            .field("relay", &self.relay)
+            .field("relay_token", &self.relay_token.as_ref().map(|_| "<redacted>"))
+            .field("relay_key", &self.relay_key.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
 
 impl Invite {
     pub fn to_uri(&self) -> String {
-        format!(
-            "{PREFIX}v=1&mid={}&pk={}&addr={}&code={}&exp={}",
-            self.machine_id,
-            b64::encode_url(&self.public_key),
-            escape_addr(&self.addr),
-            self.code,
-            self.expires_at
-        )
+        let mut uri = format!("{PREFIX}v=1&mid={}&pk={}", self.machine_id, b64::encode_url(&self.public_key));
+        if let Some(addr) = &self.addr {
+            uri.push_str(&format!("&addr={}", escape(addr, true)));
+        }
+        uri.push_str(&format!("&code={}&exp={}", self.code, self.expires_at));
+        if let (Some(relay), Some(token)) = (&self.relay, &self.relay_token) {
+            uri.push_str(&format!("&relay={}&rt={token}", escape(relay, false)));
+            if let Some(key) = &self.relay_key {
+                uri.push_str(&format!("&rk={key}"));
+            }
+        }
+        uri
     }
 
     /// Strict parse. Surrounding whitespace is ignored (pasted URIs); unknown parameters are
-    /// ignored; duplicates, a missing parameter or any invalid value is `BadUri`. Expiry is not
+    /// ignored; duplicates, a missing parameter or any invalid value is `BadUri`. `addr` may be
+    /// missing only when `relay` is present, `relay` and `rt` come together, and `rk` needs `relay`. Expiry is not
     /// checked here: the inviter decides.
     pub fn parse(uri: &str) -> Result<Invite, InviteError> {
         let uri = uri.trim();
@@ -68,8 +89,8 @@ impl Invite {
         if !scheme.eq_ignore_ascii_case(PREFIX) || query.contains('#') {
             return Err(InviteError::BadUri);
         }
-        let mut fields: [Option<String>; 6] = Default::default();
-        const KEYS: [&str; 6] = ["v", "mid", "pk", "addr", "code", "exp"];
+        let mut fields: [Option<String>; 9] = Default::default();
+        const KEYS: [&str; 9] = ["v", "mid", "pk", "addr", "code", "exp", "relay", "rt", "rk"];
         for pair in query.split('&') {
             let (k, v) = pair.split_once('=').ok_or(InviteError::BadUri)?;
             let Some(i) = KEYS.iter().position(|key| *key == k) else { continue };
@@ -78,10 +99,28 @@ impl Invite {
             }
             fields[i] = Some(percent_decode(v).ok_or(InviteError::BadUri)?);
         }
-        let [Some(v), Some(mid), Some(pk), Some(addr), Some(code), Some(exp)] = fields else {
+        let [Some(v), Some(mid), Some(pk), addr, Some(code), Some(exp), relay, rt, rk] = fields else {
             return Err(InviteError::BadUri);
         };
-        if v != "1" || !is_valid_machine_id(&mid) || !valid_addr(&addr) {
+        if v != "1" || !is_valid_machine_id(&mid) || addr.as_deref().is_some_and(|a| !valid_addr(a)) {
+            return Err(InviteError::BadUri);
+        }
+        if rk.as_deref().is_some_and(|k| relay.is_none() || !valid_access_key(k)) {
+            return Err(InviteError::BadUri);
+        }
+        let (relay, relay_token) = match (relay, rt) {
+            (None, None) => (None, None),
+            (Some(relay), Some(rt)) => {
+                let relay = normalize_url(&relay).ok_or(InviteError::BadUri)?;
+                match b64::decode_url(&rt) {
+                    Ok(t) if t.len() == CODE_LEN => {}
+                    _ => return Err(InviteError::BadUri),
+                }
+                (Some(relay), Some(rt))
+            }
+            _ => return Err(InviteError::BadUri),
+        };
+        if addr.is_none() && relay.is_none() {
             return Err(InviteError::BadUri);
         }
         let public_key: [u8; 32] = b64::decode_url(&pk)
@@ -96,11 +135,12 @@ impl Invite {
         if expires_at <= 0 || !exp.bytes().all(|b| b.is_ascii_digit()) {
             return Err(InviteError::BadUri);
         }
-        Ok(Invite { machine_id: mid, public_key, addr, code, expires_at })
+        Ok(Invite { machine_id: mid, public_key, addr, code, expires_at, relay, relay_token, relay_key: rk })
     }
 }
 
-/// Fresh random invite code: raw bytes (kept in memory by the inviter) and the base64url string.
+/// Fresh random invite code (or relay pairing token): raw bytes (kept in memory by the inviter) and
+/// the base64url string.
 pub(crate) fn new_code() -> ([u8; CODE_LEN], String) {
     let mut c = [0u8; CODE_LEN];
     getrandom::fill(&mut c).expect("OS random number generator unavailable");
@@ -108,26 +148,17 @@ pub(crate) fn new_code() -> ([u8; CODE_LEN], String) {
     (c, s)
 }
 
-/// "host:port" with a non-zero port; host is an IPv4 address, a DNS name, or "[IPv6]". Unspecified
-/// addresses (0.0.0.0, ::) are rejected: nobody can dial them.
+/// "host:port" with a non-zero port; host as in `valid_host`.
 pub(crate) fn valid_addr(s: &str) -> bool {
     if s.is_empty() || s.len() > 262 {
         return false;
     }
-    let (host, port) = if let Some(rest) = s.strip_prefix('[') {
-        let Some((h, p)) = rest.split_once("]:") else { return false };
-        match h.parse::<Ipv6Addr>() {
-            Ok(ip) if !ip.is_unspecified() => {}
-            _ => return false,
-        }
-        (None, p)
+    let (host, port) = if s.starts_with('[') {
+        let Some(end) = s.find("]:") else { return false };
+        (&s[..=end], &s[end + 2..])
     } else {
         let Some((h, p)) = s.rsplit_once(':') else { return false };
-        if h.contains(':') {
-            // Bare IPv6 is ambiguous; it must be bracketed.
-            return false;
-        }
-        (Some(h), p)
+        (h, p)
     };
     if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
         return false;
@@ -136,8 +167,19 @@ pub(crate) fn valid_addr(s: &str) -> bool {
         Ok(p) if p != 0 => {}
         _ => return false,
     }
-    let Some(host) = host else { return true };
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    valid_host(host)
+}
+
+/// A host we could dial: an IPv4 address, a DNS name, or "[IPv6]" (bare IPv6 is ambiguous next to a
+/// port and is refused). Unspecified addresses (0.0.0.0, ::) are rejected: nobody can dial them.
+pub(crate) fn valid_host(host: &str) -> bool {
+    if let Some(inner) = host.strip_prefix('[') {
+        return inner.strip_suffix(']').and_then(|h| h.parse::<Ipv6Addr>().ok()).is_some_and(|ip| !ip.is_unspecified());
+    }
+    if host.contains(':') {
+        return false;
+    }
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
         return !ip.is_unspecified();
     }
     !host.is_empty()
@@ -177,11 +219,14 @@ fn local_v4(ip: Ipv4Addr) -> bool {
     ip.is_private() || ip.is_loopback() || ip.is_link_local() || (a == 100 && (b & 0xc0) == 64)
 }
 
-fn escape_addr(addr: &str) -> String {
-    let mut out = String::with_capacity(addr.len() + 6);
-    for c in addr.chars() {
+/// Percent-encode everything but RFC 3986 unreserved characters (and ':' when `keep_colon`, which
+/// keeps "host:port" readable).
+fn escape(s: &str, keep_colon: bool) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
         match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '.' | '_' | '~' | ':' => out.push(c),
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '.' | '_' | '~' => out.push(c),
+            ':' if keep_colon => out.push(c),
             _ => {
                 let mut buf = [0u8; 4];
                 for b in c.encode_utf8(&mut buf).bytes() {
@@ -224,7 +269,26 @@ mod tests {
 
     fn sample(addr: &str) -> Invite {
         let (_, code) = new_code();
-        Invite { machine_id: "abcdef012345".into(), public_key: [9u8; 32], addr: addr.into(), code, expires_at: 1_700_000_000_000 }
+        Invite {
+            machine_id: "abcdef012345".into(),
+            public_key: [9u8; 32],
+            addr: Some(addr.into()),
+            code,
+            expires_at: 1_700_000_000_000,
+            relay: None,
+            relay_token: None,
+            relay_key: None,
+        }
+    }
+
+    fn with_relay(addr: Option<&str>) -> Invite {
+        Invite {
+            addr: addr.map(String::from),
+            relay: Some("wss://relay.krypto.dev/r".into()),
+            relay_token: Some(new_code().1),
+            relay_key: Some("k3y_-AZ".into()),
+            ..sample("10.0.0.2:47801")
+        }
     }
 
     #[test]
@@ -234,8 +298,52 @@ mod tests {
             let uri = inv.to_uri();
             assert!(uri.starts_with("krypto://peer?v=1&mid=abcdef012345&pk="), "{uri}");
             assert!(!uri.contains('['));
+            assert!(!uri.contains("relay=") && !uri.contains("rt="));
             assert_eq!(Invite::parse(&uri).unwrap(), inv);
             assert_eq!(Invite::parse(&format!("  {uri}\n")).unwrap(), inv);
+        }
+    }
+
+    #[test]
+    fn relay_params_round_trip() {
+        let open_relay = Invite { relay_key: None, ..with_relay(None) };
+        for inv in [with_relay(Some("10.0.0.2:47801")), with_relay(None), open_relay] {
+            let uri = inv.to_uri();
+            assert!(uri.contains("&relay=wss%3A%2F%2Frelay.krypto.dev%2Fr&rt="), "{uri}");
+            assert_eq!(uri.contains("&rk=k3y_-AZ"), inv.relay_key.is_some());
+            assert_eq!(uri.contains("addr="), inv.addr.is_some());
+            assert_eq!(Invite::parse(&uri).unwrap(), inv);
+        }
+        // The relay URL is normalized on parse.
+        let inv = with_relay(None);
+        let uri = inv.to_uri().replace("wss%3A%2F%2Frelay.krypto.dev%2Fr", "https%3A%2F%2FRELAY.krypto.dev%3A443%2Fr%2F");
+        assert_eq!(Invite::parse(&uri).unwrap().relay.as_deref(), Some("wss://relay.krypto.dev/r"));
+    }
+
+    #[test]
+    fn relay_params_are_strict() {
+        let good = with_relay(None).to_uri();
+        let rt = with_relay(None).relay_token.unwrap();
+        let no_rt = good.split("&rt=").next().unwrap().to_string();
+        let bad = [
+            // relay without rt, rt without relay, and no way to reach the inviter at all
+            no_rt.clone(),
+            sample("10.0.0.2:47801").to_uri() + &format!("&rt={rt}"),
+            sample("10.0.0.2:47801").to_uri().replace("&addr=10.0.0.2:47801", ""),
+            good.replace("wss%3A%2F%2Frelay.krypto.dev%2Fr", "ws%3A%2F%2Frelay.krypto.dev"),
+            good.replace("wss%3A%2F%2Frelay.krypto.dev%2Fr", "relay.krypto.dev"),
+            good.replace("wss%3A%2F%2Frelay.krypto.dev%2Fr", "wss%3A%2F%2Frelay.krypto.dev%3Fx%3D1"),
+            format!("{no_rt}&rt=AAAA"),
+            format!("{no_rt}&rt={rt}A"),
+            format!("{good}&rt={rt}"),
+            format!("{good}&relay=wss%3A%2F%2Fother.dev"),
+            // rk without relay, a bad key, a duplicate key
+            sample("10.0.0.2:47801").to_uri() + "&rk=k3y",
+            good.replace("&rk=k3y_-AZ", "&rk=k%2By"),
+            format!("{good}&rk=k3y"),
+        ];
+        for b in bad {
+            assert_eq!(Invite::parse(&b), Err(InviteError::BadUri), "{b}");
         }
     }
 
@@ -279,9 +387,13 @@ mod tests {
     }
 
     #[test]
-    fn debug_redacts_code() {
-        let inv = sample("10.0.0.2:47801");
-        assert!(!format!("{inv:?}").contains(&inv.code));
+    fn debug_redacts_secrets() {
+        let inv = with_relay(Some("10.0.0.2:47801"));
+        let dbg = format!("{inv:?}");
+        assert!(!dbg.contains(&inv.code));
+        assert!(!dbg.contains(inv.relay_token.as_deref().unwrap()));
+        assert!(!dbg.contains("k3y_-AZ"));
+        assert!(dbg.contains("relay.krypto.dev"));
     }
 
     #[test]
@@ -301,7 +413,10 @@ mod tests {
         assert_eq!(percent_decode("%"), None);
         let good = sample("10.0.0.2:47801").to_uri();
         assert_eq!(Invite::parse(&good.replace("10.0.0.2:47801", "10.0.0.2%+f:47801")), Err(InviteError::BadUri));
-        assert_eq!(Invite::parse(&good.replace("10.0.0.2:47801", "10.0.0.2%3A47801")).unwrap().addr, "10.0.0.2:47801");
+        assert_eq!(
+            Invite::parse(&good.replace("10.0.0.2:47801", "10.0.0.2%3A47801")).unwrap().addr.as_deref(),
+            Some("10.0.0.2:47801")
+        );
     }
 
     #[test]
@@ -355,5 +470,8 @@ mod tests {
         assert!(!valid_addr(":47801"));
         assert!(!valid_addr("a..b:1"));
         assert!(!valid_addr("host/x:1"));
+        assert!(!valid_addr("[::1]47801"));
+        assert!(valid_host("[::1]") && valid_host("relay.krypto.dev") && valid_host("10.0.0.1"));
+        assert!(!valid_host("::1") && !valid_host("[::]") && !valid_host("0.0.0.0") && !valid_host("[::1"));
     }
 }

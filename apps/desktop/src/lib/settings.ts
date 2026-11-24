@@ -11,6 +11,10 @@ export interface DesktopSettings {
   showPetNames: boolean;
   lastCwd: string;
   lastAgentId: string;
+  /** The first-run setup opened once on its own (it is reopened from Settings). */
+  setupOffered: boolean;
+  /** The first-run setup was finished (not just skipped). */
+  setupDone: boolean;
 }
 
 const KEY = "krypto.desktop.settings.v1";
@@ -23,6 +27,8 @@ export const DEFAULT_SETTINGS: DesktopSettings = {
   showPetNames: true,
   lastCwd: "",
   lastAgentId: "",
+  setupOffered: false,
+  setupDone: false,
 };
 
 export function readSettings(): DesktopSettings {

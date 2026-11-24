@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import WebSocket from "ws";
 import { DEFAULT_HUB_WS_URL, HubClient, toHubWsUrl, type HubState } from "@krypto/hub-client";
-import { readHubCredentials } from "@krypto/hub-client/node";
+import { readHubCredentials, resolveHubCredentials } from "@krypto/hub-client/node";
 import type { ServerMsg } from "@krypto/protocol";
 import type { ConnInfo } from "../shared/messages";
 import { errorMessage } from "./util";
@@ -51,6 +51,10 @@ export class HubConnection implements vscode.Disposable {
   private disconnectedSince = Date.now();
   private offlineTimer: ReturnType<typeof setTimeout> | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** Bumped by every start/stop: a credential lookup that finishes after a newer start/stop is dropped. */
+  private generation = 0;
+  private resolving = false;
+  private polling = false;
   private lastStatus: HubState["status"] | null = null;
   private readonly stateListeners = new Set<(state: HubState, conn: ConnInfo) => void>();
   private readonly msgListeners = new Set<(msg: ServerMsg, state: HubState) => void>();
@@ -93,6 +97,15 @@ export class HubConnection implements vscode.Disposable {
     return this.client;
   }
 
+  /**
+   * The port to pass to `krypto serve`, or null. Only an address from the `krypto.hubUrl` setting needs one: the
+   * hub reads KRYPTO_HUB_URL and config.toml itself, and a flag would pin the port (locking Settings → Hub port).
+   */
+  servePort(): number | null {
+    const setting = vscode.workspace.getConfiguration("krypto").get<string>("hubUrl")?.trim();
+    return setting ? portOf(toHubWsUrl(setting)) : null;
+  }
+
   onState(fn: (state: HubState, conn: ConnInfo) => void): vscode.Disposable {
     this.stateListeners.add(fn);
     return new vscode.Disposable(() => this.stateListeners.delete(fn));
@@ -103,9 +116,19 @@ export class HubConnection implements vscode.Disposable {
     return new vscode.Disposable(() => this.msgListeners.delete(fn));
   }
 
+  /** Resolve the credentials (async: a runtime.json port is checked first), then connect. */
   start(): void {
-    if (this.client) return;
-    const creds = this.resolveCredentials();
+    if (this.client || this.resolving) return;
+    const gen = ++this.generation;
+    this.resolving = true;
+    void this.resolveCredentials().then((creds) => {
+      this.resolving = false;
+      if (gen !== this.generation || this.client) return; // stopped or restarted meanwhile
+      this.connectWith(creds);
+    });
+  }
+
+  private connectWith(creds: Credentials): void {
     this.url = creds.url;
     this.token = creds.token;
     this.disconnectedSince = Date.now();
@@ -138,6 +161,8 @@ export class HubConnection implements vscode.Disposable {
   }
 
   private stop(): void {
+    this.generation += 1;
+    this.resolving = false;
     this.unsubscribe?.();
     this.unsubscribe = null;
     const client = this.client;
@@ -152,7 +177,12 @@ export class HubConnection implements vscode.Disposable {
     this.lastStatus = null;
   }
 
-  private resolveCredentials(): Credentials {
+  /**
+   * Settings > env > hub data dir. Without a `krypto.hubUrl` setting the hub-client helper also finds a hub on a
+   * not-yet-applied port through runtime.json, but only after that port's /health names this machine (the token
+   * is never sent before that check).
+   */
+  private async resolveCredentials(): Promise<Credentials> {
     const cfg = vscode.workspace.getConfiguration("krypto");
     const urlSetting = cfg.get<string>("hubUrl")?.trim() || "";
     const tokenSetting = cfg.get<string>("hubToken")?.trim() || "";
@@ -160,11 +190,11 @@ export class HubConnection implements vscode.Disposable {
     let token: string | null = tokenSetting || null;
     if (!token || !urlSetting) {
       try {
-        const creds = readHubCredentials();
+        const creds = urlSetting ? readHubCredentials() : await resolveHubCredentials();
         if (!urlSetting && creds.url) url = creds.url;
         if (!token && creds.token) token = creds.token.trim() || null;
       } catch (err) {
-        this.log.debug(`readHubCredentials: ${errorMessage(err)}`);
+        this.log.debug(`hub credentials: ${errorMessage(err)}`);
       }
     }
     return { url: toHubWsUrl(url), token };
@@ -209,6 +239,9 @@ export class HubConnection implements vscode.Disposable {
         const offline = Date.now() - this.disconnectedSince >= OFFLINE_AFTER_MS;
         this.setConn({ status: state.status, offline: this.conn.offline || offline, missingToken: false, url: this.url });
         if (!offline) this.armOfflineTimer();
+        // While disconnected, watch the credentials too: a Hub port changed in Settings applies when the hub
+        // restarts, and then the hub is only found at the new port (config.toml).
+        this.startPolling();
       }
     }
   }
@@ -233,11 +266,20 @@ export class HubConnection implements vscode.Disposable {
   private startPolling(): void {
     if (this.pollTimer) return;
     this.pollTimer = setInterval(() => {
-      const creds = this.resolveCredentials();
-      if (creds.token && (creds.token !== this.token || creds.url !== this.url || !this.client)) {
-        this.log.info("hub credentials changed; reconnecting");
-        this.restart();
-      }
+      if (this.polling) return;
+      this.polling = true;
+      const gen = this.generation;
+      void this.resolveCredentials()
+        .then((creds) => {
+          if (gen !== this.generation) return;
+          if (creds.token && (creds.token !== this.token || creds.url !== this.url || !this.client)) {
+            this.log.info("hub credentials changed; reconnecting");
+            this.restart();
+          }
+        })
+        .finally(() => {
+          this.polling = false;
+        });
     }, CREDENTIAL_POLL_MS);
   }
 

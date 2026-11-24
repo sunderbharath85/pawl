@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHubState } from "@krypto/hub-client/react";
-import { onNative, type PanelFocus } from "../lib/native";
+import { isTauri, native, onNative, type PanelFocus } from "../lib/native";
+import { readSettings, writeSettings } from "../lib/settings";
 import { usePetViews } from "../lib/pets";
 import { useSprites } from "../lib/sprites";
 import { useConnection } from "../lib/useConnection";
 import { useNow } from "../lib/useNow";
+import { ConfirmProvider } from "./Confirm";
 import { PanelContext, type PanelCtx, type Route } from "./context";
+import { routeForView } from "./routes";
 import { Sidebar } from "./Sidebar";
 import { HubBanner } from "./HubBanner";
 import { HomeView } from "./views/HomeView";
@@ -17,6 +20,7 @@ import { PetsView } from "./views/PetsView";
 import { RulesView } from "./views/RulesView";
 import { SettingsView } from "./views/SettingsView";
 import { MachinesView } from "./views/MachinesView";
+import { SetupView } from "./views/SetupView";
 import { PendingStrip } from "./views/PendingStrip";
 
 interface Toast {
@@ -39,6 +43,12 @@ function routeFromFocus(focus: PanelFocus): Route {
       return { view: "rules" };
     case "home":
       return { view: "home" };
+    case "settings":
+      return { view: "settings", section: focus.section };
+    case "machines":
+      return { view: "machines" };
+    case "setup":
+      return { view: "setup" };
     case "session":
     case undefined:
       return focus.sessionId ? { view: "session", sessionId: focus.sessionId } : { view: "home" };
@@ -63,6 +73,24 @@ export function PanelApp() {
   }, []);
 
   useEffect(() => onNative("panel-focus", (focus) => setRoute(routeFromFocus(focus))), []);
+
+  // Another local client (VS Code) asked for a view: show the panel there.
+  useEffect(
+    () =>
+      client.onMessage("open_panel", (msg) => {
+        setRoute(routeForView(msg.view));
+        if (isTauri) void native.openPanel().catch(() => {});
+      }),
+    [client],
+  );
+
+  // First run: open the setup once by itself (Settings → This app reopens it).
+  useEffect(() => {
+    if (readSettings().setupOffered) return;
+    writeSettings({ setupOffered: true });
+    setRoute({ view: "setup" });
+    if (isTauri) void native.openPanel().catch(() => {});
+  }, []);
 
   // Input in the panel means the user is on this machine (hub-client throttles the reports).
   useEffect(() => {
@@ -91,23 +119,25 @@ export function PanelApp() {
 
   return (
     <PanelContext.Provider value={ctx}>
-      <div className="app">
-        <Sidebar />
-        <main className="main">
-          <HubBanner />
-          {route.view !== "approvals" && <PendingStrip />}
-          <div className="main-scroll" key={route.view === "session" ? `s:${route.sessionId}` : route.view}>
-            {renderRoute(route)}
-          </div>
-        </main>
-        <div className="toasts" aria-live="polite">
-          {toasts.map((t) => (
-            <div key={t.id} className={`toast toast-${t.tone}`}>
-              {t.text}
+      <ConfirmProvider>
+        <div className="app">
+          <Sidebar />
+          <main className="main">
+            <HubBanner />
+            {route.view !== "approvals" && <PendingStrip />}
+            <div className="main-scroll" key={route.view === "session" ? `s:${route.sessionId}` : route.view}>
+              {renderRoute(route)}
             </div>
-          ))}
+          </main>
+          <div className="toasts" aria-live="polite">
+            {toasts.map((t) => (
+              <div key={t.id} className={`toast toast-${t.tone}`}>
+                {t.text}
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
+      </ConfirmProvider>
     </PanelContext.Provider>
   );
 }
@@ -129,8 +159,10 @@ function renderRoute(route: Route) {
     case "rules":
       return <RulesView />;
     case "settings":
-      return <SettingsView />;
+      return <SettingsView section={route.section} />;
     case "machines":
       return <MachinesView />;
+    case "setup":
+      return <SetupView />;
   }
 }

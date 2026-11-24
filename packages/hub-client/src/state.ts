@@ -7,6 +7,7 @@ import type {
   Device,
   HubEvent,
   HubNotification,
+  HubSettings,
   Machine,
   MachineId,
   Pet,
@@ -49,6 +50,17 @@ export interface HubState {
   hubVersion?: string | undefined;
   /** Last connection/handshake error, cleared on successful hello. */
   lastError?: string | undefined;
+  /** The hub's protocol version from the hello `Welcome` (settings need 7+). */
+  protocolVersion?: number | undefined;
+  /**
+   * The hub's settings (migration step 5b), from `getSettings` / `updateSettings` and every `settings` broadcast.
+   * Undefined until fetched once. Secrets are never included (only whether they are set).
+   */
+  settings?: HubSettings | undefined;
+  /** Settings keys saved to config.toml that only take effect after a hub restart (e.g. "hub.port"). */
+  restartRequired?: string[] | undefined;
+  /** Where the hub keeps its config.toml (from `getSettings`). */
+  settingsConfigPath?: string | undefined;
 }
 
 export interface StateLimits {
@@ -196,6 +208,7 @@ export function applyWelcome(state: HubState, welcome: Welcome): HubState {
     ...state,
     status: "connected",
     hubVersion: welcome.hubVersion,
+    protocolVersion: typeof welcome.protocolVersion === "number" ? welcome.protocolVersion : state.protocolVersion,
     machine,
     machines,
     devices: welcome.devices ?? [],
@@ -247,6 +260,11 @@ export function reduceServerMsg(state: HubState, msg: ServerMsg, limits: StateLi
       return { ...state, devices: msg.devices ?? [] };
     case "peer_status":
       return { ...state, peer: msg.peer };
+    case "settings":
+      return { ...state, settings: msg.settings, restartRequired: msg.restartRequired ?? [] };
+    case "open_panel":
+      // A request for the desktop app to show a view: an event for `onMessage`, no state.
+      return state;
     default: {
       // Unknown message type from a newer hub: ignore.
       const _exhaustive: never = msg;
@@ -335,6 +353,22 @@ export function applyAck(
     case "revoke_device":
       // ok:true means the device is gone; the hub follows up with `machine_removed` + `devices`.
       return removeDevice(state, request.deviceId);
+    case "get_settings": {
+      const res = result as Partial<AckResults["get_settings"]> | undefined;
+      if (!res?.settings) return state;
+      return {
+        ...state,
+        settings: res.settings,
+        restartRequired: res.restartRequired ?? [],
+        settingsConfigPath: res.configPath ?? state.settingsConfigPath,
+      };
+    }
+    case "update_settings": {
+      // The hub also broadcasts `settings`; folding the ack shows the saved values at once.
+      const res = result as Partial<AckResults["update_settings"]> | undefined;
+      if (!res?.settings) return state;
+      return { ...state, settings: res.settings, restartRequired: res.restartRequired ?? state.restartRequired ?? [] };
+    }
     default:
       return state;
   }

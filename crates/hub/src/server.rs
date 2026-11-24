@@ -1,6 +1,7 @@
 //! HTTP/WebSocket server (axum 0.8), bound to 127.0.0.1 only.
 //!
-//! - `GET  /health`          → `{"ok":true,"version":"x"}` (no auth)
+//! - `GET  /health`          → `{"ok":true,"version":"x","machineId":"..."}` (no auth; clients use
+//!   machineId to check that a port from runtime.json is this data dir's hub)
 //! - `GET  /ws`              → WebSocket; first frame must be `hello{token}` within 5 s
 //! - `POST /hooks/{source}`  → `Authorization: Bearer <token>`, raw hook JSON body → `{"ok":true}`
 
@@ -66,16 +67,37 @@ pub fn router(hub: Hub) -> Router {
 
 /// Bind 127.0.0.1:`port` and serve until `shutdown` resolves.
 pub async fn serve(hub: Hub, port: u16, shutdown: impl std::future::Future<Output = ()> + Send + 'static) -> Result<()> {
+    let listener = bind(port, Duration::ZERO).await?;
+    serve_on(hub, listener, shutdown).await
+}
+
+/// Bind 127.0.0.1:`port`, retrying for up to `retry_for` while it is still taken (a hub that
+/// replaces itself with `restart_hub` waits here for the old process to let go of the port).
+pub async fn bind(port: u16, retry_for: Duration) -> Result<tokio::net::TcpListener> {
     let addr: SocketAddr = format!("{HUB_HOST}:{port}").parse().context("hub address")?;
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("could not listen on {addr} (is another krypto already running?)"))?;
+    let deadline = tokio::time::Instant::now() + retry_for;
+    loop {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => return Ok(l),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!("could not listen on {addr} (is another krypto already running?)")))
+            }
+        }
+    }
+}
+
+/// Serve on a bound listener until `shutdown` resolves.
+pub async fn serve_on(hub: Hub, listener: tokio::net::TcpListener, shutdown: impl std::future::Future<Output = ()> + Send + 'static) -> Result<()> {
+    let addr = listener.local_addr().context("hub address")?;
     tracing::info!("krypto {} listening on http://{addr}", crate::HUB_VERSION);
     axum::serve(listener, router(hub)).with_graceful_shutdown(shutdown).await.context("server error")
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({ "ok": true, "version": crate::HUB_VERSION }))
+async fn health(State(hub): State<Hub>) -> Json<Value> {
+    Json(json!({ "ok": true, "version": crate::HUB_VERSION, "machineId": hub.machine_id() }))
 }
 
 // ---------------------------------------------------------------- hooks
@@ -190,6 +212,8 @@ async fn ws_connection(hub: Hub, socket: WebSocket) {
     };
     let actor = Actor::client(client, conn_id);
     tracing::info!("ws #{conn_id}: {} connected", actor.label);
+    // Counted while connected (open_panel tells whether a desktop app got the request).
+    let _connected = hub.client_connected(client);
 
     // Subscribe before taking the snapshot so nothing falls between the two.
     let mut bus = hub.subscribe();

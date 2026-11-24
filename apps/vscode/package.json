@@ -108,6 +108,12 @@
         "title": "Show Machines",
         "category": "Krypto",
         "icon": "$(remote-explorer)"
+      },
+      {
+        "command": "krypto.openSettings",
+        "title": "Open Settings",
+        "category": "Krypto",
+        "icon": "$(settings-gear)"
       }
     ],
     "viewsContainers": {
@@ -171,6 +177,11 @@
           "command": "krypto.showMachines",
           "when": "view == krypto.petView",
           "group": "1_pet@5"
+        },
+        {
+          "command": "krypto.openSettings",
+          "when": "view == krypto.petView",
+          "group": "1_pet@6"
         }
       ],
       "commandPalette": [

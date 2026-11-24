@@ -33,6 +33,7 @@ const MIGRATIONS: &[Migration] =
         Migration::Sql(SCHEMA_V4),
         Migration::Sql(SCHEMA_V5),
         Migration::Sql(SCHEMA_V6),
+        Migration::Sql(SCHEMA_V7),
     ];
 
 const SCHEMA_V1: &str = r#"
@@ -210,6 +211,24 @@ ALTER TABLE chat ADD COLUMN proposals TEXT;
 ALTER TABLE devices ADD COLUMN repos TEXT;
 "#;
 
+/// v7 (settings in the UI): who changed which settings or agent hooks, and when. Never holds values.
+const SCHEMA_V7: &str = r#"
+CREATE TABLE settings_audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          INTEGER NOT NULL,
+    machine_id  TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    client      TEXT,
+    keys        TEXT NOT NULL,
+    detail      TEXT
+);
+CREATE INDEX settings_audit_ts ON settings_audit(ts);
+"#;
+
+/// settings_audit rows kept (oldest pruned first).
+pub const SETTINGS_AUDIT_MAX_ROWS: i64 = 10_000;
+
 /// intent_log rows are kept this long, and at most INTENT_LOG_MAX_ROWS of them.
 pub const INTENT_LOG_RETENTION_MS: i64 = 30 * 86_400_000;
 pub const INTENT_LOG_MAX_ROWS: i64 = 100_000;
@@ -342,6 +361,38 @@ pub struct PairingAuditEntry {
     pub detail: Option<String>,
 }
 
+/// What a settings audit row is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsAuditKind {
+    /// `update_settings` (keys = the changed setting keys).
+    Settings,
+    /// `install_hooks` apply / remove (keys = `hooks.<target>`).
+    Hooks,
+    /// A pairing join that adopted the inviter's relay (keys = relay.url, relay.accessKey).
+    Pairing,
+    /// `restart_hub` (keys = the restart-only keys that were pending, if any).
+    Restart,
+}
+
+/// One settings change. Holds key names only, never values (secrets included).
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct SettingsAuditEntry {
+    pub id: i64,
+    pub ts: UnixMs,
+    /// This hub.
+    pub machine_id: MachineId,
+    pub kind: SettingsAuditKind,
+    /// e.g. "desktop#3".
+    pub actor: String,
+    /// The local client kind that asked ("desktop", "vscode", "cli", ...).
+    pub client: Option<String>,
+    /// camelCase setting keys, e.g. ["peer.listen", "bot.anthropicApiKey"].
+    pub keys: Vec<String>,
+    /// e.g. "apply" / "remove" (+ repo) for hooks.
+    pub detail: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
@@ -431,6 +482,7 @@ fn row_roster_entry(r: &Row<'_>) -> rusqlite::Result<RosterEntry> {
         paired_at,
         last_seen,
         addr: r.get(6)?,
+        path: None,
     };
     Ok(RosterEntry { device, machine })
 }
@@ -1009,6 +1061,14 @@ impl Store {
         Ok(c.query_row(&sql, [device_id], row_roster_entry).optional()?)
     }
 
+    /// A revoked device's row (revoking keeps its key and counters), so the link layer can answer
+    /// its next hello with `bye{revoked}`. None for a paired or unknown id.
+    pub fn revoked_roster_entry(&self, device_id: &str) -> Result<Option<RosterEntry>> {
+        let c = self.conn();
+        let sql = format!("SELECT {DEVICE_COLS} FROM devices WHERE id = ?1 AND revoked_at IS NOT NULL");
+        Ok(c.query_row(&sql, [device_id], row_roster_entry).optional()?)
+    }
+
     /// Every paired device that is not revoked, oldest pairing first.
     pub fn roster(&self) -> Result<Vec<RosterEntry>> {
         let c = self.conn();
@@ -1089,6 +1149,42 @@ impl Store {
             params![a.ts, a.machine_id, enum_str(&a.kind), a.device_id, a.device_name, a.remote_addr, a.actor, a.detail],
         )?;
         Ok(c.last_insert_rowid())
+    }
+
+    /// Append a settings audit entry (`id` is ignored and assigned); keeps the newest
+    /// SETTINGS_AUDIT_MAX_ROWS. Returns the new id.
+    pub fn insert_settings_audit(&self, a: &SettingsAuditEntry) -> Result<i64> {
+        let c = self.conn();
+        c.execute(
+            "INSERT INTO settings_audit (ts, machine_id, kind, actor, client, keys, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![a.ts, a.machine_id, enum_str(&a.kind), a.actor, a.client, serde_json::to_string(&a.keys)?, a.detail],
+        )?;
+        let id = c.last_insert_rowid();
+        c.execute("DELETE FROM settings_audit WHERE id <= ?1", params![id - SETTINGS_AUDIT_MAX_ROWS])?;
+        Ok(id)
+    }
+
+    /// Latest settings audit entries (newest first).
+    pub fn settings_audit(&self, limit: u32) -> Result<Vec<SettingsAuditEntry>> {
+        let c = self.conn();
+        let mut st = c.prepare(
+            "SELECT id, ts, machine_id, kind, actor, client, keys, detail FROM settings_audit ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = st.query_map([limit], |r| {
+            let kind: String = r.get(3)?;
+            let keys: String = r.get(6)?;
+            Ok(SettingsAuditEntry {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                machine_id: r.get(2)?,
+                kind: enum_from(&kind).unwrap_or(SettingsAuditKind::Settings),
+                actor: r.get(4)?,
+                client: r.get(5)?,
+                keys: serde_json::from_str(&keys).unwrap_or_default(),
+                detail: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Latest pairing audit entries (newest first).
@@ -1497,6 +1593,13 @@ impl Roster for Store {
     fn get(&self, device_id: &str) -> Option<RosterEntry> {
         self.roster_entry(device_id).unwrap_or_else(|e| {
             tracing::warn!("roster: read {device_id}: {e:#}");
+            None
+        })
+    }
+
+    fn get_revoked(&self, device_id: &str) -> Option<RosterEntry> {
+        self.revoked_roster_entry(device_id).unwrap_or_else(|e| {
+            tracing::warn!("roster: read revoked {device_id}: {e:#}");
             None
         })
     }
@@ -2235,6 +2338,7 @@ mod tests {
                 paired_at: 100,
                 last_seen: Some(100),
                 addr: addr.map(Into::into),
+                path: None,
             },
             machine: Machine {
                 id: id.into(),
@@ -2246,6 +2350,26 @@ mod tests {
                 user_active_at: None,
             },
         }
+    }
+
+    #[test]
+    fn revoked_devices_keep_their_key_for_a_bye() {
+        const PEER: &str = "zyxwvu987654";
+        let s = Store::open_in_memory(MID).unwrap();
+        let r: &dyn Roster = &s;
+        assert_eq!(r.get_revoked(PEER), None, "unknown");
+        let e = roster_entry(PEER, "Mac mini", "pk-1", Some("10.0.0.2:47801"));
+        r.upsert(e.clone());
+        assert_eq!(r.get_revoked(PEER), None, "still paired");
+        r.revoke(PEER);
+        assert_eq!(r.get(PEER), None);
+        let gone = r.get_revoked(PEER).expect("revoked rows stay readable");
+        assert_eq!((gone.device.id.as_str(), gone.device.public_key.as_str()), (PEER, "pk-1"));
+        assert!(r.list().is_empty());
+        // Pairing again makes it a normal entry once more.
+        r.upsert(e.clone());
+        assert_eq!(r.get_revoked(PEER), None);
+        assert_eq!(r.get(PEER).map(|x| x.device.public_key), Some("pk-1".to_string()));
     }
 
     #[test]

@@ -32,6 +32,7 @@ axum = { version = "0.8.9", features = ["ws"] }
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 clap = { version = "4.6.9", features = ["derive", "env"] }
 toml = "1.2.2"
+toml_edit = "0.25.20"
 chrono = "0.4.45"
 subtle = "2.6.1"
 getrandom = "0.4.3"

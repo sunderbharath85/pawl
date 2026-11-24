@@ -25,6 +25,10 @@ export function HubBanner() {
       title = "Waking the hub…";
       body = "Starting krypto serve in the background.";
       break;
+    case "restarting":
+      title = "Restarting the hub…";
+      body = "It comes back by itself in a few seconds with the saved settings; reconnecting as soon as it answers.";
+      break;
     case "connecting":
       title = "Sniffing for the hub…";
       body = `The hub is up; saying hello at ${meta.url}.`;
@@ -37,7 +41,7 @@ export function HubBanner() {
       break;
   }
 
-  const activity = meta.phase === "starting" ? "thinking" : meta.phase === "unauthorized" ? "sad" : "napping";
+  const activity = meta.phase === "starting" || meta.phase === "restarting" ? "thinking" : meta.phase === "unauthorized" ? "sad" : "napping";
 
   return (
     <div className={`hub-banner phase-${meta.phase}`} role="status">
@@ -61,7 +65,7 @@ export function HubBanner() {
           </button>
         </div>
       )}
-      {meta.phase === "starting" && <span className="spinner" aria-hidden />}
+      {(meta.phase === "starting" || meta.phase === "restarting") && <span className="spinner" aria-hidden />}
     </div>
   );
 }

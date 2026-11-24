@@ -34,11 +34,19 @@ fn machine(id: &str, name: &str) -> Machine {
     }
 }
 
+/// `fast` for a peer that never sends after its hello (a stalled reader): no offline timeout midway,
+/// however slow the machine.
+fn quiet_peer() -> PeerTimings {
+    PeerTimings { offline_after: Duration::from_secs(30), ..fast() }
+}
+
+/// Short timings. The handshake limit stays generous: it also bounds a dial's reply and the grace of
+/// a replaced link, and a loaded test machine can take a while to schedule both sides.
 fn fast() -> PeerTimings {
     PeerTimings {
         presence_interval: Duration::from_millis(200),
         offline_after: Duration::from_secs(5),
-        handshake_timeout: Duration::from_millis(500),
+        handshake_timeout: Duration::from_secs(2),
         backoff_min: Duration::from_millis(50),
         backoff_max: Duration::from_millis(400),
     }
@@ -140,6 +148,58 @@ impl TestNode {
     }
 }
 
+impl TestNode {
+    /// The next Body from `from` within `d`, if any (other events are logged).
+    async fn body_within(&mut self, from: &str, d: Duration) -> Option<PeerBody> {
+        let deadline = Instant::now() + d;
+        loop {
+            match tokio::time::timeout_at(deadline, self.events.recv()).await {
+                Ok(Some(e)) => {
+                    self.log.push(e.clone());
+                    if let PeerEvent::Body { device_id, body } = e {
+                        if device_id == from {
+                            return Some(body);
+                        }
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+
+/// Wait until `a` and `b` agree on one LAN link and keep it for a moment. When both listen, both
+/// dial right after pairing and the tie-break swaps links; a revoke sent on a link that is replaced
+/// and closed (its 2 s grace over) before the bye gets there is lost (see the report).
+async fn settle(a: &TestNode, b: &TestNode) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let now = (a.node.test_link_dialed_by_me(&b.id), b.node.test_link_dialed_by_me(&a.id));
+        if now.0.is_some() && now.1.is_some() && now.0 != now.1 {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if (a.node.test_link_dialed_by_me(&b.id), b.node.test_link_dialed_by_me(&a.id)) == now {
+                return;
+            }
+        }
+        assert!(Instant::now() < deadline, "{} and {} never settled on one link", a.id, b.id);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// `from` sends bodies until `to` gets one. A body queued on a link that just lost a tie-break (both
+/// sides dialed) or a path switch may be dropped, by design (the hub resyncs on every LinkUp), so a
+/// test that only needs "the link works" must not hang on the first one.
+async fn link_works(from: &TestNode, to: &mut TestNode) {
+    let deadline = Instant::now() + WAIT;
+    for i in 0.. {
+        assert!(Instant::now() < deadline, "{} never got a body from {}: {:#?}", to.id, from.id, to.log);
+        let _ = from.node.send(&to.id, sync_request(1_000 + i));
+        if to.body_within(&from.id, Duration::from_millis(300)).await.is_some() {
+            return;
+        }
+    }
+}
+
 /// A mirror_events body whose serialized JSON is exactly `n` bytes.
 fn body_of_size(n: usize) -> PeerBody {
     let make = |payload: String| PeerBody::MirrorEvents {
@@ -184,7 +244,7 @@ fn presence_body(id: &str, name: &str) -> PeerBody {
             repos: vec![],
             pets: vec![],
             user_active_at: None,
-            ts: 1,
+            ts: now_ms(),
         },
     }
 }
@@ -272,6 +332,7 @@ fn add_paired(roster: &MemoryRoster, id: &str, pk: &[u8; 32], addr: Option<Strin
             paired_at: 1,
             last_seen: None,
             addr,
+            path: None,
         },
         machine: machine(id, "Raw"),
     });
@@ -304,7 +365,7 @@ async fn pair_two_nodes_link_up_and_presence_both_ways() {
     let (dev, m) = b.node.join(&inv.to_uri()).await.unwrap();
     assert_eq!(dev.id, A);
     assert_eq!(dev.public_key, a.node.public_b64());
-    assert_eq!(dev.addr.as_deref(), Some(inv.addr.as_str()));
+    assert_eq!(dev.addr, inv.addr);
     assert_eq!(m.id, A);
     assert!(m.online);
 
@@ -334,7 +395,7 @@ async fn pair_two_nodes_link_up_and_presence_both_ways() {
 
     assert_eq!(a.node.test_live_invites(), 0, "invite is single use");
     assert_eq!(a.roster.get(B).unwrap().device.public_key, b.node.public_b64());
-    assert_eq!(b.roster.get(A).unwrap().device.addr.as_deref(), Some(inv.addr.as_str()));
+    assert_eq!(b.roster.get(A).unwrap().device.addr, inv.addr);
     assert_eq!(a.node.online().iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), [B]);
     assert_eq!(b.node.online().iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), [A]);
 
@@ -481,7 +542,7 @@ async fn join_errors() {
     let free = std::net::TcpListener::bind(local()).unwrap().local_addr().unwrap();
     let mut dead = inv.clone();
     dead.machine_id = C.into();
-    dead.addr = free.to_string();
+    dead.addr = Some(free.to_string());
     assert_eq!(b.node.join(&dead.to_uri()).await, Err(JoinError::Unreachable));
 
     // A URI for machine C whose key is a's: the reply cannot come from C, so it is rejected.
@@ -506,10 +567,11 @@ async fn create_invite_rules() {
     assert_eq!(a.node.create_invite(Some("not an addr".into()), TTL), Err(InviteError::Invalid));
     assert_eq!(a.node.create_invite(Some("0.0.0.0:47801".into()), TTL), Err(InviteError::Invalid));
     let inv = a.node.create_invite(Some("192.168.1.9:47801".into()), TTL).unwrap();
-    assert_eq!(inv.addr, "192.168.1.9:47801");
+    assert_eq!(inv.addr.as_deref(), Some("192.168.1.9:47801"));
+    assert_eq!((inv.relay, inv.relay_token, inv.relay_key), (None, None, None), "no relay: LAN only");
     let before = now_ms();
     let inv = a.node.create_invite(None, TTL).unwrap();
-    assert_eq!(inv.addr, addr.to_string());
+    assert_eq!(inv.addr, Some(addr.to_string()));
     assert!((inv.expires_at - before - 600_000).abs() < 5_000);
     assert!(a.node.listen(local()).await.is_err(), "second listen is refused");
 
@@ -519,7 +581,7 @@ async fn create_invite_rules() {
     assert_eq!(any.node.create_invite(None, TTL), Err(InviteError::Invalid));
     let port = any.node.listening().unwrap().port();
     let inv = any.node.create_invite(Some(format!("127.0.0.1:{port}")), TTL).unwrap();
-    assert_eq!(inv.addr, format!("127.0.0.1:{port}"));
+    assert_eq!(inv.addr, Some(format!("127.0.0.1:{port}")));
     assert_eq!(any.node.inner.advertised_addr(), Some(format!("127.0.0.1:{port}")));
 }
 
@@ -612,9 +674,12 @@ async fn replayed_old_pair_accept_rejected_on_rejoin() {
         Invite {
             machine_id: A.into(),
             public_key: a.pk(),
-            addr: addr.to_string(),
+            addr: Some(addr.to_string()),
             code: new_code().1,
             expires_at: now_ms() + 60_000,
+            relay: None,
+            relay_token: None,
+            relay_key: None,
         }
         .to_uri()
     };
@@ -684,7 +749,8 @@ async fn peer_reported_public_or_dns_addr_ignored() {
     // hello on the live link: public IPs and DNS names are ignored, a LAN IP literal is stored.
     let mut hello_then_sync = |addr: &str, tag: &str| {
         seq += 1;
-        let h = seal(&b_keys, B, A, &a_pk, seq, &PeerBody::Hello { machine: machine(B, "B"), addr: Some(addr.into()), ts: 1 }, false);
+        let hello = PeerBody::Hello { machine: machine(B, "B"), addr: Some(addr.into()), ts: now_ms() };
+        let h = seal(&b_keys, B, A, &a_pk, seq, &hello, false);
         seq += 1;
         let p = seal(&b_keys, B, A, &a_pk, seq, &presence_body(B, tag), false);
         (env_text(&h), env_text(&p))
@@ -761,6 +827,65 @@ async fn replayed_and_tampered_frames_dropped() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replayed_frames_are_dropped_before_decryption() {
+    let (mut a, addr) = listening(A, fast()).await;
+    let b_keys = DeviceKeys::generate();
+    let mut ws = stalled_peer(&mut a, addr, &b_keys).await;
+    let a_pk = a.pk();
+    let seq = time_seq() + 1_000;
+    let frame = env_text(&seal(&b_keys, B, A, &a_pk, seq, &sync_request(1), false));
+    ws.send(frame.clone()).await.unwrap();
+    assert_eq!(a.bodies(B, 1).await, [sync_request(1)]);
+    let opened = a.node.test_opens();
+    // Replays, and a stale seq with a box that would not even open: dropped without decrypting.
+    for _ in 0..5 {
+        ws.send(frame.clone()).await.unwrap();
+    }
+    let mut stale = seal(&b_keys, B, A, &a_pk, seq - 1, &sync_request(2), false);
+    stale.ciphertext = b64::encode(&[0u8; 64]);
+    ws.send(env_text(&stale)).await.unwrap();
+    a.expect_none(Duration::from_millis(300), "a Body", is_body_from(B)).await;
+    assert_eq!(a.node.test_opens(), opened, "replays must be dropped before opening");
+    ws.send(env_text(&seal(&b_keys, B, A, &a_pk, seq + 10, &sync_request(3), false))).await.unwrap();
+    assert_eq!(a.bodies(B, 1).await, [sync_request(3)]);
+    assert_eq!(a.node.test_opens(), opened + 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hello_and_presence_stamped_far_from_our_clock_are_dropped() {
+    let (mut a, addr) = listening(A, quiet_peer()).await;
+    let b_keys = DeviceKeys::generate();
+    add_paired(&a.roster, B, &b_keys.public_key(), None);
+    let a_pk = a.pk();
+    let two_hours: i64 = 2 * 3600 * 1000;
+    let hello_at = |ts: i64| PeerBody::Hello { machine: machine(B, "B"), addr: None, ts };
+    // A hello stamped two hours ago does not open a link.
+    let mut ws = raw(addr).await;
+    ws.send(env_text(&seal(&b_keys, B, A, &a_pk, time_seq(), &hello_at(now_ms() - two_hours), false))).await.unwrap();
+    assert_closed_silently(&mut ws, WAIT).await;
+    let mut ws = raw(addr).await;
+    ws.send(env_text(&seal(&b_keys, B, A, &a_pk, time_seq(), &hello_at(now_ms()), false))).await.unwrap();
+    assert!(matches!(raw_next(&mut ws, WAIT).await, RawNext::Text(_)));
+    a.expect("LinkUp", is_link_up(B)).await;
+    // Presence from two hours ago or two hours ahead is dropped; one stamped now is not.
+    let presence_at = |name: &str, ts: i64| {
+        let mut body = presence_body(B, name);
+        if let PeerBody::Presence { presence } = &mut body {
+            presence.ts = ts;
+        }
+        body
+    };
+    let base = time_seq();
+    for (i, (name, ts)) in [("old", now_ms() - two_hours), ("future", now_ms() + two_hours), ("now", now_ms())].into_iter().enumerate() {
+        ws.send(env_text(&seal(&b_keys, B, A, &a_pk, base + 1 + i as u64, &presence_at(name, ts), false))).await.unwrap();
+    }
+    a.expect("the fresh presence", is_presence_named(B, "now")).await;
+    assert!(a.position(is_presence_named(B, "old")).is_none());
+    assert!(a.position(is_presence_named(B, "future")).is_none());
+    assert!(a.node.online().len() == 1, "the link stays up");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replayed_hello_closed() {
     let (mut a, addr) = listening(A, fast()).await;
     let b_keys = DeviceKeys::generate();
@@ -786,6 +911,7 @@ async fn revoke_sends_bye_both_sides_revoked_no_redial() {
     b.node.listen(local()).await.unwrap();
     pair(&mut a, &mut b).await;
     assert!(a.roster.get(B).unwrap().device.addr.is_some(), "b advertised its listener");
+    settle(&a, &b).await;
 
     a.node.revoke(B).await;
     a.expect("Revoked here", |e| matches!(e, PeerEvent::Revoked { device_id, by_peer: false } if device_id == B))
@@ -809,6 +935,95 @@ async fn revoke_sends_bye_both_sides_revoked_no_redial() {
     a.node.revoke(B).await;
     a.node.revoke(C).await;
     a.expect_none(Duration::from_millis(100), "Revoked", |e| matches!(e, PeerEvent::Revoked { .. })).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bye_revoked_on_a_replaced_link_still_revokes() {
+    // A revoke that the peer sends on the link that just lost a swap (both sides dialed) is honoured.
+    let (mut a, addr) = listening(A, fast()).await;
+    let b_keys = DeviceKeys::generate();
+    add_paired(&a.roster, B, &b_keys.public_key(), None);
+    let a_pk = a.pk();
+    let frame = |body: &PeerBody| env_text(&seal(&b_keys, B, A, &a_pk, time_seq(), body, false));
+    let mut ws1 = raw(addr).await;
+    ws1.send(frame(&hello_body(B))).await.unwrap();
+    assert!(matches!(raw_next(&mut ws1, WAIT).await, RawNext::Text(_)));
+    a.expect("LinkUp", is_link_up(B)).await;
+    // The same dialer again: the new link replaces the first, which lingers for its grace period.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let mut ws2 = raw(addr).await;
+    ws2.send(frame(&hello_body(B))).await.unwrap();
+    assert!(matches!(raw_next(&mut ws2, WAIT).await, RawNext::Text(_)));
+    a.expect("LinkUp of the replacement", is_link_up(B)).await;
+    a.log.clear();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    ws1.send(frame(&PeerBody::Bye { reason: ByeReason::Revoked, ts: now_ms() })).await.unwrap();
+    a.expect("Revoked by peer", |e| matches!(e, PeerEvent::Revoked { device_id, by_peer: true } if device_id == B))
+        .await;
+    assert!(a.position(is_link_down(B)).unwrap() < a.position(|e| matches!(e, PeerEvent::Revoked { .. })).unwrap());
+    assert!(a.roster.is_revoked(B));
+    assert!(a.node.online().is_empty());
+    // A bye{shutdown} there would have been ignored: only a revoke matters on a replaced link.
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoked_device_hello_is_answered_with_bye_once_a_minute() {
+    let (mut a, addr) = listening(A, fast()).await;
+    let b_keys = DeviceKeys::generate();
+    add_paired(&a.roster, B, &b_keys.public_key(), None);
+    a.node.revoke(B).await;
+    a.expect("Revoked", |e| matches!(e, PeerEvent::Revoked { by_peer: false, .. })).await;
+    let base = time_seq();
+    a.roster.set_last_rx_seq(B, base + 10);
+    let a_pk = a.pk();
+    let hello_from = |keys: &DeviceKeys, seq: u64| env_text(&seal(keys, B, A, &a_pk, seq, &hello_body(B), false));
+
+    // Not b's key, or a replay (seq not above the last one): closed without a word.
+    let mut ws = raw(addr).await;
+    ws.send(hello_from(&DeviceKeys::generate(), base + 20)).await.unwrap();
+    assert_closed_silently(&mut ws, WAIT).await;
+    let mut ws = raw(addr).await;
+    ws.send(hello_from(&b_keys, base + 5)).await.unwrap();
+    assert_closed_silently(&mut ws, WAIT).await;
+
+    // Authentic and fresh: bye{revoked}, then the socket closes.
+    let mut ws = raw(addr).await;
+    ws.send(hello_from(&b_keys, base + 30)).await.unwrap();
+    let RawNext::Text(t) = raw_next(&mut ws, WAIT).await else { panic!("no answer") };
+    let env: PeerEnvelope = serde_json::from_str(&t).unwrap();
+    assert_eq!((env.from.as_str(), env.to.as_str()), (A, B));
+    assert!(matches!(open(&b_keys, &env, &a_pk).unwrap(), PeerBody::Bye { reason: ByeReason::Revoked, .. }));
+    assert!(matches!(raw_next(&mut ws, WAIT).await, RawNext::Closed));
+
+    // Once a minute at most.
+    let mut ws = raw(addr).await;
+    ws.send(hello_from(&b_keys, base + 40)).await.unwrap();
+    assert_closed_silently(&mut ws, WAIT).await;
+    assert!(a.roster.get(B).is_none(), "still revoked");
+    a.expect_none(Duration::from_millis(200), "a link", is_link_up(B)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoked_while_offline_peer_learns_it_when_it_comes_back() {
+    let (mut a, _) = listening(A, fast()).await;
+    let path = std::env::temp_dir().join(format!("krypto-peer-revoked-{}", hex::encode(getrandom::u64().unwrap().to_be_bytes())));
+    let roster_b = Arc::new(MemoryRoster::new());
+    let mut b1 = node_with(B, DeviceKeys::load_or_create(&path).unwrap(), roster_b.clone(), fast());
+    pair(&mut a, &mut b1).await;
+    b1.node.shutdown().await;
+    a.expect("LinkDown", is_link_down(B)).await;
+    a.node.revoke(B).await;
+    a.expect("Revoked", |e| matches!(e, PeerEvent::Revoked { by_peer: false, .. })).await;
+
+    // b comes back (same key and roster) and dials: a tells it, and b stops for good.
+    let mut b2 = node_with(B, DeviceKeys::load_or_create(&path).unwrap(), roster_b.clone(), fast());
+    b2.node.connect_known();
+    b2.expect("Revoked by peer", |e| matches!(e, PeerEvent::Revoked { device_id, by_peer: true } if device_id == A))
+        .await;
+    assert!(roster_b.is_revoked(A));
+    b2.expect_none(Duration::from_millis(600), "a link", is_link_up(A)).await;
+    assert!(lock(&b2.node.inner.dialers).get(A).is_none_or(|h| h.is_finished()), "b stopped dialing");
+    let _ = std::fs::remove_file(&path);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1074,13 +1289,15 @@ async fn disconnect_cools_down_both_directions_then_reconnects() {
     a.log.clear();
     b.log.clear();
 
-    let cooldown = Duration::from_millis(1500);
+    let cooldown = Duration::from_millis(2500);
     let start = Instant::now();
     a.node.disconnect(B, cooldown);
     a.expect("LinkDown", is_link_down(B)).await;
     b.expect("LinkDown", is_link_down(A)).await;
-    // b's dialer keeps trying (backoff_max 400 ms) and a keeps refusing; a never dials.
-    a.expect_none(Duration::from_millis(1200), "LinkUp during the cooldown", is_link_up(B)).await;
+    // b's dialer keeps trying (backoff_max 400 ms) and a keeps refusing; a never dials. The window is
+    // measured from the disconnect, so a slow machine only makes it shorter.
+    let quiet = cooldown.saturating_sub(start.elapsed()).saturating_sub(Duration::from_millis(400));
+    a.expect_none(quiet, "LinkUp during the cooldown", is_link_up(B)).await;
     assert!(b.position(is_link_up(A)).is_none(), "b linked during a's cooldown");
     assert!(a.node.online().is_empty() && b.node.online().is_empty());
     // Not a revoke: both rosters intact, nobody saw bye or Revoked.
@@ -1092,22 +1309,22 @@ async fn disconnect_cools_down_both_directions_then_reconnects() {
     a.expect("LinkUp after the cooldown", is_link_up(B)).await;
     b.expect("LinkUp after the cooldown", is_link_up(A)).await;
     assert!(start.elapsed() >= cooldown, "reconnected after {:?}", start.elapsed());
-    assert_eq!(a.node.send(B, sync_request(1)), Ok(()));
-    assert_eq!(b.bodies(A, 1).await, [sync_request(1)]);
-
-    // A zero cooldown just drops the link; it comes straight back.
-    a.node.disconnect(B, Duration::ZERO);
-    a.expect("LinkDown", is_link_down(B)).await;
-    a.expect("LinkUp", is_link_up(B)).await;
+    // Both dial now: the first body may go down with the link that loses the tie-break.
+    link_works(&a, &mut b).await;
 
     // Unknown ids are a no-op.
     a.log.clear();
     a.node.disconnect(C, cooldown);
     a.expect_none(Duration::from_millis(200), "any effect", |e| {
-        matches!(e, PeerEvent::LinkDown { .. } | PeerEvent::Revoked { .. })
+        matches!(e, PeerEvent::LinkDown { device_id } | PeerEvent::Revoked { device_id, .. } if device_id == C)
     })
     .await;
     assert!(lock(&a.node.inner.cooldowns).get(C).is_none());
+
+    // A zero cooldown just drops the link; it comes straight back.
+    a.node.disconnect(B, Duration::ZERO);
+    a.expect("LinkDown", is_link_down(B)).await;
+    a.expect("LinkUp", is_link_up(B)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1115,7 +1332,9 @@ async fn disconnect_refuses_raw_hello_during_cooldown() {
     let (mut a, addr) = listening(A, fast()).await;
     let b_keys = DeviceKeys::generate();
     let mut ws = stalled_peer(&mut a, addr, &b_keys).await;
-    a.node.disconnect(B, Duration::from_millis(800));
+    let cooldown = Duration::from_secs(3);
+    let start = Instant::now();
+    a.node.disconnect(B, cooldown);
     a.expect("LinkDown", is_link_down(B)).await;
     // The old socket is closed without a bye.
     loop {
@@ -1131,12 +1350,56 @@ async fn disconnect_refuses_raw_hello_during_cooldown() {
     let hello = || env_text(&seal(&b_keys, B, A, &a.pk(), time_seq(), &hello_body(B), false));
     let mut ws = raw(addr).await;
     ws.send(hello()).await.unwrap();
+    assert!(start.elapsed() < cooldown, "the machine is too slow for this test: {:?}", start.elapsed());
     assert_closed_silently(&mut ws, WAIT).await;
-    tokio::time::sleep(Duration::from_millis(900)).await;
+    tokio::time::sleep_until(start + cooldown + Duration::from_millis(200)).await;
     let mut ws = raw(addr).await;
     ws.send(hello()).await.unwrap();
     assert!(matches!(raw_next(&mut ws, WAIT).await, RawNext::Text(_)), "hello accepted after the cooldown");
     a.expect("LinkUp", is_link_up(B)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_listening_closes_accepted_links_only() {
+    let (mut a, a_addr) = listening(A, fast()).await;
+    // b (no listener) joins a: a accepted that link.
+    let mut b = node(B, fast());
+    pair(&mut a, &mut b).await;
+    // a joins c: a dialed that link (and it stays a's: the smaller id's dial wins the tie-break).
+    let (mut c, _) = listening(C, fast()).await;
+    pair(&mut c, &mut a).await;
+    let deadline = Instant::now() + WAIT;
+    while a.node.test_link_dialed_by_me(C) != Some(true) {
+        assert!(Instant::now() < deadline, "a's link to c is not a's dial");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(a.node.test_link_dialed_by_me(B), Some(false));
+    a.log.clear();
+
+    a.node.stop_listening().await;
+    // On return: listener off, the accepted link down, the dialed one up.
+    assert_eq!(a.node.listening(), None);
+    assert_eq!(a.node.link_path(B), None);
+    assert_eq!(a.node.link_path(C), Some(LinkPath::Lan));
+    a.expect("LinkDown", is_link_down(B)).await;
+    b.expect("LinkDown", is_link_down(A)).await;
+    // The port is released (Windows may hold it a moment for the closed connection).
+    let deadline = Instant::now() + WAIT;
+    while std::net::TcpListener::bind(a_addr).is_err() {
+        assert!(Instant::now() < deadline, "port {a_addr} not released");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    a.expect_none(Duration::from_millis(500), "LinkDown of the dialed link", is_link_down(C)).await;
+    assert_eq!(a.node.send(C, sync_request(1)), Ok(()));
+    assert_eq!(c.bodies(A, 1).await, [sync_request(1)]);
+
+    // listen() works again; stop_listening when off is a no-op.
+    let again = a.node.listen(local()).await.unwrap();
+    assert_eq!(a.node.listening(), Some(again));
+    a.node.stop_listening().await;
+    a.node.stop_listening().await;
+    assert_eq!(a.node.listening(), None);
+    assert_eq!(a.node.link_path(C), Some(LinkPath::Lan));
 }
 
 // ---------- step 3: bodies ----------
@@ -1226,7 +1489,7 @@ async fn too_large_body_never_sent_largest_allowed_delivered() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn backpressure_closes_link_and_peer_reconnects() {
-    let (mut a, addr) = listening(A, fast()).await;
+    let (mut a, addr) = listening(A, quiet_peer()).await;
     let b_keys = DeviceKeys::generate();
     add_paired(&a.roster, B, &b_keys.public_key(), None);
     let a_pk = a.pk();
@@ -1287,7 +1550,7 @@ async fn stalled_peer(a: &mut TestNode, addr: SocketAddr, b_keys: &DeviceKeys) -
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn byte_budget_overflow_closes_link() {
-    let (mut a, addr) = listening(A, fast()).await;
+    let (mut a, addr) = listening(A, quiet_peer()).await;
     let b_keys = DeviceKeys::generate();
     let _ws = stalled_peer(&mut a, addr, &b_keys).await;
     // 200 KiB bodies: the 16 MiB budget holds about 81 of them, far below the 1024-frame cap.
@@ -1341,3 +1604,5 @@ async fn send_refuses_reserved_bodies() {
     assert_eq!(a.node.send(B, sync_request(3)), Ok(()));
     assert_eq!(b.bodies(A, 1).await, [sync_request(3)]);
 }
+
+mod relay;

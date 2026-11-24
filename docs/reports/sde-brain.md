@@ -1,8 +1,17 @@
 # sde-brain report — step 5: remote commands by machine + repo (`crates/brain/`, crate `krypto-brain`)
 
-Status: **DONE, rev 2** (2026-11-24, branch `step-5-remote-commands`). Gate passes: `cargo test -p krypto-brain` 81 passed / 0
+Status: **DONE, rev 3** (2026-11-24, branch `step-5-remote-commands`). Gate passes: `cargo test -p krypto-brain` 82 passed / 0
 failed; `cargo clippy -p krypto-brain --all-targets -- -D warnings` clean. `cargo check -p krypto-hub --all-targets` builds.
 Nothing committed.
+
+## Rev 3 — `Watchdog::set_config` (step 5b follow-up)
+- `crates/brain/src/watchdog.rs`: `pub fn set_config(&mut self, cfg: WatchdogConfig)`, which matches the existing `&mut self`
+  `tick`. It swaps in the new timings and keeps the per-request and per-turn nudge state.
+  - Something already nudged is not nudged again because the threshold dropped.
+  - Repeats follow the new interval, counted from the last nudge; `repeat_every_ms <= 0` stops them.
+  - New items use the new threshold.
+- Test: `watchdog::tests::set_config_keeps_nudge_state`.
+- For sde-hub (t28): call `watchdog.set_config(new_cfg)` on a settings change instead of building a new `Watchdog`.
 
 ## Rev 2 — integration and security-review fixes
 Also touches `crates/brain/src/util.rs`.

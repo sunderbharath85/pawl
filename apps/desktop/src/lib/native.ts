@@ -1,6 +1,7 @@
 // Typed wrappers around the Rust commands/events in src-tauri.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { homeDir } from "@tauri-apps/api/path";
 
 export interface HubCredentials {
   /** HTTP base, e.g. http://127.0.0.1:47800 */
@@ -38,18 +39,33 @@ export interface HitRect {
 export interface PanelFocus {
   petId?: string;
   sessionId?: string;
-  view?: "session" | "approvals" | "chat" | "pets" | "new" | "rules" | "home";
+  view?: "session" | "approvals" | "chat" | "pets" | "new" | "rules" | "home" | "settings" | "machines" | "setup";
+  /** Settings only: the section to scroll to (e.g. "pairing"). */
+  section?: string;
   requestId?: string;
 }
 
 /** True inside the Tauri webview (false in a plain browser tab during `vite dev`). */
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+let home: Promise<string | null> | null = null;
+/** This user's home folder (looked up once), or null outside Tauri or when the OS does not say. */
+export function homeFolder(): Promise<string | null> {
+  if (!isTauri) return Promise.resolve(null);
+  home ??= homeDir().then(
+    (h) => h || null,
+    () => null,
+  );
+  return home;
+}
+
 export const native = {
   hubCredentials: () => invoke<HubCredentials>("hub_credentials"),
   hubHealth: () => invoke<NativeHubHealth>("hub_health"),
   startHub: () => invoke<StartHubResult>("start_hub"),
   locateHub: () => invoke<string | null>("locate_hub"),
+  /** This machine's main network address (a suggestion for the peer listener), or null. */
+  lanAddress: () => invoke<string | null>("lan_address"),
   quit: () => invoke<void>("quit_app"),
   setHitRects: (rects: HitRect[]) => invoke<void>("set_hit_rects", { rects }),
   setCaptureAll: (capture: boolean) => invoke<void>("set_capture_all", { capture }),

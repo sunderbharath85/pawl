@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 pub const HUB_DEFAULT_PORT: u16 = 47800;
 pub const HUB_HOST: &str = "127.0.0.1";
 pub const HUB_DATA_DIR_NAME: &str = "krypto";
@@ -114,6 +114,9 @@ pub struct Device {
     /// The device's peer-listener address "host:port", when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addr: Option<String>,
+    /// Live link path (absent when offline).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<LinkPath>,
 }
 
 /// This hub's peer-link status.
@@ -124,6 +127,27 @@ pub struct PeerStatus {
     pub listening: Option<String>,
     /// This hub's base64 X25519 public key.
     pub public_key: String,
+    /// Relay connection (migration step 6). `url` None = relay off.
+    pub relay: RelayStatusInfo,
+}
+
+/// `last_error`: unreachable | timeout | bad_key | unavailable | rate_limited | bad_auth | bad_frame |
+/// unsupported_version | replaced | closed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayStatusInfo {
+    pub url: Option<String>,
+    pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// How a paired machine is reached right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkPath {
+    Lan,
+    Relay,
 }
 
 /// A folder a hub runs agents in (its repo index, migration step 5): canonical cwds of its local sessions plus
@@ -833,7 +857,9 @@ pub struct HubNotification {
 // ---------- relay (migration step 6) ----------
 /// The relay (Cloudflare Worker + one Durable Object mailbox per device) routes PeerEnvelopes between devices that
 /// are not on the same LAN. It sees only public keys and ciphertext. A device's relay address IS its X25519 public
-/// key (base64url, unpadded, 43 chars). Connect: `wss://<relay>/v1/connect?pk=<pk>`. JSON text frames.
+/// key (base64url, unpadded, 43 chars). Connect: `wss://<relay>/v1/connect?pk=<pk>&k=<relay access key>`. JSON text
+/// frames. The access key (Worker secret RELAY_ACCESS_KEY) is checked by the Worker in constant time before any
+/// mailbox is touched; it travels inside invite URIs (`rk=`) and is stored write-only in hub settings.
 pub const RELAY_PROTOCOL_VERSION: u8 = 1;
 /// Text the device boxes in its auth answer: `{RELAY_AUTH_CONTEXT}:{challenge_nonce}:{relay_host}`.
 pub const RELAY_AUTH_CONTEXT: &str = "krypto-relay-auth-v1";
@@ -848,6 +874,9 @@ pub const RELAY_FRAME_MAX_BYTES: usize = 320 * 1024;
 #[serde(tag = "t", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum RelayServerFrame {
     /// First frame: prove you hold the secret key for `pk`. `relay_pk` is a fresh X25519 key for this connection.
+    /// `nonce` byte 15 is always >= 2 (envelope nonces use 0/1 there), so the auth box can never reuse an envelope's
+    /// nonce under the same long-term key. Clients refuse a nonce with byte 15 in {0, 1} or a relay_pk equal to their
+    /// own key or any paired device's key.
     Challenge { nonce: String, relay_pk: String, v: u8 },
     Ok { queued: u32 },
     /// A frame from an authenticated sender (`from` = its public key). Check it matches the roster key for env.from.
@@ -894,6 +923,271 @@ pub enum RelayClientFrame {
     /// Phone only: content-free wake when a frame is queued while it is offline.
     RegisterPush { expo_token: String },
     Ping { ts: UnixMs },
+}
+
+// ---------- settings (migration step 5b: everything configurable in the UI) ----------
+/// A user-defined ACP agent (config.toml [[custom_agents]]). The hub runs `command` when a session starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomAgentSetting {
+    pub id: String,
+    pub name: String,
+    pub command: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsHub {
+    pub port: u16,
+    pub offline: bool,
+    pub hook_session_stale_hours: u32,
+    pub owned_session_idle_hours: u32,
+    pub event_retention_days: u32,
+    /// "HH:MM" local time, or "" for off.
+    pub daily_report_time: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsBot {
+    pub model: String,
+    pub anthropic_api_key_set: bool,
+    pub ollama_url: Option<String>,
+    pub ollama_model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsWatchdog {
+    pub waiting_nudge_after_ms: i64,
+    pub repeat_every_ms: i64,
+    pub tick_secs: u64,
+}
+
+/// `listen` = peer-listener address ("ip:port") or None when off; `accept_intents` = remote control on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsPeer {
+    pub listen: Option<String>,
+    pub accept_intents: bool,
+    pub start_roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsRepos {
+    pub paths: Vec<String>,
+}
+
+/// Relay URL (wss://...) or None when off (migration step 6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsRelay {
+    pub url: Option<String>,
+    pub access_key_set: bool,
+}
+
+/// The hub's editable settings (config.toml + defaults). Secrets are never sent: only whether they are set.
+/// `overridden_by` lists keys whose effective value comes from a CLI flag or env var (e.g. "hub.port" -> "--port").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettings {
+    pub hub: HubSettingsHub,
+    pub bot: HubSettingsBot,
+    pub watchdog: HubSettingsWatchdog,
+    pub peer: HubSettingsPeer,
+    pub repos: HubSettingsRepos,
+    pub relay: HubSettingsRelay,
+    pub custom_agents: Vec<CustomAgentSetting>,
+    #[serde(default)]
+    pub overridden_by: BTreeMap<String, String>,
+}
+
+/// `Some(None)` = explicit null (clear), `None` = key absent (unchanged).
+fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsHubPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_session_stale_hours: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_session_idle_hours: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_retention_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_report_time: Option<String>,
+}
+
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsBotPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Write-only: Some(Some(key)) sets it, Some(None) clears it.
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub anthropic_api_key: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub ollama_url: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub ollama_model: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsWatchdogPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_nudge_after_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_every_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsPeerPatch {
+    /// Some(None) turns the listener off.
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub listen: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept_intents: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_roots: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsReposPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<String>>,
+}
+
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsRelayPatch {
+    /// Some(None) turns the relay off.
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub url: Option<Option<String>>,
+    /// Write-only: Some(Some(key)) sets it, Some(None) clears it.
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub access_key: Option<Option<String>>,
+}
+
+/// Shows whether a write-only secret is being set / cleared / left alone, never its value.
+fn secret_patch(v: &Option<Option<String>>) -> &'static str {
+    match v {
+        None => "unchanged",
+        Some(None) => "clear",
+        Some(Some(_)) => "set (redacted)",
+    }
+}
+
+impl std::fmt::Debug for HubSettingsBotPatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HubSettingsBotPatch")
+            .field("model", &self.model)
+            .field("anthropic_api_key", &secret_patch(&self.anthropic_api_key))
+            .field("ollama_url", &self.ollama_url)
+            .field("ollama_model", &self.ollama_model)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for HubSettingsRelayPatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HubSettingsRelayPatch")
+            .field("url", &self.url)
+            .field("access_key", &secret_patch(&self.access_key))
+            .finish()
+    }
+}
+
+/// Partial update. Omitted keys are unchanged; lists replace the whole list.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub: Option<HubSettingsHubPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot: Option<HubSettingsBotPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog: Option<HubSettingsWatchdogPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<HubSettingsPeerPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repos: Option<HubSettingsReposPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<HubSettingsRelayPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_agents: Option<Vec<CustomAgentSetting>>,
+}
+
+/// Agent hooks the hub can install (same targets as `krypto install-hooks`). copilot-vscode is per repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HookTargetName {
+    #[serde(rename = "claude")]
+    Claude,
+    #[serde(rename = "codex")]
+    Codex,
+    #[serde(rename = "copilot-cli")]
+    CopilotCli,
+    #[serde(rename = "copilot-vscode")]
+    CopilotVscode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookState {
+    Installed,
+    Outdated,
+    Missing,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookStatus {
+    pub target: HookTargetName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    pub agent_installed: bool,
+    pub state: HookState,
+    pub config_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookAction {
+    Preview,
+    Apply,
+    Remove,
+}
+
+/// Views the desktop panel can be asked to show (`open_panel`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelView {
+    Home,
+    Settings,
+    Machines,
+    Approvals,
+    Pets,
+    Rules,
+    Chat,
+    Setup,
 }
 
 // ---------- client -> hub ----------
@@ -974,6 +1268,25 @@ pub enum ClientMsg {
         #[serde(default)]
         machine_id: Option<MachineId>,
     },
+    /// Settings are local-only: only clients on this machine's localhost API can read or change them.
+    GetSettings { id: String },
+    /// Validated first ("invalid:<field>: <reason>", nothing changed), then written to config.toml (comments kept)
+    /// and applied at runtime where possible; keys needing a restart come back in `restartRequired`.
+    UpdateSettings { id: String, patch: Box<HubSettingsPatch> },
+    HookStatus { id: String },
+    /// preview = the exact change, nothing written; apply / remove write the agent's config.
+    InstallHooks {
+        id: String,
+        target: HookTargetName,
+        #[serde(default)]
+        repo: Option<String>,
+        action: HookAction,
+    },
+    /// Ask the desktop app to show a view (e.g. from VS Code). Ack `{delivered}`.
+    OpenPanel { id: String, view: PanelView },
+    /// Local only. The hub acks, starts a replacement process with the same arguments, says bye to peers and exits;
+    /// running sessions end. Clients reconnect on their own. The running port is in data_dir/runtime.json.
+    RestartHub { id: String },
 }
 
 impl ClientMsg {
@@ -997,7 +1310,13 @@ impl ClientMsg {
             | ClientMsg::JoinPeer { id, .. }
             | ClientMsg::RevokeDevice { id, .. }
             | ClientMsg::UserActivity { id }
-            | ClientMsg::ListRepos { id, .. } => id,
+            | ClientMsg::ListRepos { id, .. }
+            | ClientMsg::GetSettings { id }
+            | ClientMsg::UpdateSettings { id, .. }
+            | ClientMsg::HookStatus { id }
+            | ClientMsg::InstallHooks { id, .. }
+            | ClientMsg::OpenPanel { id, .. }
+            | ClientMsg::RestartHub { id } => id,
         }
     }
 }
@@ -1059,6 +1378,10 @@ pub enum ServerMsg {
     Devices { devices: Vec<Device> },
     /// Peer listener started or stopped.
     PeerStatus { peer: PeerStatus },
+    /// Settings changed (by any local client).
+    Settings { settings: HubSettings, restart_required: Vec<String> },
+    /// A client asked the desktop app to show this view.
+    OpenPanel { view: PanelView },
 }
 
 impl ServerMsg {
@@ -1092,8 +1415,8 @@ mod tests {
         assert_eq!(serde_json::to_value(&env).unwrap(), serde_json::json!({"v":1,"from":"a","to":"b","seq":7,"nonce":"n","box":"c"}));
         let b = PeerBody::Bye { reason: ByeReason::Revoked, ts: 1 };
         assert_eq!(serde_json::to_value(&b).unwrap(), serde_json::json!({"type":"bye","reason":"revoked","ts":1}));
-        let st = PeerStatus { listening: None, public_key: "k".into() };
-        assert_eq!(serde_json::to_value(&st).unwrap(), serde_json::json!({"listening":null,"publicKey":"k"}));
+        let st = PeerStatus { listening: None, public_key: "k".into(), relay: RelayStatusInfo::default() };
+        assert_eq!(serde_json::to_value(&st).unwrap(), serde_json::json!({"listening":null,"publicKey":"k","relay":{"url":null,"connected":false}}));
         let m: ClientMsg = serde_json::from_str(r#"{"type":"create_invite","id":"1"}"#).unwrap();
         assert_eq!(m, ClientMsg::CreateInvite { id: "1".into(), ttl_secs: None, addr: None });
         let b = PeerBody::SyncRequest { since_seq: 5 };
@@ -1127,6 +1450,16 @@ mod tests {
             summary: "Start".into(),
         };
         assert_eq!(serde_json::to_value(&p).unwrap()["kind"], "start");
+        let p: HubSettingsPatch = serde_json::from_str(r#"{"bot":{"anthropicApiKey":null},"peer":{"listen":"192.168.1.5:47801"}}"#).unwrap();
+        assert_eq!(p.bot.unwrap().anthropic_api_key, Some(None));
+        assert_eq!(p.peer.unwrap().listen, Some(Some("192.168.1.5:47801".into())));
+        let p: HubSettingsPatch = serde_json::from_str(r#"{"bot":{"anthropicApiKey":"sk-secret-value"},"relay":{"accessKey":"rk-secret"}}"#).unwrap();
+        let dbg = format!("{p:?}");
+        assert!(!dbg.contains("sk-secret-value") && !dbg.contains("rk-secret") && dbg.contains("set (redacted)"));
+        let p: HubSettingsPatch = serde_json::from_str(r#"{"bot":{"model":"m"}}"#).unwrap();
+        assert_eq!(p.bot.unwrap().anthropic_api_key, None);
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"install_hooks","id":"8","target":"copilot-vscode","repo":"/r","action":"preview"}"#).unwrap();
+        assert_eq!(m.id(), "8");
         let s = ServerMsg::MachineRemoved { machine_id: "abcdef012345".into() };
         assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::json!({"type":"machine_removed","machineId":"abcdef012345"}));
     }

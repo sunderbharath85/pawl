@@ -15,7 +15,7 @@ use std::time::Duration;
 mod install;
 mod normalize;
 
-pub use install::{install_with_home, InstallEnv};
+pub use install::{change_with_home, config_path_with_home, install_with_home, status_with_home, HookChange, HookCheck, HookOutcome, InstallEnv};
 
 /// Key of the metadata object `forward` adds to the raw hook JSON.
 pub const META_KEY: &str = "_krypto";
@@ -212,8 +212,42 @@ pub async fn run_hook_cli(source: HookSource, extra_args: &[String], hub_url: &s
 /// diff; `apply=true` writes a timestamped `.bak` of each touched file and merges without
 /// removing other hooks. Re-running is idempotent (our previous entries are replaced).
 pub fn install(target: HookTarget, hub_exe: &Path, apply: bool) -> anyhow::Result<String> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
-    install_with_home(target, hub_exe, apply, &home, &InstallEnv::from_system())
+    change(&target, hub_exe, HookChange::Install, apply).map(|o| o.text)
+}
+
+/// The home directory the agents themselves use for their config (Node's `os.homedir()`):
+/// `USERPROFILE` on Windows, `HOME` elsewhere, else the OS profile directory.
+pub fn agent_home() -> anyhow::Result<PathBuf> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))
+}
+
+/// Install (or update) or remove our hooks for `target` in the agent's real config
+/// ([`agent_home`] plus `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `COPILOT_HOME`). Without `apply`
+/// nothing is written and the outcome is the exact change.
+pub fn change(target: &HookTarget, hub_exe: &Path, change: HookChange, apply: bool) -> anyhow::Result<HookOutcome> {
+    change_with_home(target, hub_exe, change, apply, &agent_home()?, &InstallEnv::from_system())
+}
+
+/// [`status_with_home`] for the agent's real config.
+pub fn status(target: &HookTarget, hub_exe: &Path) -> anyhow::Result<HookCheck> {
+    Ok(status_with_home(target, hub_exe, &agent_home()?, &InstallEnv::from_system()))
+}
+
+/// Is the program a hook target belongs to on this machine? Claude Code `claude`, Codex `codex`,
+/// Copilot CLI `copilot`, Copilot in VS Code: the `code` (or `code-insiders`) launcher.
+pub fn agent_found(target: &HookTarget, env: &crate::detect::HostEnv) -> bool {
+    let names: &[&str] = match target {
+        HookTarget::Claude => &["claude"],
+        HookTarget::Codex => &["codex"],
+        HookTarget::CopilotCli => &["copilot"],
+        HookTarget::CopilotVscode { .. } => &["code", "code-insiders"],
+    };
+    names.iter().any(|n| env.which(n).is_some())
 }
 
 #[cfg(test)]

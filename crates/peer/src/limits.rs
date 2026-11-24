@@ -3,7 +3,7 @@
 //!   `MAX_UNAUTH_TOTAL` unauthenticated ones in total and `MAX_UNAUTH_PER_IP` per remote IP, and a
 //!   deadline that closes a connection which has not authenticated in time, covering the HTTP header
 //!   read and the upgrade as well as the first frame (no slow-loris);
-//! - pairing level ([`PairLimiter`]): failed pair attempts per remote IP, and coalescing of the
+//! - pairing level ([`PairLimiter`]): failed pair attempts per remote IP (or relay sender), and coalescing of the
 //!   `PairRejected` events they produce.
 //!
 //! IPs are keyed per IPv4 address, or per IPv6 /64 (one host usually owns a whole /64).
@@ -33,6 +33,8 @@ pub(crate) const MAX_UNAUTH_PER_IP: usize = 4;
 
 /// Failed pair attempts per IP within `PAIR_WINDOW` before the IP is blocked.
 pub(crate) const PAIR_MAX_FAILURES: u32 = 5;
+/// Pair attempts per PAIR_WINDOW, all origins together (each one costs a box open).
+pub(crate) const PAIR_ATTEMPTS_PER_WINDOW: u32 = 60;
 pub(crate) const PAIR_WINDOW: Duration = Duration::from_secs(60);
 /// How long pair requests from a blocked IP are dropped.
 pub(crate) const PAIR_BLOCK: Duration = Duration::from_secs(60);
@@ -88,35 +90,75 @@ pub(crate) struct Failure {
     pub blocked: bool,
 }
 
+/// Who a pair attempt came from: a remote IP (LAN listener; IPv6 by /64), or the relay. All relay
+/// origins share one bucket: anyone can make up sender keys, so per-key state would limit nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum PairKey {
+    Ip(IpAddr),
+    Relay,
+}
+
+impl PairIp {
+    fn new(now: Instant) -> Self {
+        PairIp { window_start: now, failures: 0, blocked_until: None, last_event: None, suppressed: 0 }
+    }
+}
+
+impl From<IpAddr> for PairKey {
+    fn from(ip: IpAddr) -> Self {
+        PairKey::Ip(ip_key(ip))
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct PairLimiter {
     ips: HashMap<IpAddr, PairIp>,
+    /// The shared relay bucket, kept apart so relay traffic never evicts an IP entry.
+    relay: Option<PairIp>,
+    /// Pair attempts (any origin, any outcome) in the current window: (window start, count).
+    attempts: Option<(Instant, u32)>,
 }
 
 impl PairLimiter {
-    /// True while pair requests from `ip` are dropped.
-    pub fn blocked(&self, ip: IpAddr, now: Instant) -> bool {
-        self.ips.get(&ip_key(ip)).and_then(|s| s.blocked_until).is_some_and(|t| now < t)
+    /// True while pair requests from `key` are dropped.
+    pub fn blocked(&self, key: impl Into<PairKey>, now: Instant) -> bool {
+        let s = match key.into() {
+            PairKey::Ip(ip) => self.ips.get(&ip),
+            PairKey::Relay => self.relay.as_ref(),
+        };
+        s.and_then(|s| s.blocked_until).is_some_and(|t| now < t)
     }
 
-    pub fn failure(&mut self, ip: IpAddr, now: Instant) -> Failure {
-        let key = ip_key(ip);
-        if !self.ips.contains_key(&key) && self.ips.len() >= PAIR_MAX_TRACKED {
-            self.ips.retain(|_, s| !s.idle(now));
-            if self.ips.len() >= PAIR_MAX_TRACKED {
-                // Still full: forget the IP whose window started first.
-                if let Some(oldest) = self.ips.iter().min_by_key(|(_, s)| s.window_start).map(|(k, _)| *k) {
-                    self.ips.remove(&oldest);
-                }
-            }
+    /// Count one pair attempt against the global cap (PAIR_ATTEMPTS_PER_WINDOW per PAIR_WINDOW, all
+    /// origins together). False: over the cap, drop the attempt.
+    pub fn attempt(&mut self, now: Instant) -> bool {
+        let w = self.attempts.get_or_insert((now, 0));
+        if now.duration_since(w.0) >= PAIR_WINDOW {
+            *w = (now, 0);
         }
-        let s = self.ips.entry(key).or_insert(PairIp {
-            window_start: now,
-            failures: 0,
-            blocked_until: None,
-            last_event: None,
-            suppressed: 0,
-        });
+        if w.1 >= PAIR_ATTEMPTS_PER_WINDOW {
+            return false;
+        }
+        w.1 += 1;
+        true
+    }
+
+    pub fn failure(&mut self, key: impl Into<PairKey>, now: Instant) -> Failure {
+        let s = match key.into() {
+            PairKey::Relay => self.relay.get_or_insert_with(|| PairIp::new(now)),
+            PairKey::Ip(ip) => {
+                if !self.ips.contains_key(&ip) && self.ips.len() >= PAIR_MAX_TRACKED {
+                    self.ips.retain(|_, s| !s.idle(now));
+                    if self.ips.len() >= PAIR_MAX_TRACKED {
+                        // Still full: forget the IP whose window started first.
+                        if let Some(oldest) = self.ips.iter().min_by_key(|(_, s)| s.window_start).map(|(k, _)| *k) {
+                            self.ips.remove(&oldest);
+                        }
+                    }
+                }
+                self.ips.entry(ip).or_insert_with(|| PairIp::new(now))
+            }
+        };
         if now.duration_since(s.window_start) >= PAIR_WINDOW {
             s.window_start = now;
             s.failures = 0;
@@ -144,11 +186,13 @@ impl PairLimiter {
     #[cfg(test)]
     pub fn clear(&mut self) {
         self.ips.clear();
+        self.relay = None;
+        self.attempts = None;
     }
 
     #[cfg(test)]
     pub fn tracked(&self) -> usize {
-        self.ips.len()
+        self.ips.len() + usize::from(self.relay.is_some())
     }
 }
 
@@ -384,6 +428,37 @@ mod tests {
         // Slow failures (one window apart) never block.
         assert!(!l.failure(a, t0 + PAIR_WINDOW + Duration::from_secs(10)).blocked);
         assert!(!l.blocked(a, t0 + PAIR_WINDOW + Duration::from_secs(11)));
+    }
+
+    #[test]
+    fn relay_origins_share_one_bucket_that_never_evicts_ips() {
+        let mut l = PairLimiter::default();
+        let t0 = Instant::now();
+        // Fill the IP table.
+        for i in 0..PAIR_MAX_TRACKED as u32 {
+            l.failure(IpAddr::V4(std::net::Ipv4Addr::from(0x0a00_0000 + i)), t0);
+        }
+        let first = IpAddr::V4(std::net::Ipv4Addr::from(0x0a00_0000));
+        assert_eq!(l.tracked(), PAIR_MAX_TRACKED);
+        // Relay failures (whatever key they claim) go to the one shared bucket and block it.
+        for i in 0..PAIR_MAX_FAILURES {
+            l.failure(PairKey::Relay, t0 + Duration::from_secs(u64::from(i)));
+        }
+        assert!(l.blocked(PairKey::Relay, t0 + Duration::from_secs(6)));
+        assert_eq!(l.tracked(), PAIR_MAX_TRACKED + 1, "no IP entry was evicted");
+        assert!(l.ips.contains_key(&first));
+        assert!(!l.blocked(first, t0 + Duration::from_secs(6)), "LAN IPs are unaffected");
+    }
+
+    #[test]
+    fn global_cap_on_pair_attempts() {
+        let mut l = PairLimiter::default();
+        let t0 = Instant::now();
+        for _ in 0..PAIR_ATTEMPTS_PER_WINDOW {
+            assert!(l.attempt(t0));
+        }
+        assert!(!l.attempt(t0 + Duration::from_secs(1)), "over the cap");
+        assert!(l.attempt(t0 + PAIR_WINDOW), "a new window");
     }
 
     #[test]

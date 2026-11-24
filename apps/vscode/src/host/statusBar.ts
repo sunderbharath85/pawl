@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { OS_LABEL, isLocal, machineCounts, machineDisplayName, machinesLine, sortedMachines, type HubState } from "@krypto/hub-client";
+import { OS_LABEL, isLocal, linkPathLabel, machineCounts, machineDisplayName, machinesLine, sortedMachines, type HubState } from "@krypto/hub-client";
 import { SPECIES_META } from "@krypto/pet-engine";
 import { DEFAULT_SPECIES } from "@krypto/protocol";
 import { presenceLabel } from "../shared/machine";
@@ -157,11 +157,15 @@ export class PetStatusBar implements vscode.Disposable {
     }
     md.appendMarkdown(`$(remote-explorer) **${machinesLine(total, online)}** · ${show}\n\n`);
     const now = Date.now();
+    const paths = new Map(state.devices.map((d) => [d.id, d.path]));
     for (const m of sortedMachines(state)) {
       if (m.id === state.machine?.id) continue;
       const os = OS_LABEL[m.os] ?? m.os;
       const dot = m.online ? "$(circle-filled)" : "$(circle-outline)";
-      md.appendMarkdown(`${dot} ${escapeMd(machineDisplayName(m))} _(${escapeMd(os)})_ — ${escapeMd(presenceLabel(m, now))}\n\n`);
+      const via = m.online ? linkPathLabel(paths.get(m.id)) : null;
+      md.appendMarkdown(
+        `${dot} ${escapeMd(machineDisplayName(m))} _(${escapeMd(os)})_ — ${escapeMd(presenceLabel(m, now))}${via ? ` · **${via}**` : ""}\n\n`,
+      );
     }
   }
 

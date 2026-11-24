@@ -13,6 +13,8 @@ export type HubPhase =
   | "hub-down"
   /** We asked Rust to spawn the hub and are waiting for it. */
   | "starting"
+  /** The hub acked `restart_hub`; waiting for the replacement to come back (or RESTART_WAIT_MS to pass). */
+  | "restarting"
   | "connecting"
   | "connected"
   /** Hub is up but rejected our token. */
@@ -31,6 +33,8 @@ export interface ConnectionMeta {
 }
 
 const HEALTH_EVERY_MS = 4000;
+/** How long a restart may take before we stop saying "restarting" (the hub retries its port for ~10 s). */
+export const RESTART_WAIT_MS = 30_000;
 
 export class HubConnection {
   client: HubClient;
@@ -42,6 +46,8 @@ export class HubConnection {
   private creds: HubCredentials | null = null;
   private healthy: boolean | null = null;
   private starting = false;
+  /** Set while a requested restart is in progress: until when, and whether the old connection has dropped yet. */
+  private restarting: { until: number; dropped: boolean } | null = null;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private unsubs: Array<() => void> = [];
   private started = false;
@@ -115,6 +121,19 @@ export class HubConnection {
     }
   }
 
+  /**
+   * Ask the hub to restart itself (`restart_hub`; the caller confirmed with the user). Rejects with the hub's error.
+   * After the ack the phase is "restarting" until the replacement hub says hello (it may be on a new port: the
+   * credentials and health probe follow runtime.json) or RESTART_WAIT_MS pass.
+   */
+  async restartHub(): Promise<void> {
+    if (this.restarting) return;
+    await this.client.restartHub();
+    this.restarting = { until: Date.now() + RESTART_WAIT_MS, dropped: false };
+    this.patch({ startError: undefined });
+    this.recompute();
+  }
+
   /** Re-read credentials + health and (re)connect as needed. `force` redials even after `unauthorized`. */
   async refresh(force = false): Promise<void> {
     const creds = await this.loadCredentials();
@@ -126,15 +145,18 @@ export class HubConnection {
       const prev = this.creds;
       tokenChanged = !!prev && prev.token !== creds.token;
       this.creds = creds;
-      const urlChanged = !prev || prev.wsUrl !== creds.wsUrl;
-      if (urlChanged && toHubHttpUrl(this.client.wsUrl) !== toHubHttpUrl(creds.wsUrl)) {
+      const moved = toHubHttpUrl(this.client.wsUrl) !== toHubHttpUrl(creds.wsUrl);
+      // A saved Hub port (config.toml) only takes effect when the hub restarts: keep talking to the running hub
+      // on its current address until that connection drops, then dial the new one.
+      const keep = moved && this.client.getState().status === "connected";
+      if (moved && !keep) {
         this.client.close();
         this.client = this.makeClient(creds.wsUrl, creds.token);
         this.clientId += 1;
       } else if (!prev || prev.token !== creds.token) {
         this.client.setToken(creds.token);
       }
-      this.patch({ url: creds.url });
+      this.patch({ url: keep ? toHubHttpUrl(this.client.wsUrl) : creds.url });
     }
 
     const token = this.creds?.token ?? "";
@@ -206,8 +228,21 @@ export class HubConnection {
 
   private recompute(): void {
     const state = this.client.getState();
+    // A restart is over once the old connection dropped and a new hello arrived, or after RESTART_WAIT_MS.
+    const r = this.restarting;
+    if (r) {
+      if (state.status !== "connected") r.dropped = true;
+      if (r.dropped && state.status === "connected") this.restarting = null;
+      else if (Date.now() > r.until) {
+        this.restarting = null;
+        if (state.status !== "connected") {
+          this.patch({ startError: "The hub has not come back after the restart. Start it again, or check desktop-hub.log in its data folder." });
+        }
+      }
+    }
     let phase: HubPhase;
     if (this.starting) phase = "starting";
+    else if (this.restarting) phase = "restarting";
     else if (state.status === "connected") phase = "connected";
     else if (state.status === "unauthorized") phase = "unauthorized";
     else if (this.healthy === null && !this.creds) phase = "booting";

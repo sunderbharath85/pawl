@@ -9,8 +9,12 @@ import type {
   ClientKind,
   ClientMsg,
   HistorySession,
+  HookStatus,
+  HookTargetName,
   HubEvent,
+  HubSettingsPatch,
   Machine,
+  PanelView,
   Pet,
   PermissionRequest,
   RepoRef,
@@ -37,6 +41,7 @@ import { proposalProblem, repoIndexHas } from "./proposals";
 import { MACHINE_NAME_MAX, normalizeMachineName } from "./machine";
 import { INVITE_TTL_MAX_SECS, INVITE_TTL_MIN_SECS, parseInviteUri } from "./peer";
 import { toHubWsUrl } from "./url";
+import { isEmptyPatch, isPanelView, parseSettingsError, settingsFieldLabel } from "./settings";
 
 export interface HubClientOptions {
   /** Hub WebSocket URL. Default `ws://127.0.0.1:47800/ws`. `http(s)://host:port` is accepted and normalized. */
@@ -69,6 +74,21 @@ export class HubRequestError extends Error {
     this.name = "HubRequestError";
     this.code = code;
     this.requestType = requestType;
+  }
+}
+
+/**
+ * A settings request the hub refused because of one field (`invalid:<field>: <reason>`). `code` is "invalid";
+ * `field` is the camelCase wire path ("hub.port", "peer.startRoots[2]") and `reason` the hub's text.
+ */
+export class SettingsError extends HubRequestError {
+  readonly field: string;
+  readonly reason: string;
+  constructor(field: string, reason: string, requestType: string) {
+    super("invalid", requestType, `${settingsFieldLabel(field)}: ${reason}`);
+    this.name = "SettingsError";
+    this.field = field;
+    this.reason = reason;
   }
 }
 
@@ -575,6 +595,82 @@ export class HubClient {
       // Older hubs answer with an error; activity is best effort.
     });
     return true;
+  }
+
+  // ---------------------------------------------------------------- settings (migration step 5b)
+
+  /**
+   * The hub's effective settings (config.toml + defaults; secrets only as "is set"), the keys waiting for a hub
+   * restart and the config.toml path. Folded into `state.settings` / `state.restartRequired`.
+   * Settings are local-only: the hub answers them for clients on this machine only.
+   */
+  async getSettings(): Promise<AckResults["get_settings"]> {
+    return this.settingsRequest<"get_settings">({ type: "get_settings" });
+  }
+
+  /**
+   * Change settings. Omitted keys stay; lists replace the whole list; `bot.anthropicApiKey` / `relay.accessKey`
+   * set a secret (string) or clear it (null) and are never read back. The hub validates everything first: a bad
+   * value rejects with a `SettingsError` (field + reason) and nothing changes. Then it writes config.toml, applies
+   * what it can at runtime and lists the rest in `restartRequired`. An empty patch resolves without asking the hub
+   * when the settings are already known.
+   */
+  async updateSettings(patch: HubSettingsPatch): Promise<AckResults["update_settings"]> {
+    const known = this.state.settings;
+    if (isEmptyPatch(patch) && known) {
+      return { settings: known, restartRequired: this.state.restartRequired ?? [], applied: [] };
+    }
+    return this.settingsRequest<"update_settings">({ type: "update_settings", patch });
+  }
+
+  /** Every hook target's status on this machine (agent found, installed / outdated / missing / unsupported). */
+  async hookStatus(): Promise<HookStatus[]> {
+    const res = await this.settingsRequest<"hook_status">({ type: "hook_status" });
+    return res.hooks ?? [];
+  }
+
+  /**
+   * Install, update or remove an agent's hooks. `preview` returns the exact change (`plan`) without writing;
+   * `apply` / `remove` write the agent's config. `repo` picks the repo for the per-repo copilot-vscode hooks.
+   */
+  async installHooks(
+    target: HookTargetName,
+    action: "preview" | "apply" | "remove",
+    opts: { repo?: string | undefined } = {},
+  ): Promise<AckResults["install_hooks"]> {
+    const msg: DistributiveOmit<Extract<ClientMsg, { type: "install_hooks" }>, "id"> = { type: "install_hooks", target, action };
+    if (opts.repo !== undefined && opts.repo !== "") msg.repo = opts.repo;
+    return this.settingsRequest<"install_hooks">(msg);
+  }
+
+  /**
+   * Ask the desktop app to show a view (e.g. from VS Code). Resolves true when a desktop client was connected to
+   * receive it. Rejects with `invalid` for an unknown view without contacting the hub.
+   */
+  async openPanel(view: PanelView): Promise<boolean> {
+    if (!isPanelView(view)) throw new HubRequestError("invalid", "open_panel", `unknown panel view "${String(view)}"`);
+    const res = await this.request<"open_panel">({ type: "open_panel", view });
+    return res.delivered === true;
+  }
+
+  /**
+   * Ask the hub to restart itself (local only), e.g. to apply settings in `restartRequired`. Resolves on the ack;
+   * the hub then starts a replacement and exits, so this connection drops and reconnects by itself (the port may
+   * change: see the Node helper's runtime.json lookup). Running sessions end. Confirm with the user first.
+   */
+  async restartHub(): Promise<void> {
+    await this.request<"restart_hub">({ type: "restart_hub" });
+  }
+
+  /** `request`, with `invalid:<field>: <reason>` turned into a `SettingsError`. */
+  private async settingsRequest<T extends keyof AckResults>(msg: DistributiveOmit<Extract<ClientMsg, { type: T }>, "id">): Promise<AckResults[T]> {
+    try {
+      return await this.request<T>(msg);
+    } catch (err) {
+      const fe = err instanceof HubRequestError ? parseSettingsError(err.code) : null;
+      if (fe) throw new SettingsError(fe.field, fe.reason, (msg as { type: string }).type);
+      throw err;
+    }
   }
 
   // ---------------------------------------------------------------- internals

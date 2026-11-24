@@ -160,8 +160,15 @@ pub enum Command {
         #[command(subcommand)]
         action: PeerAction,
     },
-    /// List this machine and every paired machine (online state, last seen, address)
+    /// List this machine and every paired machine (online state, last seen, address, link path)
     Machines {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the hub's effective settings (secrets show as set / not set only). Change them in the
+    /// desktop app's Settings, or edit config.toml for the initial setup.
+    Settings {
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -233,6 +240,7 @@ pub async fn run() -> ExitCode {
         Command::Machine { name, json } => run_machine(&paths, cli.port, name, json).await,
         Command::Peer { action } => run_peer(&paths, cli.port, action).await,
         Command::Machines { json } => run_machines(&paths, cli.port, json).await,
+        Command::Settings { json } => run_settings(&paths, cli.port, json).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -273,17 +281,69 @@ async fn run_serve(paths: Paths, port_flag: Option<u16>, peer_listen: Option<Str
     paths.ensure()?;
     let _log = logging::init(Some(&paths.log), "info", "info");
     let mut cfg = HubConfig::load_or_init(&paths)?;
+    // Values flags / env vars decide instead of config.toml (shown as `overriddenBy` in settings).
+    let mut overrides = std::collections::BTreeMap::new();
     if peer_listen.is_some() {
         cfg.peer.listen = peer_listen;
+        overrides.insert(crate::settings::PEER_LISTEN.to_string(), "--peer-listen".to_string());
     }
     let token = config::load_or_create_token(&paths)?;
     let machine = machine::load_or_create(&paths)?;
     let port = config::serve_port(port_flag, &cfg);
+    if port != cfg.port {
+        let by = if port_flag.is_some() { "--port" } else { config::ENV_URL };
+        overrides.insert(crate::settings::HUB_PORT.to_string(), by.to_string());
+        cfg.port = port;
+    }
     tracing::info!("data dir {}", paths.data_dir.display());
     tracing::info!("machine {} ({:?})", machine.id, machine.name);
-    let hub = Hub::start(HubOptions { paths, config: cfg, token, machine, background: true }).await?;
-    let result = server::serve(hub.clone(), port, shutdown_signal()).await;
+    let hub = Hub::start(HubOptions { paths: paths.clone(), config: cfg, token, machine, background: true }).await?;
+    let (listener, port) = match server::bind(port, crate::restart::bind_retry()).await {
+        Ok(l) => (l, port),
+        // A restart must never leave no hub: stay on the port the previous hub used.
+        Err(e) => match crate::restart::marker().and_then(|m| m.previous_port).filter(|p| *p != port) {
+            Some(previous) => {
+                tracing::warn!("after a restart, port {port} could not be bound ({e:#}); staying on the previous port {previous}");
+                match server::bind(previous, crate::restart::RESTART_BIND_RETRY).await {
+                    Ok(l) => {
+                        hub.port_fallback_notice(port, previous);
+                        (l, previous)
+                    }
+                    Err(e2) => {
+                        hub.shutdown().await;
+                        return Err(e2.context(format!("port {port} was taken too ({e:#})")));
+                    }
+                }
+            }
+            None => {
+                hub.shutdown().await;
+                return Err(e);
+            }
+        },
+    };
+    hub.set_launch(port, overrides);
+    // Clients find the running port here first (a saved port change waits for a restart).
+    if let Err(e) = config::RuntimeInfo::now(port).write(&paths) {
+        tracing::warn!("could not write {}: {e:#}", paths.runtime.display());
+    }
+    let mut restart = hub.restart_requested();
+    let stop = async move {
+        tokio::select! {
+            _ = shutdown_signal() => {}
+            _ = restart.wait_for(|r| *r) => tracing::info!("restarting"),
+        }
+    };
+    let result = server::serve_on(hub.clone(), listener, stop).await;
+    let restarting = *hub.restart_requested().borrow();
+    // bye{shutdown} to every peer, the listener and the relay closed, agents stopped.
     hub.shutdown().await;
+    config::RuntimeInfo::remove_if_ours(&paths);
+    if restarting && result.is_ok() {
+        match crate::restart::spawn_replacement(port) {
+            Ok(pid) => tracing::info!("started the replacement hub (pid {pid})"),
+            Err(e) => tracing::error!("could not start the replacement hub: {e:#}"),
+        }
+    }
     result
 }
 
@@ -387,8 +447,47 @@ async fn run_hook(paths: &Paths, port_flag: Option<u16>, source: &str, args: Vec
     let Some(source) = krypto_discovery::hooks::parse_hook_source(source) else { return };
     let token = config::read_token(paths).unwrap_or_default();
     let cfg = HubConfig::load(paths).unwrap_or_default();
-    let ep = HubEndpoint::resolve(port_flag, cfg.port);
+    let ep = client_endpoint(paths, port_flag, cfg.port).await;
     krypto_discovery::hooks::run_hook_cli(source, &args, &ep.http_base, &token).await;
+}
+
+/// How long a client waits for `/health` when checking runtime.json's port (hooks have 2 s in all).
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Where this data dir's running hub is: `--port` > `KRYPTO_HUB_URL` > runtime.json's port when
+/// the hub answering there has this machine's id > config.toml.
+pub async fn client_endpoint(paths: &Paths, port_flag: Option<u16>, config_port: u16) -> HubEndpoint {
+    if let Some(port) = config::runtime_candidate(port_flag, paths, config_port) {
+        let expected = machine::load(paths).ok().flatten().map(|m| m.id);
+        let answered = health_machine_id(port, HEALTH_CHECK_TIMEOUT).await;
+        if expected.is_some() && answered == expected {
+            return HubEndpoint::local(port);
+        }
+        tracing::debug!("runtime.json port {port} is not this data dir's hub; using config.toml's");
+    }
+    HubEndpoint::for_client_fallback(port_flag, config_port)
+}
+
+/// `machineId` from `GET /health` on 127.0.0.1:`port` (a plain HTTP/1.1 request; None on any error).
+pub async fn health_machine_id(port: u16, timeout: Duration) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tokio::time::timeout(timeout, async {
+        let mut s = tokio::net::TcpStream::connect((krypto_protocol::HUB_HOST, port)).await.ok()?;
+        let req = format!("GET /health HTTP/1.1\r\nHost: {}:{port}\r\nConnection: close\r\n\r\n", krypto_protocol::HUB_HOST);
+        s.write_all(req.as_bytes()).await.ok()?;
+        let mut buf = Vec::new();
+        s.take(64 * 1024).read_to_end(&mut buf).await.ok()?;
+        let text = String::from_utf8_lossy(&buf);
+        let (head, body) = text.split_once("\r\n\r\n")?;
+        if !head.starts_with("HTTP/1.1 200") {
+            return None;
+        }
+        let v: Value = serde_json::from_str(body.trim()).ok()?;
+        v.get("machineId")?.as_str().map(str::to_string)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 // ---------------------------------------------------------------- hub connection
@@ -407,7 +506,7 @@ impl RemoteHub {
     /// None if no hub answers (or we have no token yet). Err if a hub answered but refused us.
     pub async fn connect(paths: &Paths, port_flag: Option<u16>) -> Result<Option<Self>> {
         let cfg = HubConfig::load(paths).unwrap_or_default();
-        let ep = HubEndpoint::resolve(port_flag, cfg.port);
+        let ep = client_endpoint(paths, port_flag, cfg.port).await;
         let Some(token) = config::read_token(paths) else { return Ok(None) };
         let ws = match tokio::time::timeout(Duration::from_millis(1500), tokio_tungstenite::connect_async(ep.ws_url.as_str())).await {
             Ok(Ok((ws, _))) => ws,
@@ -477,7 +576,7 @@ fn empty_welcome() -> Welcome {
         machine,
         machines: vec![],
         devices: vec![],
-        peer: PeerStatus { listening: None, public_key: String::new() },
+        peer: PeerStatus { listening: None, public_key: String::new(), relay: Default::default() },
         agents: vec![],
         sessions: vec![],
         pets: vec![],
@@ -666,10 +765,10 @@ fn resolve_device<'a>(devices: &'a [Device], query: &str) -> Result<&'a Device> 
 
 /// `krypto machines`: from the running hub (live online state), else from hub.db (peers offline).
 async fn run_machines(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> Result<()> {
-    let (machines, devices, listening, hub_running) = match RemoteHub::connect(paths, port_flag).await? {
+    let (machines, devices, listening, relay, hub_running) = match RemoteHub::connect(paths, port_flag).await? {
         Some(hub) => {
             let w = hub.welcome;
-            (w.machines, w.devices, w.peer.listening, true)
+            (w.machines, w.devices, w.peer.listening, Some(w.peer.relay), true)
         }
         None => {
             paths.ensure()?;
@@ -690,11 +789,14 @@ async fn run_machines(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
                 }
                 devices.push(e.device);
             }
-            (machines, devices, None, false)
+            (machines, devices, None, None, false)
         }
     };
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "machines": machines, "devices": devices }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "machines": machines, "devices": devices, "relay": relay }))?
+        );
         return Ok(());
     }
     let now = krypto_protocol::now_ms();
@@ -714,10 +816,11 @@ async fn run_machines(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
                 (true, _) | (false, true) => "now".to_string(),
                 (false, false) => ago(now, m.last_seen),
             };
-            let addr = if this {
-                listening.clone()
-            } else {
-                devices.iter().find(|d| d.id == m.id).and_then(|d| d.addr.clone())
+            let device = devices.iter().find(|d| d.id == m.id);
+            let addr = if this { listening.clone() } else { device.and_then(|d| d.addr.clone()) };
+            let path = match device.and_then(|d| d.path) {
+                Some(p) if m.online => enum_label(&p),
+                _ => "-".into(),
             };
             vec![
                 printable(&m.name),
@@ -726,13 +829,75 @@ async fn run_machines(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
                 status,
                 seen,
                 addr.unwrap_or_else(|| "-".into()),
+                path,
             ]
         })
         .collect();
-    print_table(&["NAME", "ID", "OS", "STATUS", "LAST SEEN", "PEER ADDR"], &rows);
+    print_table(&["NAME", "ID", "OS", "STATUS", "LAST SEEN", "PEER ADDR", "PATH"], &rows);
+    if let Some(r) = &relay {
+        println!();
+        println!("relay: {}", relay_line(r));
+    }
     if machines.len() == 1 {
         println!();
         println!("No paired machines. Pair one with `krypto peer invite` (needs `krypto serve --peer-listen <LAN-IP>`).");
+    }
+    Ok(())
+}
+
+/// "wss://relay.example.com (connected)", "off", "wss://... (not connected: unreachable)".
+fn relay_line(r: &krypto_protocol::RelayStatusInfo) -> String {
+    match (&r.url, r.connected, &r.last_error) {
+        (None, ..) => "off".into(),
+        (Some(u), true, _) => format!("{} (connected)", printable(u)),
+        (Some(u), false, Some(e)) => format!("{} (not connected: {})", printable(u), printable(e)),
+        (Some(u), false, None) => format!("{} (connecting)", printable(u)),
+    }
+}
+
+// ---------------------------------------------------------------- settings
+
+/// `krypto settings [--json]`: from the running hub (effective values, flags, restart needed,
+/// relay status), else from config.toml. Secrets are never printed: only whether they are set.
+async fn run_settings(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> Result<()> {
+    let (settings, restart, config_path, relay) = match RemoteHub::connect(paths, port_flag).await? {
+        Some(mut hub) => {
+            let relay = hub.welcome.peer.relay.clone();
+            let v = hub.request_raw(ClientMsg::GetSettings { id: "settings".into() }).await?;
+            let settings: krypto_protocol::HubSettings = serde_json::from_value(v["settings"].clone()).context("settings reply")?;
+            let restart: Vec<String> = serde_json::from_value(v["restartRequired"].clone()).unwrap_or_default();
+            let path = v["configPath"].as_str().map(str::to_string).unwrap_or_else(|| paths.config.display().to_string());
+            (settings, restart, path, Some(relay))
+        }
+        None => {
+            let cfg = HubConfig::load(paths)?;
+            let overrides = crate::settings::Overrides {
+                keys: Default::default(),
+                env_anthropic_key: std::env::var(config::ENV_ANTHROPIC_KEY).is_ok_and(|k| !k.trim().is_empty()),
+            };
+            (crate::settings::to_settings(&cfg, &overrides), Vec::new(), paths.config.display().to_string(), None)
+        }
+    };
+    if as_json {
+        let out = serde_json::json!({
+            "settings": settings,
+            "restartRequired": restart,
+            "configPath": config_path,
+            "hubRunning": relay.is_some(),
+            "relayStatus": relay,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    match &relay {
+        Some(_) => println!("Settings of the running hub ({})", printable(&config_path)),
+        None => println!("Hub not running: settings from {}", printable(&config_path)),
+    }
+    for line in crate::settings::masked_lines(&settings, &restart) {
+        println!("{}", printable(&line));
+    }
+    if let Some(r) = &relay {
+        println!("relay status              {}", relay_line(r));
     }
     Ok(())
 }
@@ -1696,6 +1861,49 @@ mod tests {
     use super::*;
     use krypto_protocol::PermissionOption;
 
+    /// runtime.json is trusted only when the hub on that port has this data dir's machine id.
+    #[tokio::test]
+    async fn clients_verify_runtime_json_before_using_it() {
+        if std::env::var(config::ENV_URL).is_ok() {
+            return; // KRYPTO_HUB_URL set in this environment: it wins by design
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::in_dir(dir.path());
+        let me = machine::load_or_create(&paths).unwrap();
+        let hub = Hub::start(HubOptions {
+            paths: paths.clone(),
+            config: HubConfig { offline: true, ..Default::default() },
+            token: "t".repeat(64),
+            machine: me.clone(),
+            background: false,
+        })
+        .await
+        .unwrap();
+        let listener = server::bind(0, Duration::ZERO).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let served = tokio::spawn(server::serve_on(hub.clone(), listener, async move {
+            let _ = stop_rx.await;
+        }));
+        assert_eq!(health_machine_id(port, Duration::from_secs(2)).await.as_deref(), Some(me.id.as_str()));
+
+        let config_port = 48777;
+        assert_eq!(client_endpoint(&paths, None, config_port).await.port, config_port, "no runtime.json");
+        config::RuntimeInfo { port, pid: 1, started_at: 0 }.write(&paths).unwrap();
+        assert_eq!(client_endpoint(&paths, None, config_port).await.port, port, "verified: the running port");
+
+        // Another machine's hub (or anything else) on that port is never used.
+        let other = MachineIdentity { id: "zzzzzz999999".into(), name: "Other".into() };
+        machine::save(&paths, &other).unwrap();
+        assert_eq!(client_endpoint(&paths, None, config_port).await.port, config_port, "wrong machine id");
+        machine::save(&paths, &me).unwrap();
+        let _ = stop_tx.send(());
+        served.await.unwrap().unwrap();
+        hub.shutdown().await;
+        assert_eq!(client_endpoint(&paths, None, config_port).await.port, config_port, "nothing answers there");
+        assert_eq!(client_endpoint(&paths, Some(47999), config_port).await.port, 47999, "--port wins");
+    }
+
     fn req() -> PermissionRequest {
         PermissionRequest {
             request_id: "abcdef012345:r".into(),
@@ -1763,6 +1971,7 @@ mod tests {
             paired_at: 0,
             last_seen: None,
             addr: None,
+            path: None,
         }
     }
 

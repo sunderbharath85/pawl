@@ -1,7 +1,6 @@
 import * as vscode from "vscode";
 import { execFile } from "node:child_process";
 import type { HubConnection } from "./connection";
-import { portOf } from "./connection";
 import { errorMessage, needsShell, quoteWinArg, resolveHubExecutable } from "./util";
 
 const HUB_TERMINAL_NAME = "Krypto hub";
@@ -38,7 +37,7 @@ export async function startHub(hub: HubConnection, log: vscode.LogOutputChannel)
   const exe = await requireHubExecutable();
   if (!exe) return;
   const args = ["serve"];
-  const port = portOf(hub.info.url);
+  const port = hub.servePort();
   if (port !== null) args.push("--port", String(port));
   log.info(`starting hub: ${exe} ${args.join(" ")}`);
   const terminal = vscode.window.createTerminal({

@@ -20,7 +20,7 @@ import { HubOfflineError, type HubConnection } from "./connection";
 import { installHooks, startHub, type HookTargetId } from "./hubProcess";
 import { machinePickItems } from "./machineList";
 import { answerRequest, confirmModal, remoteError } from "./remote";
-import { machineSuffix, remoteStartText } from "./remoteText";
+import { machineSuffix, openSettingsErrorText, remoteStartText } from "./remoteText";
 import type { PetWebviews } from "./petView";
 import { agentName, errorMessage, isBusy, isInWorkspace, isOpen, relativeTime, sessionLabel } from "./util";
 
@@ -64,6 +64,7 @@ export class Commands {
       reg("krypto.reconnect", () => this.hub.restart()),
       reg("krypto.renameMachine", (name?: string) => this.renameMachine(name)),
       reg("krypto.showMachines", () => this.showMachines()),
+      reg("krypto.openSettings", () => this.openSettings()),
     ];
   }
 
@@ -409,6 +410,24 @@ export class Commands {
    * Read-only list of this machine and every paired hub with its online state, kept live while open.
    * Pairing and revoking happen in the desktop app (or `krypto peer …`), not here.
    */
+  /**
+   * Every setting lives in the Krypto desktop app (PLAN.md migration step 5b): ask it to open its Settings view.
+   * The hub forwards `open_panel` to connected desktop apps; without one, say so.
+   */
+  async openSettings(): Promise<void> {
+    let delivered: boolean;
+    try {
+      delivered = await this.hub.api.openPanel("settings");
+    } catch (err) {
+      throw new Error(openSettingsErrorText(err));
+    }
+    if (!delivered) {
+      void vscode.window.showInformationMessage("Open the Krypto desktop app to change settings.");
+      return;
+    }
+    this.log.info("asked the desktop app to open Settings");
+  }
+
   showMachines(): void {
     const qp = vscode.window.createQuickPick<vscode.QuickPickItem>();
     qp.placeholder = "Read-only. Pair or revoke machines in the Krypto desktop app or with krypto peer.";

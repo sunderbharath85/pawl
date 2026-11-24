@@ -22,7 +22,7 @@ async fn hub_credentials() -> Result<HubCredentials, String> {
 /// `GET /health` against the configured hub URL (done natively: the hub sends no CORS headers).
 #[tauri::command]
 async fn hub_health() -> Result<HubHealth, String> {
-    tauri::async_runtime::spawn_blocking(|| hub::probe_health(&hub::hub_http_url(), Duration::from_millis(1500)))
+    tauri::async_runtime::spawn_blocking(|| hub::hub_health_now(Duration::from_millis(1500)))
         .await
         .map_err(|e| e.to_string())
 }
@@ -42,6 +42,12 @@ async fn start_hub(app: tauri::AppHandle) -> Result<StartHubResult, String> {
 #[tauri::command]
 fn locate_hub() -> Option<String> {
     hub::find_hub_binary().map(|p| p.display().to_string())
+}
+
+/// This machine's main network address (suggested for the peer listener), if it has one.
+#[tauri::command]
+async fn lan_address() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(hub::lan_address).await.ok().flatten()
 }
 
 #[tauri::command]
@@ -65,6 +71,7 @@ pub fn run() {
             hub_health,
             start_hub,
             locate_hub,
+            lan_address,
             quit_app,
             pet_window::set_hit_rects,
             pet_window::set_capture_all,

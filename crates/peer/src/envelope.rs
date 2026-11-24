@@ -48,7 +48,8 @@ impl fmt::Display for OpenError {
 impl std::error::Error for OpenError {}
 
 const NONCE_LEN: usize = 24;
-const RANDOM_LEN: usize = 15;
+/// Index of the direction byte (after the random prefix). The relay auth nonce domain uses it too.
+pub(crate) const RANDOM_LEN: usize = 15;
 /// Poly1305 tag.
 const TAG_LEN: usize = 16;
 

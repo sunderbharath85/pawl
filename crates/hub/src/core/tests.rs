@@ -988,7 +988,7 @@ async fn pairing_requests_answer_bare_codes() {
     assert!((expires - krypto_protocol::now_ms() - 60_000).abs() < 5_000);
     let uri = v["uri"].as_str().unwrap().to_string();
     assert!(uri.starts_with("krypto://peer?"), "{uri}");
-    assert_eq!(krypto_peer::Invite::parse(&uri).unwrap().addr, listening);
+    assert_eq!(krypto_peer::Invite::parse(&uri).unwrap().addr.as_deref(), Some(listening.as_str()));
 
     assert_eq!(ack_error(join(&b, "not an invite").await), "bad_uri");
     assert_eq!(ack_error(join(&a, &uri).await), "self_invite");
@@ -1161,6 +1161,7 @@ async fn roster_peer(hub: &Hub, peer: &str) {
         paired_at: 1,
         last_seen: None,
         addr: None,
+        path: None,
     };
     let machine = Machine {
         id: peer.into(),

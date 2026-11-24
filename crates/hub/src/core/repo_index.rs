@@ -21,7 +21,7 @@ impl Hub {
     /// Rebuild the index from this machine's session folders and `[repos] paths`; a changed index
     /// is pushed to paired hubs with the next presence.
     pub(super) async fn rebuild_repo_index(&self) {
-        let paths = self.inner.config.repos.paths.clone();
+        let paths = self.cfg().repos.paths.clone();
         let built = self
             .inner
             .store
@@ -77,7 +77,7 @@ impl Hub {
     /// or inside one, or inside a `[peer] start_roots` entry. A folder the cached index does not
     /// have yet triggers one rebuild before the answer is no.
     pub(super) async fn is_known_folder(&self, dir: &Path) -> bool {
-        let roots = self.inner.config.peer.start_roots.clone();
+        let roots = self.cfg().peer.start_roots.clone();
         let roots: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
             roots.iter().filter_map(|r| repos::canonical_dir(Path::new(r.trim()))).collect()
         })

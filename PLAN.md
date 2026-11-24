@@ -4,7 +4,7 @@ Named dog pets that watch and drive your coding agents over ACP (Agent Client Pr
 
 - Whiteboard: https://claude.ai/artifact/E8zVPktys5q8qKw5AjmjtB
 - Last updated: 2026-11-23
-- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto, step 1 (machine identity), step 2 (pairing + LAN presence, protocol v3), step 3 (mirror events + visitors, protocol v4), step 4 (intents + acks, protocol v5), step 5 (remote commands by machine + repo, protocol v6). In progress: step 5b (settings in the UI) and step 6 (relay).
+- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto, step 1 (machine identity), step 2 (pairing + LAN presence, protocol v3), step 3 (mirror events + visitors, protocol v4), step 4 (intents + acks, protocol v5), step 5 (remote commands by machine + repo, protocol v6), step 5b (settings in the UI, protocol v7), step 6 (relay, deployed). Next: step 7 (phone).
 
 ## Decisions
 
@@ -270,17 +270,20 @@ Each step can ship and be tested on its own.
    - A repo that exists on this machine stays local when no machine is named.
    - Backlog: on Windows, `taskkill /F` on a hub leaves its ACP agent processes running.
 
-5b. **Settings in the UI.** (in progress; protocol v7, dep `toml_edit`)
+5b. ✅ **Settings in the UI.** (done 2026-11-24; protocol v7, dep `toml_edit`)
    - Hub API: `get_settings` / `update_settings` (validated, applied at runtime where possible, "restart needed" otherwise, every change audited with the client that made it) for everything in `config.toml`: port and retention, bot model and keys (write-only), watchdog timings, daily report time, peer listener on/off and address (start/stop at runtime), remote control (`accept_intents`), `start_roots`, `[repos] paths`, custom agents.
    - Hooks: show per-agent hook status and install/update/remove them from the UI (the same code as `krypto install-hooks`, with a preview first).
    - Desktop Settings grouped as Hub, This machine, Machines & pairing, Remote control, Repos, Agents & hooks, Bot, Notifications. Risky changes (listener on, remote control on, a new start root, a custom agent command) need an in-app confirm that says what it allows.
    - First-run setup in the desktop app: start the hub, name this machine, install hooks for the agents it found, optionally pair a machine.
    - VS Code: "Krypto: Open Settings" opens the desktop panel; the machine/pet rename commands stay.
-6. **Relay.**
+6. ✅ **Relay.** (done 2026-11-24; `services/relay` deployed to the owner's Cloudflare account; deps `wrangler`, `@cloudflare/workers-types`, `tweetnacl`, `tokio-tungstenite` rustls feature, `rustls`)
    - A Cloudflare Worker routes the same envelopes. Hubs connect outbound.
    - The LAN link becomes a preferred fast path with relay fallback.
    - Push wakes.
-   - Test: approval with the LAN link disabled.
+   - Test: approval with the LAN link disabled. Passed against the deployed relay: relay-only pairing, link on the relay path, mirror, remote approval, `already_decided`.
+   - Hardened after three security reviews: the relay is closed by an access key (Worker secret, carried in invite URIs as `rk=`); per-IP, per-socket and per-recipient limits; bounded queues; auth bound to the Host header; the auth nonce domain is disjoint from envelope nonces (byte 15 >= 2); clients refuse a relay key that is their own or a roster key; an adopted relay learns only the inviter until pairing succeeds; relay-origin pairing attempts share one limiter; a revoked device's hello gets `bye{revoked}`.
+   - Settings hardening in the same pass: hub port test-bound before saving; hook writes use O_EXCL temp files without following symlinks; clients trust `runtime.json` only after `/health` returns this machine's id; no filesystem roots as start roots or repos.
+   - Known limits: the per-IP connect limit is Cloudflare's approximate rate limiter; anyone who saw an invite has the relay access key until it is rotated.
 7. **Phone.**
    - QR pairing joins the group, with per-hub E2E channels and a merged multi-machine view.
    - Biometric approvals, push, and start-on-machine+repo.

@@ -1,5 +1,5 @@
 use super::*;
-use krypto_protocol::{EventType, HookSource, NotificationLevel, SessionSource, SessionStatus};
+use krypto_protocol::{EventType, HookSource, HookState, NotificationLevel, SessionSource, SessionStatus};
 use serde_json::json;
 
 fn n(source: HookSource, raw: Value) -> NormalizedHook {
@@ -617,6 +617,141 @@ fn powershell_and_posix_quoting() {
     assert!(h["bash"].as_str().unwrap().contains(r"it'\''s here"));
 }
 
+// ---------- status + remove (temp dirs only) ----------
+
+fn state(target: &HookTarget, exe: &Path, home: &Path, env: &InstallEnv) -> HookState {
+    status_with_home(target, exe, home, env).state
+}
+
+#[test]
+fn claude_status_follows_install_and_remove() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let env = InstallEnv::default();
+    let exe = hub_exe(tmp.path());
+    let settings = home.join(".claude").join("settings.json");
+    let check = status_with_home(&HookTarget::Claude, &exe, &home, &env);
+    assert_eq!((check.state, check.config_path.clone()), (HookState::Missing, settings.clone()));
+    assert!(!settings.exists(), "status never writes");
+
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let user = json!({ "model": "opus", "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "say done" } ] } ] } });
+    std::fs::write(&settings, serde_json::to_string_pretty(&user).unwrap()).unwrap();
+    assert_eq!(state(&HookTarget::Claude, &exe, &home, &env), HookState::Missing);
+
+    // Preview: the exact change, nothing written.
+    let preview = change_with_home(&HookTarget::Claude, &exe, HookChange::Install, false, &home, &env).unwrap();
+    assert!(preview.changed && preview.text.contains("hook claude"), "{}", preview.text);
+    assert_eq!(serde_json::from_str::<Value>(&std::fs::read_to_string(&settings).unwrap()).unwrap(), user);
+
+    change_with_home(&HookTarget::Claude, &exe, HookChange::Install, true, &home, &env).unwrap();
+    assert_eq!(state(&HookTarget::Claude, &exe, &home, &env), HookState::Installed);
+    let again = change_with_home(&HookTarget::Claude, &exe, HookChange::Install, false, &home, &env).unwrap();
+    assert!(!again.changed, "{}", again.text);
+
+    // Another hub executable: ours are there but stale.
+    let moved = tmp.path().join("other").join(if cfg!(windows) { "krypto.exe" } else { "krypto" });
+    let check = status_with_home(&HookTarget::Claude, &moved, &home, &env);
+    assert_eq!(check.state, HookState::Outdated);
+    assert!(check.detail.is_some());
+
+    // Remove preview writes nothing; remove keeps every other hook and setting.
+    let before = std::fs::read_to_string(&settings).unwrap();
+    let preview = change_with_home(&HookTarget::Claude, &exe, HookChange::Remove, false, &home, &env).unwrap();
+    assert!(preview.changed && preview.text.contains("Removing"), "{}", preview.text);
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), before);
+    let out = change_with_home(&HookTarget::Claude, &exe, HookChange::Remove, true, &home, &env).unwrap();
+    assert!(out.text.contains("backup"), "{}", out.text);
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(v, user, "back to the user's own settings");
+    assert_eq!(state(&HookTarget::Claude, &exe, &home, &env), HookState::Missing);
+    let none = change_with_home(&HookTarget::Claude, &exe, HookChange::Remove, true, &home, &env).unwrap();
+    assert!(!none.changed && none.text.contains("no Krypto hooks"), "{}", none.text);
+
+    // Removing from a machine without the file creates nothing.
+    let empty = tmp.path().join("empty-home");
+    let out = change_with_home(&HookTarget::Claude, &exe, HookChange::Remove, true, &empty, &env).unwrap();
+    assert!(!out.changed);
+    assert!(!empty.exists());
+}
+
+#[test]
+fn status_reports_unreadable_configs_as_unsupported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join(".claude");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("settings.json"), "{ \"model\": ").unwrap();
+    let check = status_with_home(&HookTarget::Claude, &hub_exe(tmp.path()), tmp.path(), &InstallEnv::default());
+    assert_eq!(check.state, HookState::Unsupported);
+    assert!(check.detail.unwrap().contains("not valid JSON"));
+    let missing_repo = HookTarget::CopilotVscode { repo: tmp.path().join("no-such-repo") };
+    let check = status_with_home(&missing_repo, &hub_exe(tmp.path()), tmp.path(), &InstallEnv::default());
+    assert_eq!(check.state, HookState::Unsupported);
+    assert!(check.detail.unwrap().contains("does not exist"));
+}
+
+#[test]
+fn codex_remove_takes_out_notify_and_inline_hooks_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let codex = tmp.path().join(".codex");
+    std::fs::create_dir_all(&codex).unwrap();
+    let original = "# my codex config\nmodel = \"gpt-5.5\" # favourite\n\n[[hooks.PreToolUse]]\nmatcher = \"^Bash$\"\n\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"python3 ~/.codex/policy.py\"\n";
+    std::fs::write(codex.join("config.toml"), original).unwrap();
+    let exe = hub_exe(tmp.path());
+    let env = InstallEnv::default();
+    change_with_home(&HookTarget::Codex, &exe, HookChange::Install, true, tmp.path(), &env).unwrap();
+    assert_eq!(state(&HookTarget::Codex, &exe, tmp.path(), &env), HookState::Installed);
+    change_with_home(&HookTarget::Codex, &exe, HookChange::Remove, true, tmp.path(), &env).unwrap();
+    let text = std::fs::read_to_string(codex.join("config.toml")).unwrap();
+    let doc: toml_edit::DocumentMut = text.parse().unwrap();
+    assert!(doc.get("notify").is_none(), "{text}");
+    assert!(text.contains("# my codex config") && text.contains("# favourite"), "{text}");
+    assert!(text.contains("python3 ~/.codex/policy.py"), "{text}");
+    assert!(!text.contains("hook codex"), "{text}");
+    assert!(doc["hooks"].get("SessionStart").is_none(), "{text}");
+    assert_eq!(state(&HookTarget::Codex, &exe, tmp.path(), &env), HookState::Missing);
+
+    // A foreign notify is never removed.
+    std::fs::write(codex.join("config.toml"), "notify = [\"python3\", \"/opt/notify.py\"]\n").unwrap();
+    let out = change_with_home(&HookTarget::Codex, &exe, HookChange::Remove, true, tmp.path(), &env).unwrap();
+    assert!(!out.changed, "{}", out.text);
+    assert_eq!(std::fs::read_to_string(codex.join("config.toml")).unwrap(), "notify = [\"python3\", \"/opt/notify.py\"]\n");
+}
+
+#[test]
+fn copilot_remove_deletes_our_file_unless_the_user_added_to_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = hub_exe(tmp.path());
+    let env = InstallEnv::default();
+    let path = tmp.path().join(".copilot").join("hooks").join("krypto.json");
+    change_with_home(&HookTarget::CopilotCli, &exe, HookChange::Install, true, tmp.path(), &env).unwrap();
+    assert_eq!(state(&HookTarget::CopilotCli, &exe, tmp.path(), &env), HookState::Installed);
+    let out = change_with_home(&HookTarget::CopilotCli, &exe, HookChange::Remove, true, tmp.path(), &env).unwrap();
+    assert!(out.text.contains("deleted"), "{}", out.text);
+    assert!(!path.exists());
+    assert_eq!(backups(path.parent().unwrap(), "krypto.json.").len(), 1);
+    assert_eq!(state(&HookTarget::CopilotCli, &exe, tmp.path(), &env), HookState::Missing);
+
+    change_with_home(&HookTarget::CopilotCli, &exe, HookChange::Install, true, tmp.path(), &env).unwrap();
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    v["hooks"]["PreToolUse"].as_array_mut().unwrap().push(json!({ "type": "command", "bash": "./audit.sh" }));
+    std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    change_with_home(&HookTarget::CopilotCli, &exe, HookChange::Remove, true, tmp.path(), &env).unwrap();
+    let left: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(left["hooks"], json!({ "PreToolUse": [ { "type": "command", "bash": "./audit.sh" } ] }));
+}
+
+#[test]
+fn config_paths_honour_agent_env_overrides() {
+    let home = Path::new("/home/u");
+    let env = InstallEnv { claude_config_dir: Some("/cfg/claude".into()), codex_home: None, copilot_home: Some("/cfg/copilot".into()) };
+    assert_eq!(config_path_with_home(&HookTarget::Claude, home, &env), Path::new("/cfg/claude").join("settings.json"));
+    assert_eq!(config_path_with_home(&HookTarget::Codex, home, &env), home.join(".codex").join("config.toml"));
+    assert_eq!(config_path_with_home(&HookTarget::CopilotCli, home, &env), Path::new("/cfg/copilot").join("hooks").join("krypto.json"));
+    let repo = PathBuf::from("/r");
+    assert_eq!(config_path_with_home(&HookTarget::CopilotVscode { repo: repo.clone() }, home, &env), repo.join(".github").join("hooks").join("krypto.json"));
+}
+
 // ---------- forward ----------
 
 #[tokio::test]
@@ -668,4 +803,77 @@ async fn forward_fails_fast_when_hub_down() {
     assert!(started.elapsed() < Duration::from_millis(2600), "{:?}", started.elapsed());
     // run_hook_cli never panics or errors, even with the hub down.
     run_hook_cli(HookSource::Codex, &[r#"{"type":"agent-turn-complete","thread-id":"x"}"#.to_string()], &format!("http://127.0.0.1:{port}"), "t").await;
+}
+
+/// A symlink to `target` at `link`, or None where this OS / account cannot make one (Windows
+/// without Developer Mode).
+fn try_symlink_dir(target: &Path, link: &Path) -> Option<()> {
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_dir(target, link).or_else(|_| {
+        // A directory junction needs no privilege and is a link all the same.
+        let ok = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if ok { Ok(()) } else { Err(std::io::Error::other("mklink /J failed")) }
+    });
+    made.ok()
+}
+
+#[test]
+fn repo_hooks_never_go_through_a_symlink() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = hub_exe(tmp.path());
+    let env = InstallEnv::default();
+    let repo = tmp.path().join("repo");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(outside.join("hooks")).unwrap();
+    std::fs::write(outside.join("hooks").join("krypto.json"), r#"{"secret":"do not show"}"#).unwrap();
+    if try_symlink_dir(&outside, &repo.join(".github")).is_none() {
+        eprintln!("skipped: this account cannot create symlinks");
+        return;
+    }
+    let target = HookTarget::CopilotVscode { repo: repo.clone() };
+    for (change, apply) in [(HookChange::Install, false), (HookChange::Install, true), (HookChange::Remove, true)] {
+        let e = change_with_home(&target, &exe, change, apply, tmp.path(), &env).unwrap_err();
+        assert!(format!("{e:#}").contains("symbolic link"), "{e:#}");
+    }
+    let check = status_with_home(&target, &exe, tmp.path(), &env);
+    assert_eq!(check.state, HookState::Unsupported);
+    assert!(!check.detail.unwrap_or_default().contains("do not show"), "the linked file is never read");
+    assert_eq!(std::fs::read_to_string(outside.join("hooks").join("krypto.json")).unwrap(), r#"{"secret":"do not show"}"#);
+    assert_eq!(std::fs::read_dir(outside.join("hooks")).unwrap().count(), 1, "no backup or temp file outside the repo");
+}
+
+#[test]
+fn rewrites_leave_no_temp_files_and_keep_permissions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = hub_exe(tmp.path());
+    let env = InstallEnv::default();
+    let dir = tmp.path().join(".claude");
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings = dir.join("settings.json");
+    std::fs::write(&settings, r#"{"model":"opus"}"#).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    change_with_home(&HookTarget::Claude, &exe, HookChange::Install, true, tmp.path(), &env).unwrap();
+    let names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert!(names.iter().all(|n| !n.contains("krypto-tmp")), "{names:?}");
+    assert_eq!(names.iter().filter(|n| n.ends_with(".bak")).count(), 1, "{names:?}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&settings), 0o600, "the rewritten file keeps the original's mode");
+        let bak = dir.join(names.iter().find(|n| n.ends_with(".bak")).unwrap());
+        assert_eq!(mode(&bak), 0o600, "the backup too");
+    }
 }

@@ -1,20 +1,24 @@
-// Machines: this hub and every paired hub (online state, OS, last seen, address), pairing by
-// invite, and revoking. PLAN.md migration step 2. Paired machines' pets arrive in step 3.
+// Machines: this hub and every paired hub (online state, OS, last seen, address, LAN / relay link), pairing by
+// invite, and revoking. PLAN.md migration steps 2, 3 and 6.
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   INVITE_TTL_DEFAULT_SECS,
   OS_LABEL,
   extractInviteUri,
+  inviteRoute,
   isUnspecifiedAddr,
+  linkPathLabel,
+  maskInviteSecrets,
+  pairingAllowsText,
+  relayHost,
   machineCounts,
   machineDisplayName,
   machinesLine,
   parseInviteUri,
   sortedMachines,
 } from "@krypto/hub-client";
-import { PEER_DEFAULT_PORT, type Device, type MachineOs } from "@krypto/protocol";
+import { PEER_DEFAULT_PORT, type Device, type LinkPath, type MachineOs } from "@krypto/protocol";
 import { clockTime, timeAgo } from "../../lib/format";
-import { isTauri, native } from "../../lib/native";
 import {
   INVITE_TTL_CHOICES,
   copyText,
@@ -29,6 +33,8 @@ import {
 } from "../../lib/pairing";
 import { usePanel } from "../context";
 import * as I from "../icons";
+import { ListenerControl } from "./settings/PairingSection";
+import { useHubSettings } from "./settings/shared";
 
 /** One row: this hub, a paired hub, or a roster device with no machine (a phone, later). */
 interface Row {
@@ -42,6 +48,8 @@ interface Row {
   addr?: string | null | undefined;
   pairedAt?: number | undefined;
   hubVersion?: string | undefined;
+  /** How a paired machine is linked right now (absent when offline). */
+  path?: LinkPath | undefined;
 }
 
 export function MachinesView() {
@@ -65,11 +73,12 @@ export function MachinesView() {
         addr: self ? (state.peer?.listening ?? null) : device?.addr,
         pairedAt: device?.pairedAt,
         hubVersion: m.hubVersion,
+        path: self ? undefined : device?.path,
       };
     });
     for (const d of state.devices) {
       if (d.id in state.machines || d.id === ownId) continue;
-      out.push({ id: d.id, name: d.name, self: false, kind: d.kind, online: false, lastSeen: d.lastSeen, addr: d.addr, pairedAt: d.pairedAt });
+      out.push({ id: d.id, name: d.name, self: false, kind: d.kind, online: !!d.path, lastSeen: d.lastSeen, addr: d.addr, pairedAt: d.pairedAt, path: d.path });
     }
     return out;
   }, [state, ownId, connected]);
@@ -84,7 +93,8 @@ export function MachinesView() {
         <h1>Machines</h1>
         <p>
           {counts.total > 0 ? `${machinesLine(counts.total, connected ? counts.online : undefined)}. ` : ""}
-          Pair the Krypto hubs on your network so they can see each other. Pets from other machines come over in a later update.
+          Pair the Krypto hubs on your machines so they can see each other's sessions, pets and approvals. They link on your network,
+          or through your relay when one is set up.
         </p>
       </header>
 
@@ -124,6 +134,7 @@ function MachineRow({ row, connected, now, stale }: { row: Row; connected: boole
   const [error, setError] = useState<string | null>(null);
 
   const online = row.online && !stale;
+  const via = online && !row.self ? linkPathLabel(row.path) : null;
   const presence = row.self
     ? connected
       ? "Online"
@@ -160,6 +171,14 @@ function MachineRow({ row, connected, now, stale }: { row: Row; connected: boole
           {row.self && <span className="chip">This machine</span>}
           {row.kind === "phone" && <span className="chip chip-soft">Phone</span>}
           {row.os && <span className="chip chip-soft">{OS_LABEL[row.os] ?? row.os}</span>}
+          {via && (
+            <span
+              className={`chip link-chip link-${row.path}`}
+              title={row.path === "relay" ? "Linked through the relay (end-to-end encrypted)" : "Linked directly on your network"}
+            >
+              {via}
+            </span>
+          )}
         </div>
         <div className="machine-row-sub">
           <span className={online ? "presence-online" : undefined}>{presence}</span>
@@ -216,6 +235,9 @@ function InviteCard() {
   const invite = useShownInvite();
   const connected = meta.phase === "connected";
   const listening = state.peer?.listening ?? null;
+  const relay = state.peer?.relay;
+  const viaRelay = !!relay?.url && relay.connected;
+  const canInvite = listening !== null || viaRelay;
   const wildcard = listening !== null && isUnspecifiedAddr(listening);
   const [addr, setAddr] = useState("");
   const [ttl, setTtl] = useState(INVITE_TTL_DEFAULT_SECS);
@@ -270,8 +292,8 @@ function InviteCard() {
           </span>
         </div>
         <p className="hint">On the other machine open Machines → Join a machine and paste this, or run the command below there.</p>
-        <CopyField label="Invite link" text={invite.uri} primary />
-        <CopyField label="Command line" text={joinCommand(invite.uri)} />
+        <CopyField label="Invite link" text={invite.uri} shown={maskInviteSecrets(invite.uri)} primary />
+        <CopyField label="Command line" text={joinCommand(invite.uri)} shown={maskInviteSecrets(joinCommand(invite.uri))} />
         <p className="hint">
           Works once, until {clockTime(invite.expiresAt)}. Anyone who has it can pair while it is valid, so only paste it into your own machines.
         </p>
@@ -294,13 +316,19 @@ function InviteCard() {
   return (
     <div className="card invite-card">
       <h3>Invite a machine</h3>
-      {listening === null ? (
+      {!canInvite ? (
         <ListenerHelp />
+      ) : listening === null ? (
+        <p className="hint">
+          Create a one-time link on this machine and paste it into the other one. It pairs through the relay{" "}
+          <span className="mono">{relayHost(relay!.url!)}</span>; turn on the peer listener in Settings for a direct link on your network.
+        </p>
       ) : (
         <>
           <p className="hint">
             Create a one-time link on this machine and paste it into the other one. This hub is listening on{" "}
-            <span className="mono">{listening}</span>.
+            <span className="mono">{listening}</span>
+            {viaRelay ? <> and reachable through the relay {relayHost(relay!.url!)}</> : null}.
           </p>
           <div className="field">
             <label className="field-label" htmlFor="invite-addr">
@@ -343,10 +371,11 @@ function InviteCard() {
         </span>
       )}
       {note && !error && <span className="hint invite-note">{note}</span>}
+      {canInvite && <PairingAllows />}
       <div className="form-actions">
         <button
           className="pill pill-primary"
-          disabled={!connected || busy || listening === null || (wildcard && !addr.trim())}
+          disabled={!connected || busy || !canInvite || (wildcard && !addr.trim())}
           onClick={() => void create()}
         >
           {busy ? "Creating…" : "Create invite"}
@@ -356,39 +385,43 @@ function InviteCard() {
   );
 }
 
-/** The peer listener is off (the default): how to turn it on. */
+/** What pairing allows, shown before Create invite / Join (remote control decides whether it can act here). */
+function PairingAllows() {
+  const hs = useHubSettings();
+  const { navigate } = usePanel();
+  return (
+    <p className="pairing-allows">
+      {pairingAllowsText(hs.settings?.peer.acceptIntents)}{" "}
+      <button className="link" onClick={() => navigate({ view: "settings", section: "remote" })}>
+        Remote control settings
+      </button>
+    </p>
+  );
+}
+
+/** The peer listener is off (the default): turn it on right here (it asks first, saying what it allows). */
 function ListenerHelp() {
-  const [dataDir, setDataDir] = useState<string | null>(null);
-  useEffect(() => {
-    if (!isTauri) return;
-    native
-      .hubCredentials()
-      .then((c) => setDataDir(c.dataDir))
-      .catch(() => {});
-  }, []);
+  const hs = useHubSettings();
+  const { navigate } = usePanel();
   return (
     <div className="listener-help">
       <strong>Turn on the peer listener first</strong>
       <span className="hint">
-        Inviting needs this hub to accept connections from your network. That is off by default. Restart the hub with:
+        Inviting needs this hub to accept connections from your network, which is off by default. Only the machine that invites needs
+        it; the joining machine dials out. Allow krypto through the firewall if it asks.
       </span>
-      <CopyField label="Command" text="krypto serve --peer-listen <LAN-IP>" />
+      {hs.settings ? (
+        <ListenerControl settings={hs.settings} live={hs.connected} compact />
+      ) : (
+        <span className="hint">
+          {!hs.connected ? "Connect the hub first." : !hs.supported ? "Update krypto on this machine to turn it on from here." : (hs.loadError ?? "Loading…")}
+        </span>
+      )}
       <span className="hint">
-        or add this to <span className="mono">config.toml</span>
-        {dataDir ? (
-          <>
-            {" "}
-            in <span className="mono">{dataDir}</span>
-          </>
-        ) : (
-          " in the hub's data folder"
-        )}{" "}
-        and restart the hub:
-      </span>
-      <CopyField label="config.toml" text={`[peer]\nlisten = "192.168.1.20:${PEER_DEFAULT_PORT}"`} multiline />
-      <span className="hint">
-        Use this machine's LAN address (port {PEER_DEFAULT_PORT} by default) and allow it through the firewall. Only the machine that
-        invites needs the listener; the joining machine dials out.
+        Or set up a relay to pair machines that are not on the same network:{" "}
+        <button className="link" onClick={() => navigate({ view: "settings", section: "relay" })}>
+          Relay settings
+        </button>
       </span>
     </div>
   );
@@ -473,30 +506,32 @@ function JoinCard() {
           </span>
         ) : info ? (
           <span className="hint" id="join-preview">
-            {known ? `${machineDisplayName(known)} (already paired; joining again refreshes the link)` : `Machine ${info.machineId}`} at{" "}
-            <span className="mono">{info.addr}</span> ·{" "}
+            {known ? `${machineDisplayName(known)} (already paired; joining again refreshes the link)` : `Machine ${info.machineId}`} via{" "}
+            <span className="mono">{inviteRoute(info)}</span> ·{" "}
             {info.expiresAt > now
               ? `expires in ${formatCountdown(info.expiresAt, now)}`
               : "looks expired by this machine's clock, so it may be turned down"}
           </span>
         ) : (
           <span className="hint" id="join-preview">
-            The other machine must have its peer listener on and be reachable on your network.
+            The other machine must have its peer listener on and be reachable on your network, or be connected to a relay.
           </span>
         )}
       </div>
+      <PairingAllows />
       <div className="form-actions">
         <button className="pill pill-primary" disabled={!connected || busy || !info || !!liveError} onClick={() => void join()}>
           {busy ? "Pairing…" : "Join"}
         </button>
-        {busy && <span className="hint">Dialing {info?.addr}… this can take up to 10 seconds.</span>}
+        {busy && <span className="hint">Connecting to {info ? inviteRoute(info) : "the other machine"}… this can take up to 10 seconds.</span>}
       </div>
     </div>
   );
 }
 
-/** Read-only value with a copy button. */
-function CopyField({ label, text, primary, multiline }: { label: string; text: string; primary?: boolean; multiline?: boolean }) {
+/** Read-only value with a copy button. `shown` (e.g. with the relay key masked) is displayed; `text` is copied. */
+function CopyField({ label, text, shown, primary, multiline }: { label: string; text: string; shown?: string; primary?: boolean; multiline?: boolean }) {
+  const masked = shown !== undefined && shown !== text;
   const [copied, setCopied] = useState<boolean | null>(null);
   useEffect(() => {
     if (copied === null) return;
@@ -509,16 +544,18 @@ function CopyField({ label, text, primary, multiline }: { label: string; text: s
         className={`copy-value${multiline ? " is-multiline" : ""}`}
         aria-label={label}
         tabIndex={0}
-        onFocus={(e) => window.getSelection()?.selectAllChildren(e.currentTarget)}
+        onFocus={(e) => {
+          if (!masked) window.getSelection()?.selectAllChildren(e.currentTarget);
+        }}
       >
-        {text}
+        {shown ?? text}
       </code>
       <button
         className={`pill${primary ? " pill-primary" : ""} copy-btn`}
         title={`Copy ${label.toLowerCase()}`}
         onClick={() => void copyText(text).then(setCopied)}
       >
-        <I.Copy size={14} /> {copied === true ? "Copied" : copied === false ? "Select to copy" : "Copy"}
+        <I.Copy size={14} /> {copied === true ? "Copied" : copied === false ? (masked ? "Copy failed, try again" : "Select to copy") : "Copy"}
       </button>
     </div>
   );

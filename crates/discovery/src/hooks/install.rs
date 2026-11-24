@@ -11,13 +11,40 @@
 //!   "VS Code compatible" payloads that carry `hook_event_name`.
 //!
 //! Our entries are recognised by containing the hub executable name plus `hook <source>`, so
-//! re-running replaces them in place and every other hook is left untouched.
+//! re-running replaces them in place and every other hook is left untouched. Removing takes out
+//! only our entries (and the `krypto.json` files we own once nothing else is left in them).
 
 use super::{HookTarget, HOOK_EVENT_ENV};
 use anyhow::{bail, Context};
+use krypto_protocol::HookState;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, InlineTable, Item, TableLike, Value as TVal};
+
+/// Install (or update) our hook entries, or remove them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookChange {
+    Install,
+    Remove,
+}
+
+/// What [`change_with_home`] did (or, without `apply`, would do).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookOutcome {
+    /// Human-readable plan: one section per file with a unified diff, then notes.
+    pub text: String,
+    /// Some file differs (preview) or was written (apply).
+    pub changed: bool,
+}
+
+/// A target's hook state, see [`status_with_home`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookCheck {
+    pub state: HookState,
+    /// The agent config file the hooks live in.
+    pub config_path: PathBuf,
+    pub detail: Option<String>,
+}
 
 /// Environment overrides honoured by the agents themselves.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -273,6 +300,42 @@ fn to_pretty(v: &Value) -> String {
     s
 }
 
+/// Remove every handler of ours from a `hooks` map (all events); drops events and a `hooks`
+/// object we emptied. Returns true if anything changed.
+fn strip_json_hooks(doc: &mut Value, grouped: bool, is_ours: &dyn Fn(&Value) -> bool) -> bool {
+    let Some(hooks) = doc.get_mut("hooks").and_then(Value::as_object_mut) else { return false };
+    let mut changed = false;
+    let keys: Vec<String> = hooks.keys().cloned().collect();
+    for k in keys {
+        if let Some(Value::Array(arr)) = hooks.get_mut(&k) {
+            if remove_ours(arr, grouped, is_ours) {
+                changed = true;
+                if arr.is_empty() {
+                    hooks.remove(&k);
+                }
+            }
+        }
+    }
+    if changed && hooks.is_empty() {
+        if let Some(obj) = doc.as_object_mut() {
+            obj.remove("hooks");
+        }
+    }
+    changed
+}
+
+/// A JSON file change: the new text only when the content changed (formatting alone never
+/// counts, so an up-to-date file is never rewritten).
+fn json_change(label: &'static str, path: PathBuf, old: Option<String>, doc: &Value) -> anyhow::Result<FileChange> {
+    let before = match old.as_deref() {
+        Some(text) => Some(parse_json_doc(&path, Some(text))?),
+        None => None,
+    };
+    let changed = before.as_ref() != Some(doc);
+    let new = if changed { Some(to_pretty(doc)) } else { old.clone() };
+    Ok(FileChange { label, path, old, new, changed, confine: None })
+}
+
 // ---------- TOML (Codex config.toml) ----------
 
 fn tval_to_json(v: &TVal) -> Value {
@@ -470,8 +533,22 @@ struct FileChange {
     label: &'static str,
     path: PathBuf,
     old: Option<String>,
-    new: String,
+    /// None = delete the file (only files we own, after removing our hooks left nothing else).
+    new: Option<String>,
+    /// The content differs from `old` (a file that only needs reformatting is unchanged).
+    changed: bool,
+    /// Repo-scoped targets: the repository. Nothing between it and `path` may be a symlink.
+    confine: Option<PathBuf>,
 }
+
+impl FileChange {
+    fn text(label: &'static str, path: PathBuf, old: Option<String>, new: String) -> Self {
+        let changed = old.as_deref() != Some(new.as_str());
+        FileChange { label, path, old, new: Some(new), changed, confine: None }
+    }
+}
+
+type Plan = (Vec<FileChange>, Vec<String>);
 
 fn read_opt(path: &Path) -> anyhow::Result<Option<String>> {
     match std::fs::read(path) {
@@ -481,7 +558,7 @@ fn read_opt(path: &Path) -> anyhow::Result<Option<String>> {
     }
 }
 
-fn claude_plan(cmd: &HubCmd, path: PathBuf) -> anyhow::Result<(Vec<FileChange>, Vec<String>)> {
+fn claude_plan(cmd: &HubCmd, path: PathBuf) -> anyhow::Result<Plan> {
     let old = read_opt(&path)?;
     let mut doc = parse_json_doc(&path, old.as_deref())?;
     let mut notes = Vec::new();
@@ -504,10 +581,18 @@ fn claude_plan(cmd: &HubCmd, path: PathBuf) -> anyhow::Result<(Vec<FileChange>, 
     let hooks = hooks_object(&mut doc, &path)?;
     merge_hook_map(hooks, &desired, true, &|h| cmd.is_ours(h, "claude"), &p)?;
     notes.push("Claude Code reloads hooks on the next session; check them with /hooks".to_string());
-    Ok((vec![FileChange { label: "Claude Code settings", path, old, new: to_pretty(&doc) }], notes))
+    Ok((vec![json_change("Claude Code settings", path, old, &doc)?], notes))
 }
 
-fn codex_plan(cmd: &HubCmd, codex_home: PathBuf) -> anyhow::Result<(Vec<FileChange>, Vec<String>)> {
+fn claude_remove_plan(cmd: &HubCmd, path: PathBuf) -> anyhow::Result<Plan> {
+    let Some(old) = read_opt(&path)? else { return Ok((Vec::new(), Vec::new())) };
+    let mut doc = parse_json_doc(&path, Some(&old))?;
+    strip_json_hooks(&mut doc, true, &|h| cmd.is_ours(h, "claude"));
+    let notes = vec!["Claude Code stops calling the hub from its next session".to_string()];
+    Ok((vec![json_change("Claude Code settings", path, Some(old), &doc)?], notes))
+}
+
+fn codex_plan(cmd: &HubCmd, codex_home: PathBuf) -> anyhow::Result<Plan> {
     let cfg_path = codex_home.join("config.toml");
     let old = read_opt(&cfg_path)?;
     let mut doc: DocumentMut = old
@@ -571,16 +656,40 @@ fn codex_plan(cmd: &HubCmd, codex_home: PathBuf) -> anyhow::Result<(Vec<FileChan
         let hooks = hooks_object(&mut hdoc, &hooks_json)?;
         merge_hook_map(hooks, &desired, true, &is_ours, &p)?;
         merge_codex_toml_hooks(&mut doc, &[], &is_ours)?;
-        changes.push(FileChange { label: "Codex hooks.json", path: hooks_json, old: hooks_json_old.clone(), new: to_pretty(&hdoc) });
+        changes.push(json_change("Codex hooks.json", hooks_json, hooks_json_old.clone(), &hdoc)?);
     } else {
         merge_codex_toml_hooks(&mut doc, &desired, &is_ours)?;
     }
     let new = doc.to_string();
-    changes.insert(0, FileChange { label: "Codex config.toml", path: cfg_path, old, new });
+    changes.insert(0, FileChange::text("Codex config.toml", cfg_path, old, new));
     Ok((changes, notes))
 }
 
-fn copilot_plan(cmd: &HubCmd, path: PathBuf, label: &'static str, repo_scoped: bool) -> anyhow::Result<(Vec<FileChange>, Vec<String>)> {
+fn codex_remove_plan(cmd: &HubCmd, codex_home: PathBuf) -> anyhow::Result<Plan> {
+    let mut changes = Vec::new();
+    let cfg_path = codex_home.join("config.toml");
+    let is_ours = |h: &Value| cmd.is_ours(h, "codex");
+    if let Some(old) = read_opt(&cfg_path)? {
+        let mut doc: DocumentMut = old
+            .parse()
+            .with_context(|| format!("{} is not valid TOML; fix it or remove the hooks by hand", cfg_path.display()))?;
+        if doc.get("notify").is_some_and(|item| notify_is_ours(item, cmd)) {
+            doc.remove("notify");
+        }
+        merge_codex_toml_hooks(&mut doc, &[], &is_ours)?;
+        let new = doc.to_string();
+        changes.push(FileChange::text("Codex config.toml", cfg_path, Some(old), new));
+    }
+    let hooks_json = codex_home.join("hooks.json");
+    if let Some(old) = read_opt(&hooks_json)? {
+        let mut hdoc = parse_json_doc(&hooks_json, Some(&old))?;
+        strip_json_hooks(&mut hdoc, true, &is_ours);
+        changes.push(json_change("Codex hooks.json", hooks_json, Some(old), &hdoc)?);
+    }
+    Ok((changes, vec!["Codex stops calling the hub from its next session".to_string()]))
+}
+
+fn copilot_plan(cmd: &HubCmd, path: PathBuf, label: &'static str, repo_scoped: bool) -> anyhow::Result<Plan> {
     let old = read_opt(&path)?;
     let mut doc = parse_json_doc(&path, old.as_deref())?;
     let obj = doc.as_object_mut().expect("object");
@@ -611,7 +720,21 @@ fn copilot_plan(cmd: &HubCmd, path: PathBuf, label: &'static str, repo_scoped: b
         notes.push("this file lives in the repository and contains this machine's hub path: add it to .gitignore unless your team shares the same path".to_string());
         notes.push("Copilot CLI also reads .github/hooks; with both copilot-cli and copilot-vscode installed, CLI sessions in this repo report twice".to_string());
     }
-    Ok((vec![FileChange { label, path, old, new: to_pretty(&doc) }], notes))
+    Ok((vec![json_change(label, path, old, &doc)?], notes))
+}
+
+/// Our `krypto.json` loses our handlers; once nothing but `version` is left, the file goes.
+fn copilot_remove_plan(cmd: &HubCmd, path: PathBuf, label: &'static str) -> anyhow::Result<Plan> {
+    let Some(old) = read_opt(&path)? else { return Ok((Vec::new(), Vec::new())) };
+    let mut doc = parse_json_doc(&path, Some(&old))?;
+    let changed = strip_json_hooks(&mut doc, false, &|h| cmd.is_ours(h, "copilot"));
+    let only_version = doc.as_object().is_some_and(|o| o.keys().all(|k| k == "version"));
+    let change = if changed && only_version {
+        FileChange { label, path, old: Some(old), new: None, changed: true, confine: None }
+    } else {
+        json_change(label, path, Some(old), &doc)?
+    };
+    Ok((vec![change], vec!["Copilot stops calling the hub from its next session".to_string()]))
 }
 
 // ---------- apply / render ----------
@@ -638,55 +761,161 @@ fn backup_path(path: &Path, stamp: &str) -> PathBuf {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "config".into());
     let mut candidate = path.with_file_name(format!("{name}.{stamp}.bak"));
     let mut n = 1;
-    while candidate.exists() {
+    // symlink_metadata: a dangling link counts as taken too.
+    while std::fs::symlink_metadata(&candidate).is_ok() {
         candidate = path.with_file_name(format!("{name}.{stamp}-{n}.bak"));
         n += 1;
     }
     candidate
 }
 
-fn write_atomic(path: &Path, content: &str) -> anyhow::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+/// Refuse when `path`, or any folder between it and `root`, is a symbolic link (or a Windows
+/// junction). Missing parts are fine (they will be created as plain folders).
+pub(crate) fn refuse_symlinks_below(root: &Path, path: &Path) -> anyhow::Result<()> {
+    let mut cur = Some(path);
+    while let Some(p) = cur {
+        if p == root || !p.starts_with(root) {
+            break;
+        }
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            bail!("{} is a symbolic link; Krypto does not write hooks through links inside a repository", p.display());
+        }
+        cur = p.parent();
     }
-    let tmp = path.with_file_name(format!(
-        ".{}.krypto-tmp",
-        path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-    ));
-    std::fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
+}
+
+/// A temp-file suffix nobody can predict (per-process random keys of the std hasher + the clock).
+fn random_suffix() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+    h.write_u32(std::process::id());
+    h.finish()
+}
+
+/// Create `path` exclusively (O_EXCL: never through an existing file or link).
+fn create_new(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().write(true).create_new(true).open(path)
+}
+
+/// Unix: give `dst` the permission bits of `src` (a settings file stays as private as it was).
+/// Windows: the new file keeps the folder's inherited ACL.
+fn copy_permissions(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    if let Ok(m) = std::fs::metadata(src) {
+        std::fs::set_permissions(dst, m.permissions()).with_context(|| format!("setting permissions on {}", dst.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (src, dst);
+    Ok(())
+}
+
+/// Back `src` up to `dst`, created exclusively with `src`'s permissions.
+fn backup_copy(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    let data = std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
+    let mut f = create_new(dst).with_context(|| format!("creating {}", dst.display()))?;
+    std::io::Write::write_all(&mut f, &data)?;
+    f.sync_all()?;
+    drop(f);
+    copy_permissions(src, dst)
+}
+
+/// Replace `path` atomically: a randomly named temp file next to it, created exclusively, with the
+/// original's permissions, then renamed over it. `confine`: the repository nothing under may be a
+/// link (checked before the folders are created and again before the rename).
+fn write_atomic(path: &Path, content: &str, confine: Option<&Path>) -> anyhow::Result<()> {
+    if let Some(root) = confine {
+        refuse_symlinks_below(root, path)?;
+    }
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut attempt = 0;
+    let (tmp, mut file) = loop {
+        let tmp = dir.join(format!(".{name}.{:016x}.krypto-tmp", random_suffix()));
+        match create_new(&tmp) {
+            Ok(f) => break (tmp, f),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 8 => attempt += 1,
+            Err(e) => return Err(anyhow::Error::new(e).context(format!("creating {}", tmp.display()))),
+        }
+    };
+    let written = (|| -> anyhow::Result<()> {
+        std::io::Write::write_all(&mut file, content.as_bytes()).with_context(|| format!("writing {}", tmp.display()))?;
+        file.sync_all()?;
+        copy_permissions(path, &tmp)?;
+        if let Some(root) = confine {
+            refuse_symlinks_below(root, path)?;
+        }
+        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+    })();
+    drop(file);
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 fn render_diff(c: &FileChange) -> String {
     let old = c.old.as_deref().unwrap_or("");
-    let diff = similar::TextDiff::from_lines(old, &c.new);
-    let a = if c.old.is_some() { c.path.display().to_string() } else { "/dev/null".to_string() };
-    diff.unified_diff().context_radius(3).header(&a, &c.path.display().to_string()).to_string()
+    let new = c.new.as_deref().unwrap_or("");
+    let diff = similar::TextDiff::from_lines(old, new);
+    let path = c.path.display().to_string();
+    let a = if c.old.is_some() { path.as_str() } else { "/dev/null" };
+    let b = if c.new.is_some() { path.as_str() } else { "/dev/null" };
+    diff.unified_diff().context_radius(3).header(a, b).to_string()
 }
 
-fn run(changes: Vec<FileChange>, notes: Vec<String>, apply: bool, title: &str) -> anyhow::Result<String> {
+fn run(changes: Vec<FileChange>, notes: Vec<String>, apply: bool, change: HookChange, title: &str) -> anyhow::Result<HookOutcome> {
     let mut out = String::new();
-    out.push_str(&format!("Krypto hooks for {title}{}\n", if apply { "" } else { " (dry run: nothing written; re-run with --apply)" }));
+    let verb = match change {
+        HookChange::Install => "Krypto hooks for",
+        HookChange::Remove => "Removing Krypto hooks for",
+    };
+    out.push_str(&format!("{verb} {title}{}\n", if apply { "" } else { " (dry run: nothing written)" }));
     let stamp = utc_stamp(krypto_protocol::now_ms() / 1000);
     let mut any_change = false;
+    if changes.is_empty() {
+        out.push_str("\nno hook files found; nothing to change\n");
+    }
     for c in &changes {
-        let changed = c.old.as_deref() != Some(c.new.as_str());
         out.push_str(&format!("\n== {}: {} ==\n", c.label, c.path.display()));
-        if !changed {
-            out.push_str("already up to date; nothing to change\n");
+        if !c.changed {
+            out.push_str(match change {
+                HookChange::Install => "already up to date; nothing to change\n",
+                HookChange::Remove => "no Krypto hooks here; nothing to change\n",
+            });
             continue;
         }
         any_change = true;
         if apply {
-            if c.old.is_some() {
-                let bak = backup_path(&c.path, &stamp);
-                std::fs::copy(&c.path, &bak).with_context(|| format!("backing up {} to {}", c.path.display(), bak.display()))?;
-                write_atomic(&c.path, &c.new)?;
-                out.push_str(&format!("updated (backup: {})\n", bak.display()));
-            } else {
-                write_atomic(&c.path, &c.new)?;
-                out.push_str("created\n");
+            let backup = match &c.old {
+                Some(_) => {
+                    let bak = backup_path(&c.path, &stamp);
+                    if let Some(root) = c.confine.as_deref() {
+                        refuse_symlinks_below(root, &c.path)?;
+                    }
+                    backup_copy(&c.path, &bak).with_context(|| format!("backing up {} to {}", c.path.display(), bak.display()))?;
+                    Some(bak)
+                }
+                None => None,
+            };
+            match (&c.new, backup) {
+                (Some(new), Some(bak)) => {
+                    write_atomic(&c.path, new, c.confine.as_deref())?;
+                    out.push_str(&format!("updated (backup: {})\n", bak.display()));
+                }
+                (Some(new), None) => {
+                    write_atomic(&c.path, new, c.confine.as_deref())?;
+                    out.push_str("created\n");
+                }
+                (None, bak) => {
+                    std::fs::remove_file(&c.path).with_context(|| format!("deleting {}", c.path.display()))?;
+                    match bak {
+                        Some(b) => out.push_str(&format!("deleted (backup: {})\n", b.display())),
+                        None => out.push_str("deleted\n"),
+                    }
+                }
             }
         }
         out.push_str(&render_diff(c));
@@ -697,37 +926,101 @@ fn run(changes: Vec<FileChange>, notes: Vec<String>, apply: bool, title: &str) -
             out.push_str(&format!("- {n}\n"));
         }
     }
-    Ok(out)
+    Ok(HookOutcome { text: out, changed: any_change })
+}
+
+/// The agent config file a target's hooks live in (Codex: config.toml, even when the lifecycle
+/// hooks sit in hooks.json next to it).
+pub fn config_path_with_home(target: &HookTarget, home: &Path, env: &InstallEnv) -> PathBuf {
+    match target {
+        HookTarget::Claude => env.claude_config_dir.clone().unwrap_or_else(|| home.join(".claude")).join("settings.json"),
+        HookTarget::Codex => env.codex_home.clone().unwrap_or_else(|| home.join(".codex")).join("config.toml"),
+        HookTarget::CopilotCli => {
+            env.copilot_home.clone().unwrap_or_else(|| home.join(".copilot")).join("hooks").join("krypto.json")
+        }
+        HookTarget::CopilotVscode { repo } => repo.join(".github").join("hooks").join("krypto.json"),
+    }
+}
+
+fn plan(target: &HookTarget, cmd: &HubCmd, change: HookChange, home: &Path, env: &InstallEnv) -> anyhow::Result<(Plan, String)> {
+    let path = config_path_with_home(target, home, env);
+    Ok(match (target, change) {
+        (HookTarget::Claude, HookChange::Install) => (claude_plan(cmd, path)?, "Claude Code".to_string()),
+        (HookTarget::Claude, HookChange::Remove) => (claude_remove_plan(cmd, path)?, "Claude Code".to_string()),
+        (HookTarget::Codex, c) => {
+            let dir = env.codex_home.clone().unwrap_or_else(|| home.join(".codex"));
+            let p = if c == HookChange::Install { codex_plan(cmd, dir)? } else { codex_remove_plan(cmd, dir)? };
+            (p, "Codex".to_string())
+        }
+        (HookTarget::CopilotCli, HookChange::Install) => {
+            (copilot_plan(cmd, path, "Copilot CLI hooks", false)?, "GitHub Copilot CLI".to_string())
+        }
+        (HookTarget::CopilotCli, HookChange::Remove) => {
+            (copilot_remove_plan(cmd, path, "Copilot CLI hooks")?, "GitHub Copilot CLI".to_string())
+        }
+        (HookTarget::CopilotVscode { repo }, c) => {
+            if !repo.is_dir() {
+                bail!("repository folder {} does not exist", repo.display());
+            }
+            // A repository is not trusted: refuse before reading (a linked .github could make us
+            // show, back up or overwrite a file outside it).
+            refuse_symlinks_below(repo, &path)?;
+            let label = "Copilot agent hooks (VS Code)";
+            let (mut changes, notes) =
+                if c == HookChange::Install { copilot_plan(cmd, path, label, true)? } else { copilot_remove_plan(cmd, path, label)? };
+            for ch in &mut changes {
+                ch.confine = Some(repo.clone());
+            }
+            ((changes, notes), format!("Copilot in VS Code ({})", repo.display()))
+        }
+    })
+}
+
+/// Install or remove our hooks with an explicit home directory and env overrides (tests use temp
+/// dirs). `apply = false` writes nothing and returns the exact change as a diff; `apply = true`
+/// backs up every touched file first.
+pub fn change_with_home(
+    target: &HookTarget,
+    hub_exe: &Path,
+    change: HookChange,
+    apply: bool,
+    home: &Path,
+    env: &InstallEnv,
+) -> anyhow::Result<HookOutcome> {
+    let cmd = HubCmd::new(hub_exe)?;
+    let ((changes, notes), title) = plan(target, &cmd, change, home, env)?;
+    run(changes, notes, apply, change, &title)
 }
 
 /// [`super::install`] with an explicit home directory and env overrides (tests use temp dirs).
 pub fn install_with_home(target: HookTarget, hub_exe: &Path, apply: bool, home: &Path, env: &InstallEnv) -> anyhow::Result<String> {
-    let cmd = HubCmd::new(hub_exe)?;
-    let (changes, notes, title) = match &target {
-        HookTarget::Claude => {
-            let dir = env.claude_config_dir.clone().unwrap_or_else(|| home.join(".claude"));
-            let (c, n) = claude_plan(&cmd, dir.join("settings.json"))?;
-            (c, n, "Claude Code".to_string())
+    change_with_home(&target, hub_exe, HookChange::Install, apply, home, env).map(|o| o.text)
+}
+
+/// Is `target` hooked up to this hub? Reads the agent's config only (never writes):
+/// - installed: installing would change nothing;
+/// - outdated: some of our entries are there, but installing would change them (another hub
+///   path, missing events);
+/// - missing: none of our entries are there;
+/// - unsupported: the config cannot be read or merged (invalid JSON/TOML, missing repo folder),
+///   or nothing can be installed for this setup; `detail` says why.
+pub fn status_with_home(target: &HookTarget, hub_exe: &Path, home: &Path, env: &InstallEnv) -> HookCheck {
+    let config_path = config_path_with_home(target, home, env);
+    let checked = HubCmd::new(hub_exe).and_then(|cmd| {
+        let ((install, notes), _) = plan(target, &cmd, HookChange::Install, home, env)?;
+        let ((remove, _), _) = plan(target, &cmd, HookChange::Remove, home, env)?;
+        Ok((install.iter().any(|c| c.changed), remove.iter().any(|c| c.changed), notes))
+    });
+    let (state, detail) = match checked {
+        Err(e) => (HookState::Unsupported, Some(format!("{e:#}"))),
+        Ok((false, true, _)) => (HookState::Installed, None),
+        Ok((true, true, _)) => {
+            (HookState::Outdated, Some("some Krypto hooks are missing or point at another krypto executable".to_string()))
         }
-        HookTarget::Codex => {
-            let dir = env.codex_home.clone().unwrap_or_else(|| home.join(".codex"));
-            let (c, n) = codex_plan(&cmd, dir)?;
-            (c, n, "Codex".to_string())
-        }
-        HookTarget::CopilotCli => {
-            let dir = env.copilot_home.clone().unwrap_or_else(|| home.join(".copilot"));
-            let (c, n) = copilot_plan(&cmd, dir.join("hooks").join("krypto.json"), "Copilot CLI hooks", false)?;
-            (c, n, "GitHub Copilot CLI".to_string())
-        }
-        HookTarget::CopilotVscode { repo } => {
-            if !repo.is_dir() {
-                bail!("repository folder {} does not exist", repo.display());
-            }
-            let (c, n) = copilot_plan(&cmd, repo.join(".github").join("hooks").join("krypto.json"), "Copilot agent hooks (VS Code)", true)?;
-            (c, n, format!("Copilot in VS Code ({})", repo.display()))
-        }
+        Ok((true, false, _)) => (HookState::Missing, None),
+        Ok((false, false, notes)) => (HookState::Unsupported, Some(notes.join("; ")).filter(|s| !s.is_empty())),
     };
-    run(changes, notes, apply, &title)
+    HookCheck { state, config_path, detail }
 }
 
 #[cfg(test)]

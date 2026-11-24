@@ -18,7 +18,7 @@ const state = {
   machine: me,
   machines: { [ME]: me, [MAC]: mac, [BOX]: box },
   devices: [dev(MAC, { addr: "192.168.1.20:47801" }), dev(BOX)],
-  peer: { listening: "192.168.1.10:47801", publicKey: "pk" },
+  peer: { listening: "192.168.1.10:47801", publicKey: "pk", relay: { url: null, connected: false } },
 };
 
 describe("machinePickItems", () => {
@@ -39,13 +39,22 @@ describe("machinePickItems", () => {
   });
 
   test("listener off, no peers yet, and a roster-only device", () => {
-    const alone = { machine: me, machines: { [ME]: me }, devices: [], peer: { listening: null, publicKey: "pk" } };
+    const alone = { machine: me, machines: { [ME]: me }, devices: [], peer: { listening: null, publicKey: "pk", relay: { url: null, connected: false } } };
     const { items } = machinePickItems(alone, true);
     expect(items[0]!.detail).toContain("peer listener off");
     expect(items[1]!.label).toContain("No other machines paired yet");
 
     const phone = machinePickItems({ ...alone, devices: [dev("phone-1", { kind: "phone", name: "Pixel" })] }, true);
     expect(phone.items[1]).toMatchObject({ label: "$(circle-outline) Pixel", description: "phone" });
+  });
+
+  test("online paired machines show how they are linked (LAN / Relay)", () => {
+    const linked = { ...state, devices: [dev(MAC, { addr: "192.168.1.20:47801", path: "relay" as const }), dev(BOX, { path: "lan" as const })] };
+    const { items } = machinePickItems(linked, true, 5_000);
+    expect(items[1]!.description).toBe("macOS · Relay");
+    // Offline machines have no live link.
+    expect(items[2]!.description).toBe("Linux");
+    expect(machinePickItems(linked, false).items[1]!.description).toBe("macOS");
   });
 
   test("before the hub said hello", () => {

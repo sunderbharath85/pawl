@@ -475,7 +475,7 @@ impl Hub {
             }
             None => {}
         }
-        let refused = if !self.inner.config.peer.accept_intents {
+        let refused = if !self.cfg().peer.accept_intents {
             Some(IntentRejectReason::Forbidden)
         } else if !self.intent_rate_ok(from) {
             Some(IntentRejectReason::RateLimited)

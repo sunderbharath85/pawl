@@ -18,6 +18,12 @@ use std::time::{Duration, Instant};
 pub const HUB_DATA_DIR_NAME: &str = "krypto";
 /// Token file inside the data dir. Mirrors `HUB_TOKEN_FILE`.
 pub const HUB_TOKEN_FILE: &str = "token";
+/// The hub's config file inside the data dir (its top-level `port` is where clients find the hub).
+pub const HUB_CONFIG_FILE: &str = "config.toml";
+/// Written by the running hub: `{port, pid, startedAt}`.
+pub const HUB_RUNTIME_FILE: &str = "runtime.json";
+/// This machine's identity (`id`, `name`), written by the hub on first start.
+pub const HUB_MACHINE_FILE: &str = "machine.toml";
 pub const HUB_DEFAULT_PORT: u16 = 47800;
 pub const HUB_HOST: &str = "127.0.0.1";
 const SPAWN_LOG_FILE: &str = "desktop-hub.log";
@@ -42,6 +48,8 @@ pub struct HubHealth {
     pub ok: bool,
     pub version: Option<String>,
     pub error: Option<String>,
+    /// The answering hub's machine id (protocol v7 hubs), used to verify a runtime.json port.
+    pub machine_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +69,8 @@ pub struct StartHubResult {
 struct HealthBody {
     ok: bool,
     version: Option<String>,
+    #[serde(default, rename = "machineId")]
+    machine_id: Option<String>,
 }
 
 /// The `krypto serve` child we launched (if any). The hub is a background daemon:
@@ -74,17 +84,131 @@ pub fn data_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join(HUB_DATA_DIR_NAME))
 }
 
-/// Hub HTTP base URL: `KRYPTO_HUB_URL` (http/ws, with or without `/ws`) or the default.
+/// How long checking a runtime.json port may take (localhost: a closed port fails at once).
+const VERIFY_TIMEOUT: Duration = Duration::from_millis(800);
+
+/// Hub HTTP base URL: `KRYPTO_HUB_URL` (http/ws, with or without `/ws`), else the port the running hub bound
+/// (`runtime.json`, only once its `/health` names this machine), else the `port` saved in config.toml
+/// (Settings → Hub port), else the default. A saved port that is not applied yet therefore never hides the
+/// running hub, and a stale or planted runtime.json never receives the token.
 pub fn hub_http_url() -> String {
-    let default = format!("http://{HUB_HOST}:{HUB_DEFAULT_PORT}");
-    let Ok(raw) = std::env::var("KRYPTO_HUB_URL") else {
-        return default;
-    };
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return default;
+    resolve_hub_url().0
+}
+
+/// The hub's health right now, at the URL `hub_http_url()` picks (reusing the check of a runtime.json port).
+pub fn hub_health_now(timeout: Duration) -> HubHealth {
+    let (url, verified) = resolve_hub_url();
+    verified.unwrap_or_else(|| probe_health(&url, timeout))
+}
+
+/// The URL, plus the `/health` answer when it came from a verified runtime.json port.
+fn resolve_hub_url() -> (String, Option<HubHealth>) {
+    if let Ok(raw) = std::env::var("KRYPTO_HUB_URL") {
+        let raw = raw.trim();
+        if !raw.is_empty() {
+            return (normalize_http_url(raw), None);
+        }
     }
-    normalize_http_url(raw)
+    let machine_id = local_machine_id();
+    let mut verified = None;
+    let port = choose_port(runtime_port(), config_port(), |port| {
+        // Only /health (no token) is sent to an unverified port.
+        let Some(id) = machine_id.as_deref() else { return false };
+        let health = probe_health(&local_url(port), VERIFY_TIMEOUT);
+        let ok = runtime_verified(&health, id);
+        if ok {
+            verified = Some(health);
+        }
+        ok
+    });
+    (local_url(port), verified)
+}
+
+fn local_url(port: u16) -> String {
+    format!("http://{HUB_HOST}:{port}")
+}
+
+/// Port choice: a runtime.json port that differs from the configured one is used only when `verify` accepts it
+/// (its `/health` names this machine); otherwise the config.toml port, else the default.
+fn choose_port(runtime: Option<u16>, config: Option<u16>, verify: impl FnOnce(u16) -> bool) -> u16 {
+    let fallback = config.unwrap_or(HUB_DEFAULT_PORT);
+    match runtime {
+        Some(port) if port != fallback && verify(port) => port,
+        _ => fallback,
+    }
+}
+
+/// True when a `/health` answer is this machine's hub.
+fn runtime_verified(health: &HubHealth, machine_id: &str) -> bool {
+    health.ok && health.machine_id.as_deref() == Some(machine_id)
+}
+
+/// This machine's id from `<data dir>/machine.toml` (written by the hub on first start).
+fn local_machine_id() -> Option<String> {
+    let text = fs::read_to_string(data_dir()?.join(HUB_MACHINE_FILE)).ok()?;
+    machine_id_from_toml(&text)
+}
+
+/// Top-level `id = "…"` of machine.toml (a 12-character [a-z0-9] machine id).
+fn machine_id_from_toml(text: &str) -> Option<String> {
+    for line in text.trim_start_matches('\u{feff}').lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            return None;
+        }
+        let Some(rest) = line.strip_prefix("id") else { continue };
+        let Some(value) = rest.trim_start().strip_prefix('=') else { continue };
+        let value = value.split('#').next().unwrap_or_default().trim();
+        let id = ['"', '\''].iter().find_map(|q| value.strip_prefix(*q).and_then(|v| v.strip_suffix(*q)))?;
+        let valid = id.len() == 12 && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+        return valid.then(|| id.to_string());
+    }
+    None
+}
+
+/// `{port, pid, startedAt}` that the hub writes to `<data dir>/runtime.json` at startup (removed on a clean exit).
+fn runtime_port() -> Option<u16> {
+    let text = fs::read_to_string(data_dir()?.join(HUB_RUNTIME_FILE)).ok()?;
+    port_from_runtime_json(&text)
+}
+
+fn port_from_runtime_json(text: &str) -> Option<u16> {
+    #[derive(Deserialize)]
+    struct Runtime {
+        port: u16,
+    }
+    serde_json::from_str::<Runtime>(text.trim_start_matches('\u{feff}')).ok().map(|r| r.port).filter(|p| *p > 0)
+}
+
+/// The top-level `port = N` in `<data dir>/config.toml`, if set.
+fn config_port() -> Option<u16> {
+    let text = fs::read_to_string(data_dir()?.join(HUB_CONFIG_FILE)).ok()?;
+    port_from_toml(&text)
+}
+
+/// Top-level `port = N` (before the first `[table]`); comments and other keys are ignored. No TOML crate needed
+/// for one integer key.
+fn port_from_toml(text: &str) -> Option<u16> {
+    for line in text.trim_start_matches('\u{feff}').lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            return None;
+        }
+        let Some(rest) = line.strip_prefix("port") else { continue };
+        let Some(value) = rest.trim_start().strip_prefix('=') else { continue };
+        let value = value.split('#').next().unwrap_or_default().trim();
+        return value.parse::<u16>().ok().filter(|p| *p > 0);
+    }
+    None
+}
+
+/// This machine's address on its main network (the source address of the default route), for suggesting a
+/// peer-listener address. Connecting a UDP socket only picks a route; no packet is sent.
+pub fn lan_address() -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:9").ok()?; // TEST-NET-1: never routed anywhere real
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_unspecified() && !ip.is_loopback()).then(|| ip.to_string())
 }
 
 fn normalize_http_url(raw: &str) -> String {
@@ -178,12 +302,17 @@ fn parse_host_port(http_url: &str) -> Result<HostPort, String> {
 /// Blocking `GET {url}/health` with a short timeout.
 pub fn probe_health(http_url: &str, timeout: Duration) -> HubHealth {
     match probe_health_inner(http_url, timeout) {
-        Ok((ok, version)) => HubHealth { ok, version, error: if ok { None } else { Some("hub reported not ok".into()) } },
-        Err(e) => HubHealth { ok: false, version: None, error: Some(e) },
+        Ok(body) => HubHealth {
+            ok: body.ok,
+            version: body.version,
+            error: if body.ok { None } else { Some("hub reported not ok".into()) },
+            machine_id: body.machine_id,
+        },
+        Err(e) => HubHealth { ok: false, version: None, error: Some(e), machine_id: None },
     }
 }
 
-fn probe_health_inner(http_url: &str, timeout: Duration) -> Result<(bool, Option<String>), String> {
+fn probe_health_inner(http_url: &str, timeout: Duration) -> Result<HealthBody, String> {
     let hp = parse_host_port(http_url)?;
     let addr = (hp.host.as_str(), hp.port)
         .to_socket_addrs()
@@ -222,8 +351,7 @@ fn probe_health_inner(http_url: &str, timeout: Duration) -> Result<(bool, Option
         return Err(format!("/health returned HTTP {status}"));
     }
     let body = if headers.contains("transfer-encoding: chunked") { decode_chunked(body) } else { body.to_vec() };
-    let parsed: HealthBody = serde_json::from_slice(&body).map_err(|e| format!("bad /health body: {e}"))?;
-    Ok((parsed.ok, parsed.version))
+    serde_json::from_slice(&body).map_err(|e| format!("bad /health body: {e}"))
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
@@ -366,16 +494,10 @@ fn open_spawn_log() -> Option<File> {
     OpenOptions::new().create(true).write(true).truncate(true).open(dir.join(SPAWN_LOG_FILE)).ok()
 }
 
-fn port_override(http_url: &str) -> Option<u16> {
-    let hp = parse_host_port(http_url).ok()?;
-    (hp.port != HUB_DEFAULT_PORT).then_some(hp.port)
-}
-
 /// Blocking: if the hub is healthy return immediately, otherwise spawn `krypto serve`
 /// detached and wait up to ~10 s for `/health`.
 pub fn start_hub_blocking(proc_state: &HubProcess) -> Result<StartHubResult, String> {
-    let url = hub_http_url();
-    let health = probe_health(&url, Duration::from_millis(800));
+    let health = hub_health_now(Duration::from_millis(800));
     if health.ok {
         return Ok(StartHubResult { path: None, pid: None, already_running: true, healthy: true, version: health.version });
     }
@@ -398,10 +520,9 @@ pub fn start_hub_blocking(proc_state: &HubProcess) -> Result<StartHubResult, Str
             )
         })?;
         let mut cmd = Command::new(&bin);
+        // No --port: the hub reads KRYPTO_HUB_URL (inherited) and config.toml itself, in the same order as
+        // hub_http_url(). A flag would pin the port and lock the Hub port setting in the UI.
         cmd.arg("serve");
-        if let Some(port) = port_override(&url) {
-            cmd.arg("--port").arg(port.to_string());
-        }
         cmd.stdin(Stdio::null());
         match open_spawn_log() {
             Some(log) => {
@@ -433,7 +554,8 @@ pub fn start_hub_blocking(proc_state: &HubProcess) -> Result<StartHubResult, Str
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let h = probe_health(&url, Duration::from_millis(500));
+        // Re-resolve each time: the new hub writes runtime.json with the port it actually bound.
+        let h = hub_health_now(Duration::from_millis(500));
         if h.ok {
             return Ok(StartHubResult { path, pid, already_running: false, healthy: true, version: h.version });
         }
@@ -471,8 +593,77 @@ mod tests {
         assert_eq!((hp.host.as_str(), hp.port), ("127.0.0.1", 47800));
         let hp = parse_host_port("http://[::1]:5000").unwrap();
         assert_eq!((hp.host.as_str(), hp.port), ("::1", 5000));
-        assert_eq!(port_override("http://127.0.0.1:47800"), None);
-        assert_eq!(port_override("http://127.0.0.1:47801"), Some(47801));
+    }
+
+    #[test]
+    fn reads_top_level_port_from_config() {
+        assert_eq!(port_from_toml("port = 47900\n"), Some(47900));
+        assert_eq!(port_from_toml("\u{feff}# hub\r\noffline = true\r\nport=48000 # mine\r\n"), Some(48000));
+        assert_eq!(port_from_toml("# port = 47900\n"), None);
+        assert_eq!(port_from_toml("[peer]\nport = 47901\n"), None);
+        assert_eq!(port_from_toml("port = 99999\n"), None);
+        assert_eq!(port_from_toml("port = \"47900\"\n"), None);
+        assert_eq!(port_from_toml("ports = 1\nport = 2000\n"), Some(2000));
+    }
+
+    #[test]
+    fn reads_machine_id_from_machine_toml() {
+        assert_eq!(machine_id_from_toml("id = \"abcdef012345\"\nname = \"PC\"\n").as_deref(), Some("abcdef012345"));
+        assert_eq!(machine_id_from_toml("# m\r\nname = 'PC'\r\nid='abcdef012345' # x\r\n").as_deref(), Some("abcdef012345"));
+        assert_eq!(machine_id_from_toml("id = \"ABCDEF012345\"\n"), None);
+        assert_eq!(machine_id_from_toml("id = \"short\"\n"), None);
+        assert_eq!(machine_id_from_toml("[x]\nid = \"abcdef012345\"\n"), None);
+        assert_eq!(machine_id_from_toml("ids = 1\nname = \"x\"\n"), None);
+    }
+
+    #[test]
+    fn runtime_port_is_used_only_when_verified() {
+        // Different from config + verified -> runtime port.
+        assert_eq!(choose_port(Some(47900), Some(47950), |p| p == 47900), 47900);
+        // Not verified (stale, or another program on that port) -> config port, else default.
+        assert_eq!(choose_port(Some(47900), Some(47950), |_| false), 47950);
+        assert_eq!(choose_port(Some(47900), None, |_| false), HUB_DEFAULT_PORT);
+        // Same as the configured port: nothing to verify.
+        assert_eq!(choose_port(Some(47950), Some(47950), |_| panic!("no check needed")), 47950);
+        assert_eq!(choose_port(None, Some(47950), |_| panic!("no check needed")), 47950);
+        let h = |ok, id: Option<&str>| HubHealth { ok, version: None, error: None, machine_id: id.map(str::to_string) };
+        assert!(runtime_verified(&h(true, Some("abcdef012345")), "abcdef012345"));
+        assert!(!runtime_verified(&h(true, Some("zzzzzz012345")), "abcdef012345"));
+        assert!(!runtime_verified(&h(true, None), "abcdef012345"));
+        assert!(!runtime_verified(&h(false, Some("abcdef012345")), "abcdef012345"));
+    }
+
+    #[test]
+    fn health_probe_reports_the_machine_id() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut req = [0u8; 1024];
+            let n = s.read(&mut req).unwrap();
+            let text = String::from_utf8_lossy(&req[..n]).to_string();
+            let body = r#"{"ok":true,"version":"0.7.0","machineId":"abcdef012345"}"#;
+            let resp = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len());
+            s.write_all(resp.as_bytes()).unwrap();
+            text
+        });
+        let h = probe_health(&local_url(port), Duration::from_secs(2));
+        let request = server.join().unwrap();
+        assert!(h.ok);
+        assert_eq!(h.machine_id.as_deref(), Some("abcdef012345"));
+        // The check never carries the token.
+        assert!(request.starts_with("GET /health "));
+        assert!(!request.to_ascii_lowercase().contains("authorization"));
+    }
+
+    #[test]
+    fn reads_running_port_from_runtime_json() {
+        assert_eq!(port_from_runtime_json(r#"{"port":47900,"pid":12,"startedAt":1}"#), Some(47900));
+        assert_eq!(port_from_runtime_json("\u{feff}{\"port\":48000}"), Some(48000));
+        assert_eq!(port_from_runtime_json(r#"{"port":"47900"}"#), None);
+        assert_eq!(port_from_runtime_json(r#"{"port":0}"#), None);
+        assert_eq!(port_from_runtime_json("{"), None);
     }
 
     #[test]

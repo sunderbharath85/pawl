@@ -1,0 +1,352 @@
+//! Settings view, validation table and config.toml round-trip tests (pure; temp dirs only).
+
+use super::*;
+use krypto_protocol::{
+    HubSettingsBotPatch, HubSettingsHubPatch, HubSettingsPeerPatch, HubSettingsRelayPatch, HubSettingsReposPatch,
+    HubSettingsWatchdogPatch,
+};
+use serde_json::json;
+
+const SECRET: &str = "sk-ant-test-0123456789abcdef";
+const RELAY_SECRET: &str = "rk_0123456789abcdefABCDEF";
+
+fn patch(v: serde_json::Value) -> HubSettingsPatch {
+    serde_json::from_value(v).expect("patch parses")
+}
+
+fn reserved() -> Vec<String> {
+    vec!["claude-code".into(), "codex".into(), "gemini".into()]
+}
+
+fn err_of(cur: &HubConfig, p: serde_json::Value) -> InvalidSetting {
+    apply_patch(cur, &patch(p), &reserved()).expect_err("patch must be refused")
+}
+
+/// Contract-level: every refusal names the camelCase wire path of the field (with list indices)
+/// and reads `invalid:<field>: <reason>`.
+#[test]
+fn validation_table_names_camel_case_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().to_string_lossy().into_owned();
+    let missing = dir.path().join("nope").to_string_lossy().into_owned();
+    let file = dir.path().join("f.txt");
+    std::fs::write(&file, "x").unwrap();
+    let file = file.to_string_lossy().into_owned();
+    let cur = HubConfig::default();
+    let agent = |id: &str, cmd: serde_json::Value| json!({ "id": id, "name": "A", "command": cmd });
+    let table: Vec<(serde_json::Value, &str)> = vec![
+        (json!({ "hub": { "port": 80 } }), "hub.port"),
+        (json!({ "hub": { "port": 0 } }), "hub.port"),
+        (json!({ "hub": { "hookSessionStaleHours": 9000 } }), "hub.hookSessionStaleHours"),
+        (json!({ "hub": { "ownedSessionIdleHours": 100000 } }), "hub.ownedSessionIdleHours"),
+        (json!({ "hub": { "eventRetentionDays": 5000 } }), "hub.eventRetentionDays"),
+        (json!({ "hub": { "dailyReportTime": "25:00" } }), "hub.dailyReportTime"),
+        (json!({ "hub": { "dailyReportTime": "9:00" } }), "hub.dailyReportTime"),
+        (json!({ "hub": { "dailyReportTime": "noon" } }), "hub.dailyReportTime"),
+        (json!({ "bot": { "model": "" } }), "bot.model"),
+        (json!({ "bot": { "model": "claude haiku" } }), "bot.model"),
+        (json!({ "bot": { "anthropicApiKey": "" } }), "bot.anthropicApiKey"),
+        (json!({ "bot": { "anthropicApiKey": "has space" } }), "bot.anthropicApiKey"),
+        (json!({ "bot": { "ollamaUrl": "ftp://x" } }), "bot.ollamaUrl"),
+        (json!({ "bot": { "ollamaUrl": "http://user:pw@host:11434" } }), "bot.ollamaUrl"),
+        (json!({ "bot": { "ollamaUrl": "http://host:99999" } }), "bot.ollamaUrl"),
+        (json!({ "bot": { "ollamaModel": "a b" } }), "bot.ollamaModel"),
+        (json!({ "watchdog": { "waitingNudgeAfterMs": 0 } }), "watchdog.waitingNudgeAfterMs"),
+        (json!({ "watchdog": { "repeatEveryMs": -5 } }), "watchdog.repeatEveryMs"),
+        (json!({ "watchdog": { "tickSecs": 0 } }), "watchdog.tickSecs"),
+        (json!({ "watchdog": { "tickSecs": 4000 } }), "watchdog.tickSecs"),
+        (json!({ "peer": { "listen": "my-pc:47801" } }), "peer.listen"),
+        (json!({ "peer": { "listen": "192.168.1.5:80" } }), "peer.listen"),
+        (json!({ "peer": { "listen": "127.0.0.1:47800" } }), "peer.listen"),
+        (json!({ "peer": { "startRoots": [d.clone(), d.clone()] } }), "peer.startRoots[1]"),
+        (json!({ "peer": { "startRoots": [d.clone(), file.clone(), missing.clone()] } }), "peer.startRoots[1]"),
+        (json!({ "peer": { "startRoots": [d.clone(), "relative/dir", d.clone()] } }), "peer.startRoots[1]"),
+        (json!({ "peer": { "startRoots": [d.clone(), format!("{d}/a"), missing.clone()] } }), "peer.startRoots[1]"),
+        (json!({ "repos": { "paths": [missing.clone()] } }), "repos.paths[0]"),
+        (json!({ "repos": { "paths": [""] } }), "repos.paths[0]"),
+        (json!({ "relay": { "url": "ftp://relay" } }), "relay.url"),
+        (json!({ "relay": { "url": "ws://relay.example.com" } }), "relay.url"),
+        (json!({ "relay": { "url": "wss://relay.example.com/?x=1" } }), "relay.url"),
+        (json!({ "relay": { "accessKey": "not base64url!" } }), "relay.accessKey"),
+        (json!({ "relay": { "accessKey": "" } }), "relay.accessKey"),
+        (json!({ "customAgents": [agent("ok", json!(["a"])), agent("Bad_Id", json!(["b"]))] }), "customAgents[1].id"),
+        (json!({ "customAgents": [agent("ok", json!(["a"])), agent("ok", json!(["b"]))] }), "customAgents[1].id"),
+        (json!({ "customAgents": [agent("ok", json!(["a"])), agent("codex", json!(["b"]))] }), "customAgents[1].id"),
+        (json!({ "customAgents": [agent("ok", json!(["a"])), agent("two", json!([]))] }), "customAgents[1].command"),
+        (json!({ "customAgents": [agent("ok", json!(["a"])), agent("two", json!(["  "]))] }), "customAgents[1].command"),
+        (json!({ "customAgents": [agent("ok", json!(["a"])), json!({ "id": "two", "name": " ", "command": ["b"] })] }), "customAgents[1].name"),
+    ];
+    // peer.startRoots[1] in the 4th root case is the "a" subfolder that does not exist.
+    for (p, field) in table {
+        let e = err_of(&cur, p.clone());
+        assert_eq!(e.field, field, "{p}");
+        let text = anyhow::Error::new(e.clone()).to_string();
+        assert!(text.starts_with(&format!("invalid:{field}: ")), "{text}");
+        assert!(!e.reason.is_empty());
+    }
+    let many: Vec<serde_json::Value> = (0..17).map(|i| agent(&format!("a{i}"), json!(["x"]))).collect();
+    assert_eq!(err_of(&cur, json!({ "customAgents": many })).field, "customAgents");
+    let roots: Vec<String> = (0..65).map(|_| d.clone()).collect();
+    assert_eq!(err_of(&cur, json!({ "peer": { "startRoots": roots } })).field, "peer.startRoots");
+}
+
+#[test]
+fn folders_are_canonical_and_never_a_whole_drive() {
+    let cur = HubConfig::default();
+    let root = if cfg!(windows) { "C:\\" } else { "/" };
+    let e = err_of(&cur, json!({ "peer": { "startRoots": [root] } }));
+    assert_eq!(e.field, "peer.startRoots[0]");
+    assert!(e.reason.contains("whole drive"), "{e}");
+    assert_eq!(err_of(&cur, json!({ "repos": { "paths": [root] } })).field, "repos.paths[0]");
+    if cfg!(windows) {
+        assert_eq!(err_of(&cur, json!({ "repos": { "paths": ["\\\\?\\C:\\"] } })).field, "repos.paths[0]");
+    }
+    // `..` and links are resolved before the path is stored; the same folder twice is refused.
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a");
+    std::fs::create_dir_all(a.join("b")).unwrap();
+    let dotted = a.join("b").join("..").to_string_lossy().into_owned();
+    let (next, _) = apply_patch(&cur, &patch(json!({ "peer": { "startRoots": [dotted] } })), &reserved()).unwrap();
+    let canon = crate::repos::canonical_dir(&a).unwrap().to_string_lossy().into_owned();
+    assert_eq!(next.peer.start_roots, vec![canon.clone()]);
+    assert!(!next.peer.start_roots[0].contains(".."));
+    let e = err_of(&cur, json!({ "repos": { "paths": [canon, a.join("b").join("..").to_string_lossy()] } }));
+    assert_eq!(e.field, "repos.paths[1]");
+}
+
+#[test]
+fn the_api_port_never_shares_the_listener_port() {
+    let mut cur = HubConfig::default();
+    cur.peer.listen = Some("127.0.0.1:47901".into());
+    assert_eq!(err_of(&cur, json!({ "hub": { "port": 47901 } })).field, "hub.port");
+    cur.peer.listen = Some("0.0.0.0:47901".into());
+    assert_eq!(err_of(&cur, json!({ "hub": { "port": 47901 } })).field, "hub.port");
+    // A LAN-only listener on that port does not collide with 127.0.0.1.
+    cur.peer.listen = Some("192.168.1.20:47901".into());
+    assert!(apply_patch(&cur, &patch(json!({ "hub": { "port": 47901 } })), &reserved()).is_ok());
+}
+
+#[test]
+fn refusals_never_quote_secret_values() {
+    let cur = HubConfig::default();
+    for p in [
+        json!({ "bot": { "anthropicApiKey": format!("{SECRET} x") } }),
+        json!({ "bot": { "anthropicApiKey": "x".repeat(600) + SECRET } }),
+        json!({ "relay": { "accessKey": format!("{RELAY_SECRET}!") } }),
+    ] {
+        let e = err_of(&cur, p);
+        assert!(!e.reason.contains(SECRET) && !e.reason.contains(RELAY_SECRET), "{e}");
+    }
+}
+
+#[test]
+fn valid_patches_normalize_and_report_changed_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().to_string_lossy().into_owned();
+    let cur = HubConfig::default();
+    let p = patch(json!({
+        "hub": { "port": 48000, "dailyReportTime": "", "eventRetentionDays": 0 },
+        "bot": { "model": " claude-haiku-5-5 ", "anthropicApiKey": SECRET, "ollamaUrl": "HTTP://127.0.0.1:11434/", "ollamaModel": "" },
+        "watchdog": { "tickSecs": 60 },
+        "peer": { "listen": "10.0.0.5", "acceptIntents": false, "startRoots": [format!(" {d} ")] },
+        "repos": { "paths": [d.clone()] },
+        "relay": { "url": "wss://relay.example.com/", "accessKey": RELAY_SECRET },
+        "customAgents": [{ "id": "my-agent", "name": " Mine ", "command": [" my-agent ", "--acp"] }],
+    }));
+    let (next, changed) = apply_patch(&cur, &p, &reserved()).unwrap();
+    assert_eq!(next.port, 48000);
+    assert_eq!(next.daily_report_minutes(), None);
+    assert_eq!(next.daily_report_time, "off");
+    assert_eq!(next.brain.model, "claude-haiku-5-5");
+    assert_eq!(next.brain.anthropic_api_key.as_deref(), Some(SECRET));
+    assert_eq!(next.brain.ollama_url.as_deref(), Some("http://127.0.0.1:11434"));
+    assert_eq!(next.peer.listen.as_deref(), Some("10.0.0.5:47801"));
+    assert_eq!(next.peer.start_roots, vec![d.clone()]);
+    assert_eq!(next.relay.url.as_deref(), Some("wss://relay.example.com"));
+    assert_eq!(next.custom_agents[0].name, "Mine");
+    assert_eq!(next.custom_agents[0].command, vec!["my-agent".to_string(), "--acp".into()]);
+    assert_eq!(
+        changed,
+        vec![
+            HUB_PORT,
+            HUB_RETENTION,
+            HUB_DAILY_REPORT,
+            BOT_KEY,
+            BOT_OLLAMA_URL,
+            WD_TICK,
+            PEER_LISTEN,
+            PEER_ACCEPT,
+            PEER_ROOTS,
+            REPOS_PATHS,
+            RELAY_URL,
+            RELAY_KEY,
+            CUSTOM_AGENTS
+        ],
+        "bot.model was already the default"
+    );
+    // The same patch again changes nothing.
+    let (_, again) = apply_patch(&next, &p, &reserved()).unwrap();
+    assert!(again.is_empty(), "{again:?}");
+    // Clearing: null and "" both clear optional values; null clears secrets.
+    let clear = patch(json!({ "bot": { "anthropicApiKey": null, "ollamaUrl": "" }, "peer": { "listen": null }, "relay": { "url": null, "accessKey": null } }));
+    let (cleared, changed) = apply_patch(&next, &clear, &reserved()).unwrap();
+    assert_eq!((cleared.brain.anthropic_api_key, cleared.brain.ollama_url, cleared.peer.listen), (None, None, None));
+    assert_eq!((cleared.relay.url, cleared.relay.access_key), (None, None));
+    assert_eq!(changed, vec![BOT_KEY, BOT_OLLAMA_URL, PEER_LISTEN, RELAY_URL, RELAY_KEY]);
+    // Loopback relays may use ws:// (local tests, wrangler dev).
+    let (n, _) = apply_patch(&cur, &patch(json!({ "relay": { "url": "ws://127.0.0.1:8787" } })), &reserved()).unwrap();
+    assert_eq!(n.relay.url.as_deref(), Some("ws://127.0.0.1:8787"));
+}
+
+#[test]
+fn settings_view_never_carries_secrets() {
+    let mut cfg = HubConfig::default();
+    cfg.brain.anthropic_api_key = Some(SECRET.into());
+    cfg.relay.access_key = Some(RELAY_SECRET.into());
+    cfg.relay.url = Some("wss://relay.example.com".into());
+    let s = to_settings(&cfg, &Overrides::default());
+    assert!(s.bot.anthropic_api_key_set && s.relay.access_key_set);
+    let text = serde_json::to_string(&s).unwrap();
+    assert!(!text.contains(SECRET) && !text.contains(RELAY_SECRET), "{text}");
+    let printed = masked_lines(&s, &[]).join("\n");
+    assert!(!printed.contains(SECRET) && !printed.contains(RELAY_SECRET), "{printed}");
+    assert!(printed.contains("set (hidden)"));
+    // Debug output of the config redacts them too.
+    let dbg = format!("{cfg:?}");
+    assert!(!dbg.contains(SECRET) && !dbg.contains(RELAY_SECRET), "{dbg}");
+
+    // The env key counts as set and is reported as the source while config.toml has none.
+    let env = Overrides { keys: BTreeMap::new(), env_anthropic_key: true };
+    let s = to_settings(&HubConfig::default(), &env);
+    assert!(s.bot.anthropic_api_key_set);
+    assert_eq!(s.overridden_by.get(BOT_KEY).map(String::as_str), Some("ANTHROPIC_API_KEY"));
+    let s = to_settings(&HubConfig::default(), &Overrides::default());
+    assert!(!s.bot.anthropic_api_key_set && s.overridden_by.is_empty());
+    assert_eq!(s.hub.daily_report_time, "18:00");
+    assert_eq!(s.peer.listen, None);
+}
+
+const HAND_WRITTEN: &str = r#"# My hub settings
+port = 47800 # the default port
+
+daily_report_time = "18:00"
+
+[brain]
+# keep the cheap model
+model = "claude-haiku-5-5"
+
+[peer]
+# my LAN address
+listen = "192.168.1.20"
+# comment above accept_intents
+accept_intents = true
+
+[future_section]
+answer = 42 # unknown to this hub version
+
+[[custom_agents]]
+# my agent, keep this comment
+id = "mine"
+name = "Mine"
+command = ["mine", "--acp"]
+env = { TOKEN_FILE = "/x" }
+
+[[custom_agents]]
+id = "gone"
+name = "Gone"
+command = ["gone"]
+"#;
+
+#[test]
+fn edits_keep_comments_unknown_keys_and_env() {
+    let cur = HubConfig::parse(HAND_WRITTEN).unwrap();
+    let p = patch(json!({
+        "hub": { "port": 48100 },
+        "bot": { "anthropicApiKey": SECRET },
+        "peer": { "listen": null },
+        "relay": { "url": "wss://relay.example.com", "accessKey": RELAY_SECRET },
+        "customAgents": [
+            { "id": "new-one", "name": "New", "command": ["new", "--acp"] },
+            { "id": "mine", "name": "Mine renamed", "command": ["mine", "--acp", "--v2"] },
+        ],
+    }));
+    let (next, changed) = apply_patch(&cur, &p, &reserved()).unwrap();
+    let out = edit_config(Some(HAND_WRITTEN), &next, &changed).unwrap();
+    for kept in [
+        "# My hub settings",
+        "# the default port",
+        "# keep the cheap model",
+        "# my LAN address",
+        "# comment above accept_intents",
+        "[future_section]",
+        "answer = 42 # unknown to this hub version",
+        "# my agent, keep this comment",
+        "TOKEN_FILE",
+    ] {
+        assert!(out.contains(kept), "{kept:?} missing in:\n{out}");
+    }
+    assert!(out.contains("port = 48100 # the default port"), "{out}");
+    assert!(!out.contains("listen ="), "{out}");
+    assert!(!out.contains("\"gone\""), "{out}");
+    let back = HubConfig::parse(&out).unwrap();
+    assert_eq!(back.port, 48100);
+    assert_eq!(back.peer.listen, None);
+    assert_eq!(back.brain.anthropic_api_key.as_deref(), Some(SECRET));
+    assert_eq!(back.relay.access_key.as_deref(), Some(RELAY_SECRET));
+    assert_eq!(back.custom_agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["new-one", "mine"]);
+    let mine = &back.custom_agents[1];
+    assert_eq!((mine.name.as_str(), mine.command.len()), ("Mine renamed", 3));
+    assert_eq!(mine.env.as_ref().and_then(|e| e.get("TOKEN_FILE")).map(String::as_str), Some("/x"), "env kept");
+    // Untouched keys are byte-identical.
+    assert!(out.contains("daily_report_time = \"18:00\""));
+    assert!(out.contains("model = \"claude-haiku-5-5\""));
+
+    // Turning the listener back on writes it into [peer] again.
+    let (next2, changed2) = apply_patch(&back, &patch(json!({ "peer": { "listen": "10.1.2.3:47901" } })), &reserved()).unwrap();
+    let out2 = edit_config(Some(&out), &next2, &changed2).unwrap();
+    assert_eq!(HubConfig::parse(&out2).unwrap().peer.listen.as_deref(), Some("10.1.2.3:47901"));
+    assert!(out2.contains("# comment above accept_intents"), "{out2}");
+}
+
+#[test]
+fn a_missing_file_starts_from_the_commented_template() {
+    let cur = HubConfig::default();
+    let (next, changed) = apply_patch(&cur, &patch(json!({ "peer": { "listen": "127.0.0.1:47901" }, "watchdog": { "tickSecs": 15 } })), &reserved()).unwrap();
+    let out = edit_config(None, &next, &changed).unwrap();
+    assert!(out.contains("# Krypto hub configuration"), "{out}");
+    assert!(out.contains("# [[custom_agents]]"), "template comments kept");
+    let back = HubConfig::parse(&out).unwrap();
+    assert_eq!(back.peer.listen.as_deref(), Some("127.0.0.1:47901"));
+    assert_eq!(back.watchdog.tick_secs, 15);
+    assert!(edit_config(Some("port = = 1"), &next, &changed).is_err(), "broken TOML is never overwritten");
+}
+
+#[test]
+fn atomic_write_replaces_the_file_and_leaves_no_temp_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "port = 1\n").unwrap();
+    write_atomic(&path, "port = 48000\n").unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "port = 48000\n");
+    write_atomic(&path, "port = 48001\n").unwrap();
+    let names: Vec<String> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, ["config.toml"]);
+}
+
+#[test]
+fn patches_build_from_typed_sections_too() {
+    // The Rust patch types (what a Rust client would send) take the same path.
+    let p = HubSettingsPatch {
+        hub: Some(HubSettingsHubPatch { offline: Some(true), ..Default::default() }),
+        bot: Some(HubSettingsBotPatch { ollama_model: Some(Some("llama3.2".into())), ..Default::default() }),
+        watchdog: Some(HubSettingsWatchdogPatch { repeat_every_ms: Some(60_000), ..Default::default() }),
+        peer: Some(HubSettingsPeerPatch { accept_intents: Some(false), ..Default::default() }),
+        repos: Some(HubSettingsReposPatch { paths: Some(vec![]) }),
+        relay: Some(HubSettingsRelayPatch { url: Some(None), access_key: None }),
+        custom_agents: None,
+    };
+    let (next, changed) = apply_patch(&HubConfig::default(), &p, &reserved()).unwrap();
+    assert!(next.offline && !next.peer.accept_intents);
+    assert_eq!(changed, vec![HUB_OFFLINE, BOT_OLLAMA_MODEL, WD_REPEAT, PEER_ACCEPT]);
+}
+

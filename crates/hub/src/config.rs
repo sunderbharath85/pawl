@@ -25,6 +25,8 @@ pub const LOG_FILE: &str = "hub.log";
 pub const REGISTRY_CACHE_FILE: &str = "registry-cache.json";
 /// X25519 device secret for hub-to-hub links (64 hex chars). Never logged, printed or sent.
 pub const DEVICE_KEY_FILE: &str = "device.key";
+/// `{port, pid, startedAt}` of the running hub (written once it serves, removed on a clean exit).
+pub const RUNTIME_FILE: &str = "runtime.json";
 
 /// Files inside the hub data dir.
 #[derive(Debug, Clone)]
@@ -39,6 +41,8 @@ pub struct Paths {
     pub device_key: PathBuf,
     pub log: PathBuf,
     pub registry_cache: PathBuf,
+    /// `runtime.json`: where the running hub listens (see [`RuntimeInfo`]).
+    pub runtime: PathBuf,
 }
 
 impl Paths {
@@ -52,6 +56,7 @@ impl Paths {
             device_key: data_dir.join(DEVICE_KEY_FILE),
             log: data_dir.join(LOG_FILE),
             registry_cache: data_dir.join(REGISTRY_CACHE_FILE),
+            runtime: data_dir.join(RUNTIME_FILE),
             data_dir,
         }
     }
@@ -107,6 +112,11 @@ impl fmt::Debug for BrainSection {
 }
 
 impl BrainSection {
+    /// The configured model, or the default when blank.
+    pub fn effective_model(&self) -> String {
+        if self.model.trim().is_empty() { BrainSection::default().model } else { self.model.trim().to_string() }
+    }
+
     /// Config key, else `ANTHROPIC_API_KEY`.
     pub fn to_brain_config(&self) -> krypto_brain::chat::BrainConfig {
         let key = self
@@ -116,7 +126,7 @@ impl BrainSection {
             .or_else(|| std::env::var(ENV_ANTHROPIC_KEY).ok().filter(|k| !k.trim().is_empty()));
         krypto_brain::chat::BrainConfig {
             anthropic_api_key: key,
-            model: if self.model.trim().is_empty() { BrainSection::default().model } else { self.model.clone() },
+            model: self.effective_model(),
             ollama_url: self.ollama_url.clone().filter(|s| !s.trim().is_empty()),
             ollama_model: self.ollama_model.clone().filter(|s| !s.trim().is_empty()),
         }
@@ -202,6 +212,28 @@ pub struct ReposSection {
     pub paths: Vec<String>,
 }
 
+/// `[relay]`: the relay hubs and phones connect to outbound (PLAN step 6). Stored and shown now;
+/// wired into the link layer in step 6 phase B.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RelaySection {
+    /// e.g. "wss://relay.example.com". Unset = no relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Secret the relay asks for (write-only in the UI; never logged or sent to clients).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_key: Option<String>,
+}
+
+impl fmt::Debug for RelaySection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RelaySection")
+            .field("url", &self.url)
+            .field("access_key", &self.access_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HubConfig {
@@ -224,6 +256,7 @@ pub struct HubConfig {
     pub event_retention_days: u32,
     pub peer: PeerSection,
     pub repos: ReposSection,
+    pub relay: RelaySection,
 }
 
 impl Default for HubConfig {
@@ -241,11 +274,15 @@ impl Default for HubConfig {
             event_retention_days: 30,
             peer: PeerSection::default(),
             repos: ReposSection::default(),
+            relay: RelaySection::default(),
         }
     }
 }
 
-const CONFIG_TEMPLATE: &str = r#"# Krypto hub configuration. Every key is optional; defaults shown.
+/// Written when config.toml is missing. The desktop app's Settings change these keys in place
+/// (comments and unknown keys are kept).
+pub(crate) const CONFIG_TEMPLATE: &str = r#"# Krypto hub configuration. Every key is optional; defaults shown.
+# Every setting can also be changed in the desktop app (Settings).
 # port = 47800                 # the hub only ever binds 127.0.0.1
 # offline = false              # true = never fetch the ACP registry
 # daily_report_time = "18:00"  # local time, "off" to disable
@@ -265,6 +302,9 @@ const CONFIG_TEMPLATE: &str = r#"# Krypto hub configuration. Every key is option
 #
 # [repos]
 # paths = ["E:/work/api"]          # also offered as repos ("in repo api"), besides folders sessions used
+#
+# [relay]
+# url = "wss://relay.example.com"  # reach paired machines off the LAN (step 6)
 #
 # [watchdog]
 # waiting_nudge_after_ms = 300000
@@ -338,6 +378,46 @@ impl HubConfig {
             cache_dir: paths.data_dir.clone(),
             custom_agents: self.custom_agents.clone(),
             offline: self.offline,
+        }
+    }
+}
+
+// ---------------------------------------------------------------- runtime.json
+
+/// The running hub: clients find its port here first, so a port saved in config.toml but not yet
+/// applied (it needs a restart) never sends hook events to the wrong port.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeInfo {
+    pub port: u16,
+    pub pid: u32,
+    pub started_at: krypto_protocol::UnixMs,
+}
+
+impl RuntimeInfo {
+    /// This process, serving on `port` now.
+    pub fn now(port: u16) -> Self {
+        Self { port, pid: std::process::id(), started_at: krypto_protocol::now_ms() }
+    }
+
+    /// Write it atomically (the hub, once its port is bound).
+    pub fn write(&self, paths: &Paths) -> Result<()> {
+        let text = serde_json::to_string_pretty(self)?;
+        crate::settings::write_atomic(&paths.runtime, &text)
+    }
+
+    /// None when missing or unreadable (no hub, or an old one that never wrote it).
+    pub fn read(paths: &Paths) -> Option<Self> {
+        let text = std::fs::read_to_string(&paths.runtime).ok()?;
+        serde_json::from_str::<RuntimeInfo>(&text).ok().filter(|r| r.port != 0)
+    }
+
+    /// Remove runtime.json if it is still this process's (a replacement may have written its own).
+    pub fn remove_if_ours(paths: &Paths) {
+        if Self::read(paths).is_some_and(|r| r.pid == std::process::id()) {
+            if let Err(e) = std::fs::remove_file(&paths.runtime) {
+                tracing::warn!("remove {}: {e}", paths.runtime.display());
+            }
         }
     }
 }
@@ -471,6 +551,26 @@ pub fn serve_port(port_flag: Option<u16>, cfg: &HubConfig) -> u16 {
     HubEndpoint::resolve(port_flag, cfg.port).port
 }
 
+impl HubEndpoint {
+    /// Where a client (`krypto hook`, every other client command) finds the running hub:
+    /// `--port` > `KRYPTO_HUB_URL` > runtime.json (once verified, see [`runtime_candidate`] and
+    /// `cli::client_endpoint`) > config.toml. This is the answer without runtime.json.
+    pub fn for_client_fallback(port_flag: Option<u16>, config_port: u16) -> Self {
+        Self::resolve(port_flag, config_port)
+    }
+}
+
+/// The port runtime.json offers, when it would change the answer: no `--port`, no
+/// `KRYPTO_HUB_URL`, and a port other than config.toml's. The caller must check that the hub there
+/// is this data dir's (`/health` machineId == machine.toml) before using it: runtime.json is a
+/// plain file, and anything listening on that port could otherwise collect hook events.
+pub fn runtime_candidate(port_flag: Option<u16>, paths: &Paths, config_port: u16) -> Option<u16> {
+    if port_flag.is_some() || std::env::var(ENV_URL).is_ok_and(|u| !u.trim().is_empty()) {
+        return None;
+    }
+    RuntimeInfo::read(paths).map(|r| r.port).filter(|p| *p != config_port)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +635,34 @@ match = { toolKind = "read" }
         let e = HubEndpoint::parse("http://localhost:47800/").unwrap();
         assert_eq!(e.ws_url, "ws://localhost:47800/ws");
         assert!(HubEndpoint::parse("ftp://x").is_err());
+    }
+
+    #[test]
+    fn clients_prefer_the_running_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::in_dir(dir.path());
+        if std::env::var(ENV_URL).is_ok() {
+            return; // KRYPTO_HUB_URL set in this environment: it wins by design
+        }
+        assert_eq!(runtime_candidate(None, &paths, 48001), None, "no runtime.json: config.toml");
+        RuntimeInfo::now(47810).write(&paths).unwrap();
+        let r = RuntimeInfo::read(&paths).unwrap();
+        assert_eq!((r.port, r.pid), (47810, std::process::id()));
+        assert_eq!(runtime_candidate(None, &paths, 48001), Some(47810), "the running port is offered (to be verified)");
+        assert_eq!(runtime_candidate(None, &paths, 47810), None, "same as config.toml: nothing to verify");
+        assert_eq!(runtime_candidate(Some(47999), &paths, 48001), None, "--port beats everything");
+        assert_eq!(HubEndpoint::for_client_fallback(Some(47999), 48001).port, 47999);
+        let text = std::fs::read_to_string(&paths.runtime).unwrap();
+        assert!(text.contains("\"startedAt\""), "{text}");
+        // Only the process that wrote it removes it.
+        std::fs::write(&paths.runtime, r#"{"port":47811,"pid":1,"startedAt":0}"#).unwrap();
+        RuntimeInfo::remove_if_ours(&paths);
+        assert!(paths.runtime.exists());
+        RuntimeInfo::now(47812).write(&paths).unwrap();
+        RuntimeInfo::remove_if_ours(&paths);
+        assert!(!paths.runtime.exists());
+        std::fs::write(&paths.runtime, "garbage").unwrap();
+        assert_eq!(runtime_candidate(None, &paths, 48001), None, "unreadable runtime.json is ignored");
     }
 
     #[test]

@@ -16,7 +16,9 @@ A dog (or cat, bird, robot) that watches and drives your coding agents through t
   `Krypto: Open Pet in Editor` opens the same view in an editor tab.
 - **Commands:** Start Session (pick this machine or an online paired one), Prompt Session, Cancel Session, Approve Pending, Deny Pending, Show Pet,
   Rename Pet, Change Pet Species, Rename This Machine, Show Machines (read-only; pair machines in the desktop
-  app or with `krypto peer`), Install Agent Hooks, Start Hub, Reconnect to Hub.
+  app or with `krypto peer`; online machines show whether they are linked over the LAN or the relay), Install Agent
+  Hooks, Start Hub, Reconnect to Hub, and **Open Settings**: every hub setting lives in the Krypto desktop app, so
+  this asks it to open its Settings view (or tells you to open the desktop app when it is not running).
 - **Edits:** when an agent finishes editing a file inside this workspace, the file (or a diff against git
   HEAD) opens in a preview tab — `krypto.openEditedFiles`: `off` | `open` | `diff`.
 - **Notifications:** permission requests of pet-owned sessions (with Approve/Deny), finished turns and hub

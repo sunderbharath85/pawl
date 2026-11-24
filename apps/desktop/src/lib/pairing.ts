@@ -16,7 +16,7 @@ const PAIRING_ERRORS: Record<string, string> = {
   bad_uri: "That isn't a Krypto invite. Copy the whole krypto://peer?… link (or the krypto peer join line) from the other machine.",
   self_invite: "That invite was made on this machine. Paste it into Krypto on the other machine instead.",
   unreachable:
-    "Couldn't reach the other machine. Check that both are on the same network, its peer listener is on, and its firewall allows the port.",
+    "Couldn't reach the other machine. Check that both are on the same network, its peer listener is on, and its firewall allows the port (or that both machines are connected to the relay).",
   invite_rejected:
     "The other machine turned the invite down: it may have expired or been used already. Create a new invite there and try again.",
   timeout: "The other machine didn't answer in time. Make sure it's awake and on the same network, then try again.",

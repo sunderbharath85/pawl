@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::RangeInclusive;
 
 use krypto_peer::{PeerEvent, PeerNode, RosterEntry};
-use krypto_protocol::{Device, DeviceKind, PairRejectReason, PeerStatus, Presence};
+use krypto_protocol::{Device, DeviceKind, LinkPath, PairRejectReason, PeerStatus, Presence};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::*;
@@ -35,6 +35,8 @@ pub(super) struct Peers {
     /// peer's `bye{revoked}` in the store and reports `LinkDown` first); kept so that event can
     /// still audit them.
     departed: HashMap<String, RosterEntry>,
+    /// The path of each live link (`PeerEvent::LinkPath`); gone on `LinkDown`. Shown as `Device.path`.
+    paths: HashMap<String, LinkPath>,
 }
 
 /// A link-layer error as its bare snake_case wire code (`krypto-peer` errors display as the code).
@@ -81,16 +83,19 @@ fn same_view(a: &Machine, b: &Machine) -> bool {
     a.name == b.name && a.os == b.os && a.hub_version == b.hub_version && a.online == b.online && activity_close
 }
 
-fn sorted_devices(roster: &BTreeMap<String, RosterEntry>) -> Vec<Device> {
-    let mut v: Vec<Device> = roster.values().map(|e| e.device.clone()).collect();
+/// The roster as clients see it, by name, with each live link's path.
+fn sorted_devices(roster: &BTreeMap<String, RosterEntry>, paths: &HashMap<String, LinkPath>) -> Vec<Device> {
+    let mut v: Vec<Device> =
+        roster.values().map(|e| Device { path: paths.get(&e.device.id).copied(), ..e.device.clone() }).collect();
     v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.id.cmp(&b.id)));
     v
 }
 
 /// The roster as clients see it in `devices`, minus lastSeen (which changes on every heartbeat).
-fn devices_key(roster: &BTreeMap<String, RosterEntry>) -> Vec<Device> {
-    sorted_devices(roster).into_iter().map(|d| Device { last_seen: None, ..d }).collect()
+fn devices_key(roster: &BTreeMap<String, RosterEntry>, paths: &HashMap<String, LinkPath>) -> Vec<Device> {
+    sorted_devices(roster, paths).into_iter().map(|d| Device { last_seen: None, ..d }).collect()
 }
+
 
 /// A presence snapshot without its timestamps, to tell whether anything peers see changed.
 fn presence_key(p: &Presence) -> Value {
@@ -140,21 +145,49 @@ impl Hub {
             .map(|e| (e.device.id.clone(), live_machine(e, false, None, None)))
             .collect();
         peers.sent = sent;
-        peers.devices_sent = devices_key(&peers.roster);
+        peers.devices_sent = devices_key(&peers.roster, &peers.paths);
         Ok(())
     }
 
     /// Start the link layer: the listener when configured (`--peer-listen` / `[peer] listen`),
-    /// then dial loops to every paired hub with a known address.
+    /// the relay when `[relay] url` is set, then dial loops to every paired hub with a known address.
     pub async fn start_peer_links(&self) -> Result<()> {
-        if let Some(addr) = self.inner.config.peer.listen_addr().context("[peer] listen")? {
+        let (listen, relay) = {
+            let cfg = self.cfg();
+            (cfg.peer.listen_addr().context("[peer] listen")?, settings::relay_config(&cfg))
+        };
+        if relay.is_some() {
+            // A bad relay setting must not keep the hub from starting: it says so and runs without.
+            if let Err(e) = self.inner.peer.set_relay(relay) {
+                tracing::warn!("ignoring the [relay] setting in config.toml: {e}");
+                let notification = notify::make(
+                    &self.inner.machine_id,
+                    NotificationLevel::Warning,
+                    "Relay setting ignored",
+                    format!("The relay setting in config.toml was refused ({e}); fix it in Settings."),
+                    None,
+                    None,
+                );
+                self.inner.startup_notices.lock().unwrap_or_else(|p| p.into_inner()).push(notification.clone());
+                self.inner.bus.send_local(ServerMsg::Notification { notification });
+            }
+        }
+        if let Some(addr) = listen {
             if addr.ip().is_unspecified() {
                 tracing::warn!(
                     "the peer listener on {addr} accepts connections on every interface; \
                      invites need --addr <LAN-IP:port> so the other hub knows where to dial"
                 );
             }
-            let bound = self.inner.peer.listen(addr).await.with_context(|| format!("start the peer listener on {addr}"))?;
+            // A replacement hub (restart_hub) may find the port still held by the old one briefly.
+            let deadline = tokio::time::Instant::now() + crate::restart::bind_retry();
+            let bound = loop {
+                match self.inner.peer.listen(addr).await {
+                    Ok(b) => break b,
+                    Err(_) if tokio::time::Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(250)).await,
+                    Err(e) => return Err(e.context(format!("start the peer listener on {addr}"))),
+                }
+            };
             tracing::info!("peer listener on {bound}");
             self.inner.bus.send(ServerMsg::PeerStatus { peer: self.peer_status() });
         }
@@ -162,17 +195,19 @@ impl Hub {
         Ok(())
     }
 
-    /// This hub's peer-link status (listener address, public key).
+    /// This hub's peer-link status (listener address, public key, relay connection).
     pub fn peer_status(&self) -> PeerStatus {
         PeerStatus {
             listening: self.inner.peer.listening().map(|a| a.to_string()),
             public_key: self.inner.peer.public_b64(),
+            relay: self.inner.peer.relay_status(),
         }
     }
 
-    /// The pairing roster (never this hub), by name.
+    /// The pairing roster (never this hub), by name, with each live link's path.
     pub fn devices(&self) -> Vec<Device> {
-        sorted_devices(&self.peers().roster)
+        let peers = self.peers();
+        sorted_devices(&peers.roster, &peers.paths)
     }
 
     /// Paired hubs with live state from the link layer, by name.
@@ -273,16 +308,25 @@ impl Hub {
         let addr = addr.map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
         let invite = self.inner.peer.create_invite(addr, Duration::from_secs(ttl.into())).map_err(wire)?;
         // Never log the URI: it carries the one-time code.
-        tracing::info!("created a pairing invite (valid {ttl} s, advertising {})", invite.addr);
+        let advertising = invite.addr.as_deref().unwrap_or("relay only");
+        tracing::info!("created a pairing invite (valid {ttl} s, advertising {advertising})");
         Ok(json!({ "uri": invite.to_uri(), "expiresAt": invite.expires_at }))
     }
 
     /// `join_peer`: pair with the hub that created `uri`. The link layer stores it and reports
-    /// `Paired`, which updates clients.
-    pub async fn join_peer(&self, uri: &str) -> Result<Value> {
-        let (device, mut machine) = self.inner.peer.join(uri.trim()).await.map_err(wire)?;
+    /// `Paired`, which updates clients. When this hub had no relay and the join used the
+    /// invite's, that relay becomes this hub's relay setting (config.toml, audited, announced).
+    pub async fn join_peer(&self, uri: &str, actor: &Actor) -> Result<Value> {
+        let joined = self.inner.peer.join_invite(uri.trim()).await.map_err(wire)?;
+        let (device, mut machine) = (joined.device, joined.machine);
         machine.online = true; // the pairing socket is now the live link
         tracing::info!("joined {:?} ({})", machine.name, machine.id);
+        if let Some(relay) = joined.adopted_relay {
+            if let Err(e) = self.adopt_relay(relay, actor).await {
+                // The node keeps using the relay until the next restart; say so.
+                tracing::warn!("joined through the invite's relay, but could not save it as the relay setting: {e:#}");
+            }
+        }
         Ok(json!({ "device": device, "machine": machine }))
     }
 
@@ -366,6 +410,7 @@ impl Hub {
             }
             PeerEvent::LinkDown { device_id } => {
                 tracing::info!("link down: {device_id}");
+                self.peers().paths.remove(&device_id);
                 self.link_lost(&device_id);
                 self.sync_peers(Some((&device_id, false))).await;
             }
@@ -402,6 +447,25 @@ impl Hub {
             }
             PeerEvent::Revoked { device_id, by_peer } => {
                 self.remove_device(&device_id, by_peer, if by_peer { "peer" } else { "hub" }).await;
+            }
+            PeerEvent::LinkPath { device_id, path } => {
+                let known = {
+                    let mut peers = self.peers();
+                    let known = peers.roster.contains_key(&device_id);
+                    if known && peers.paths.insert(device_id.clone(), path) != Some(path) {
+                        tracing::info!("link to {device_id} now goes over the {} path", if path == LinkPath::Lan { "LAN" } else { "relay" });
+                    }
+                    known
+                };
+                if known {
+                    self.sync_peers(None).await;
+                }
+            }
+            PeerEvent::RelayStatus(info) => {
+                tracing::info!("relay {}: connected={} last_error={:?}", info.url.as_deref().unwrap_or("off"), info.connected, info.last_error);
+                let mut peer = self.peer_status();
+                peer.relay = info;
+                self.inner.bus.send_local(ServerMsg::PeerStatus { peer });
             }
         }
     }
@@ -468,16 +532,18 @@ impl Hub {
             }
             // Re-paired after leaving: no longer departed.
             peers.departed.retain(|id, _| !peers.roster.contains_key(id));
+            let roster_ids: HashSet<String> = peers.roster.keys().cloned().collect();
+            peers.paths.retain(|id, _| roster_ids.contains(id));
             let gone: Vec<String> = peers.sent.keys().filter(|id| !peers.roster.contains_key(*id)).cloned().collect();
             for id in gone {
                 peers.sent.remove(&id);
                 out.push(ServerMsg::MachineRemoved { machine_id: id });
             }
             peers.presence.retain(|id, _| peers.roster.contains_key(id));
-            let devices = devices_key(&peers.roster);
+            let devices = devices_key(&peers.roster, &peers.paths);
             if devices != peers.devices_sent {
                 peers.devices_sent = devices;
-                out.push(ServerMsg::Devices { devices: sorted_devices(&peers.roster) });
+                out.push(ServerMsg::Devices { devices: sorted_devices(&peers.roster, &peers.paths) });
             }
             for e in peers.roster.values().filter(|e| e.device.kind == DeviceKind::Hub) {
                 let id = &e.device.id;

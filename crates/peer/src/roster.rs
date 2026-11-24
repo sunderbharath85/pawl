@@ -14,7 +14,11 @@ use std::sync::Mutex;
 /// - `update_seen`: set name/os/hub_version/last_seen from `machine`, `last_seen = ts`, and the addr
 ///   only when `addr` is `Some` (None keeps the stored one). No-op for unknown ids.
 /// - `set_last_rx_seq`/`set_last_tx_seq` store the value as given (it may go down on a re-pair). For a
-///   device that is not stored yet they may be a no-op. Unknown ids read as 0.
+///   device that is not stored yet they may be a no-op. Unknown ids read as 0. Revoked rows keep (and
+///   update) their counters.
+/// - `get_revoked` returns the entry of a *revoked* device (its last key), so the node can answer that
+///   device's hello with `bye{revoked}` when the device missed the revoke. The default (None) only
+///   loses that answer.
 pub trait Roster: Send + Sync + 'static {
     fn get(&self, device_id: &str) -> Option<RosterEntry>;
     fn list(&self) -> Vec<RosterEntry>;
@@ -25,6 +29,11 @@ pub trait Roster: Send + Sync + 'static {
     fn set_last_rx_seq(&self, device_id: &str, seq: u64);
     fn last_tx_seq(&self, device_id: &str) -> u64;
     fn set_last_tx_seq(&self, device_id: &str, seq: u64);
+    /// The stored entry of a revoked device; None for a paired or unknown id.
+    fn get_revoked(&self, device_id: &str) -> Option<RosterEntry> {
+        let _ = device_id;
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +71,10 @@ impl MemoryRoster {
 impl Roster for MemoryRoster {
     fn get(&self, device_id: &str) -> Option<RosterEntry> {
         self.rows.lock().unwrap().get(device_id).filter(|r| !r.revoked).map(|r| r.entry.clone())
+    }
+
+    fn get_revoked(&self, device_id: &str) -> Option<RosterEntry> {
+        self.rows.lock().unwrap().get(device_id).filter(|r| r.revoked).map(|r| r.entry.clone())
     }
 
     fn list(&self) -> Vec<RosterEntry> {
@@ -122,5 +135,91 @@ impl Roster for MemoryRoster {
         if let Some(row) = self.rows.lock().unwrap().get_mut(device_id) {
             row.last_tx = seq;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use krypto_protocol::{DeviceKind, MachineOs};
+
+    fn entry(id: &str) -> RosterEntry {
+        RosterEntry {
+            device: Device {
+                id: id.into(),
+                kind: DeviceKind::Hub,
+                name: "x".into(),
+                public_key: "pk".into(),
+                paired_at: 1,
+                last_seen: None,
+                addr: None,
+                path: None,
+            },
+            machine: Machine {
+                id: id.into(),
+                name: "x".into(),
+                os: MachineOs::current(),
+                last_seen: 0,
+                online: false,
+                hub_version: None,
+                user_active_at: None,
+            },
+        }
+    }
+
+    #[test]
+    fn get_revoked_returns_revoked_rows_only() {
+        let r = MemoryRoster::new();
+        r.upsert(entry("aaaaaaaaaaaa"));
+        assert!(r.get_revoked("aaaaaaaaaaaa").is_none(), "still paired");
+        r.set_last_rx_seq("aaaaaaaaaaaa", 7);
+        r.revoke("aaaaaaaaaaaa");
+        assert!(r.get("aaaaaaaaaaaa").is_none());
+        assert_eq!(r.get_revoked("aaaaaaaaaaaa").unwrap().device.public_key, "pk");
+        assert_eq!(r.last_rx_seq("aaaaaaaaaaaa"), 7, "counters survive the revoke");
+        assert!(r.get_revoked("bbbbbbbbbbbb").is_none(), "unknown");
+        r.upsert(entry("aaaaaaaaaaaa"));
+        assert!(r.get_revoked("aaaaaaaaaaaa").is_none(), "paired again");
+    }
+
+    /// A roster written before `get_revoked` existed (the default answers None).
+    struct Legacy(MemoryRoster);
+
+    impl Roster for Legacy {
+        fn get(&self, id: &str) -> Option<RosterEntry> {
+            self.0.get(id)
+        }
+        fn list(&self) -> Vec<RosterEntry> {
+            self.0.list()
+        }
+        fn upsert(&self, e: RosterEntry) {
+            self.0.upsert(e)
+        }
+        fn update_seen(&self, id: &str, m: &Machine, addr: Option<&str>, ts: UnixMs) {
+            self.0.update_seen(id, m, addr, ts)
+        }
+        fn revoke(&self, id: &str) {
+            self.0.revoke(id)
+        }
+        fn last_rx_seq(&self, id: &str) -> u64 {
+            self.0.last_rx_seq(id)
+        }
+        fn set_last_rx_seq(&self, id: &str, seq: u64) {
+            self.0.set_last_rx_seq(id, seq)
+        }
+        fn last_tx_seq(&self, id: &str) -> u64 {
+            self.0.last_tx_seq(id)
+        }
+        fn set_last_tx_seq(&self, id: &str, seq: u64) {
+            self.0.set_last_tx_seq(id, seq)
+        }
+    }
+
+    #[test]
+    fn get_revoked_defaults_to_none() {
+        let r = Legacy(MemoryRoster::new());
+        r.upsert(entry("aaaaaaaaaaaa"));
+        r.revoke("aaaaaaaaaaaa");
+        assert!(r.get_revoked("aaaaaaaaaaaa").is_none());
     }
 }

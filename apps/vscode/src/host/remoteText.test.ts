@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Machine, PermissionRequest } from "@krypto/protocol";
-import { machineSuffix, remoteApprovalText, remoteStartText } from "./remoteText";
+import { machineSuffix, openSettingsErrorText, remoteApprovalText, remoteStartText } from "./remoteText";
 
 const ME = "winpc0000001";
 const MAC = "macmini00002";
@@ -42,4 +42,11 @@ describe("remote confirmation wording", () => {
     expect(machineSuffix(state, MAC)).toBe(" · Mac mini");
     expect(machineSuffix(state, ME)).toBe("");
   });
+});
+
+test("openSettingsErrorText: old hub, timeout, other errors", () => {
+  expect(openSettingsErrorText({ code: "unknown_type" })).toContain("too old");
+  expect(openSettingsErrorText({ code: "timeout" })).toContain("did not answer");
+  expect(openSettingsErrorText(new Error("boom"))).toBe("boom");
+  expect(openSettingsErrorText(null)).toBe("Could not reach the desktop app.");
 });
