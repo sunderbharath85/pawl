@@ -1,0 +1,234 @@
+{
+  "name": "ai-pet-vscode",
+  "displayName": "Pet for VS Code",
+  "description": "A dog (or cat, bird, robot) that watches and drives your coding agents through the AI Pet Hub.",
+  "version": "0.1.0",
+  "publisher": "ai-pet",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "acp",
+    "agent",
+    "pet",
+    "claude",
+    "codex"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onWebviewPanel:ai-pet.petPanel"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "ai-pet.startSession",
+        "title": "Start Session",
+        "category": "AI Pet",
+        "icon": "$(add)"
+      },
+      {
+        "command": "ai-pet.promptSession",
+        "title": "Prompt Session",
+        "category": "AI Pet",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "ai-pet.cancelSession",
+        "title": "Cancel Session",
+        "category": "AI Pet",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "ai-pet.approvePending",
+        "title": "Approve Pending",
+        "category": "AI Pet",
+        "icon": "$(check)"
+      },
+      {
+        "command": "ai-pet.denyPending",
+        "title": "Deny Pending",
+        "category": "AI Pet",
+        "icon": "$(close)"
+      },
+      {
+        "command": "ai-pet.showPet",
+        "title": "Show Pet",
+        "category": "AI Pet"
+      },
+      {
+        "command": "ai-pet.openPetPanel",
+        "title": "Open Pet in Editor",
+        "category": "AI Pet",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "ai-pet.changeSpecies",
+        "title": "Change Pet Species",
+        "category": "AI Pet",
+        "icon": "$(symbol-color)"
+      },
+      {
+        "command": "ai-pet.installHooks",
+        "title": "Install Agent Hooks",
+        "category": "AI Pet"
+      },
+      {
+        "command": "ai-pet.startHub",
+        "title": "Start Hub",
+        "category": "AI Pet",
+        "icon": "$(play)"
+      },
+      {
+        "command": "ai-pet.reconnect",
+        "title": "Reconnect to Hub",
+        "category": "AI Pet",
+        "icon": "$(refresh)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ai-pet",
+          "title": "AI Pet",
+          "icon": "media/pet.svg"
+        }
+      ]
+    },
+    "views": {
+      "ai-pet": [
+        {
+          "type": "webview",
+          "id": "ai-pet.petView",
+          "name": "Pet",
+          "icon": "media/pet.svg",
+          "contextualTitle": "AI Pet"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "ai-pet.startSession",
+          "when": "view == ai-pet.petView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ai-pet.openPetPanel",
+          "when": "view == ai-pet.petView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "ai-pet.changeSpecies",
+          "when": "view == ai-pet.petView",
+          "group": "1_pet@1"
+        },
+        {
+          "command": "ai-pet.installHooks",
+          "when": "view == ai-pet.petView",
+          "group": "1_pet@2"
+        },
+        {
+          "command": "ai-pet.reconnect",
+          "when": "view == ai-pet.petView",
+          "group": "1_pet@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "ai-pet.approvePending",
+          "when": "ai-pet.hasPending"
+        },
+        {
+          "command": "ai-pet.denyPending",
+          "when": "ai-pet.hasPending"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AI Pet",
+      "properties": {
+        "ai-pet.hubUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "WebSocket URL of the AI Pet Hub. Empty = `AI_PET_HUB_URL` env var, else `ws://127.0.0.1:47800/ws`."
+        },
+        "ai-pet.hubToken": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Hub token override. Empty = `AI_PET_HUB_TOKEN` env var, else the `token` file in the hub data dir. Prefer leaving this empty."
+        },
+        "ai-pet.hubExecutable": {
+          "type": "string",
+          "default": "pet-hub",
+          "markdownDescription": "Command used for **AI Pet: Start Hub** and **AI Pet: Install Agent Hooks** (`pet-hub` on PATH by default)."
+        },
+        "ai-pet.openEditedFiles": {
+          "type": "string",
+          "enum": [
+            "off",
+            "open",
+            "diff"
+          ],
+          "enumDescriptions": [
+            "Do nothing when an agent edits a file.",
+            "Open the edited file (preview tab, focus stays where it is).",
+            "Open a diff of the edited file against git HEAD."
+          ],
+          "default": "open",
+          "markdownDescription": "What to do when an agent edits a file inside this workspace."
+        },
+        "ai-pet.notifications": {
+          "type": "string",
+          "enum": [
+            "all",
+            "permissions",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Permission requests (with Approve/Deny), finished turns and hub notifications.",
+            "Only permission requests (with Approve/Deny).",
+            "No notifications; the status bar and pet view still update."
+          ],
+          "default": "all",
+          "markdownDescription": "Which events show a VS Code notification."
+        },
+        "ai-pet.notifyOnlyWorkspaceSessions": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Only notify for sessions whose working directory is inside this workspace."
+        },
+        "ai-pet.defaultAgent": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Agent id preselected by **AI Pet: Start Session** (e.g. `claude-code`). Empty = last used."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "watch": "bun run scripts/build.ts --watch",
+    "typecheck": "tsc --noEmit -p .",
+    "package": "bun run build && bunx @vscode/vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@ai-pet/hub-client": "workspace:*",
+    "@ai-pet/pet-engine": "workspace:*",
+    "@ai-pet/protocol": "workspace:*",
+    "@types/node": "^22",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/vscode": "~1.100.0",
+    "@types/ws": "^8.18.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "ws": "^8.23.0"
+  }
+}

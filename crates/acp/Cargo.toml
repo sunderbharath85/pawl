@@ -1,0 +1,31 @@
+[package]
+name = "pet-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ACP client host for AI Pet Hub: spawns ACP agents and normalizes their session updates"
+
+[dependencies]
+pet-protocol = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+dirs = { workspace = true }
+# Official ACP SDK (protocol v1). No features needed: we spawn processes ourselves.
+agent-client-protocol = "5.5.1"
+tokio-util = { version = "0.7.20", features = ["compat"] }
+which = "8.0.6"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

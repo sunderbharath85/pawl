@@ -1,0 +1,21 @@
+[package]
+name = "pet-discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent discovery (ACP registry + PATH detection) and agent hook normalization/forwarding/installation for AI Pet Hub"
+
+[dependencies]
+pet-protocol = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "system-proxy"] }
+toml_edit = "0.25"
+similar = "3"
+
+[dev-dependencies]
+tempfile = "3"

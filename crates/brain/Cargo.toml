@@ -1,0 +1,19 @@
+[package]
+name = "pet-brain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AI Pet Hub brain: permission rules, chat bot, watchdog and pet growth"
+
+[dependencies]
+pet-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+globset = "0.4"
+reqwest = { version = "0.13", features = ["json"] }
+
+[dev-dependencies]
+tokio = { workspace = true }

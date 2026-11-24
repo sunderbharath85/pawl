@@ -1,0 +1,67 @@
+{
+  "expo": {
+    "name": "AI Pet Hub",
+    "slug": "ai-pet-hub",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "aipet",
+    "userInterfaceStyle": "automatic",
+    "platforms": ["ios", "android"],
+    "ios": {
+      "bundleIdentifier": "dev.aipet.hub",
+      "supportsTablet": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "dev.aipet.hub",
+      "adaptiveIcon": {
+        "backgroundColor": "#FFF4E6",
+        "foregroundImage": "./assets/images/adaptive-icon.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#FFF4E6",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 160,
+          "dark": {
+            "backgroundColor": "#18120D",
+            "image": "./assets/images/splash-icon.png"
+          }
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "AI Pet Hub uses the camera to scan the pairing QR code shown by your desktop hub.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "AI Pet Hub asks for Face ID before approving an agent's request from your phone."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#E8833A"
+        }
+      ],
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}

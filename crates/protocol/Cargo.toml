@@ -1,0 +1,11 @@
+[package]
+name = "pet-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wire types for AI Pet Hub (mirror of packages/protocol)"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }

@@ -1,0 +1,34 @@
+[package]
+name = "ai-pet-desktop"
+version = "0.1.0"
+description = "AI Pet Hub desktop dog (Tauri 2)"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Excluded from the root Cargo workspace (see /Cargo.toml `exclude`).
+[workspace]
+
+[lib]
+name = "ai_pet_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-notification = "2.8"
+tauri-plugin-dialog = "2.8"
+tauri-plugin-single-instance = "2.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Same major as the hub (workspace `dirs = "6"`) so both resolve the identical data dir.
+dirs = "6"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

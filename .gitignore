@@ -1,0 +1,16 @@
+node_modules/
+dist/
+out/
+build/
+target/
+.turbo/
+.expo/
+*.vsix
+*.log
+.env
+.env.*
+.locks/
+.wrangler/
+apps/desktop/src-tauri/gen/
+apps/mobile/ios/
+apps/mobile/android/

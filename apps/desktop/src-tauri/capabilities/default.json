@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions for the pet strip and the panel window.",
+  "windows": ["pet", "panel"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "dialog:default"
+  ]
+}
