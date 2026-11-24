@@ -30,7 +30,7 @@ Tauri 2 + React 19 + TypeScript + Vite 8 desktop dog (PLAN.md "Desktop dog", bui
   - `pet.css`
 - `src/panel/`: the panel window.
   - `PanelApp.tsx` (routing, toasts, `panel-focus` listener), `Sidebar.tsx` (hero pet card, nav with an approvals badge, sessions list with status dots and a "show finished" toggle), `HubBanner.tsx` (hub down → *Start hub* / *Retry*), `PetAvatar.tsx`, `feed.ts` (folds streamed chunks, merges `tool_call` and its updates into one card, latest plan, stops, permissions), `icons.tsx`, `panel.css`.
-  - `views/`: `HomeView`, `SessionView` (live event feed with history backfill via `getEvents`, prompt bar, cancel turn, inline pending approvals), `NewSessionView` (agent picker, cwd via the dialog plugin folder picker, first prompt), `ChatView` (chat with a chosen pet, suggestions), `ApprovalsView` + `PermissionCard` (every ACP option as a button, locations, raw input), `PendingStrip` (oldest pending approval pinned on every view), `PetsView` (species dog/cat/bird/robot, name, personality, mood/xp), `RulesView` (edit/reorder/add/delete, `setRules`, warns on risky auto-allow), `SettingsView` (pause pets, pet size, notification toggles, hub info, quit).
+  - `views/`: `HomeView`, `SessionView` (live event feed with history backfill via `getEvents`, prompt bar, cancel turn, inline pending approvals), `NewSessionView` (agent picker, cwd via the dialog plugin folder picker, first prompt), `ChatView` (chat with a chosen pet, suggestions), `ApprovalsView` + `PermissionCard` (every ACP option as a button, locations, raw input), `PendingStrip` (oldest pending approval pinned on every view), `PetsView` (species dog/cat/bird/robot, name, personality, mood/xp), `RulesView` (edit/reorder/add/delete, `setRules`, enforces the auto-allow hard floor; see below), `SettingsView` (pause pets, pet size, notification toggles, hub info, quit).
 - `src-tauri/` (excluded from the root workspace; has its own `[workspace]`)
   - `Cargo.toml`: tauri 2.12 (`tray-icon`, `image-png`, `macos-private-api`), tauri-plugin-notification 2.8, -dialog 2.8, -single-instance 2.5, serde, `dirs = "6"` (same major as the hub, so both resolve the same data dir).
   - `tauri.conf.json`: v2 schema, `panel` window (hidden, closing it hides it), CSP plus `devCsp` (Vite's inline refresh preamble), `macOSPrivateApi`, bundle icons.
@@ -65,6 +65,17 @@ Not run: `tauri dev` / `tauri build`. They would put an always-on-top strip on t
 - Clicking an OS notification doesn't open the panel: tauri-plugin-notification has no desktop click callback.
 - `pet-hub` isn't bundled as a Tauri sidecar (`bundle.externalBin`), because that would break `tauri build` until the hub binary is built for the target triple. The spawn logic already looks next to the app exe, so bundling it later is a config-only change.
 - Prompting is offered only for `owned` sessions. Hook-fed sessions are watch-only, as in PLAN.md.
+
+## Follow-up 1: auto-allow hard floor (RulesView)
+
+The change uses `NEVER_AUTO_ALLOW` and `isAutoAllowable` from `@ai-pet/protocol`. No new deps.
+
+- The "Allow" option is disabled (struck through, with a tooltip) when a rule's toolKind is empty ("any tool") or in `NEVER_AUTO_ALLOW` (execute, delete, fetch, other).
+- Changing a rule's toolKind to a kind below the floor while it is set to auto_allow switches it to "ask" automatically.
+- A rule that already violates the floor (e.g. loaded from an older hub) is outlined red with an inline explanation. Save stays disabled until it is fixed ("Fix N rules to save").
+- The old "Careful: …" warning is removed; the header copy now lists the floor kinds.
+- If the hub rejects a save with ack error `invalid_rule: <detail>`, the detail is shown in an inline alert above Save. It's read from `HubRequestError.code`, falls back to a generic line when there's no detail, and clears on the next edit. Other errors still go to a toast.
+- Gate: `bunx tsc --noEmit` PASS, `bunx vite build` PASS. I checked the error-text extraction with a bun script against three cases: code with detail → detail, bare code → fallback line, unrelated error → null.
 
 ## Decisions for the orchestrator
 

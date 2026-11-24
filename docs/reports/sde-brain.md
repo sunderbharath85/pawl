@@ -1,6 +1,24 @@
 # sde-brain report — crate `pet-brain` (`crates/brain/`)
 
-Status: **DONE** (rev 2: reads scoped to the session cwd). Gate `cargo test -p pet-brain` passes (51 tests); `cargo clippy -p pet-brain --all-targets` is clean.
+Status: **DONE** (rev 3: security floor). Gate `cargo test -p pet-brain` passes (54 tests); `cargo clippy -p pet-brain --all-targets` is clean; `cargo check -p pet-hub` builds (it already calls `validate_rules`). No new dependencies.
+
+## Rev 3 — security hard floor (`pet_protocol::NEVER_AUTO_ALLOW`)
+
+- **Floor in evaluation.** `evaluate`, `evaluate_in` and `decide` never return AutoAllow for a request whose kind fails `is_auto_allowable`: execute, delete, fetch, other, or a missing kind.
+  - **Invalid AutoAllow rules are skipped:** a rule with no `toolKind`, or with a floor kind, is ignored and evaluation moves to the next rule. So a later Deny still wins, and with no later rule the result is Ask. This covers invalid rules that reach evaluation anyway, e.g. from a hand-edited config.
+  - **Second layer:** `decide` also turns any AutoAllow into Ask when the request's own kind isn't allowable.
+  - **`Decision` has a new `floor: bool` field:** true when an unsafe rule was skipped or the second layer downgraded the result. The hub doesn't build `Decision` values, so adding the field breaks nothing.
+- **`validate_rules(rules: &[Rule]) -> Result<(), RuleError>`.** It rejects the first AutoAllow rule whose `match.toolKind` is missing or in `NEVER_AUTO_ALLOW`.
+  - `RuleError` variants: `AutoAllowWithoutToolKind { rule_id }` and `AutoAllowNotPermitted { rule_id, kind }`.
+  - It also has a `rule_id()` accessor and implements `Display` and `std::error::Error`. Example message: `rule "yolo": toolKind "execute" can never be auto-allowed (security floor: execute, delete, fetch, other)`.
+  - `default_rules()` passes. Ask and Deny rules are always valid.
+- **Behavior change:** a kind-less AutoAllow rule used to auto-approve safe kinds (read, edit, …). It now never auto-approves anything, as the spec requires. `switch_mode` is allowable per the protocol, so an explicit `{toolKind: switch_mode, auto_allow}` still works.
+- **New tests:**
+  - `floor_kinds_are_never_auto_approved`: every floor kind plus a missing kind, against explicit, kind-less and default rule sets, with and without paths, across every entry point and cwd variant.
+  - `user_execute_auto_allow_rule_never_approves`: uses the exact `set_rules` wire JSON, and also checks that a later deny wins.
+  - `kindless_auto_allow_rule_never_approves`.
+  - `explicit_allowable_kind_rules_still_work`.
+  - `validate_rules_rejects_unsafe_auto_allow`: covers every variant, the message text, and that the first offender is reported.
 
 ## Rev 2 — reads scoped to the session cwd (t13's decision on item 3)
 

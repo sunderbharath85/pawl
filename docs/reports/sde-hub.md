@@ -3,7 +3,7 @@
 Status: **DONE**.
 - `cargo check -p pet-hub --all-targets` passes.
 - `cargo clippy -p pet-hub --all-targets` is clean.
-- `cargo test -p pet-hub` passes all 29 tests.
+- `cargo test -p pet-hub` passes all 33 tests.
 - No `todo!()` or placeholder bodies are left.
 
 ## Files (all inside `crates/hub/`)
@@ -36,7 +36,7 @@ Status: **DONE**.
 - `start_session`
   - Calls `session/new` (`AcpHost::start_session` with `prompt=None`).
   - Logs a `session_start` event (the host does not emit one).
-  - If a prompt was given, logs a `user_message` event and calls `AcpHost::prompt`. Doing it in this order keeps the event log ordered.
+  - If a prompt was given, calls `AcpHost::prompt`. The host emits the `user_message` event itself; the hub does not log a second copy.
   - `cwd` must be an existing directory. It is made absolute (not canonicalized, so no `\\?\` prefix) and `~` is expanded.
 - `prompt` and `cancel` work only on open owned sessions. Hook sessions get a clear error.
 - `cancel` cancels any permission requests still pending for that session.
@@ -118,7 +118,7 @@ Status: **DONE**.
 
 - `cargo check -p pet-hub --all-targets`: OK, once all dependencies existed. Earlier runs failed only while pet-brain's `chat.rs` was mid-rewrite.
 - `cargo clippy -p pet-hub --all-targets`: clean. The remaining warnings are in pet-brain.
-- `cargo test -p pet-hub`: **29 passed**. They cover store, config, token, endpoint, origin, bearer, CLI parsing, and core message handling with a fake host: ack shapes, ask then user-resolve plus audit, auto allow and deny, `set_rules` re-evaluation, cancel and session-end cleanup, host-initiated cancel dedupe, stop notifications, pet updates, chat ack, resume reuse,, close_session cleanup, and restart closing owned sessions.
+- `cargo test -p pet-hub`: **33 passed**. They cover store, config, token, endpoint, origin, bearer, CLI parsing, and core message handling with a fake host: ack shapes, ask then user-resolve plus audit, auto allow and deny, `set_rules` re-evaluation, cancel and session-end cleanup, host-initiated cancel dedupe, stop notifications, pet updates, chat ack, resume reuse,, close_session cleanup, and restart closing owned sessions.
 - **Binary smoke test:** `serve` with a scratch `--data-dir`, `offline = true` and port 48123.
   - `GET /health` returned `{"ok":true,"version":"0.1.0"}`.
   - The token file is 64 hex characters.
@@ -155,3 +155,29 @@ Status: **DONE**.
 - The host's `Event{PermissionResolved}` clears pending, is audited and is broadcast once.
 - Rule checks use `pet_brain::rules::evaluate_in` with the session cwd.
 - `AcpHost::close_session` is wired in through `Hub::close_session`, which closes idle owned sessions.
+
+## Step-0 security floor (t13, unfrozen task)
+
+- **`set_rules` validates first.** It runs `pet_brain::rules::validate_rules(&rules)` before anything else.
+  - On failure the ack is `invalid_rule: <reason>` (for example `invalid_rule: rule "x": toolKind "execute" can never be auto-allowed (...)`) and **nothing changes**: neither the live rules nor hub.db are touched.
+  - Empty or duplicate ids also fail with an `invalid_rule:` error.
+  - Pending requests are re-checked only after a valid set has been stored.
+- **Startup sanitizing.** Rules loaded from hub.db, config.toml or the built-in defaults go through `core::sanitize_rules`. That function keeps a rule only if `validate_rules` passes on it alone and its id is unique and non-empty.
+  - Dropped rules are logged with `warn!`, naming their source, ids and reasons.
+  - They also raise a `HubNotification` (level `warning`, "Unsafe permission rules ignored"). It is broadcast on the bus and **replayed to every new WebSocket client right after its Welcome**, because no client is connected at startup. It stops being replayed after the next successful `set_rules`.
+  - The stored rules are not rewritten, so the user can still fix the source.
+- **The rules engine is the only automatic approval path.** I audited every `resolve_permission` call site:
+  - Automatic answers happen only in `on_permission_request` and in the post-`set_rules` re-evaluation. Both go through `Hub::rule_action`, which calls `evaluate_in`, and `auto_option`.
+  - `close_permission` only ever answers `cancelled`.
+  - User decisions come from `resolve_permission` client messages, chat-parsed "approve"/"deny" commands (audited as `chat:<client>`), and CLI stdin. When CLI input closes, the CLI denies.
+- **Tests:**
+  - `set_rules_rejects_unsafe_rules_and_changes_nothing`: auto_allow for execute, delete, fetch, other and a missing toolKind, plus duplicate ids. Ask and deny rules for any kind are accepted.
+  - `startup_drops_invalid_rules_from_the_store`: invalid, missing-kind and duplicate rules are dropped and the notice names them. An execute request still asks the user. A later fix clears the notice.
+  - `startup_drops_invalid_rules_from_config`: valid config and the defaults raise no notice.
+  - The existing auto-allow tests now use `edit`, a kind that may be auto-allowed.
+
+## Step-0 fix: prompt printed twice
+
+- **Cause:** `AcpHost::prompt` already emits `Event{UserMessage}` for every prompt (pet-acp `host.rs`), and `Hub::prompt` recorded a second copy. So `pet-hub start --prompt X` printed `you: X` twice, and the event log stored the prompt twice.
+- **Fix:** the hub no longer records its own `user_message`; the host's event is the only one. As a belt-and-braces guard, the CLI printer also drops a `you:` line identical to the one it just printed. That covers agents that replay the prompt as `user_message_chunk`. A later turn with the same text still prints.
+- **Tests:** `prompt_echo_printed_once`, and `start_prompt_events_and_ack_shapes` now feeds the host's user_message events.

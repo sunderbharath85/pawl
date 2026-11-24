@@ -7,11 +7,15 @@
 //! - Sensitive paths (`.env*`, keys/certs, `id_rsa*`, `.ssh/**`, `.aws/**`, `.npmrc`,
 //!   `*credential*`, the hub's own token, ...) are guarded in code: a request that touches
 //!   one is never auto-approved, whatever the rules say (a deny rule still denies).
+//! - Security hard floor ([`pet_protocol::NEVER_AUTO_ALLOW`]): a request whose tool kind is
+//!   not auto-allowable (`execute`, `delete`, `fetch`, `other`, or missing) is **never**
+//!   auto-approved, whatever the rules say (Deny still wins). [`validate_rules`] rejects
+//!   AutoAllow rules without a `toolKind` or with a floor kind; [`default_rules`] passes it.
+//!   If such invalid rules reach evaluation anyway (e.g. from a hand-edited config) they
+//!   are skipped, so the next rule decides (a later Deny applies) and otherwise Ask. As a
+//!   second layer, any AutoAllow outcome for a non-allowable request kind becomes Ask.
 //! - Commands, deletes and network access (plus edits, moves, mode switches and unknown
 //!   tools) always ask by default. [`default_rules`] never auto-approves them.
-//! - A rule without an explicit `toolKind` can never auto-approve a guarded kind
-//!   (`delete`, `execute`, `fetch`, `switch_mode`, `other`/unknown). Such a rule is
-//!   skipped for that request and evaluation continues with the next rule.
 //! - A path rule that auto-approves needs **every** location path to match its glob (and
 //!   at least one path). Ask/deny path rules apply when **any** location path matches.
 //! - First applicable rule wins; no applicable rule means [`RuleAction::Ask`].
@@ -22,10 +26,14 @@
 //! slash-normalized, `.`/`..` are resolved lexically, and relative paths are joined onto the
 //! cwd. Matching is case-insensitive on Windows and macOS.
 
+use std::fmt;
 use std::sync::OnceLock;
 
 use globset::{GlobBuilder, GlobMatcher, GlobSet, GlobSetBuilder};
-use pet_protocol::{PermissionOptionKind, PermissionRequest, Rule, RuleAction, RuleMatch, ToolKind};
+use pet_protocol::{
+    is_auto_allowable, PermissionOptionKind, PermissionRequest, Rule, RuleAction, RuleMatch, ToolKind,
+    NEVER_AUTO_ALLOW,
+};
 use serde_json::Value;
 
 /// Token a rule path may start with; expands to the normalized session cwd.
@@ -94,7 +102,74 @@ pub fn default_rules() -> Vec<Rule> {
     ]
 }
 
-/// Kinds a rule may only auto-approve when it names that `toolKind` explicitly.
+/// Why a rule set was rejected by [`validate_rules`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleError {
+    /// An AutoAllow rule without `match.toolKind` (it would cover every kind).
+    AutoAllowWithoutToolKind { rule_id: String },
+    /// An AutoAllow rule for a kind in [`NEVER_AUTO_ALLOW`].
+    AutoAllowNotPermitted { rule_id: String, kind: ToolKind },
+}
+
+impl RuleError {
+    pub fn rule_id(&self) -> &str {
+        match self {
+            RuleError::AutoAllowWithoutToolKind { rule_id } | RuleError::AutoAllowNotPermitted { rule_id, .. } => {
+                rule_id
+            }
+        }
+    }
+}
+
+impl fmt::Display for RuleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RuleError::AutoAllowWithoutToolKind { rule_id } => {
+                write!(f, "rule \"{rule_id}\": auto_allow rules must name an explicit toolKind")
+            }
+            RuleError::AutoAllowNotPermitted { rule_id, kind } => write!(
+                f,
+                "rule \"{rule_id}\": toolKind \"{}\" can never be auto-allowed (security floor: execute, delete, fetch, other)",
+                kind_name(*kind)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RuleError {}
+
+fn kind_name(kind: ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Read => "read",
+        ToolKind::Edit => "edit",
+        ToolKind::Delete => "delete",
+        ToolKind::Move => "move",
+        ToolKind::Search => "search",
+        ToolKind::Execute => "execute",
+        ToolKind::Think => "think",
+        ToolKind::Fetch => "fetch",
+        ToolKind::SwitchMode => "switch_mode",
+        ToolKind::Other => "other",
+    }
+}
+
+/// Reject any AutoAllow rule whose `match.toolKind` is missing or in [`NEVER_AUTO_ALLOW`].
+/// Returns the first offending rule. Ask/Deny rules are always valid.
+pub fn validate_rules(rules: &[Rule]) -> Result<(), RuleError> {
+    for r in rules.iter().filter(|r| r.action == RuleAction::AutoAllow) {
+        match r.matcher.tool_kind {
+            None => return Err(RuleError::AutoAllowWithoutToolKind { rule_id: r.id.clone() }),
+            Some(kind) if NEVER_AUTO_ALLOW.contains(&kind) => {
+                return Err(RuleError::AutoAllowNotPermitted { rule_id: r.id.clone(), kind })
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Risky kinds: the [`NEVER_AUTO_ALLOW`] floor (never auto-approved) plus `switch_mode`
+/// (only auto-approved by a rule that names it explicitly).
 pub fn requires_explicit_kind(kind: ToolKind) -> bool {
     matches!(
         kind,
@@ -120,6 +195,8 @@ pub struct Decision {
     pub rule_id: Option<String>,
     /// True when the sensitive-path guard turned an AutoAllow into Ask.
     pub sensitive: bool,
+    /// True when the security floor turned an AutoAllow into Ask (kind not auto-allowable).
+    pub floor: bool,
 }
 
 /// [`evaluate_in`] without a session cwd: `{cwd}` rules never match, so default reads ask.
@@ -127,24 +204,30 @@ pub fn evaluate(rules: &[Rule], req: &PermissionRequest) -> RuleAction {
     evaluate_in(rules, req, None)
 }
 
-/// First matching rule wins; no match -> Ask. Never AutoAllow delete/execute/fetch (or
-/// other guarded kinds) unless a rule explicitly matches that toolKind, and never AutoAllow
-/// a request that touches a sensitive path. `cwd` is the session's working directory.
+/// First matching rule wins; no match -> Ask. Never AutoAllow a kind outside
+/// [`is_auto_allowable`] (execute/delete/fetch/other/missing), whatever the rules say, and
+/// never AutoAllow a request that touches a sensitive path. Deny still wins.
+/// `cwd` is the session's working directory.
 pub fn evaluate_in(rules: &[Rule], req: &PermissionRequest, cwd: Option<&str>) -> RuleAction {
     decide(rules, req, cwd).action
 }
 
-/// Full decision: action, deciding rule id and whether the sensitive guard applied.
+/// Full decision: action, deciding rule id and which guard (if any) downgraded it.
 pub fn decide(rules: &[Rule], req: &PermissionRequest, cwd: Option<&str>) -> Decision {
     let cwd = normalized_cwd(cwd);
     let paths = paths_in(req, cwd.as_deref());
-    let rule = find_rule(rules, req, &paths, cwd.as_deref());
+    let (rule, skipped_unsafe) = find_rule(rules, req, &paths, cwd.as_deref());
     let action = rule.map(|r| r.action).unwrap_or(RuleAction::Ask);
     let rule_id = rule.map(|r| r.id.clone());
-    if action == RuleAction::AutoAllow && paths.iter().any(|p| sensitive_match(p)) {
-        return Decision { action: RuleAction::Ask, rule_id, sensitive: true };
+    if action != RuleAction::AutoAllow {
+        return Decision { action, rule_id, sensitive: false, floor: skipped_unsafe };
     }
-    Decision { action, rule_id, sensitive: false }
+    let floor = !is_auto_allowable(req.tool_call.kind);
+    let sensitive = paths.iter().any(|p| sensitive_match(p));
+    if floor || sensitive {
+        return Decision { action: RuleAction::Ask, rule_id, sensitive, floor };
+    }
+    Decision { action, rule_id, sensitive: false, floor: false }
 }
 
 /// The rule that decides `req` with no cwd, or `None` when it falls back to Ask.
@@ -156,7 +239,7 @@ pub fn matching_rule<'a>(rules: &'a [Rule], req: &PermissionRequest) -> Option<&
 pub fn matching_rule_in<'a>(rules: &'a [Rule], req: &PermissionRequest, cwd: Option<&str>) -> Option<&'a Rule> {
     let cwd = normalized_cwd(cwd);
     let paths = paths_in(req, cwd.as_deref());
-    find_rule(rules, req, &paths, cwd.as_deref())
+    find_rule(rules, req, &paths, cwd.as_deref()).0
 }
 
 /// True if `path` names a secret (env files, keys, credentials, `.ssh`/`.aws`, hub token).
@@ -202,9 +285,32 @@ fn paths_in(req: &PermissionRequest, cwd: Option<&str>) -> Vec<String> {
     out
 }
 
-fn find_rule<'a>(rules: &'a [Rule], req: &PermissionRequest, paths: &[String], cwd: Option<&str>) -> Option<&'a Rule> {
+/// True for an AutoAllow rule that [`validate_rules`] would reject.
+fn is_unsafe_auto_allow(rule: &Rule) -> bool {
+    rule.action == RuleAction::AutoAllow && !is_auto_allowable(rule.matcher.tool_kind)
+}
+
+/// First applicable rule, plus whether an unsafe AutoAllow rule matched (and was skipped)
+/// before it.
+fn find_rule<'a>(
+    rules: &'a [Rule],
+    req: &PermissionRequest,
+    paths: &[String],
+    cwd: Option<&str>,
+) -> (Option<&'a Rule>, bool) {
     let kind = effective_kind(req);
-    rules.iter().find(|r| rule_applies(r, req, kind, paths, cwd))
+    let mut skipped = false;
+    for r in rules {
+        if !rule_applies(r, req, kind, paths, cwd) {
+            continue;
+        }
+        if is_unsafe_auto_allow(r) {
+            skipped = true;
+            continue;
+        }
+        return (Some(r), skipped);
+    }
+    (None, skipped)
 }
 
 fn rule_applies(rule: &Rule, req: &PermissionRequest, kind: ToolKind, paths: &[String], cwd: Option<&str>) -> bool {
@@ -234,9 +340,6 @@ fn rule_applies(rule: &Rule, req: &PermissionRequest, kind: ToolKind, paths: &[S
         if !ok {
             return false;
         }
-    }
-    if rule.action == RuleAction::AutoAllow && m.tool_kind.is_none() && requires_explicit_kind(kind) {
-        return false;
     }
     true
 }
@@ -535,7 +638,11 @@ mod tests {
             // A user rule that auto-allows everything still can't touch secrets.
             let open = vec![custom(Some(ToolKind::Read), Some("**"), None, RuleAction::AutoAllow)];
             let d = decide(&open, &r, CWD);
-            assert_eq!(d, Decision { action: RuleAction::Ask, rule_id: Some("custom".into()), sensitive: true }, "{p}");
+            assert_eq!(
+                d,
+                Decision { action: RuleAction::Ask, rule_id: Some("custom".into()), sensitive: true, floor: false },
+                "{p}"
+            );
         }
         // Relative sensitive path joined onto the cwd.
         assert_eq!(read_in(CWD, &[".env"]), RuleAction::Ask);
@@ -576,33 +683,140 @@ mod tests {
         }
     }
 
-    #[test]
-    fn wildcard_auto_allow_never_covers_guarded_kinds() {
-        let rules = vec![custom(None, None, None, RuleAction::AutoAllow)];
-        for kind in ALL_KINDS {
-            let got = evaluate_in(&rules, &req(Some(kind), &["/r/a"]), CWD);
-            if requires_explicit_kind(kind) {
-                assert_eq!(got, RuleAction::Ask, "{kind:?}");
-            } else {
-                assert_eq!(got, RuleAction::AutoAllow, "{kind:?}");
-            }
+    /// Every evaluation entry point, every cwd variant: never AutoAllow.
+    fn assert_never_auto_allows(rules: &[Rule], r: &PermissionRequest) {
+        assert_ne!(evaluate(rules, r), RuleAction::AutoAllow, "evaluate {:?}", r.tool_call.kind);
+        for cwd in [None, CWD, Some("/"), Some("/r")] {
+            assert_ne!(evaluate_in(rules, r, cwd), RuleAction::AutoAllow, "evaluate_in {:?} {cwd:?}", r.tool_call.kind);
+            assert_ne!(decide(rules, r, cwd).action, RuleAction::AutoAllow, "decide {:?} {cwd:?}", r.tool_call.kind);
         }
-        assert_eq!(evaluate(&rules, &req(None, &["/r/a"])), RuleAction::Ask);
-        // Path-scoped wildcard rule is skipped for execute; a later explicit rule decides.
-        let rules = vec![
-            custom(None, Some("/r/**"), None, RuleAction::AutoAllow),
-            custom(Some(ToolKind::Execute), None, None, RuleAction::Deny),
-        ];
-        assert_eq!(evaluate(&rules, &req(Some(ToolKind::Execute), &["/r/a"])), RuleAction::Deny);
-        assert_eq!(evaluate(&rules, &req(Some(ToolKind::Edit), &["/r/a"])), RuleAction::AutoAllow);
     }
 
     #[test]
-    fn explicit_kind_rule_can_opt_in_to_guarded_kinds() {
-        let rules = vec![custom(Some(ToolKind::Execute), Some("/r/**"), Some("codex"), RuleAction::AutoAllow)];
-        assert_eq!(evaluate(&rules, &req(Some(ToolKind::Execute), &["/r/a"])), RuleAction::AutoAllow);
-        assert_eq!(evaluate(&rules, &req(Some(ToolKind::Execute), &["/other/a"])), RuleAction::Ask);
+    fn floor_kinds_are_never_auto_approved() {
+        // Kinds outside the floor per pet_protocol.
+        for kind in ALL_KINDS {
+            assert_eq!(is_auto_allowable(Some(kind)), !NEVER_AUTO_ALLOW.contains(&kind), "{kind:?}");
+        }
+        assert!(!is_auto_allowable(None));
+        let paths_sets: [&[&str]; 4] = [&[], &["/r/a"], &["/work/repo/x"], &["relative/x"]];
+        for kind in NEVER_AUTO_ALLOW.iter().copied().map(Some).chain([None]) {
+            // Explicit user opt-in for that exact kind (any path / {cwd} / agent scope).
+            let explicit = vec![
+                custom(kind, None, None, RuleAction::AutoAllow),
+                custom(kind, Some("**"), None, RuleAction::AutoAllow),
+                custom(kind, Some("{cwd}/**"), Some("codex"), RuleAction::AutoAllow),
+            ];
+            // Kind-less rules, alone and in front of the defaults.
+            let kindless = vec![custom(None, None, None, RuleAction::AutoAllow)];
+            let mut kindless_first = vec![custom(None, Some("/r/**"), None, RuleAction::AutoAllow)];
+            kindless_first.extend(default_rules());
+            for paths in paths_sets {
+                let r = req(kind, paths);
+                assert_never_auto_allows(&explicit, &r);
+                assert_never_auto_allows(&kindless, &r);
+                assert_never_auto_allows(&kindless_first, &r);
+                assert_never_auto_allows(&default_rules(), &r);
+            }
+        }
+    }
+
+    #[test]
+    fn user_execute_auto_allow_rule_never_approves() {
+        let rule = Rule {
+            id: "yolo".into(),
+            matcher: RuleMatch { tool_kind: Some(ToolKind::Execute), path: None, agent: None },
+            action: RuleAction::AutoAllow,
+        };
+        // Exactly the JSON a client could send in set_rules.
+        let from_wire: Rule =
+            serde_json::from_value(json!({"id": "yolo", "match": {"toolKind": "execute"}, "action": "auto_allow"})).unwrap();
+        assert_eq!(from_wire, rule);
+        let rules = vec![rule];
+        let r = req(Some(ToolKind::Execute), &["/work/repo/build.sh"]);
+        assert_never_auto_allows(&rules, &r);
+        let d = decide(&rules, &r, CWD);
+        assert_eq!(d, Decision { action: RuleAction::Ask, rule_id: None, sensitive: false, floor: true });
+        // Deny still wins: the unsafe rule is skipped and a later deny applies.
+        let rules = vec![
+            rules[0].clone(),
+            custom(Some(ToolKind::Execute), None, None, RuleAction::Deny),
+        ];
+        assert_eq!(evaluate_in(&rules, &r, CWD), RuleAction::Deny);
+        assert_eq!(decide(&rules, &r, CWD).rule_id.as_deref(), Some("custom"));
+        assert!(validate_rules(&rules).is_err());
+    }
+
+    #[test]
+    fn kindless_auto_allow_rule_never_approves() {
+        let rules = vec![custom(None, None, None, RuleAction::AutoAllow)];
+        for kind in ALL_KINDS.iter().copied().map(Some).chain([None]) {
+            assert_never_auto_allows(&rules, &req(kind, &["/r/a"]));
+        }
+        // Skipped, so later rules decide: a valid read rule still works, deny still wins.
+        let rules = vec![
+            custom(None, Some("/r/**"), None, RuleAction::AutoAllow),
+            custom(Some(ToolKind::Execute), None, None, RuleAction::Deny),
+            custom(Some(ToolKind::Edit), Some("/r/**"), None, RuleAction::AutoAllow),
+        ];
+        assert_eq!(evaluate(&rules, &req(Some(ToolKind::Execute), &["/r/a"])), RuleAction::Deny);
+        assert_eq!(evaluate(&rules, &req(Some(ToolKind::Edit), &["/r/a"])), RuleAction::AutoAllow);
+        assert_eq!(evaluate(&rules, &req(Some(ToolKind::Read), &["/r/a"])), RuleAction::Ask);
+        assert!(decide(&rules, &req(Some(ToolKind::Read), &["/r/a"]), None).floor);
+    }
+
+    #[test]
+    fn explicit_allowable_kind_rules_still_work() {
+        let rules = vec![custom(Some(ToolKind::Edit), Some("/r/**"), Some("codex"), RuleAction::AutoAllow)];
+        assert_eq!(evaluate(&rules, &req(Some(ToolKind::Edit), &["/r/a"])), RuleAction::AutoAllow);
+        assert_eq!(evaluate(&rules, &req(Some(ToolKind::Edit), &["/other/a"])), RuleAction::Ask);
         assert_eq!(evaluate(&rules, &req(Some(ToolKind::Delete), &["/r/a"])), RuleAction::Ask);
+        let rules = vec![custom(Some(ToolKind::SwitchMode), None, None, RuleAction::AutoAllow)];
+        assert_eq!(evaluate(&rules, &req(Some(ToolKind::SwitchMode), &[])), RuleAction::AutoAllow);
+        assert!(validate_rules(&rules).is_ok());
+    }
+
+    #[test]
+    fn validate_rules_rejects_unsafe_auto_allow() {
+        assert_eq!(validate_rules(&default_rules()), Ok(()));
+        assert_eq!(validate_rules(&[]), Ok(()));
+        // Ask/Deny rules of any shape are fine.
+        let ok = vec![
+            custom(None, None, None, RuleAction::Ask),
+            custom(Some(ToolKind::Execute), None, None, RuleAction::Deny),
+            custom(None, Some("**/.env"), None, RuleAction::Deny),
+            custom(Some(ToolKind::Read), Some("{cwd}/**"), None, RuleAction::AutoAllow),
+        ];
+        assert_eq!(validate_rules(&ok), Ok(()));
+        let mut bad = ok.clone();
+        bad.push(Rule {
+            id: "kindless".into(),
+            matcher: RuleMatch { tool_kind: None, path: Some("/r/**".into()), agent: None },
+            action: RuleAction::AutoAllow,
+        });
+        let err = validate_rules(&bad).unwrap_err();
+        assert_eq!(err, RuleError::AutoAllowWithoutToolKind { rule_id: "kindless".into() });
+        assert_eq!(err.rule_id(), "kindless");
+        assert!(err.to_string().contains("\"kindless\"") && err.to_string().contains("toolKind"), "{err}");
+        for kind in NEVER_AUTO_ALLOW {
+            let rules = vec![Rule {
+                id: format!("allow-{kind:?}"),
+                matcher: RuleMatch { tool_kind: Some(*kind), path: None, agent: None },
+                action: RuleAction::AutoAllow,
+            }];
+            let err = validate_rules(&rules).unwrap_err();
+            assert_eq!(err, RuleError::AutoAllowNotPermitted { rule_id: format!("allow-{kind:?}"), kind: *kind });
+            let msg = err.to_string();
+            assert!(msg.contains(&format!("\"allow-{kind:?}\"")) && msg.contains(kind_name(*kind)), "{msg}");
+        }
+        // First offender is reported.
+        let two = vec![
+            custom(Some(ToolKind::Fetch), None, None, RuleAction::AutoAllow),
+            Rule { id: "second".into(), ..custom(None, None, None, RuleAction::AutoAllow) },
+        ];
+        assert_eq!(validate_rules(&two).unwrap_err().rule_id(), "custom");
+        let boxed: Box<dyn std::error::Error> = Box::new(validate_rules(&two).unwrap_err());
+        assert!(boxed.to_string().contains("fetch"));
     }
 
     #[test]
@@ -663,7 +877,10 @@ mod tests {
         r.agent_id = "claude-code".into();
         assert_eq!(evaluate(&rules, &r), RuleAction::Deny);
         assert_eq!(evaluate(&[], &r), RuleAction::Ask);
-        assert_eq!(decide(&[], &r, CWD), Decision { action: RuleAction::Ask, rule_id: None, sensitive: false });
+        assert_eq!(
+            decide(&[], &r, CWD),
+            Decision { action: RuleAction::Ask, rule_id: None, sensitive: false, floor: false }
+        );
         assert_eq!(
             matching_rule_in(&default_rules(), &req(Some(ToolKind::Read), &["/work/repo/a"]), CWD).map(|x| x.id.as_str()),
             Some("default-read")

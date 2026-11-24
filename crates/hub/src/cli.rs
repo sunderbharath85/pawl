@@ -679,11 +679,24 @@ fn parse_answer(req: &PermissionRequest, line: &str) -> Option<Option<String>> {
 struct Printer {
     agent: String,
     streaming: Option<EventType>,
+    /// Text of the `you:` line just printed; an identical user_message right after it (an agent
+    /// replaying the prompt as user_message_chunk) is not printed again.
+    last_user: Option<String>,
 }
 
 impl Printer {
     fn new(agent: &str) -> Self {
-        Self { agent: agent.to_string(), streaming: None }
+        Self { agent: agent.to_string(), streaming: None, last_user: None }
+    }
+
+    /// The `you:` line for a user_message, or None if it repeats the line just printed.
+    fn user_line(&mut self, text: &str) -> Option<String> {
+        let t = text.trim();
+        if self.last_user.as_deref() == Some(t) {
+            return None;
+        }
+        self.last_user = Some(t.to_string());
+        Some(format!("you: {text}"))
     }
 
     fn finish_line(&mut self) {
@@ -704,6 +717,9 @@ impl Printer {
 
     fn event(&mut self, e: &HubEvent) {
         let text = e.payload.get("text").and_then(Value::as_str).unwrap_or_default();
+        if e.kind != EventType::UserMessage && !matches!(e.kind, EventType::RequestPermission | EventType::Notification | EventType::Hook) {
+            self.last_user = None;
+        }
         match e.kind {
             EventType::AgentMessageChunk => {
                 let prefix = format!("{}: ", self.agent);
@@ -711,8 +727,10 @@ impl Printer {
             }
             EventType::AgentThoughtChunk => self.stream(e.kind, "(thinking) ", text),
             EventType::UserMessage => {
-                self.finish_line();
-                println!("you: {text}");
+                if let Some(line) = self.user_line(text) {
+                    self.finish_line();
+                    println!("{line}");
+                }
             }
             EventType::ToolCall => {
                 self.finish_line();
@@ -846,6 +864,17 @@ mod tests {
         assert!(matches!(c.command, Command::InstallHooks { target: HookTargetArg::CopilotVscode, apply: true, .. }));
         let c = Cli::try_parse_from(["pet-hub", "--port", "48000", "serve"]).unwrap();
         assert_eq!(c.port, Some(48000));
+    }
+
+    #[test]
+    fn prompt_echo_printed_once() {
+        let mut p = Printer::new("codex");
+        let ev = |kind: EventType, text: &str| HubEvent { id: 0, session_id: "s".into(), kind, payload: serde_json::json!({ "text": text }), ts: 0 };
+        assert_eq!(p.user_line("run tests").as_deref(), Some("you: run tests"));
+        assert_eq!(p.user_line("run tests "), None, "agent replay of the same prompt is suppressed");
+        p.event(&ev(EventType::AgentMessageChunk, "ok"));
+        assert_eq!(p.user_line("run tests").as_deref(), Some("you: run tests"), "a new turn with the same text prints again");
+        p.finish_line();
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Rule, RuleAction, ToolKind } from "@ai-pet/protocol";
+import { HubRequestError } from "@ai-pet/hub-client";
+import { NEVER_AUTO_ALLOW, isAutoAllowable, type Rule, type RuleAction, type ToolKind } from "@ai-pet/protocol";
 import { TOOL_KINDS, TOOL_KIND_ICON, errorText } from "../../lib/format";
 import { usePanel } from "../context";
 import * as I from "../icons";
@@ -10,7 +11,25 @@ const ACTIONS: Array<{ value: RuleAction; label: string }> = [
   { value: "deny", label: "Deny" },
 ];
 
-const DANGEROUS: ToolKind[] = ["delete", "execute", "fetch"];
+const FLOOR_LIST = NEVER_AUTO_ALLOW.map((k) => k.replace("_", " ")).join(", ");
+
+/** Security hard floor (mirrors the hub): auto_allow needs a named, non-risky tool kind. */
+function violatesFloor(r: Rule): boolean {
+  return r.action === "auto_allow" && !isAutoAllowable(r.match.toolKind);
+}
+
+function kindLabel(kind: ToolKind | undefined): string {
+  return kind ? kind.replace("_", " ") : "any tool";
+}
+
+/** The hub rejects floor violations with ack error `invalid_rule: <detail>`. */
+function invalidRuleMessage(err: unknown): string | null {
+  const text = err instanceof HubRequestError ? `${err.code} ${err.message}` : errorText(err);
+  const m = /invalid_rule\s*:?\s*([^\n]*)/.exec(text);
+  if (!m) return null;
+  const detail = (m[1] ?? "").replace(/\s*hub request "set_rules" failed:.*$/, "").trim();
+  return detail || "One of these rules breaks the auto-allow safety floor.";
+}
 
 function newRuleId(): string {
   return `rule-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -24,7 +43,12 @@ export function RulesView() {
   const { client, state, toast, meta } = usePanel();
   const [draft, setDraft] = useState<Rule[]>(state.rules);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const dirty = !sameRules(draft, state.rules);
+  const invalidCount = draft.filter(violatesFloor).length;
+
+  // Any edit makes the last rejection stale.
+  useEffect(() => setSaveError(null), [draft]);
 
   // Adopt server changes while the user has nothing pending.
   useEffect(() => {
@@ -42,7 +66,9 @@ export function RulesView() {
         const match = { ...r.match } as Record<string, string | undefined>;
         if (value) match[key] = value;
         else delete match[key];
-        return { ...r, match: match as Rule["match"] };
+        const next: Rule = { ...r, match: match as Rule["match"] };
+        // A kind below the floor can never keep auto-allowing: fall back to asking.
+        return violatesFloor(next) ? { ...next, action: "ask" } : next;
       }),
     );
   const move = (idx: number, dir: -1 | 1) =>
@@ -55,13 +81,17 @@ export function RulesView() {
     });
 
   const save = async () => {
+    if (invalidCount > 0) return;
     setSaving(true);
+    setSaveError(null);
     try {
       const saved = await client.setRules(draft.map((r) => ({ ...r, match: cleanMatch(r.match) })));
       setDraft(saved);
       toast("Rules saved. Good boy.");
     } catch (err) {
-      toast(errorText(err), "error");
+      const invalid = invalidRuleMessage(err);
+      if (invalid) setSaveError(invalid);
+      else toast(errorText(err), "error");
     } finally {
       setSaving(false);
     }
@@ -72,17 +102,19 @@ export function RulesView() {
       <header className="view-head">
         <h1>Rules</h1>
         <p>
-          When an agent asks permission, the first matching rule decides. No match means your pet asks you. Destructive kinds
-          (delete, execute, fetch) are only auto-allowed by a rule that names that kind.
+          When an agent asks permission, the first matching rule decides. No match means your pet asks you. Auto-allow only
+          works for a named, low-risk tool kind: {FLOOR_LIST} and &ldquo;any tool&rdquo; always come to you (or hit a deny
+          rule).
         </p>
       </header>
 
       <div className="rules">
         {draft.length === 0 && <div className="hint">No rules: every request comes to you.</div>}
         {draft.map((r, idx) => {
-          const risky = r.action === "auto_allow" && (!r.match.toolKind || DANGEROUS.includes(r.match.toolKind));
+          const canAutoAllow = isAutoAllowable(r.match.toolKind);
+          const invalid = violatesFloor(r);
           return (
-            <div key={r.id} className={`rule-row action-${r.action}`}>
+            <div key={r.id} className={`rule-row action-${r.action}${invalid ? " is-invalid" : ""}`}>
               <span className="rule-num">{idx + 1}</span>
               <div className="rule-match">
                 <span className="rule-word">When</span>
@@ -126,17 +158,28 @@ export function RulesView() {
                 </select>
               </div>
               <div className="segmented" role="radiogroup" aria-label="Action">
-                {ACTIONS.map((a) => (
-                  <button
-                    key={a.value}
-                    role="radio"
-                    aria-checked={r.action === a.value}
-                    className={`seg seg-${a.value}${r.action === a.value ? " is-active" : ""}`}
-                    onClick={() => update(idx, { action: a.value })}
-                  >
-                    {a.label}
-                  </button>
-                ))}
+                {ACTIONS.map((a) => {
+                  const blocked = a.value === "auto_allow" && !canAutoAllow;
+                  return (
+                    <button
+                      key={a.value}
+                      role="radio"
+                      aria-checked={r.action === a.value}
+                      className={`seg seg-${a.value}${r.action === a.value ? " is-active" : ""}`}
+                      disabled={blocked && r.action !== a.value}
+                      title={
+                        blocked
+                          ? `${kindLabel(r.match.toolKind)} is never auto-allowed. Pick a specific low-risk tool kind first.`
+                          : undefined
+                      }
+                      onClick={() => {
+                        if (!blocked) update(idx, { action: a.value });
+                      }}
+                    >
+                      {a.label}
+                    </button>
+                  );
+                })}
               </div>
               <div className="rule-tools">
                 <button className="icon-btn" onClick={() => move(idx, -1)} disabled={idx === 0} aria-label="Move up">
@@ -149,11 +192,22 @@ export function RulesView() {
                   <I.Trash size={15} />
                 </button>
               </div>
-              {risky && <div className="rule-warn">Careful: this can auto-allow commands, deletes or network access.</div>}
+              {invalid && (
+                <div className="rule-invalid">
+                  {kindLabel(r.match.toolKind)} can never be auto-allowed. Pick a specific low-risk tool kind, or switch this
+                  rule to Ask me or Deny.
+                </div>
+              )}
             </div>
           );
         })}
       </div>
+
+      {saveError && (
+        <div className="rules-error" role="alert">
+          <strong>The hub refused these rules.</strong> {saveError}
+        </div>
+      )}
 
       <div className="form-actions">
         <button
@@ -168,7 +222,16 @@ export function RulesView() {
             Revert
           </button>
         )}
-        <button className="pill pill-primary" disabled={!dirty || saving || meta.phase !== "connected"} onClick={() => void save()}>
+        {invalidCount > 0 && (
+          <span className="hint">
+            Fix {invalidCount} rule{invalidCount > 1 ? "s" : ""} to save
+          </span>
+        )}
+        <button
+          className="pill pill-primary"
+          disabled={!dirty || saving || invalidCount > 0 || meta.phase !== "connected"}
+          onClick={() => void save()}
+        >
           {saving ? "Saving…" : "Save rules"}
         </button>
       </div>

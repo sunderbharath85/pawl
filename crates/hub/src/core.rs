@@ -14,7 +14,7 @@ use pet_brain::chat::{Brain, BrainAction, BrainContext, BrainReply};
 use pet_brain::watchdog::Watchdog;
 use pet_protocol::{
     Agent, AgentCapabilities, AgentId, AgentSource, ChatMessage, ChatRole, ClientKind, ClientMsg, ErrorPayload,
-    EventType, HistorySession, HookSource, HubEvent, NotificationLevel, PermissionOptionKind, PermissionOutcome,
+    EventType, HistorySession, HookSource, HubEvent, HubNotification, NotificationLevel, PermissionOptionKind, PermissionOutcome,
     PermissionRequest, PermissionResolvedPayload, Pet, PetId, PetPatch, RequestId, ResolvedBy, Rule, RuleAction,
     ServerMsg, Session, SessionId, SessionSource, SessionStatus, StopPayload, UnixMs, Welcome, PROTOCOL_VERSION,
 };
@@ -159,6 +159,9 @@ struct Inner {
     watchdog: Mutex<Watchdog>,
     discovery: tokio::sync::Mutex<()>,
     shutdown: watch::Sender<bool>,
+    /// Warnings raised while loading (e.g. dropped unsafe rules); replayed to every new client
+    /// until the condition is fixed.
+    startup_notices: Mutex<Vec<HubNotification>>,
 }
 
 /// The hub. Cheap to clone; all clones share state.
@@ -215,7 +218,25 @@ impl Hub {
                 .await?;
         }
 
-        let rules = db_rules.or_else(|| config.rules.clone()).unwrap_or_else(pet_brain::rules::default_rules);
+        // Security floor: rules that fail validation never reach the engine.
+        let (rules_source, loaded) = match (db_rules, config.rules.clone()) {
+            (Some(r), _) => ("hub.db", r),
+            (None, Some(r)) => ("config.toml", r),
+            (None, None) => ("the built-in defaults", pet_brain::rules::default_rules()),
+        };
+        let (rules, dropped) = sanitize_rules(loaded);
+        let mut startup_notices = Vec::new();
+        if !dropped.is_empty() {
+            let list = dropped.iter().map(|(id, why)| format!("{id:?} ({why})")).collect::<Vec<_>>().join("; ");
+            tracing::warn!("ignoring {} invalid permission rule(s) from {rules_source}: {list}", dropped.len());
+            startup_notices.push(notify::make(
+                NotificationLevel::Warning,
+                "Unsafe permission rules ignored",
+                format!("Dropped {} rule(s) from {rules_source}: {list}", dropped.len()),
+                None,
+                None,
+            ));
+        }
         let mut state = State { agents, rules, ..Default::default() };
         for s in sessions {
             state.index_session(&s);
@@ -239,8 +260,12 @@ impl Hub {
                 state: Mutex::new(state),
                 discovery: tokio::sync::Mutex::new(()),
                 shutdown,
+                startup_notices: Mutex::new(startup_notices.clone()),
             }),
         };
+        for notification in startup_notices {
+            hub.inner.bus.send(ServerMsg::Notification { notification });
+        }
 
         tokio::spawn(hub.clone().pet_flush_loop());
         if background {
@@ -304,6 +329,11 @@ impl Hub {
 
     pub fn rules(&self) -> Vec<Rule> {
         self.st().rules.clone()
+    }
+
+    /// Load-time warnings (e.g. unsafe rules dropped) that every newly connected client should see.
+    pub fn startup_notices(&self) -> Vec<HubNotification> {
+        self.inner.startup_notices.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     pub fn welcome(&self) -> Welcome {
@@ -449,7 +479,8 @@ impl Hub {
         if text.trim().is_empty() {
             bail!("prompt text is empty");
         }
-        self.record_event(session_id, EventType::UserMessage, json!({ "text": text })).await?;
+        // The ACP host emits the `user_message` event for every prompt it sends; recording it here
+        // too would log (and print) the prompt twice.
         self.inner.host.prompt(session_id, text).await
     }
 
@@ -555,18 +586,22 @@ impl Hub {
         Ok(pet)
     }
 
+    /// Validate (security floor first), then persist and apply. Any error changes nothing.
     pub async fn set_rules(&self, rules: Vec<Rule>) -> Result<Vec<Rule>> {
+        pet_brain::rules::validate_rules(&rules).map_err(|e| anyhow!("invalid_rule: {e}"))?;
         let mut seen = HashSet::new();
         for r in &rules {
             if r.id.trim().is_empty() {
-                bail!("every rule needs a non-empty id");
+                bail!("invalid_rule: every rule needs a non-empty id");
             }
             if !seen.insert(r.id.as_str()) {
-                bail!("duplicate rule id {:?}", r.id);
+                bail!("invalid_rule: duplicate rule id {:?}", r.id);
             }
         }
         let r2 = rules.clone();
         self.inner.store.run(move |s| s.set_rules(&r2)).await?;
+        // A valid rule set replaces whatever was dropped at startup.
+        self.inner.startup_notices.lock().unwrap_or_else(|p| p.into_inner()).clear();
         let pending = {
             let mut st = self.st();
             st.rules = rules.clone();
@@ -1392,6 +1427,26 @@ fn auto_option(req: &PermissionRequest, action: RuleAction) -> Option<Option<Str
         (RuleAction::Deny, None) => Some(None),
         (RuleAction::AutoAllow, None) => None,
     }
+}
+
+/// Load-time guard: keep rules that pass `pet_brain::rules::validate_rules` (the security floor)
+/// and have a unique, non-empty id. Returns the kept rules and `(id, reason)` for each dropped one.
+pub fn sanitize_rules(rules: Vec<Rule>) -> (Vec<Rule>, Vec<(String, String)>) {
+    let mut kept = Vec::with_capacity(rules.len());
+    let mut dropped = Vec::new();
+    let mut seen = HashSet::new();
+    for r in rules {
+        if let Err(e) = pet_brain::rules::validate_rules(std::slice::from_ref(&r)) {
+            dropped.push((r.id.clone(), e.to_string()));
+        } else if r.id.trim().is_empty() {
+            dropped.push((r.id.clone(), "empty rule id".into()));
+        } else if !seen.insert(r.id.clone()) {
+            dropped.push((r.id.clone(), "duplicate rule id".into()));
+        } else {
+            kept.push(r);
+        }
+    }
+    (kept, dropped)
 }
 
 fn fallback_report(sessions: &[Session]) -> String {

@@ -203,6 +203,11 @@ async fn ws_connection(hub: Hub, socket: WebSocket) {
     if sink.send(text(&ServerMsg::ack_ok(hello_id, welcome))).await.is_err() {
         return;
     }
+    for notification in hub.startup_notices() {
+        if sink.send(text(&ServerMsg::Notification { notification })).await.is_err() {
+            return;
+        }
+    }
 
     // One writer task owns the sink; everything else queues frames.
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(OUTBOX);

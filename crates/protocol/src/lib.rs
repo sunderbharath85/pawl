@@ -360,6 +360,15 @@ pub enum RuleAction {
     Deny,
 }
 
+/// Security hard floor: tool kinds that are NEVER auto-approved, whatever the rules say.
+/// Unknown/`Other` kinds count as risky. An `AutoAllow` rule must name a `tool_kind` outside this
+/// list; the hub rejects any other auto_allow rule (ack error "invalid_rule").
+pub const NEVER_AUTO_ALLOW: &[ToolKind] = &[ToolKind::Execute, ToolKind::Delete, ToolKind::Fetch, ToolKind::Other];
+
+pub fn is_auto_allowable(kind: Option<ToolKind>) -> bool {
+    matches!(kind, Some(k) if !NEVER_AUTO_ALLOW.contains(&k))
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuleMatch {

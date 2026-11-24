@@ -204,6 +204,17 @@ export interface RuleMatch {
   path?: string;
   agent?: AgentId;
 }
+/**
+ * Security hard floor: tool kinds that are NEVER auto-approved, whatever the rules say.
+ * Unknown/"other" kinds count as risky. A rule with action "auto_allow" must name a toolKind
+ * that is not in this list; the hub rejects any other auto_allow rule (ack error "invalid_rule").
+ */
+export const NEVER_AUTO_ALLOW: readonly ToolKind[] = ["execute", "delete", "fetch", "other"];
+
+export function isAutoAllowable(kind: ToolKind | undefined): boolean {
+  return kind !== undefined && !NEVER_AUTO_ALLOW.includes(kind);
+}
+
 export interface Rule {
   id: string;
   match: RuleMatch;

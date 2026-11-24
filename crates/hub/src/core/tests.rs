@@ -29,15 +29,21 @@ fn agent(id: &str) -> Agent {
 }
 
 async fn fixture(rules: Option<Vec<Rule>>) -> Fixture {
+    fixture_with(rules, None).await
+}
+
+/// `store_rules` are written to hub.db (as if a client had called set_rules); `config_rules`
+/// play the role of config.toml `rules`.
+async fn fixture_with(store_rules: Option<Vec<Rule>>, config_rules: Option<Vec<Rule>>) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::in_dir(dir.path());
     let store = Store::open(&paths.db).unwrap();
     store.replace_agents(&[agent("codex"), agent("claude-code")]).unwrap();
-    if let Some(r) = &rules {
+    if let Some(r) = &store_rules {
         store.set_rules(r).unwrap();
     }
     let fake = FakeHost::default();
-    let config = HubConfig { offline: true, ..Default::default() };
+    let config = HubConfig { offline: true, rules: config_rules, ..Default::default() };
     let hub = Hub::build(
         HubOptions { paths, config, token: "t".repeat(64), background: false },
         store,
@@ -133,6 +139,12 @@ async fn start_prompt_events_and_ack_shapes() {
 
     let v = ack_result(f.hub.handle(ClientMsg::Prompt { id: "2".into(), session_id: s.id.clone(), text: "again".into() }, &actor()).await);
     assert_eq!(v, json!({}));
+    // The real host emits one user_message per prompt; the hub must not add its own copy.
+    for text in ["run the tests", "again"] {
+        f.hub
+            .on_host_event(HostEvent::Event { session_id: s.id.clone(), kind: EventType::UserMessage, payload: json!({ "text": text }) })
+            .await;
+    }
 
     let v = ack_result(
         f.hub.handle(ClientMsg::GetEvents { id: "3".into(), session_id: s.id.clone(), since_id: None, limit: None }, &actor()).await,
@@ -211,14 +223,14 @@ async fn ask_rule_then_user_resolves_with_audit() {
 #[tokio::test]
 async fn auto_rules_resolve_without_asking() {
     let rules = vec![
-        Rule { id: "allow-exec".into(), matcher: RuleMatch { tool_kind: Some(ToolKind::Execute), ..Default::default() }, action: RuleAction::AutoAllow },
+        Rule { id: "allow-edit".into(), matcher: RuleMatch { tool_kind: Some(ToolKind::Edit), ..Default::default() }, action: RuleAction::AutoAllow },
         Rule { id: "no-delete".into(), matcher: RuleMatch { tool_kind: Some(ToolKind::Delete), ..Default::default() }, action: RuleAction::Deny },
     ];
     let mut f = fixture(Some(rules)).await;
     let s = start(&f).await;
     drain(&mut f.rx);
 
-    let allow = permission(&s.id, ToolKind::Execute);
+    let allow = permission(&s.id, ToolKind::Edit);
     f.hub.on_host_event(HostEvent::PermissionRequest(allow.clone())).await;
     let deny = permission(&s.id, ToolKind::Delete);
     f.hub.on_host_event(HostEvent::PermissionRequest(deny.clone())).await;
@@ -242,7 +254,7 @@ async fn auto_rules_resolve_without_asking() {
 async fn set_rules_reevaluates_pending_and_validates() {
     let mut f = fixture(None).await;
     let s = start(&f).await;
-    let req = permission(&s.id, ToolKind::Execute);
+    let req = permission(&s.id, ToolKind::Edit);
     f.hub.on_host_event(HostEvent::PermissionRequest(req.clone())).await;
     assert_eq!(f.hub.pending_permissions().len(), 1);
     drain(&mut f.rx);
@@ -254,14 +266,103 @@ async fn set_rules_reevaluates_pending_and_validates() {
     assert!(ack_error(f.hub.handle(ClientMsg::SetRules { id: "1".into(), rules: dup }, &actor()).await).contains("duplicate"));
 
     let rules = vec![Rule {
-        id: "exec-ok".into(),
-        matcher: RuleMatch { tool_kind: Some(ToolKind::Execute), ..Default::default() },
+        id: "edit-ok".into(),
+        matcher: RuleMatch { tool_kind: Some(ToolKind::Edit), ..Default::default() },
         action: RuleAction::AutoAllow,
     }];
     let v = ack_result(f.hub.handle(ClientMsg::SetRules { id: "2".into(), rules: rules.clone() }, &actor()).await);
     assert_eq!(serde_json::from_value::<Vec<Rule>>(v["rules"].clone()).unwrap(), rules);
     assert!(f.hub.pending_permissions().is_empty());
     assert_eq!(f.hub.store().rules().unwrap(), Some(rules));
+}
+
+fn rule(id: &str, kind: Option<ToolKind>, action: RuleAction) -> Rule {
+    Rule { id: id.into(), matcher: RuleMatch { tool_kind: kind, ..Default::default() }, action }
+}
+
+#[tokio::test]
+async fn set_rules_rejects_unsafe_rules_and_changes_nothing() {
+    let f = fixture(None).await;
+    let before = f.hub.rules();
+    for (n, unsafe_rule) in [
+        rule("allow-exec", Some(ToolKind::Execute), RuleAction::AutoAllow),
+        rule("allow-delete", Some(ToolKind::Delete), RuleAction::AutoAllow),
+        rule("allow-fetch", Some(ToolKind::Fetch), RuleAction::AutoAllow),
+        rule("allow-other", Some(ToolKind::Other), RuleAction::AutoAllow),
+        rule("allow-anything", None, RuleAction::AutoAllow),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = unsafe_rule.id.clone();
+        let rules = vec![rule("read-ok", Some(ToolKind::Read), RuleAction::AutoAllow), unsafe_rule];
+        let err = ack_error(f.hub.handle(ClientMsg::SetRules { id: format!("s{n}"), rules }, &actor()).await);
+        assert!(err.starts_with("invalid_rule: "), "{err}");
+        assert!(err.contains(&id), "{err}");
+        assert_eq!(f.hub.rules(), before, "rejected set_rules must not change the live rules");
+        assert_eq!(f.hub.store().rules().unwrap(), None, "rejected set_rules must not persist anything");
+    }
+    let err = ack_error(
+        f.hub
+            .handle(ClientMsg::SetRules { id: "dup".into(), rules: vec![rule("a", None, RuleAction::Ask), rule("a", None, RuleAction::Deny)] }, &actor())
+            .await,
+    );
+    assert!(err.starts_with("invalid_rule: duplicate"), "{err}");
+    // ask/deny rules may cover any kind
+    let ok = vec![rule("exec-ask", Some(ToolKind::Execute), RuleAction::Ask), rule("no-fetch", Some(ToolKind::Fetch), RuleAction::Deny)];
+    ack_result(f.hub.handle(ClientMsg::SetRules { id: "ok".into(), rules: ok.clone() }, &actor()).await);
+    assert_eq!(f.hub.rules(), ok);
+}
+
+#[tokio::test]
+async fn startup_drops_invalid_rules_from_the_store() {
+    let stored = vec![
+        rule("read-ok", Some(ToolKind::Read), RuleAction::AutoAllow),
+        rule("allow-exec", Some(ToolKind::Execute), RuleAction::AutoAllow),
+        rule("allow-anything", None, RuleAction::AutoAllow),
+        rule("read-ok", Some(ToolKind::Search), RuleAction::AutoAllow),
+        rule("exec-ask", Some(ToolKind::Execute), RuleAction::Ask),
+    ];
+    let mut f = fixture(Some(stored)).await;
+    let ids: Vec<String> = f.hub.rules().into_iter().map(|r| r.id).collect();
+    assert_eq!(ids, vec!["read-ok", "exec-ask"]);
+    let notices = f.hub.startup_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].level, NotificationLevel::Warning);
+    for id in ["allow-exec", "allow-anything", "read-ok"] {
+        assert!(notices[0].body.contains(id), "{}", notices[0].body);
+    }
+    assert!(notices[0].body.contains("hub.db"));
+
+    // an execute request still asks the user: the dropped rule never reached the engine
+    let s = start(&f).await;
+    f.hub.on_host_event(HostEvent::PermissionRequest(permission(&s.id, ToolKind::Execute))).await;
+    assert_eq!(f.hub.pending_permissions().len(), 1);
+    assert!(drain(&mut f.rx).iter().any(|m| matches!(m, ServerMsg::PermissionRequest { .. })));
+
+    // fixing the rules clears the replayed warning
+    ack_result(f.hub.handle(ClientMsg::SetRules { id: "fix".into(), rules: vec![] }, &actor()).await);
+    assert!(f.hub.startup_notices().is_empty());
+}
+
+#[tokio::test]
+async fn startup_drops_invalid_rules_from_config() {
+    let from_config = vec![
+        rule("allow-delete", Some(ToolKind::Delete), RuleAction::AutoAllow),
+        rule("edit-ok", Some(ToolKind::Edit), RuleAction::AutoAllow),
+    ];
+    let f = fixture_with(None, Some(from_config)).await;
+    assert_eq!(f.hub.rules(), vec![rule("edit-ok", Some(ToolKind::Edit), RuleAction::AutoAllow)]);
+    let notices = f.hub.startup_notices();
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].body.contains("allow-delete") && notices[0].body.contains("config.toml"), "{}", notices[0].body);
+
+    // valid config and the built-in defaults raise no warning
+    let f = fixture_with(None, Some(vec![rule("edit-ok", Some(ToolKind::Edit), RuleAction::AutoAllow)])).await;
+    assert!(f.hub.startup_notices().is_empty());
+    let f = fixture(None).await;
+    assert!(f.hub.startup_notices().is_empty());
+    assert_eq!(f.hub.rules(), pet_brain::rules::default_rules());
 }
 
 #[tokio::test]

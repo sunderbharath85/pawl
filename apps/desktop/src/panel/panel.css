@@ -1331,11 +1331,26 @@ textarea.input {
   width: 200px;
   padding: 6px 10px;
 }
-.rule-warn {
+.rule-row.is-invalid {
+  border-color: var(--berry);
+  border-left-color: var(--berry);
+  background: #fff4f2;
+}
+.rule-invalid {
   grid-column: 2 / -1;
   font-size: 12px;
   font-weight: 700;
   color: var(--berry);
+}
+.rules-error {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 2px solid var(--berry);
+  background: var(--berry-soft);
+  color: var(--berry);
+  font-size: 13px;
+  word-break: break-word;
 }
 .segmented {
   display: inline-flex;
@@ -1357,6 +1372,11 @@ textarea.input {
 .seg.is-active {
   background: var(--card);
   box-shadow: var(--shadow-s);
+}
+.seg:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+  text-decoration: line-through;
 }
 .seg-auto_allow.is-active {
   color: #4c7a49;
