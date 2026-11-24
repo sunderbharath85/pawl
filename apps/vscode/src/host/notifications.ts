@@ -10,13 +10,15 @@ import {
   type ErrorPayload,
 } from "@krypto/protocol";
 import type { HubConnection } from "./connection";
-import { petFor } from "../shared/machine";
+import { activeMachineId, isLocal, machineDisplayName, petFor } from "@krypto/hub-client";
 import { agentName, errorMessage, isInWorkspace } from "./util";
 
 type NotifyLevel = "all" | "permissions" | "off";
 
 /** A hub `notification` about a session we just notified for (e.g. turn complete) is a duplicate. */
 const DEDUPE_MS = 5000;
+/** Events older than this are history (a mirror sync after a reconnect), not news. */
+const FRESH_MS = 2 * 60_000;
 
 export interface NotificationActions {
   showPet(sessionId?: string): Promise<void>;
@@ -73,10 +75,20 @@ export class Notifier implements vscode.Disposable {
     return inWorkspace || vscode.window.state.focused;
   }
 
-  /** Another machine's item: not shown (or answerable) in this window before migration step 3. */
-  private remote(machineId: string): boolean {
-    const own = this.hub.state.machine;
-    return !!own && machineId !== own.id;
+  /**
+   * Every machine's events notify, but only on the machine the user is active on, so they are told
+   * once, where they are (PLAN.md migration step 3).
+   */
+  private here(): boolean {
+    const state = this.hub.state;
+    const own = state.machine?.id;
+    return !own || activeMachineId(state, Date.now()) === own;
+  }
+
+  /** " on Mac mini" for another machine's item. */
+  private where(machineId: string): string {
+    const state = this.hub.state;
+    return isLocal(state, machineId) ? "" : ` on ${machineDisplayName(state.machines[machineId])}`;
   }
 
   private who(machineId: string, agentId: string): string {
@@ -84,11 +96,11 @@ export class Notifier implements vscode.Disposable {
     const pet = petFor(Object.values(state.pets), machineId, agentId);
     const emoji = SPECIES_META[pet?.species ?? DEFAULT_SPECIES].emoji;
     const agent = agentName(state.agents, agentId, machineId);
-    return pet ? `${emoji} ${pet.name} (${agent})` : `${emoji} ${agent}`;
+    return `${pet ? `${emoji} ${pet.name} (${agent})` : `${emoji} ${agent}`}${this.where(machineId)}`;
   }
 
   private onPermission(req: PermissionRequest): void {
-    if (this.level === "off" || this.remote(req.machineId)) return;
+    if (this.level === "off" || !this.here()) return;
     const session = this.hub.state.sessions[req.sessionId];
     if (session && session.source !== "owned") return; // approvals for vendor-extension sessions stay in VS Code
     if (!this.relevant(req.sessionId)) return;
@@ -97,7 +109,9 @@ export class Notifier implements vscode.Disposable {
     this.markRecent(req.sessionId, "perm");
 
     const text = `${this.who(req.machineId, req.agentId)} needs your OK: ${describePermission(req)}`;
-    void vscode.window.showWarningMessage(text, "Approve", "Deny", "Show").then(async (pick) => {
+    // Another machine's request is read-only here until remote control (migration step 4).
+    const actions = isLocal(this.hub.state, req.machineId) ? ["Approve", "Deny", "Show"] : ["Show"];
+    void vscode.window.showWarningMessage(text, ...actions).then(async (pick) => {
       this.shownRequests.delete(req.requestId);
       if (!pick) return;
       if (pick === "Show") return this.actions.showPet(req.sessionId);
@@ -125,11 +139,14 @@ export class Notifier implements vscode.Disposable {
   private onEvent(e: HubEvent): void {
     if (this.level !== "all") return;
     if (e.type !== "stop" && e.type !== "error") return;
+    if (Date.now() - e.ts > FRESH_MS || !this.here()) return;
     const session = this.hub.state.sessions[e.sessionId];
     if (!session || session.source !== "owned") return; // hook sessions are covered by hub notifications
     if (!this.relevant(e.sessionId)) return;
     const who = this.who(session.machineId, session.agentId);
     const title = session.title?.trim();
+    // Replying to another machine's session arrives with remote control (migration step 4).
+    const replyActions = isLocal(this.hub.state, session.machineId) ? ["Reply", "Show"] : ["Show"];
 
     if (e.type === "error") {
       const message = (e.payload as Partial<ErrorPayload> | null)?.message ?? "unknown error";
@@ -147,7 +164,7 @@ export class Notifier implements vscode.Disposable {
     this.markRecent(e.sessionId, "turn");
     if (reason === "end_turn" || reason === undefined) {
       const text = `${who} finished${title ? `: ${title}` : ""}.`;
-      void vscode.window.showInformationMessage(text, "Reply", "Show").then((pick) => {
+      void vscode.window.showInformationMessage(text, ...replyActions).then((pick) => {
         if (pick === "Reply") void this.actions.promptSession(e.sessionId);
         else if (pick === "Show") void this.actions.showPet(e.sessionId);
       });
@@ -155,7 +172,7 @@ export class Notifier implements vscode.Disposable {
     }
     const why =
       reason === "refusal" ? "refused to continue" : reason === "max_tokens" ? "ran out of tokens" : "hit its turn limit";
-    void vscode.window.showWarningMessage(`${who} stopped: ${why}.`, "Reply", "Show").then((pick) => {
+    void vscode.window.showWarningMessage(`${who} stopped: ${why}.`, ...replyActions).then((pick) => {
       if (pick === "Reply") void this.actions.promptSession(e.sessionId);
       else if (pick === "Show") void this.actions.showPet(e.sessionId);
     });
@@ -163,7 +180,7 @@ export class Notifier implements vscode.Disposable {
 
   private onHubNotification(n: HubNotification): void {
     const level = this.level;
-    if (level === "off" || this.remote(n.machineId)) return;
+    if (level === "off" || Date.now() - n.ts > FRESH_MS || !this.here()) return;
     const pending = n.sessionId
       ? Object.values(this.hub.state.pending).filter((p) => p.sessionId === n.sessionId)
       : [];
@@ -176,8 +193,10 @@ export class Notifier implements vscode.Disposable {
       this.markRecent(n.sessionId, kind);
     }
 
-    const text = n.title && n.body ? `${n.title}: ${n.body}` : n.title || n.body;
-    const actions = pending.length === 1 ? ["Approve", "Deny", "Show"] : n.sessionId ? ["Show"] : [];
+    const title = `${n.title}${this.where(n.machineId)}`;
+    const text = n.title && n.body ? `${title}: ${n.body}` : n.title ? title : n.body;
+    const answerable = pending.length === 1 && isLocal(this.hub.state, pending[0]!.machineId);
+    const actions = answerable ? ["Approve", "Deny", "Show"] : n.sessionId ? ["Show"] : [];
     const show =
       n.level === "alert" || n.level === "warning"
         ? vscode.window.showWarningMessage

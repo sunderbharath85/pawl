@@ -1,6 +1,6 @@
 //! `krypto` command line.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -412,7 +412,7 @@ impl RemoteHub {
 /// Placeholder until the hub's `hello` ack arrives.
 fn empty_welcome() -> Welcome {
     let machine =
-        Machine { id: String::new(), name: String::new(), os: MachineOs::current(), last_seen: 0, online: false, hub_version: None };
+        Machine { id: String::new(), name: String::new(), os: MachineOs::current(), last_seen: 0, online: false, hub_version: None, user_active_at: None };
     Welcome {
         protocol_version: krypto_protocol::PROTOCOL_VERSION,
         hub_version: String::new(),
@@ -708,20 +708,26 @@ async fn run_agents(paths: &Paths, port_flag: Option<u16>, refresh: bool, as_jso
     Ok(())
 }
 
+/// `krypto sessions`: every machine's sessions (this one's plus the mirror of paired hubs).
 async fn run_sessions(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> Result<()> {
-    let sessions: Vec<Session> = match RemoteHub::connect(paths, port_flag).await? {
+    let (sessions, names): (Vec<Session>, HashMap<String, String>) = match RemoteHub::connect(paths, port_flag).await? {
         Some(hub) => {
+            let names = hub.welcome.machines.iter().map(|m| (m.id.clone(), m.name.clone())).collect();
             let mut conn = Conn::Remote(Box::new(hub));
             let v = conn.request(ClientMsg::ListSessions { id: rid(), include_ended: Some(true) }).await?;
-            serde_json::from_value(v.get("sessions").cloned().unwrap_or_default())?
+            (serde_json::from_value(v.get("sessions").cloned().unwrap_or_default())?, names)
         }
         None => {
             if !paths.db.exists() {
-                Vec::new()
+                (Vec::new(), HashMap::new())
             } else {
                 let machine = machine::load_or_create(paths)?;
                 let store = crate::store::Store::open(&paths.db, &machine.id)?;
-                store.run(|s| s.recent_sessions(50)).await?
+                let (sessions, roster) = store.run(|s| Ok((s.recent_sessions(50)?, s.roster()?))).await?;
+                let mut names: HashMap<String, String> =
+                    roster.into_iter().map(|e| (e.device.id, e.device.name)).collect();
+                names.insert(machine.id.clone(), machine.name.clone());
+                (sessions, names)
             }
         }
     };
@@ -739,6 +745,7 @@ async fn run_sessions(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
         .map(|s| {
             vec![
                 short_id(&s.id),
+                printable(names.get(&s.machine_id).map_or(s.machine_id.as_str(), String::as_str)),
                 s.agent_id.clone(),
                 enum_label(&s.source),
                 if s.ended_at.is_some() { format!("{} (ended)", enum_label(&s.status)) } else { enum_label(&s.status) },
@@ -748,7 +755,7 @@ async fn run_sessions(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
             ]
         })
         .collect();
-    print_table(&["ID", "AGENT", "SOURCE", "STATUS", "LAST", "TITLE", "CWD"], &rows);
+    print_table(&["ID", "MACHINE", "AGENT", "SOURCE", "STATUS", "LAST", "TITLE", "CWD"], &rows);
     Ok(())
 }
 
@@ -1263,6 +1270,7 @@ mod tests {
             last_seen: 5,
             online: false,
             hub_version: Some("0.1.0".into()),
+            user_active_at: None,
         };
         store.upsert_device(&krypto_peer::RosterEntry { device: d, machine: m }).unwrap();
         drop(store);

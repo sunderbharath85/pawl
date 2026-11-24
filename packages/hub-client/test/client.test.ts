@@ -8,6 +8,7 @@ import {
   pickPermissionOption,
   type HubClientOptions,
 } from "../src/index";
+import { USER_ACTIVITY_REPORT_MS } from "@krypto/protocol";
 import { device2, event, FakeSocket, inviteFrom2, machine, machine2, MID, MID2, peerOff, peerOn, permission, session, tick, welcome } from "./fixtures";
 
 function makeClient(over: Partial<HubClientOptions> = {}): HubClient {
@@ -581,5 +582,41 @@ describe("pairing (protocol v3)", () => {
     expect(local.message).not.toContain("AAAAAAAAAAAAAAAAAAAAAA");
     expect(local.message).not.toContain("krypto://");
     expect(c.getState().lastError ?? "").not.toContain("krypto://");
+  });
+});
+
+describe("user activity (protocol v4)", () => {
+  test("reportUserActivity sends user_activity at most once per USER_ACTIVITY_REPORT_MS", () => {
+    const c = client();
+    c.connect();
+    const ws = FakeSocket.last();
+    ws.handshake();
+    const sent = () => ws.sent.filter((m) => m.type === "user_activity");
+    expect(c.reportUserActivity(1_000_000)).toBe(true);
+    expect(sent()).toHaveLength(1);
+    expect(sent()[0]).toEqual({ type: "user_activity", id: sent()[0].id });
+    expect(c.reportUserActivity(1_000_000 + USER_ACTIVITY_REPORT_MS - 1)).toBe(false);
+    expect(c.reportUserActivity(1_000_000 + USER_ACTIVITY_REPORT_MS)).toBe(true);
+    expect(sent()).toHaveLength(2);
+    // A rejected report (older hub) is swallowed.
+    ws.receive({ type: "ack", id: sent()[1].id, ok: false, error: "unknown_type" });
+  });
+
+  test("nothing is sent or queued while disconnected; a new connection reports at once", async () => {
+    const c = client();
+    expect(c.reportUserActivity(5)).toBe(false);
+    c.connect();
+    const ws = FakeSocket.last();
+    expect(c.reportUserActivity(5)).toBe(false);
+    ws.handshake();
+    expect(c.reportUserActivity(10)).toBe(true);
+    ws.serverClose();
+    await tick(30);
+    const ws2 = FakeSocket.last();
+    expect(ws2).not.toBe(ws);
+    ws2.handshake();
+    expect(c.reportUserActivity(20)).toBe(true);
+    expect(ws.sent.filter((m) => m.type === "user_activity")).toHaveLength(1);
+    expect(ws2.sent.filter((m) => m.type === "user_activity")).toHaveLength(1);
   });
 });

@@ -62,3 +62,16 @@ describe("buildTranscript", () => {
     expect(items).toEqual([]);
   });
 });
+
+describe("mirrored payloads that were too large", () => {
+  test("show as one 'large output' row per run", () => {
+    const items = buildTranscript([
+      ev("agent_message_chunk", { text: "Reading the log" }),
+      ev("tool_call", { truncated: true, bytes: 70_000 }),
+      ev("tool_call_update", { truncated: true, bytes: 10_000 }),
+      ev("agent_message_chunk", { text: "Done" }),
+    ]);
+    expect(items.map((i) => i.kind)).toEqual(["agent", "truncated", "agent"]);
+    expect(items[1]).toMatchObject({ kind: "truncated", bytes: 80_000 });
+  });
+});

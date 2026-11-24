@@ -4,7 +4,7 @@ Named dog pets that watch and drive your coding agents over ACP (Agent Client Pr
 
 - Whiteboard: https://claude.ai/artifact/E8zVPktys5q8qKw5AjmjtB
 - Last updated: 2026-11-23
-- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto, step 1 (machine identity), step 2 (pairing + LAN presence, protocol v3). Next: step 3 (mirror events + visitors).
+- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto, step 1 (machine identity), step 2 (pairing + LAN presence, protocol v3), step 3 (mirror events + visitors, protocol v4). Next: step 4 (intents + acks).
 
 ## Decisions
 
@@ -241,11 +241,15 @@ Each step can ship and be tested on its own.
    - An opt-in peer listener on the LAN or Tailscale interface carries encrypted `presence` heartbeats both ways.
    - Hubs show `machines` (online, lastSeen) in Welcome, the CLI (`krypto machines`) and the desktop panel.
    - Test: two hubs on one PC (separate data dirs and ports), then the Mac mini and the Windows PC.
-3. **Mirror events + visitors.**
+3. ✅ **Mirror events + visitors.** (done 2026-11-24; protocol v4)
    - Owners stream `event` messages to peers, and peers keep a read-only mirror.
    - Desktop and VS Code render a visitors area and remote sessions read-only.
    - Presence carries `userActiveAt`, and the approval dog "runs to you" on the active screen.
    - Test: a session on the PC shows as a visitor dog on the Mac.
+   - Hardened after a security review: per-peer caps on sessions, events, pets, pending requests and payload bytes (256 MiB); sync cursor taken only from stored events; at most one sync answer per peer per 10 s; inbound rate limit (a flooding peer is disconnected for 30 s); mirrored pet names validated; mirrored text marked untrusted in LLM prompts; only the user's own chat message can approve.
+   - Cross-machine pet-name clashes: the machine whose id sorts later renames its own pet (max 10 renames per peer per hour).
+   - Deferred: a per-hub epoch so a peer whose hub.db was reset is always detected (today only a lower seq is detected).
+
 4. **Intents + acks.**
    - Approve, deny, prompt, start and cancel are routed to the owning hub.
    - First valid approval wins (`already_decided`).

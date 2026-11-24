@@ -42,6 +42,8 @@ export interface Motion {
   durationMs: number;
   walking: boolean;
   facing: "left" | "right";
+  /** A purposeful walk (running away / back / in as a visitor): never halted by the wander rules. */
+  travel?: boolean | undefined;
 }
 
 export function restingMotion(x: number, facing: "left" | "right" = "right"): Motion {
@@ -97,4 +99,67 @@ export function bubblePlacement(petX: number, width: number, bubbleMax: number):
   const maxTail = Math.max(0, half - 18);
   const tail = Math.max(-maxTail, Math.min(maxTail, petX - center));
   return { center, tail };
+}
+
+/** Visitors (pets of other machines) are drawn at this fraction of the pet size. */
+export const VISITOR_SCALE = 0.75;
+/** Visitors shown at once; the rest collapse into a "+N" chip. */
+export const MAX_VISITORS = 6;
+const VISITOR_GAP = 10;
+const MORE_CHIP_W = 36;
+
+export interface VisitorLayout {
+  /** Center x of every shown visitor. */
+  slots: Record<string, number>;
+  /** Visitors past the cap (counted by the "+N" chip). */
+  hidden: string[];
+  /** Width the visitors area takes at the right edge (0 without visitors). */
+  areaWidth: number;
+  /** Center x of the "+N" chip, or null when nobody is hidden. */
+  moreX: number | null;
+}
+
+/**
+ * The visitors area at the right edge: at most `max` visitors (fewer when they would take more than
+ * half the strip), the first id nearest the edge, then a "+N" chip at the very edge.
+ */
+export function layoutVisitors(ids: readonly string[], width: number, visitorSize: number, max = MAX_VISITORS): VisitorLayout {
+  if (ids.length === 0) return { slots: {}, hidden: [], areaWidth: 0, moreX: null };
+  const slot = visitorSize + VISITOR_GAP;
+  const fit = Math.max(1, Math.floor((Math.max(0, width) * 0.5 - MORE_CHIP_W) / slot));
+  const shown = Math.min(ids.length, Math.max(1, max), fit);
+  const hidden = ids.slice(shown);
+  const moreW = hidden.length > 0 ? MORE_CHIP_W : 0;
+  const right = width - 4 - moreW;
+  const slots: Record<string, number> = {};
+  ids.slice(0, shown).forEach((id, i) => {
+    slots[id] = right - (i + 0.5) * slot;
+  });
+  return {
+    slots,
+    hidden,
+    areaWidth: shown * slot + moreW + 8,
+    moreX: hidden.length > 0 ? width - 4 - MORE_CHIP_W / 2 : null,
+  };
+}
+
+/** Just past the strip's left (a pet that ran to another machine) or right edge (where visitors run in). */
+export function offscreenX(side: "left" | "right", width: number, size: number): number {
+  return side === "left" ? -size : width + size;
+}
+
+/** Walk (or run, with a higher speed) from wherever `m` is right now to `target`. */
+export function walkMotion(m: Motion, target: number, now: number, speed: number): Motion {
+  const from = currentX(m, now);
+  const dist = Math.abs(target - from);
+  if (dist < 1) return { ...m, x: target, fromX: target, walking: false, durationMs: 0, travel: false };
+  return {
+    x: target,
+    fromX: from,
+    startedAt: now,
+    durationMs: Math.round((dist / Math.max(1, speed)) * 1000),
+    walking: true,
+    facing: target > from ? "right" : "left",
+    travel: true,
+  };
 }

@@ -1,6 +1,6 @@
 // Items for "Krypto: Show Machines" (read-only). Pure: no runtime `vscode` import, so it is unit-tested.
-import { machineCounts, sortedMachines, type HubState } from "@krypto/hub-client";
-import { OS_LABEL, machineDisplayName, machinesLine, presenceLabel } from "../shared/machine";
+import { OS_LABEL, machineCounts, machineDisplayName, machinesLine, sortedMachines, type HubState } from "@krypto/hub-client";
+import { presenceLabel } from "../shared/machine";
 
 export interface MachinePickItem {
   label: string;

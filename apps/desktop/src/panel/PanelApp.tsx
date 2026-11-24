@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useHubState } from "@krypto/hub-client/react";
 import { onNative, type PanelFocus } from "../lib/native";
 import { usePetViews } from "../lib/pets";
 import { useSprites } from "../lib/sprites";
 import { useConnection } from "../lib/useConnection";
-import { useLocalHubState } from "../lib/useLocalHubState";
 import { useNow } from "../lib/useNow";
 import { PanelContext, type PanelCtx, type Route } from "./context";
 import { Sidebar } from "./Sidebar";
@@ -47,8 +47,7 @@ function routeFromFocus(focus: PanelFocus): Route {
 
 export function PanelApp() {
   const { conn, meta, client } = useConnection();
-  // Only this machine's pets/sessions until migration step 3; paired machines live in state.machines.
-  const state = useLocalHubState(client);
+  const state = useHubState(client);
   const now = useNow(1000);
   const sprites = useSprites();
   const views = usePetViews(state, now);
@@ -64,6 +63,16 @@ export function PanelApp() {
   }, []);
 
   useEffect(() => onNative("panel-focus", (focus) => setRoute(routeFromFocus(focus))), []);
+
+  // Input in the panel means the user is on this machine (hub-client throttles the reports).
+  useEffect(() => {
+    const report = () => void client.reportUserActivity();
+    const events = ["pointerdown", "pointermove", "keydown", "wheel", "focus"] as const;
+    for (const e of events) window.addEventListener(e, report, { passive: true });
+    return () => {
+      for (const e of events) window.removeEventListener(e, report);
+    };
+  }, [client]);
 
   // If the open session disappears (hub restarted with a fresh db), fall back home.
   useEffect(() => {

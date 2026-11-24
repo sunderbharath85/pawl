@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { HubEvent } from "@krypto/protocol";
-import { backfillSession, SessionBackfill, type EventSource } from "./backfill";
+import { backfillSession, SessionBackfill, type EventSource } from "../src/index";
 
 const MID = "abc123def456";
 const SID = `${MID}:s1`;

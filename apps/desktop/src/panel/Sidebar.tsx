@@ -1,9 +1,15 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { machineCounts } from "@krypto/hub-client";
+import {
+  OS_LABEL,
+  groupByMachine,
+  machineCounts,
+  machineDisplayName,
+  machineSummary,
+  machinesLine,
+  type MachineGroup,
+} from "@krypto/hub-client";
 import type { Session } from "@krypto/protocol";
 import { STATUS_META, SOURCE_LABEL, agentName, isActive, sessionTitle, timeAgo } from "../lib/format";
-import { OS_LABEL, machineDisplayName, machineSummary } from "../lib/machine";
-import { machinesLine } from "../lib/pairing";
 import { usePanel, type Route } from "./context";
 import * as I from "./icons";
 import { ACTIVITY_LABEL, PetAvatar, activityUrgency, safePetLine } from "./PetAvatar";
@@ -15,21 +21,30 @@ export function Sidebar() {
 
   const pendingCount = Object.keys(state.pending).length;
 
-  // The most "urgent" pet leads; clicking the hero cycles through the pack.
-  const ordered = useMemo(
-    () => [...views].sort((a, b) => activityUrgency(b.activity) - activityUrgency(a.activity) || a.name.localeCompare(b.name)),
-    [views],
-  );
+  // The most "urgent" home pet leads (visitors live on other machines); clicking the hero cycles through the pack.
+  const ordered = useMemo(() => {
+    const home = views.filter((v) => !v.visitor && !v.remoteOffline);
+    return [...(home.length > 0 ? home : views)].sort(
+      (a, b) => activityUrgency(b.activity) - activityUrgency(a.activity) || a.name.localeCompare(b.name),
+    );
+  }, [views]);
   const hero = ordered.length > 0 ? ordered[heroIdx % ordered.length] : undefined;
 
   const sessions = useMemo(() => {
     const all = Object.values(state.sessions);
     const sorted = all.sort((a, b) => Number(isActive(b)) - Number(isActive(a)) || b.lastEventAt - a.lastEventAt);
+    const open = sorted.filter((s) => !s.endedAt);
+    const ended = sorted.filter((s) => !!s.endedAt);
     return {
-      open: sorted.filter((s) => !s.endedAt),
-      ended: sorted.filter((s) => !!s.endedAt),
+      open,
+      ended,
+      openGroups: groupByMachine(state, open),
+      endedGroups: groupByMachine(state, ended),
     };
-  }, [state.sessions]);
+  }, [state]);
+  // Machine headings only once another machine's sessions are mirrored here.
+  const grouped = sessions.openGroups.length + sessions.endedGroups.length > 0 &&
+    new Set([...sessions.openGroups, ...sessions.endedGroups].map((g) => g.machineId)).size > 1;
 
   const nav: Array<{ route: Route; label: string; icon: ReactNode; badge?: number }> = [
     { route: { view: "home" }, label: "Home", icon: <I.Home /> },
@@ -68,7 +83,7 @@ Rename it in Settings`}
           title="Paired machines"
         >
           <span className={`dot${connected && counts.online > 1 ? " tone-done" : ""}`} aria-hidden />
-          <span>{machinesLine(counts.total, counts.online, connected)}</span>
+          <span>{machinesLine(counts.total, connected ? counts.online : undefined)}</span>
           {counts.total === 1 && <span className="machines-line-cta">Pair</span>}
         </button>
       )}
@@ -117,19 +132,33 @@ Rename it in Settings`}
         </div>
         <div className="session-list">
           {sessions.open.length === 0 && <div className="side-empty">No sessions yet. Start one and I'll keep watch.</div>}
-          {sessions.open.map((s) => (
-            renderRow(s)
-          ))}
+          {sessions.openGroups.map((g) => renderGroup(g, "open"))}
           {sessions.ended.length > 0 && (
             <button className="side-toggle" onClick={() => setShowEnded((v) => !v)}>
               {showEnded ? "Hide" : "Show"} finished ({sessions.ended.length})
             </button>
           )}
-          {showEnded && sessions.ended.map((s) => renderRow(s))}
+          {showEnded && sessions.endedGroups.map((g) => renderGroup(g, "ended"))}
         </div>
       </div>
     </aside>
   );
+
+  function renderGroup(g: MachineGroup<Session>, part: "open" | "ended") {
+    const offline = !g.online;
+    return (
+      <div key={`${part}:${g.machineId}`} className={`session-group${offline ? " is-offline" : ""}`}>
+        {grouped && (
+          <div className="session-group-head" title={offline ? "Offline: showing what it last sent" : undefined}>
+            <I.Monitor size={12} />
+            <span className="session-group-name">{g.local ? `${machineDisplayName(g.machine)} (this machine)` : machineDisplayName(g.machine)}</span>
+            {offline && <span className="session-group-seen">last seen {timeAgo(g.machine?.lastSeen ?? 0, now)}</span>}
+          </div>
+        )}
+        {g.items.map((s) => renderRow(s))}
+      </div>
+    );
+  }
 
   function renderRow(s: Session) {
     const active = route.view === "session" && route.sessionId === s.id;

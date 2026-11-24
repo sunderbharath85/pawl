@@ -3,15 +3,17 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   INVITE_TTL_DEFAULT_SECS,
+  OS_LABEL,
   extractInviteUri,
   isUnspecifiedAddr,
   machineCounts,
+  machineDisplayName,
+  machinesLine,
   parseInviteUri,
   sortedMachines,
 } from "@krypto/hub-client";
 import { PEER_DEFAULT_PORT, type Device, type MachineOs } from "@krypto/protocol";
 import { clockTime, timeAgo } from "../../lib/format";
-import { OS_LABEL, machineDisplayName } from "../../lib/machine";
 import { isTauri, native } from "../../lib/native";
 import {
   INVITE_TTL_CHOICES,
@@ -20,7 +22,6 @@ import {
   inviteHolder,
   inviteUsedBy,
   joinCommand,
-  machinesLine,
   pairingErrorText,
   presenceText,
   useShownInvite,
@@ -82,7 +83,7 @@ export function MachinesView() {
       <header className="view-head">
         <h1>Machines</h1>
         <p>
-          {counts.total > 0 ? `${machinesLine(counts.total, counts.online, connected)}. ` : ""}
+          {counts.total > 0 ? `${machinesLine(counts.total, connected ? counts.online : undefined)}. ` : ""}
           Pair the Krypto hubs on your network so they can see each other. Pets from other machines come over in a later update.
         </p>
       </header>

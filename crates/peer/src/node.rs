@@ -5,9 +5,9 @@
 //! so the hub may call any `PeerNode` method while holding its storage lock, except `revoke`, `join`,
 //! `connect_known` and `shutdown`, which call into the roster.
 
-use crate::envelope::parse_pk;
+use crate::envelope::{parse_pk, seal_plaintext};
 use crate::invite::{new_code, peer_addr_ok, valid_addr, CODE_LEN};
-use crate::io::{spawn_io, WsIo, MAX_FRAME};
+use crate::io::{spawn_io, SendFail, WsIo, MAX_FRAME};
 use crate::keys::wipe;
 use crate::limits::{ConnLimits, PairLimiter, PeerConn, PeerListener};
 use crate::{b64, open, seal, DeviceKeys, Invite, InviteError, Roster, RosterEntry};
@@ -21,16 +21,17 @@ use axum::routing::get;
 use axum::Router;
 use krypto_protocol::{
     is_valid_machine_id, now_ms, ByeReason, Device, DeviceKind, Machine, PairRejectReason, PeerBody, PeerEnvelope,
-    Presence, UnixMs, PEER_PATH, PRESENCE_INTERVAL_MS, PRESENCE_OFFLINE_MS,
+    Presence, UnixMs, MIRROR_FRAME_MAX_BYTES, PEER_PATH, PRESENCE_INTERVAL_MS, PRESENCE_OFFLINE_MS,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Instant};
 use tracing::{debug, info, warn};
@@ -41,8 +42,14 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_INVITES: usize = 16;
 const INVITE_TTL_MIN: Duration = Duration::from_secs(60);
 const INVITE_TTL_MAX: Duration = Duration::from_secs(3600);
-/// Commands queued per link.
-const LINK_QUEUE: usize = 64;
+/// Bodies queued per link for `send` (frames waiting for the socket). Overflow closes the link.
+const LINK_QUEUE: usize = 1024;
+/// Serialized body bytes queued per link for `send`. Exceeding it is handled like LINK_QUEUE overflow.
+const LINK_QUEUE_BYTES: usize = 16 * 1024 * 1024;
+/// Control commands (presence push, close) queued per link.
+const CTL_QUEUE: usize = 16;
+/// Largest serialized body `PeerNode::send` accepts: MIRROR_FRAME_MAX_BYTES plus 16 KiB headroom.
+pub const MAX_SEND_BODY_BYTES: usize = MIRROR_FRAME_MAX_BYTES + 16 * 1024;
 /// How long `revoke`/`shutdown` wait for a link to flush its `bye`.
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
@@ -54,12 +61,17 @@ pub enum PeerEvent {
     Paired { device: Device, machine: Machine, we_invited: bool },
     /// We rejected a pairing attempt (audit it). `remote_addr` is the socket's peer address.
     PairRejected { remote_addr: String, reason: PairRejectReason },
-    /// A device went from no live link to a live link.
+    /// A link to the device became live: the device was offline, or a new link replaced the current
+    /// one (re-pair, reconnect, duplicate-link tie-break). Every `Body` is preceded by the `LinkUp`
+    /// of the link it arrived on, so (re)sync on every `LinkUp`; it is idempotent for an online device.
     LinkUp { device_id: String, machine: Machine },
     /// The device's last live link closed (socket closed, bye, offline timeout, revoke, shutdown).
     LinkDown { device_id: String },
     /// An authenticated presence heartbeat.
     Presence { device_id: String, presence: Presence },
+    /// Any other authenticated body (mirror, sync_request, mirror_snapshot, mirror_events, sync_done,
+    /// and later steps' bodies), in arrival order per link. Pair, hello, presence and bye never come here.
+    Body { device_id: String, body: PeerBody },
     /// The device was revoked, here (`by_peer: false`) or by the peer's `bye{revoked}`. Comes after
     /// the `LinkDown` of its link, if it had one.
     Revoked { device_id: String, by_peer: bool },
@@ -84,6 +96,25 @@ impl Default for PeerTimings {
             backoff_max: Duration::from_secs(60),
         }
     }
+}
+
+/// `PeerNode::send` errors. `Display` is a snake_case code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SendError {
+    /// No live link to that device.
+    #[error("not_linked")]
+    NotLinked,
+    /// The serialized body is over `MAX_SEND_BODY_BYTES`; nothing was sent.
+    #[error("too_large")]
+    TooLarge,
+    /// The link's outbound queue was full (LINK_QUEUE bodies or LINK_QUEUE_BYTES bytes): the link is
+    /// being closed (the peer resyncs on reconnect).
+    #[error("backpressure")]
+    Backpressure,
+    /// pair_request / pair_accept / pair_reject / hello / presence / bye belong to the node itself
+    /// (presence goes through `set_presence`); `send` refuses them.
+    #[error("reserved")]
+    Reserved,
 }
 
 /// `join` errors. `Display` is the wire error code.
@@ -127,6 +158,8 @@ struct Inner {
     conn_limits: Arc<ConnLimits>,
     /// Failed pair attempts per remote IP, and `PairRejected` coalescing.
     pair_limiter: Mutex<PairLimiter>,
+    /// Devices the hub disconnected: until the instant, no dialing and no hello accepted.
+    cooldowns: Mutex<HashMap<String, Instant>>,
     /// Serializes "is this device still paired?" against revocation (see module docs).
     gate: Mutex<()>,
     seq_lock: Mutex<()>,
@@ -157,12 +190,17 @@ struct ListenerState {
 struct LinkEntry {
     id: u64,
     dialed_by_me: bool,
-    cmd: mpsc::Sender<LinkCmd>,
+    ctl: mpsc::Sender<LinkCmd>,
+    /// Serialized bodies from `send`.
+    data: mpsc::Sender<Vec<u8>>,
+    /// Close now, without bye (outbound queue overflow).
+    kill: Arc<Notify>,
+    /// Serialized bytes of the bodies waiting in `data`.
+    queued_bytes: Arc<AtomicUsize>,
     last_auth: Arc<AtomicI64>,
 }
 
 enum LinkCmd {
-    Body(PeerBody),
     Presence,
     /// Close the link, after sending `bye` if given. `done` fires after the link is cleaned up
     /// (its `LinkDown` emitted).
@@ -190,7 +228,10 @@ struct Link {
     id: u64,
     device_id: String,
     peer_pk: [u8; 32],
-    cmd_rx: mpsc::Receiver<LinkCmd>,
+    ctl_rx: mpsc::Receiver<LinkCmd>,
+    data_rx: mpsc::Receiver<Vec<u8>>,
+    kill: Arc<Notify>,
+    queued_bytes: Arc<AtomicUsize>,
     last_auth: Arc<AtomicI64>,
     reply: Option<PeerBody>,
 }
@@ -253,6 +294,7 @@ impl PeerNode {
                 dialers: Mutex::new(HashMap::new()),
                 conn_limits: ConnLimits::new(),
                 pair_limiter: Mutex::new(PairLimiter::default()),
+                cooldowns: Mutex::new(HashMap::new()),
                 gate: Mutex::new(()),
                 seq_lock: Mutex::new(()),
                 rx_lock: Mutex::new(()),
@@ -327,10 +369,11 @@ impl PeerNode {
         self.inner.push_presence();
     }
 
-    /// Queue a body on the device's live link. False if there is none or its queue is full.
-    pub fn send(&self, device_id: &str, body: PeerBody) -> bool {
-        let cmd = lock(&self.inner.links).get(device_id).map(|l| l.cmd.clone());
-        cmd.is_some_and(|c| c.try_send(LinkCmd::Body(body)).is_ok())
+    /// Queue a body on the device's live link (in order). `TooLarge` bodies are never sent; on
+    /// `Backpressure` (LINK_QUEUE frames already waiting) the link is closed and the peer resyncs when
+    /// it reconnects. Never blocks.
+    pub fn send(&self, device_id: &str, body: PeerBody) -> Result<(), SendError> {
+        self.inner.send(device_id, &body)
     }
 
     /// Revoke a device: `bye{revoked}` on its live link, close it, mark it revoked, stop dialing.
@@ -340,6 +383,14 @@ impl PeerNode {
     }
 
     /// Linked device ids and the time of their last authenticated frame.
+    /// Close the device's live link without revoking it and without bye (`LinkDown` follows). For
+    /// `cooldown` we neither dial it nor accept its hello (closed silently); then the dialer resumes
+    /// with its usual backoff. A new pairing with the device ends the cooldown. No-op for an id that is
+    /// neither paired nor linked.
+    pub fn disconnect(&self, device_id: &str, cooldown: Duration) {
+        self.inner.disconnect(device_id, cooldown)
+    }
+
     pub fn online(&self) -> Vec<(String, UnixMs)> {
         let mut v: Vec<(String, UnixMs)> =
             lock(&self.inner.links).iter().map(|(id, l)| (id.clone(), l.last_auth.load(Ordering::Relaxed))).collect();
@@ -417,7 +468,50 @@ impl Inner {
 
     fn push_presence(&self) {
         for l in lock(&self.links).values() {
-            let _ = l.cmd.try_send(LinkCmd::Presence);
+            let _ = l.ctl.try_send(LinkCmd::Presence);
+        }
+    }
+
+    fn send(&self, device_id: &str, body: &PeerBody) -> Result<(), SendError> {
+        if matches!(
+            body,
+            PeerBody::PairRequest { .. }
+                | PeerBody::PairAccept { .. }
+                | PeerBody::PairReject { .. }
+                | PeerBody::Hello { .. }
+                | PeerBody::Presence { .. }
+                | PeerBody::Bye { .. }
+        ) {
+            return Err(SendError::Reserved);
+        }
+        let (data, kill, queued) = lock(&self.links)
+            .get(device_id)
+            .map(|l| (l.data.clone(), l.kill.clone(), l.queued_bytes.clone()))
+            .ok_or(SendError::NotLinked)?;
+        let plaintext = serde_json::to_vec(body).expect("PeerBody serializes");
+        let len = plaintext.len();
+        if len > MAX_SEND_BODY_BYTES {
+            return Err(SendError::TooLarge);
+        }
+        let overflow = |what: &str| {
+            warn!(device = device_id, "peer link outbound {what} full; closing the link (the peer resyncs on reconnect)");
+            kill.notify_one();
+            Err(SendError::Backpressure)
+        };
+        // Reserve the bytes first so concurrent senders cannot overshoot the budget together.
+        if queued.fetch_add(len, Ordering::SeqCst) + len > LINK_QUEUE_BYTES {
+            queued.fetch_sub(len, Ordering::SeqCst);
+            return overflow("byte budget");
+        }
+        match data.try_send(plaintext) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                queued.fetch_sub(len, Ordering::SeqCst);
+                match e {
+                    TrySendError::Full(_) => overflow("queue"),
+                    TrySendError::Closed(_) => Err(SendError::NotLinked),
+                }
+            }
         }
     }
 
@@ -618,7 +712,7 @@ impl Inner {
             // Reject replies do not touch the roster's seq counters (the sender is not paired).
             let body = PeerBody::PairReject { reason, ts: now_ms() };
             let env = seal(&self.keys, &me_id, &env.from, &pk, time_seq(), &body, false);
-            io.send(serde_json::to_string(&env).expect("PeerEnvelope serializes"));
+            let _ = io.send(serde_json::to_string(&env).expect("PeerEnvelope serializes"));
             None
         };
         let Ok(body) = open(&self.keys, &env, &pk) else { return reject(PairRejectReason::BadRequest) };
@@ -665,6 +759,10 @@ impl Inner {
     }
 
     fn inbound_hello(&self, env: PeerEnvelope, remote: SocketAddr) -> Option<LinkSetup> {
+        if self.cooldown_until(&env.from).is_some() {
+            debug!(remote = %remote, device = %env.from, "peer socket closed: device is cooling down after a disconnect");
+            return None;
+        }
         let Some(entry) = self.roster.get(&env.from) else {
             debug!(remote = %remote, "peer socket closed: unknown or revoked sender");
             return None;
@@ -722,7 +820,7 @@ impl Inner {
             ts: now_ms(),
         };
         let env = seal(&self.keys, &me_id, &mid, &invite.public_key, req_seq, &req, true);
-        if !io.send(serde_json::to_string(&env).expect("PeerEnvelope serializes")) {
+        if io.send(serde_json::to_string(&env).expect("PeerEnvelope serializes")).is_err() {
             return Err(JoinError::Unreachable);
         }
         // Closed without a reply: no live invite there (expired or used), or not a Krypto listener.
@@ -794,6 +892,42 @@ impl Inner {
         }
     }
 
+    /// End of the device's disconnect cooldown, if one is running (expired entries are dropped).
+    fn cooldown_until(&self, device_id: &str) -> Option<Instant> {
+        let mut cooldowns = lock(&self.cooldowns);
+        match cooldowns.get(device_id) {
+            Some(&until) if until > Instant::now() => Some(until),
+            Some(_) => {
+                cooldowns.remove(device_id);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn disconnect(&self, device_id: &str, cooldown: Duration) {
+        let link = {
+            let _g = lock(&self.gate);
+            let known = self.roster.get(device_id).is_some();
+            let link = lock(&self.links).get(device_id).map(|l| (l.ctl.clone(), l.kill.clone()));
+            if !known && link.is_none() {
+                return;
+            }
+            // Set under the gate, so a handshake finishing right now cannot register past it.
+            if !cooldown.is_zero() {
+                lock(&self.cooldowns).insert(device_id.to_string(), Instant::now() + cooldown);
+            }
+            link
+        };
+        info!(device = device_id, ?cooldown, "peer disconnected by the hub");
+        if let Some((ctl, kill)) = link {
+            // Close without bye; kill if the control queue is backed up.
+            if ctl.try_send(LinkCmd::Close { bye: None, done: None }).is_err() {
+                kill.notify_one();
+            }
+        }
+    }
+
     fn has_link(&self, device_id: &str) -> bool {
         lock(&self.links).contains_key(device_id)
     }
@@ -814,6 +948,13 @@ impl Inner {
             }
             let Some(entry) = self.roster.get(&device_id) else { return };
             let Some(addr) = entry.device.addr else { return };
+            if let Some(until) = self.cooldown_until(&device_id) {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(until) => {}
+                    _ = closed(&mut shutdown) => return,
+                }
+                continue;
+            }
             changed.borrow_and_update();
             if self.has_link(&device_id) {
                 tokio::select! {
@@ -851,7 +992,7 @@ impl Inner {
         let pk = parse_pk(&entry.device.public_key).ok_or(())?;
         let mut io = Self::connect(addr, t.handshake_timeout).await.map_err(|_| ())?;
         let hello = PeerBody::Hello { machine: self.me(), addr: self.advertised_addr(), ts: now_ms() };
-        if !io.send(self.seal_text(device_id, &pk, &hello)) {
+        if io.send(self.seal_text(device_id, &pk, &hello)).is_err() {
             return Err(());
         }
         let text = match timeout(t.handshake_timeout, io.rx.recv()).await {
@@ -896,8 +1037,18 @@ impl Inner {
         if self.is_closing() || self.roster.get(&setup.device_id).is_none() {
             return None;
         }
+        if setup.force {
+            // A new pairing is an explicit user action: it ends any disconnect cooldown.
+            lock(&self.cooldowns).remove(&setup.device_id);
+        } else if self.cooldown_until(&setup.device_id).is_some() {
+            debug!(device = %setup.device_id, "link refused: device is cooling down after a disconnect");
+            return None;
+        }
         let me_id = self.me_id();
-        let (cmd_tx, cmd_rx) = mpsc::channel(LINK_QUEUE);
+        let (ctl_tx, ctl_rx) = mpsc::channel(CTL_QUEUE);
+        let (data_tx, data_rx) = mpsc::channel(LINK_QUEUE);
+        let kill = Arc::new(Notify::new());
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
         let last_auth = Arc::new(AtomicI64::new(now_ms()));
         let id = self.next_link_id.fetch_add(1, Ordering::Relaxed);
         let was_up = {
@@ -913,27 +1064,48 @@ impl Inner {
                         return None;
                     }
                     debug!(device = %setup.device_id, "link replaced (tie-break)");
-                    let _ = old.cmd.try_send(LinkCmd::Superseded);
+                    let _ = old.ctl.try_send(LinkCmd::Superseded);
                     true
                 }
             };
             links.insert(
                 setup.device_id.clone(),
-                LinkEntry { id, dialed_by_me: setup.dialed_by_me, cmd: cmd_tx, last_auth: last_auth.clone() },
+                LinkEntry {
+                    id,
+                    dialed_by_me: setup.dialed_by_me,
+                    ctl: ctl_tx,
+                    data: data_tx,
+                    kill: kill.clone(),
+                    queued_bytes: queued_bytes.clone(),
+                    last_auth: last_auth.clone(),
+                },
             );
             was_up
         };
         self.links_changed.send_modify(|v| *v = v.wrapping_add(1));
-        // A pairing link reports LinkUp even over an existing link: the key and machine are new.
-        if !was_up || setup.force {
-            info!(device = %setup.device_id, dialed_by_me = setup.dialed_by_me, "peer link up");
-            self.emit(PeerEvent::LinkUp { device_id: setup.device_id.clone(), machine: setup.machine });
-        }
-        Some(Link { id, device_id: setup.device_id, peer_pk: setup.peer_pk, cmd_rx, last_auth, reply: setup.reply })
+        // Also over an existing link: bodies queued on the replaced link may be lost, so the hub resyncs.
+        info!(device = %setup.device_id, dialed_by_me = setup.dialed_by_me, replaced = was_up, "peer link up");
+        self.emit(PeerEvent::LinkUp { device_id: setup.device_id.clone(), machine: setup.machine });
+        Some(Link {
+            id,
+            device_id: setup.device_id,
+            peer_pk: setup.peer_pk,
+            ctl_rx,
+            data_rx,
+            kill,
+            queued_bytes,
+            last_auth,
+            reply: setup.reply,
+        })
     }
 
-    fn send_on(&self, io: &WsIo, link: &Link, body: &PeerBody) -> bool {
+    fn send_on(&self, io: &WsIo, link: &Link, body: &PeerBody) -> Result<(), SendFail> {
         io.send(self.seal_text(&link.device_id, &link.peer_pk, body))
+    }
+
+    /// Presence is best effort: a full socket queue skips this beat instead of closing the link.
+    fn send_presence(&self, io: &WsIo, link: &Link) -> bool {
+        !matches!(self.send_on(io, link, &self.presence_body()), Err(SendFail::Closed))
     }
 
     async fn run_link(self: Arc<Self>, io: WsIo, mut link: Link) {
@@ -941,33 +1113,55 @@ impl Inner {
         let t = self.timings();
         let mut ok = true;
         if let Some(reply) = link.reply.take() {
-            ok = self.send_on(&io, &link, &reply);
+            ok = self.send_on(&io, &link, &reply).is_ok();
         }
-        ok = ok && self.send_on(&io, &link, &self.presence_body());
+        ok = ok && self.send_presence(&io, &link);
         let mut ticker = tokio::time::interval_at(Instant::now() + t.presence_interval, t.presence_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_auth = Instant::now();
         let mut done: Option<oneshot::Sender<()>> = None;
         let mut revoked_by_peer = false;
         let mut superseded = false;
+        let mut overflow = false;
         while ok {
+            // Bodies move from the link queue to the socket queue only while the socket has room, so a
+            // slow peer backs up into the link queue (whose overflow closes the link, see `send`).
+            let socket_full = io.tx.capacity() == 0;
             tokio::select! {
-                cmd = link.cmd_rx.recv() => match cmd {
+                _ = link.kill.notified() => {
+                    warn!(device = %link.device_id, "peer link closed: outbound queue overflow");
+                    overflow = true;
+                    break;
+                }
+                cmd = link.ctl_rx.recv() => match cmd {
                     // Replaced by another link (the sender left the map).
                     None | Some(LinkCmd::Superseded) => {
                         superseded = true;
                         break;
                     }
-                    Some(LinkCmd::Body(b)) => ok = self.send_on(&io, &link, &b),
-                    Some(LinkCmd::Presence) => ok = self.send_on(&io, &link, &self.presence_body()),
+                    Some(LinkCmd::Presence) => ok = self.send_presence(&io, &link),
                     Some(LinkCmd::Close { bye, done: d }) => {
                         if let Some(reason) = bye {
-                            self.send_on(&io, &link, &PeerBody::Bye { reason, ts: now_ms() });
+                            let _ = self.send_on(&io, &link, &PeerBody::Bye { reason, ts: now_ms() });
                         }
                         done = d;
                         break;
                     }
                 },
+                body = link.data_rx.recv(), if !socket_full => match body {
+                    None => {
+                        superseded = true;
+                        break;
+                    }
+                    Some(plaintext) => {
+                        link.queued_bytes.fetch_sub(plaintext.len(), Ordering::SeqCst);
+                        let seq = self.next_tx_seq(&link.device_id);
+                        let env = seal_plaintext(&self.keys, &self.me_id(), &link.device_id, &link.peer_pk, seq, &plaintext, false);
+                        ok = io.send(serde_json::to_string(&env).expect("PeerEnvelope serializes")).is_ok();
+                    }
+                },
+                // Wake when the socket drains a slot (the permit is dropped right away).
+                room = io.tx.reserve(), if socket_full => ok = room.is_ok(),
                 frame = io.rx.recv() => match frame {
                     None => {
                         debug!(device = %link.device_id, "peer socket closed");
@@ -991,7 +1185,7 @@ impl Inner {
                         }
                     },
                 },
-                _ = ticker.tick() => ok = self.send_on(&io, &link, &self.presence_body()),
+                _ = ticker.tick() => ok = self.send_presence(&io, &link),
                 _ = tokio::time::sleep_until(last_auth + t.offline_after) => {
                     info!(device = %link.device_id, "peer offline: no authenticated frame in {:?}", t.offline_after);
                     break;
@@ -1010,7 +1204,11 @@ impl Inner {
                 }
             }
         }
-        io.close();
+        if overflow {
+            io.abort();
+        } else {
+            io.close();
+        }
         let removed = {
             let mut links = lock(&self.links);
             if links.get(&link.device_id).is_some_and(|l| l.id == link.id) {
@@ -1076,14 +1274,23 @@ impl Inner {
             PeerBody::Bye { reason, .. } => Frame::Bye(reason),
             // Pairing bodies mean nothing on a live link.
             PeerBody::PairRequest { .. } | PeerBody::PairAccept { .. } | PeerBody::PairReject { .. } => Frame::Ok,
+            // Everything else is the hub's (mirror, sync, ...). Never logged: it may carry user data.
+            body => {
+                self.emit(PeerEvent::Body { device_id: link.device_id.clone(), body });
+                Frame::Ok
+            }
         }
     }
 
-    async fn close_link(&self, cmd: mpsc::Sender<LinkCmd>, bye: ByeReason) {
+    /// Close a link with `bye`, waiting until it is cleaned up (its LinkDown emitted). The control
+    /// queue drains quickly; if it does not, the link is killed without bye.
+    async fn close_link(&self, (ctl, kill): (mpsc::Sender<LinkCmd>, Arc<Notify>), bye: ByeReason) {
         let (tx, rx) = oneshot::channel();
-        let sent = timeout(CLOSE_WAIT, cmd.send(LinkCmd::Close { bye: Some(bye), done: Some(tx) })).await;
+        let sent = timeout(CLOSE_WAIT, ctl.send(LinkCmd::Close { bye: Some(bye), done: Some(tx) })).await;
         if matches!(sent, Ok(Ok(()))) {
             let _ = timeout(CLOSE_WAIT, rx).await;
+        } else {
+            kill.notify_one();
         }
     }
 
@@ -1091,7 +1298,7 @@ impl Inner {
         let link = {
             let _g = lock(&self.gate);
             let known = self.roster.get(device_id).is_some();
-            let link = lock(&self.links).get(device_id).map(|l| l.cmd.clone());
+            let link = lock(&self.links).get(device_id).map(|l| (l.ctl.clone(), l.kill.clone()));
             if !known && link.is_none() {
                 return;
             }
@@ -1099,8 +1306,8 @@ impl Inner {
             link
         };
         self.stop_dialer(device_id);
-        if let Some(cmd) = link {
-            self.close_link(cmd, ByeReason::Revoked).await;
+        if let Some(handle) = link {
+            self.close_link(handle, ByeReason::Revoked).await;
         }
         info!(device = device_id, "device revoked");
         self.emit(PeerEvent::Revoked { device_id: device_id.to_string(), by_peer: false });
@@ -1114,8 +1321,9 @@ impl Inner {
         for (_, h) in lock(&self.dialers).drain() {
             h.abort();
         }
-        let links: Vec<mpsc::Sender<LinkCmd>> = lock(&self.links).values().map(|l| l.cmd.clone()).collect();
-        futures::future::join_all(links.into_iter().map(|cmd| self.close_link(cmd, ByeReason::Shutdown))).await;
+        let links: Vec<(mpsc::Sender<LinkCmd>, Arc<Notify>)> =
+            lock(&self.links).values().map(|l| (l.ctl.clone(), l.kill.clone())).collect();
+        futures::future::join_all(links.into_iter().map(|h| self.close_link(h, ByeReason::Shutdown))).await;
         lock(&self.invites).clear();
         let listener = lock(&self.listener).take();
         if let Some(mut l) = listener {
@@ -1162,6 +1370,10 @@ impl PeerNode {
     pub(crate) async fn test_dial_once(&self, device_id: &str) -> bool {
         let Some(addr) = self.inner.roster.get(device_id).and_then(|e| e.device.addr) else { return false };
         self.inner.dial_once(device_id, &addr).await.is_ok()
+    }
+
+    pub(crate) fn test_queued_bytes(&self, device_id: &str) -> Option<usize> {
+        lock(&self.inner.links).get(device_id).map(|l| l.queued_bytes.load(Ordering::SeqCst))
     }
 
     pub(crate) fn test_link_dialed_by_me(&self, device_id: &str) -> Option<bool> {

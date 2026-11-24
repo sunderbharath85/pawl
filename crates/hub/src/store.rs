@@ -1,7 +1,9 @@
 //! SQLite persistence (rusqlite, bundled). All methods here are blocking; async code goes through
 //! [`Store::run`], which moves the work onto tokio's blocking pool.
 
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -9,8 +11,8 @@ use anyhow::{bail, Context, Result};
 use krypto_peer::{Roster, RosterEntry};
 use krypto_protocol::{
     global_id, is_valid_machine_id, parse_global_id, Agent, ChatMessage, ChatRole, Device, DeviceKind, EventType,
-    HubEvent, Machine, MachineId, MachineOs, PermissionOptionKind, Pet, ResolvedBy, Rule, Session, SessionId, ToolKind,
-    UnixMs,
+    HubEvent, Machine, MachineId, MachineOs, PermissionOptionKind, PermissionRequest, Pet, ResolvedBy, Rule, Session,
+    SessionId, ToolKind, UnixMs,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Row, Transaction};
 use serde::{de::DeserializeOwned, Serialize};
@@ -24,7 +26,7 @@ enum Migration {
 
 /// Ordered schema migrations; `PRAGMA user_version` = number applied.
 const MIGRATIONS: &[Migration] =
-    &[Migration::Sql(SCHEMA_V1), Migration::Code(migrate_v2), Migration::Sql(SCHEMA_V3)];
+    &[Migration::Sql(SCHEMA_V1), Migration::Code(migrate_v2), Migration::Sql(SCHEMA_V3), Migration::Sql(SCHEMA_V4)];
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE agents (
@@ -147,6 +149,39 @@ CREATE TABLE pairing_audit (
 CREATE INDEX pairing_audit_ts ON pairing_audit(ts);
 "#;
 
+/// v4 (mirror): events carry their owner's `seq` (= rowid for this machine's own events, the owner's
+/// seq for mirrored ones), each paired device has a mirror sync cursor, and mirrored pending
+/// permission requests are kept so the mirror survives a restart while the peer is offline.
+const SCHEMA_V4: &str = r#"
+ALTER TABLE events ADD COLUMN seq INTEGER;
+UPDATE events SET seq = id;
+CREATE UNIQUE INDEX events_machine_seq ON events(machine_id, seq);
+CREATE INDEX events_session_seq ON events(session_id, seq);
+ALTER TABLE devices ADD COLUMN mirror_seq INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE devices ADD COLUMN mirror_bytes INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE mirror_pending (
+    request_id  TEXT PRIMARY KEY,
+    machine_id  TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    data        TEXT NOT NULL
+);
+CREATE INDEX mirror_pending_machine ON mirror_pending(machine_id);
+"#;
+
+/// Mirrored sessions per paired machine (oldest activity evicted first).
+pub const MIRROR_MAX_SESSIONS: i64 = 500;
+/// Mirrored events per mirrored session (oldest evicted first).
+pub const MIRROR_MAX_EVENTS_PER_SESSION: i64 = 2000;
+/// Mirrored pets per paired machine (one per agent; new ones beyond this are refused).
+pub const MIRROR_MAX_PETS: i64 = 200;
+/// Mirrored pending requests per paired machine (new ones beyond this are refused).
+pub const MIRROR_MAX_PENDING: i64 = 500;
+/// Ended mirrored sessions are kept this long.
+pub const MIRROR_RETENTION_MS: i64 = 7 * 86_400_000;
+/// Mirrored event payload bytes kept per paired machine (oldest events evicted beyond it).
+pub const MIRROR_MAX_PAYLOAD_BYTES: i64 = 256 * 1024 * 1024;
+
 const SETTING_RULES_SET: &str = "rules_set";
 /// The machine id hub.db was migrated with; every stored global id carries it.
 const SETTING_MACHINE_ID: &str = "machine_id";
@@ -221,6 +256,8 @@ pub struct Store {
     conn: Arc<Mutex<Connection>>,
     /// This hub's machine; prefix of every global id it stores.
     machine_id: MachineId,
+    /// Per-machine budget for mirrored event payload bytes (MIRROR_MAX_PAYLOAD_BYTES; tests lower it).
+    mirror_byte_budget: Arc<AtomicI64>,
 }
 
 fn enum_str<T: Serialize>(v: &T) -> String {
@@ -244,9 +281,10 @@ fn from_json<T: DeserializeOwned>(s: &str) -> rusqlite::Result<T> {
 }
 
 /// Columns read by [`row_event`].
-const EVENT_COLS: &str = "id, machine_id, session_id, type, payload, ts";
+const EVENT_COLS: &str = "seq, machine_id, session_id, type, payload, ts";
 
-/// The rowid is the per-machine `seq`; `HubEvent.id` is its global form.
+/// `seq` is the owner's per-machine sequence (the rowid for this machine's own events);
+/// `HubEvent.id` is its global form.
 fn row_event(r: &Row<'_>) -> rusqlite::Result<HubEvent> {
     let seq: i64 = r.get(0)?;
     let machine_id: String = r.get(1)?;
@@ -292,6 +330,7 @@ fn row_roster_entry(r: &Row<'_>) -> rusqlite::Result<RosterEntry> {
         last_seen: last_seen.unwrap_or(paired_at),
         online: false,
         hub_version: r.get(4)?,
+        user_active_at: None,
     };
     let device = Device {
         id,
@@ -353,7 +392,11 @@ impl Store {
         if stored_machine_id(&conn)?.is_none() {
             conn.execute("INSERT INTO settings (key, value) VALUES (?1, ?2)", params![SETTING_MACHINE_ID, machine_id])?;
         }
-        Ok(Self { conn: Arc::new(Mutex::new(conn)), machine_id: machine_id.to_string() })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            machine_id: machine_id.to_string(),
+            mirror_byte_budget: Arc::new(AtomicI64::new(MIRROR_MAX_PAYLOAD_BYTES)),
+        })
     }
 
     /// The machine this store belongs to.
@@ -413,33 +456,7 @@ impl Store {
     // ------------------------------------------------------------ sessions
 
     pub fn upsert_session(&self, s: &Session) -> Result<()> {
-        self.conn().execute(
-            "INSERT INTO sessions (id, agent_id, source, status, external_id, acp_session_id, cwd, title,
-                                   started_at, last_event_at, ended_at, data, machine_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-             ON CONFLICT(id) DO UPDATE SET
-                machine_id = excluded.machine_id, agent_id = excluded.agent_id, source = excluded.source, status = excluded.status,
-                external_id = excluded.external_id, acp_session_id = excluded.acp_session_id, cwd = excluded.cwd,
-                title = excluded.title, started_at = excluded.started_at,
-                last_event_at = max(sessions.last_event_at, excluded.last_event_at),
-                ended_at = excluded.ended_at, data = excluded.data",
-            params![
-                s.id,
-                s.agent_id,
-                enum_str(&s.source),
-                enum_str(&s.status),
-                s.external_id,
-                s.acp_session_id,
-                s.cwd,
-                s.title,
-                s.started_at,
-                s.last_event_at,
-                s.ended_at,
-                json(s)?,
-                s.machine_id
-            ],
-        )?;
-        Ok(())
+        write_session(&self.conn(), s, false)
     }
 
     pub fn session(&self, id: &str) -> Result<Option<Session>> {
@@ -447,17 +464,18 @@ impl Store {
         Ok(c.query_row(&format!("SELECT {SESSION_COLS} FROM sessions WHERE id = ?1"), [id], row_session).optional()?)
     }
 
-    /// Open sessions plus sessions with activity since `since` (newest first).
+    /// This machine's open sessions plus its sessions with activity since `since` (newest first).
     pub fn sessions_active_since(&self, since: UnixMs) -> Result<Vec<Session>> {
         let c = self.conn();
         let mut st = c.prepare(&format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE ended_at IS NULL OR last_event_at >= ?1 ORDER BY last_event_at DESC"
+            "SELECT {SESSION_COLS} FROM sessions WHERE machine_id = ?2 AND (ended_at IS NULL OR last_event_at >= ?1)
+             ORDER BY last_event_at DESC"
         ))?;
-        let rows = st.query_map([since], row_session)?;
+        let rows = st.query_map(params![since, self.machine_id], row_session)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// Most recent sessions, ended or not.
+    /// Most recent sessions of every machine (this one's and mirrored), ended or not.
     pub fn recent_sessions(&self, limit: u32) -> Result<Vec<Session>> {
         let c = self.conn();
         let mut st = c.prepare(&format!("SELECT {SESSION_COLS} FROM sessions ORDER BY last_event_at DESC LIMIT ?1"))?;
@@ -477,6 +495,7 @@ impl Store {
             params![self.machine_id, session_id, kind.as_str(), payload.to_string(), ts],
         )?;
         let seq = tx.last_insert_rowid();
+        tx.execute("UPDATE events SET seq = ?1 WHERE id = ?1", [seq])?;
         tx.execute(
             "UPDATE sessions SET last_event_at = max(last_event_at, ?2) WHERE id = ?1",
             params![session_id, ts],
@@ -500,14 +519,14 @@ impl Store {
         let mut out: Vec<HubEvent> = match since_seq {
             Some(since) => {
                 let mut st = c.prepare(&format!(
-                    "SELECT {EVENT_COLS} FROM events WHERE session_id = ?1 AND id > ?2 ORDER BY id ASC LIMIT ?3"
+                    "SELECT {EVENT_COLS} FROM events WHERE session_id = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3"
                 ))?;
                 let rows = st.query_map(params![session_id, since, limit], row_event)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             None => {
                 let mut st =
-                    c.prepare(&format!("SELECT {EVENT_COLS} FROM events WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2"))?;
+                    c.prepare(&format!("SELECT {EVENT_COLS} FROM events WHERE session_id = ?1 ORDER BY seq DESC LIMIT ?2"))?;
                 let rows = st.query_map(params![session_id, limit], row_event)?;
                 let mut v: Vec<HubEvent> = rows.filter_map(|r| r.ok()).collect();
                 v.reverse();
@@ -519,6 +538,20 @@ impl Store {
     }
 
     /// Latest events across all sessions (ascending), optionally skipping streaming chunks.
+    /// Latest events of this machine (`local`) or of mirrored machines (`!local`), ascending,
+    /// optionally skipping streaming chunks.
+    pub fn recent_events_of(&self, local: bool, limit: u32, skip_chunks: bool) -> Result<Vec<HubEvent>> {
+        let c = self.conn();
+        let op = if local { "=" } else { "!=" };
+        let chunks = if skip_chunks { " AND type NOT IN ('agent_thought_chunk', 'agent_message_chunk')" } else { "" };
+        let mut st =
+            c.prepare(&format!("SELECT {EVENT_COLS} FROM events WHERE machine_id {op} ?2{chunks} ORDER BY id DESC LIMIT ?1"))?;
+        let rows = st.query_map(params![limit, self.machine_id], row_event)?;
+        let mut v: Vec<HubEvent> = rows.filter_map(|r| r.ok()).collect();
+        v.reverse();
+        Ok(v)
+    }
+
     pub fn recent_events(&self, limit: u32, skip_chunks: bool) -> Result<Vec<HubEvent>> {
         let c = self.conn();
         let sql = if skip_chunks {
@@ -537,13 +570,15 @@ impl Store {
     }
 
     /// Events since `ts` (ascending), skipping streaming chunks.
+    /// This machine's events since `ts` (no streaming chunks), oldest first.
     pub fn events_since(&self, ts: UnixMs, limit: u32) -> Result<Vec<HubEvent>> {
         let c = self.conn();
         let mut st = c.prepare(&format!(
             "SELECT {EVENT_COLS} FROM events
-             WHERE ts >= ?1 AND type NOT IN ('agent_thought_chunk', 'agent_message_chunk') ORDER BY id ASC LIMIT ?2"
+             WHERE machine_id = ?3 AND ts >= ?1 AND type NOT IN ('agent_thought_chunk', 'agent_message_chunk')
+             ORDER BY id ASC LIMIT ?2"
         ))?;
-        let rows = st.query_map(params![ts, limit], row_event)?;
+        let rows = st.query_map(params![ts, limit, self.machine_id], row_event)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
@@ -819,6 +854,353 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    // ------------------------------------------------------------ mirror (paired hubs' data, read-only)
+    //
+    // Mirror rows live in the normal tables with the owner's machine_id. Every function here refuses
+    // this hub's own machine id and re-checks that each item belongs to the machine it is filed
+    // under (the hub validates first; this is the last line of defence). Nothing here ever updates a
+    // row whose machine_id differs from the item's.
+
+    fn check_mirror_machine(&self, machine_id: &str) -> Result<()> {
+        if machine_id == self.machine_id || !is_valid_machine_id(machine_id) {
+            bail!("refusing a mirror write for machine {machine_id:?}");
+        }
+        Ok(())
+    }
+
+    /// Upsert a mirrored session of `s.machine_id`, then evict that machine's oldest sessions beyond
+    /// [`MIRROR_MAX_SESSIONS`]. Returns the ids evicted (the caller drops them from its cache).
+    pub fn mirror_upsert_session(&self, s: &Session) -> Result<Vec<SessionId>> {
+        self.check_mirror_machine(&s.machine_id)?;
+        if !owned_by(&s.id, &s.machine_id) {
+            bail!("session id is not of machine {}", s.machine_id);
+        }
+        let mut c = self.conn();
+        let tx = c.transaction()?;
+        write_session(&tx, s, true)?;
+        let evicted = cap_mirror_sessions(&tx, &s.machine_id)?;
+        tx.commit()?;
+        Ok(evicted)
+    }
+
+    /// Set the per-machine budget for mirrored payload bytes (default MIRROR_MAX_PAYLOAD_BYTES).
+    pub fn set_mirror_byte_budget(&self, bytes: i64) {
+        self.mirror_byte_budget.store(bytes.max(0), Ordering::Relaxed);
+    }
+
+    /// Store mirrored events of `machine_id`, idempotently (keyed by machine + seq). Events whose id is
+    /// not `machine:seq`, that belong elsewhere, or whose session is not mirrored are skipped. Returns
+    /// the events that were new. `advance_cursor`: the link is in sync, so the sync cursor moves to
+    /// the highest seq that is now stored (inserted or already there); skipped events never move it.
+    /// The machine's mirrored payload bytes are kept within the byte budget (oldest evicted).
+    pub fn mirror_insert_events(&self, machine_id: &str, events: &[HubEvent], advance_cursor: bool) -> Result<Vec<HubEvent>> {
+        self.check_mirror_machine(machine_id)?;
+        let mut c = self.conn();
+        let tx = c.transaction()?;
+        let mut new = Vec::new();
+        let mut touched: Vec<&str> = Vec::new();
+        let mut max_seq = 0;
+        let mut added_bytes: i64 = 0;
+        for e in events {
+            if e.machine_id != machine_id || e.seq <= 0 || e.id != global_id(machine_id, e.seq) || !owned_by(&e.session_id, machine_id) {
+                continue;
+            }
+            let known = tx
+                .query_row("SELECT 1 FROM sessions WHERE id = ?1 AND machine_id = ?2", params![e.session_id, machine_id], |_| Ok(()))
+                .optional()?
+                .is_some();
+            if !known {
+                continue;
+            }
+            let payload = e.payload.to_string();
+            let n = tx.execute(
+                "INSERT INTO events (machine_id, seq, session_id, type, payload, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(machine_id, seq) DO NOTHING",
+                params![machine_id, e.seq, e.session_id, e.kind.as_str(), payload, e.ts],
+            )?;
+            // Inserted now or already stored: either way it is in the mirror.
+            max_seq = max_seq.max(e.seq);
+            if n == 1 {
+                added_bytes += payload.len() as i64;
+                tx.execute(
+                    "UPDATE sessions SET last_event_at = max(last_event_at, ?2) WHERE id = ?1 AND machine_id = ?3",
+                    params![e.session_id, e.ts, machine_id],
+                )?;
+                if !touched.contains(&e.session_id.as_str()) {
+                    touched.push(&e.session_id);
+                }
+                new.push(e.clone());
+            }
+        }
+        for sid in touched {
+            cap_mirror_session_events(&tx, machine_id, sid)?;
+        }
+        if added_bytes > 0 {
+            enforce_byte_budget(&tx, machine_id, added_bytes, self.mirror_byte_budget.load(Ordering::Relaxed))?;
+        }
+        if advance_cursor && max_seq > 0 {
+            tx.execute(
+                "UPDATE devices SET mirror_seq = MAX(mirror_seq, ?2) WHERE id = ?1",
+                params![machine_id, max_seq],
+            )?;
+        }
+        tx.commit()?;
+        Ok(new)
+    }
+
+    /// Upsert a mirrored pet. A machine gets at most [`MIRROR_MAX_PETS`]; one per agent.
+    pub fn mirror_upsert_pet(&self, p: &Pet) -> Result<()> {
+        self.check_mirror_machine(&p.machine_id)?;
+        if !owned_by(&p.id, &p.machine_id) {
+            bail!("pet id is not of machine {}", p.machine_id);
+        }
+        let mut c = self.conn();
+        let tx = c.transaction()?;
+        write_mirror_pet(&tx, p)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Record a mirrored pending permission request (at most [`MIRROR_MAX_PENDING`] per machine).
+    pub fn mirror_put_pending(&self, r: &PermissionRequest) -> Result<()> {
+        self.check_mirror_machine(&r.machine_id)?;
+        if !owned_by(&r.request_id, &r.machine_id) || !owned_by(&r.session_id, &r.machine_id) {
+            bail!("request ids are not of machine {}", r.machine_id);
+        }
+        let mut c = self.conn();
+        let tx = c.transaction()?;
+        write_mirror_pending(&tx, r)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Drop a mirrored pending request. True if it was there.
+    pub fn mirror_remove_pending(&self, machine_id: &str, request_id: &str) -> Result<bool> {
+        self.check_mirror_machine(machine_id)?;
+        let n = self.conn().execute(
+            "DELETE FROM mirror_pending WHERE request_id = ?1 AND machine_id = ?2",
+            params![request_id, machine_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Apply a `mirror_snapshot`: it replaces that machine's sessions (and their events), pets and
+    /// pending requests. Items not of `machine_id` are skipped.
+    pub fn mirror_replace(
+        &self,
+        machine_id: &str,
+        sessions: &[Session],
+        pets: &[Pet],
+        pending: &[PermissionRequest],
+    ) -> Result<()> {
+        self.check_mirror_machine(machine_id)?;
+        let mut c = self.conn();
+        let tx = c.transaction()?;
+        let keep: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        let existing: Vec<String> =
+            select_rows(&tx, "SELECT id FROM sessions WHERE machine_id = ?1", |r| r.get(0), params![machine_id])?;
+        for id in existing.iter().filter(|id| !keep.contains(id.as_str())) {
+            tx.execute("DELETE FROM events WHERE session_id = ?1 AND machine_id = ?2", params![id, machine_id])?;
+            tx.execute("DELETE FROM sessions WHERE id = ?1 AND machine_id = ?2", params![id, machine_id])?;
+        }
+        for s in sessions.iter().filter(|s| s.machine_id == machine_id && owned_by(&s.id, machine_id)) {
+            write_session(&tx, s, true)?;
+        }
+        cap_mirror_sessions(&tx, machine_id)?;
+        let keep_pets: HashSet<&str> = pets.iter().map(|p| p.id.as_str()).collect();
+        let existing: Vec<String> =
+            select_rows(&tx, "SELECT id FROM pets WHERE machine_id = ?1", |r| r.get(0), params![machine_id])?;
+        for id in existing.iter().filter(|id| !keep_pets.contains(id.as_str())) {
+            tx.execute("DELETE FROM pets WHERE id = ?1 AND machine_id = ?2", params![id, machine_id])?;
+        }
+        for p in pets.iter().filter(|p| p.machine_id == machine_id && owned_by(&p.id, machine_id)) {
+            if let Err(e) = write_mirror_pet(&tx, p) {
+                tracing::debug!("mirror snapshot: skipped a pet: {e:#}");
+            }
+        }
+        tx.execute("DELETE FROM mirror_pending WHERE machine_id = ?1", params![machine_id])?;
+        for r in pending.iter().filter(|r| {
+            r.machine_id == machine_id && owned_by(&r.request_id, machine_id) && owned_by(&r.session_id, machine_id)
+        }) {
+            if let Err(e) = write_mirror_pending(&tx, r) {
+                tracing::debug!("mirror snapshot: skipped a request: {e:#}");
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Mirrored sessions (every machine but this one) that are open or had activity since `since`.
+    pub fn mirror_sessions(&self, since: UnixMs) -> Result<Vec<Session>> {
+        let c = self.conn();
+        let mut st = c.prepare(&format!(
+            "SELECT {SESSION_COLS} FROM sessions WHERE machine_id != ?1 AND (ended_at IS NULL OR last_event_at >= ?2)
+             ORDER BY last_event_at DESC"
+        ))?;
+        let rows = st.query_map(params![self.machine_id, since], row_session)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Every mirrored pending permission request, oldest first.
+    pub fn mirror_pending(&self) -> Result<Vec<PermissionRequest>> {
+        let c = self.conn();
+        let mut st = c.prepare("SELECT data FROM mirror_pending ORDER BY created_at, request_id")?;
+        let rows = st.query_map([], |r| from_json::<PermissionRequest>(&r.get::<_, String>(0)?))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Whether `id` is a mirrored session (of a machine other than this one).
+    pub fn is_mirrored_session(&self, id: &str) -> Result<bool> {
+        let c = self.conn();
+        Ok(c
+            .query_row("SELECT 1 FROM sessions WHERE id = ?1 AND machine_id != ?2", params![id, self.machine_id], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
+    /// The seq this hub has mirrored `machine_id`'s events up to without gaps (0 = nothing yet).
+    pub fn mirror_cursor(&self, machine_id: &str) -> Result<i64> {
+        let v: Option<i64> = self
+            .conn()
+            .query_row("SELECT mirror_seq FROM devices WHERE id = ?1", [machine_id], |r| r.get(0))
+            .optional()?;
+        Ok(v.unwrap_or(0))
+    }
+
+    /// End of a sync: the cursor moves to the highest mirrored seq actually stored (never to what the
+    /// peer claims). Returns the new cursor.
+    pub fn finish_mirror_sync(&self, machine_id: &str) -> Result<i64> {
+        self.check_mirror_machine(machine_id)?;
+        let c = self.conn();
+        let stored: Option<i64> =
+            c.query_row("SELECT MAX(seq) FROM events WHERE machine_id = ?1", [machine_id], |r| r.get(0))?;
+        c.execute(
+            "UPDATE devices SET mirror_seq = MAX(mirror_seq, ?2) WHERE id = ?1",
+            params![machine_id, stored.unwrap_or(0)],
+        )?;
+        let cursor: Option<i64> =
+            c.query_row("SELECT mirror_seq FROM devices WHERE id = ?1", [machine_id], |r| r.get(0)).optional()?;
+        Ok(cursor.unwrap_or(0))
+    }
+
+    /// The peer's seq space restarted (its hub.db was reset): forget its mirrored events and cursor.
+    pub fn reset_mirror_events(&self, machine_id: &str) -> Result<()> {
+        self.check_mirror_machine(machine_id)?;
+        let mut c = self.conn();
+        let tx = c.transaction()?;
+        tx.execute("DELETE FROM events WHERE machine_id = ?1", [machine_id])?;
+        tx.execute("UPDATE devices SET mirror_seq = 0, mirror_bytes = 0 WHERE id = ?1", [machine_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The highest event seq this machine has ever issued (0 if none). Taken from the AUTOINCREMENT
+    /// high-water mark, so pruning old events never makes it go back (only a reset hub.db does).
+    pub fn local_max_seq(&self) -> Result<i64> {
+        let c = self.conn();
+        let issued: Option<i64> =
+            c.query_row("SELECT seq FROM sqlite_sequence WHERE name = 'events'", [], |r| r.get(0)).optional()?;
+        let stored: Option<i64> =
+            c.query_row("SELECT MAX(seq) FROM events WHERE machine_id = ?1", [&self.machine_id], |r| r.get(0))?;
+        Ok(issued.unwrap_or(0).max(stored.unwrap_or(0)))
+    }
+
+    /// Delete everything mirrored from `machine_id` (revoke) and reset its sync cursor.
+    pub fn delete_mirror(&self, machine_id: &str) -> Result<()> {
+        self.check_mirror_machine(machine_id)?;
+        let mut c = self.conn();
+        let tx = c.transaction()?;
+        for table in ["events", "sessions", "pets", "mirror_pending"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE machine_id = ?1"), [machine_id])?;
+        }
+        tx.execute("UPDATE devices SET mirror_seq = 0, mirror_bytes = 0 WHERE id = ?1", [machine_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Delete mirror rows of machines that are neither this one nor in `paired` (left over from a
+    /// revoke that happened while the hub was down). Returns the number of rows removed.
+    pub fn delete_unpaired_mirrors(&self, paired: &[String]) -> Result<usize> {
+        let mut c = self.conn();
+        let tx = c.transaction()?;
+        let mut keep: Vec<&str> = paired.iter().map(String::as_str).collect();
+        keep.push(&self.machine_id);
+        let mut machines: Vec<String> = Vec::new();
+        for table in ["events", "sessions", "pets", "mirror_pending"] {
+            let ms: Vec<String> = select_rows(&tx, &format!("SELECT DISTINCT machine_id FROM {table}"), |r| r.get(0), [])?;
+            machines.extend(ms);
+        }
+        machines.sort();
+        machines.dedup();
+        let mut n = 0;
+        for m in machines.iter().filter(|m| !keep.contains(&m.as_str()) && !m.is_empty()) {
+            for table in ["events", "sessions", "pets", "mirror_pending"] {
+                n += tx.execute(&format!("DELETE FROM {table} WHERE machine_id = ?1"), [m])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// Housekeeping: drop mirrored sessions that ended more than [`MIRROR_RETENTION_MS`] ago (with their
+    /// events) and enforce the per-machine caps. Returns the number of sessions removed (age and cap).
+    pub fn prune_mirror(&self, now: UnixMs) -> Result<usize> {
+        let mut c = self.conn();
+        let tx = c.transaction()?;
+        let old: Vec<(String, String)> = select_rows(
+            &tx,
+            "SELECT id, machine_id FROM sessions WHERE machine_id != ?1 AND ended_at IS NOT NULL AND ended_at < ?2",
+            |r| Ok((r.get(0)?, r.get(1)?)),
+            params![self.machine_id, now - MIRROR_RETENTION_MS],
+        )?;
+        for (id, m) in &old {
+            tx.execute("DELETE FROM events WHERE session_id = ?1 AND machine_id = ?2", params![id, m])?;
+            tx.execute("DELETE FROM sessions WHERE id = ?1 AND machine_id = ?2", params![id, m])?;
+        }
+        let mut removed = old.len();
+        let machines: Vec<String> =
+            select_rows(&tx, "SELECT DISTINCT machine_id FROM sessions WHERE machine_id != ?1", |r| r.get(0), [&self.machine_id])?;
+        for m in &machines {
+            removed += cap_mirror_sessions(&tx, m)?.len();
+            let sids: Vec<String> =
+                select_rows(&tx, "SELECT id FROM sessions WHERE machine_id = ?1", |r| r.get(0), [m])?;
+            for sid in &sids {
+                cap_mirror_session_events(&tx, m, sid)?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    // ------------------------------------------------------------ owner side of a sync
+
+    /// This machine's sessions for a `mirror_snapshot`: open ones and those ended since
+    /// `ended_since`, newest activity first, at most `limit`.
+    pub fn sync_sessions(&self, ended_since: UnixMs, limit: u32) -> Result<Vec<Session>> {
+        let c = self.conn();
+        let mut st = c.prepare(&format!(
+            "SELECT {SESSION_COLS} FROM sessions WHERE machine_id = ?1 AND (ended_at IS NULL OR ended_at >= ?2)
+             ORDER BY last_event_at DESC LIMIT ?3"
+        ))?;
+        let rows = st.query_map(params![self.machine_id, ended_since, limit], row_session)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// This machine's events with seq > `since`: the newest `limit` of them, oldest first, and
+    /// whether older matching events were left out.
+    pub fn local_events_after(&self, since: i64, limit: usize) -> Result<(Vec<HubEvent>, bool)> {
+        let c = self.conn();
+        let mut st = c.prepare(&format!(
+            "SELECT {EVENT_COLS} FROM events WHERE machine_id = ?1 AND seq > ?2 ORDER BY seq DESC LIMIT ?3"
+        ))?;
+        let rows = st.query_map(params![self.machine_id, since, limit as i64 + 1], row_event)?;
+        let mut v: Vec<HubEvent> = rows.filter_map(|r| r.ok()).collect();
+        let truncated = v.len() > limit;
+        v.truncate(limit);
+        v.reverse();
+        Ok((v, truncated))
+    }
+
     // ------------------------------------------------------------ settings
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
@@ -953,6 +1335,189 @@ fn globalize_field(obj: &mut serde_json::Map<String, Value>, key: &str, machine_
             *v = globalize(machine_id, v);
         }
     }
+}
+
+/// `id` is a global id of `machine_id`.
+fn owned_by(id: &str, machine_id: &str) -> bool {
+    parse_global_id(id).is_some_and(|(m, _)| m == machine_id)
+}
+
+/// `query_rows` with parameters.
+fn select_rows<T, F, P>(tx: &Transaction<'_>, sql: &str, f: F, p: P) -> Result<Vec<T>>
+where
+    F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
+    P: rusqlite::Params,
+{
+    let mut st = tx.prepare(sql)?;
+    let rows = st.query_map(p, f)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<T>>>()?)
+}
+
+/// Insert or update a session row. `mirror`: only ever update a row of the same machine.
+fn write_session(c: &Connection, s: &Session, mirror: bool) -> Result<()> {
+    let guard = if mirror { " WHERE sessions.machine_id = excluded.machine_id" } else { "" };
+    c.execute(
+        &format!(
+            "INSERT INTO sessions (id, agent_id, source, status, external_id, acp_session_id, cwd, title,
+                                   started_at, last_event_at, ended_at, data, machine_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(id) DO UPDATE SET
+                machine_id = excluded.machine_id, agent_id = excluded.agent_id, source = excluded.source, status = excluded.status,
+                external_id = excluded.external_id, acp_session_id = excluded.acp_session_id, cwd = excluded.cwd,
+                title = excluded.title, started_at = excluded.started_at,
+                last_event_at = max(sessions.last_event_at, excluded.last_event_at),
+                ended_at = excluded.ended_at, data = excluded.data{guard}"
+        ),
+        params![
+            s.id,
+            s.agent_id,
+            enum_str(&s.source),
+            enum_str(&s.status),
+            s.external_id,
+            s.acp_session_id,
+            s.cwd,
+            s.title,
+            s.started_at,
+            s.last_event_at,
+            s.ended_at,
+            json(s)?,
+            s.machine_id
+        ],
+    )?;
+    Ok(())
+}
+
+/// Insert or replace a mirrored pet (one per agent per machine; at most MIRROR_MAX_PETS per machine).
+fn write_mirror_pet(tx: &Transaction<'_>, p: &Pet) -> Result<()> {
+    let foreign = tx
+        .query_row("SELECT 1 FROM pets WHERE id = ?1 AND machine_id != ?2", params![p.id, p.machine_id], |_| Ok(()))
+        .optional()?
+        .is_some();
+    if foreign {
+        bail!("pet id belongs to another machine");
+    }
+    let exists = tx
+        .query_row(
+            "SELECT 1 FROM pets WHERE machine_id = ?1 AND (id = ?2 OR agent_id = ?3)",
+            params![p.machine_id, p.id, p.agent_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    let count: i64 = tx.query_row("SELECT COUNT(*) FROM pets WHERE machine_id = ?1", [&p.machine_id], |r| r.get(0))?;
+    if !exists && count >= MIRROR_MAX_PETS {
+        bail!("machine {} already has {MIRROR_MAX_PETS} mirrored pets", p.machine_id);
+    }
+    // REPLACE only ever removes rows of the same machine: the id and (machine, agent) both match it.
+    tx.execute(
+        "INSERT OR REPLACE INTO pets (id, machine_id, agent_id, data) VALUES (?1, ?2, ?3, ?4)",
+        params![p.id, p.machine_id, p.agent_id, json(p)?],
+    )?;
+    Ok(())
+}
+
+fn write_mirror_pending(tx: &Transaction<'_>, r: &PermissionRequest) -> Result<()> {
+    let exists = tx
+        .query_row("SELECT machine_id FROM mirror_pending WHERE request_id = ?1", [&r.request_id], |row| row.get::<_, String>(0))
+        .optional()?;
+    match exists {
+        Some(m) if m != r.machine_id => bail!("request id belongs to another machine"),
+        Some(_) => {}
+        None => {
+            let count: i64 =
+                tx.query_row("SELECT COUNT(*) FROM mirror_pending WHERE machine_id = ?1", [&r.machine_id], |row| row.get(0))?;
+            if count >= MIRROR_MAX_PENDING {
+                bail!("machine {} already has {MIRROR_MAX_PENDING} mirrored requests", r.machine_id);
+            }
+        }
+    }
+    tx.execute(
+        "INSERT INTO mirror_pending (request_id, machine_id, session_id, created_at, data) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(request_id) DO UPDATE SET session_id = excluded.session_id, created_at = excluded.created_at,
+                                               data = excluded.data
+         WHERE mirror_pending.machine_id = excluded.machine_id",
+        params![r.request_id, r.machine_id, r.session_id, r.created_at, json(r)?],
+    )?;
+    Ok(())
+}
+
+/// Keep a mirrored machine's newest MIRROR_MAX_SESSIONS sessions (by activity); drop the rest with
+/// their events.
+fn cap_mirror_sessions(tx: &Transaction<'_>, machine_id: &str) -> Result<Vec<String>> {
+    let extra: Vec<String> = select_rows(
+        tx,
+        "SELECT id FROM sessions WHERE machine_id = ?1 ORDER BY last_event_at DESC, id LIMIT -1 OFFSET ?2",
+        |r| r.get(0),
+        params![machine_id, MIRROR_MAX_SESSIONS],
+    )?;
+    for id in &extra {
+        tx.execute("DELETE FROM events WHERE session_id = ?1 AND machine_id = ?2", params![id, machine_id])?;
+        tx.execute("DELETE FROM sessions WHERE id = ?1 AND machine_id = ?2", params![id, machine_id])?;
+    }
+    Ok(extra)
+}
+
+/// Keep a mirrored machine's event payload bytes within `budget`. `devices.mirror_bytes` is a cheap
+/// upper bound (incremented on insert, never decremented by other deletes); only when it passes the
+/// budget is the exact sum taken, and if that is over too, the oldest events go until 90% of the
+/// budget is left.
+fn enforce_byte_budget(tx: &Transaction<'_>, machine_id: &str, added: i64, budget: i64) -> Result<()> {
+    let estimate: Option<i64> = tx
+        .query_row(
+            "UPDATE devices SET mirror_bytes = mirror_bytes + ?2 WHERE id = ?1 RETURNING mirror_bytes",
+            params![machine_id, added],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if estimate.is_some_and(|b| b <= budget) {
+        return Ok(());
+    }
+    let exact: i64 = tx.query_row(
+        "SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM events WHERE machine_id = ?1",
+        [machine_id],
+        |r| r.get(0),
+    )?;
+    let mut total = exact;
+    if exact > budget {
+        let target = budget - budget / 10;
+        let mut st = tx.prepare("SELECT seq, LENGTH(payload) FROM events WHERE machine_id = ?1 ORDER BY seq ASC")?;
+        let mut rows = st.query([machine_id])?;
+        let mut cutoff = None;
+        while let Some(r) = rows.next()? {
+            let (seq, len): (i64, i64) = (r.get(0)?, r.get(1)?);
+            total -= len;
+            cutoff = Some(seq);
+            if total <= target {
+                break;
+            }
+        }
+        drop(rows);
+        drop(st);
+        if let Some(cutoff) = cutoff {
+            tx.execute("DELETE FROM events WHERE machine_id = ?1 AND seq <= ?2", params![machine_id, cutoff])?;
+            tracing::warn!(device = %machine_id, "mirror over its byte budget: evicted events up to seq {cutoff}");
+        }
+    }
+    tx.execute("UPDATE devices SET mirror_bytes = ?2 WHERE id = ?1", params![machine_id, total])?;
+    Ok(())
+}
+
+/// Keep a mirrored session's newest MIRROR_MAX_EVENTS_PER_SESSION events.
+fn cap_mirror_session_events(tx: &Transaction<'_>, machine_id: &str, session_id: &str) -> Result<()> {
+    let cutoff: Option<i64> = tx
+        .query_row(
+            "SELECT seq FROM events WHERE machine_id = ?1 AND session_id = ?2 ORDER BY seq DESC LIMIT 1 OFFSET ?3",
+            params![machine_id, session_id, MIRROR_MAX_EVENTS_PER_SESSION],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(cutoff) = cutoff {
+        tx.execute(
+            "DELETE FROM events WHERE machine_id = ?1 AND session_id = ?2 AND seq <= ?3",
+            params![machine_id, session_id, cutoff],
+        )?;
+    }
+    Ok(())
 }
 
 fn query_rows<T, F>(tx: &Transaction<'_>, sql: &str, f: F) -> Result<Vec<T>>
@@ -1386,6 +1951,7 @@ mod tests {
                 last_seen: 100,
                 online: false,
                 hub_version: Some("0.1.0".into()),
+                user_active_at: None,
             },
         }
     }
@@ -1490,12 +2056,261 @@ mod tests {
         }
         let s = Store::open(&p, MID).unwrap();
         let v: i64 = s.conn().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, MIGRATIONS.len() as i64);
         assert_eq!(s.setting("kept").unwrap().as_deref(), Some("yes"));
         assert!(s.roster().unwrap().is_empty());
         s.upsert_device(&roster_entry("zyxwvu987654", "Mac mini", "pk", None)).unwrap();
         assert_eq!(s.roster().unwrap().len(), 1);
         assert!(s.pairing_audit(5).unwrap().is_empty());
+    }
+
+    const PEER: &str = "zyxwvu987654";
+
+    fn peer_session(local: &str, last: UnixMs) -> Session {
+        Session { id: global_id(PEER, local), machine_id: PEER.into(), ..session(local, last) }
+    }
+
+    fn peer_event(seq: i64, session_id: &str) -> HubEvent {
+        HubEvent {
+            id: global_id(PEER, seq),
+            seq,
+            machine_id: PEER.into(),
+            session_id: session_id.into(),
+            kind: EventType::ToolCall,
+            payload: json!({ "n": seq }),
+            ts: 100 + seq,
+        }
+    }
+
+    #[test]
+    fn mirror_rows_keep_their_owner_and_never_touch_ours() {
+        let s = Store::open_in_memory(MID).unwrap();
+        s.upsert_session(&session("mine", 10)).unwrap();
+        let mine = s.insert_event(&gid("mine"), EventType::ToolCall, &json!({}), 10).unwrap();
+        assert_eq!((mine.id.clone(), mine.seq), (gid("1"), 1), "local seq = rowid");
+
+        // This machine can never be written through the mirror API.
+        assert!(s.mirror_upsert_session(&session("x", 1)).is_err());
+        assert!(s.mirror_insert_events(MID, std::slice::from_ref(&mine), false).is_err());
+        assert!(s.delete_mirror(MID).is_err());
+        let mut own_pet = Pet {
+            id: gid("pet-codex"),
+            machine_id: MID.into(),
+            agent_id: "codex".into(),
+            species: Species::Dog,
+            skin: "default".into(),
+            name: "Mine".into(),
+            personality: String::new(),
+            mood: 50,
+            xp: 0,
+        };
+        s.upsert_pet(&own_pet).unwrap();
+        assert!(s.mirror_upsert_pet(&own_pet).is_err());
+        own_pet.machine_id = PEER.into(); // our id under the peer's machine
+        assert!(s.mirror_upsert_pet(&own_pet).is_err());
+        assert_eq!(s.pets().unwrap().into_iter().find(|p| p.id == gid("pet-codex")).unwrap().machine_id, MID);
+        let mut spoof = peer_session("x", 1);
+        spoof.id = gid("mine");
+        assert!(s.mirror_upsert_session(&spoof).is_err(), "our session id under the peer's machine");
+        assert_eq!(s.session(&gid("mine")).unwrap().unwrap().machine_id, MID);
+
+        // Mirrored events keep the owner's seq, even where it collides with a local seq.
+        let ps = peer_session("s", 5);
+        s.mirror_upsert_session(&ps).unwrap();
+        let pe = peer_event(1, &ps.id);
+        let new = s.mirror_insert_events(PEER, &[pe.clone(), pe.clone()], false).unwrap();
+        assert_eq!(new, vec![pe.clone()], "idempotent by (machine, seq)");
+        assert!(s.mirror_insert_events(PEER, std::slice::from_ref(&pe), false).unwrap().is_empty());
+        assert_eq!(s.events(&ps.id, None, 10).unwrap(), vec![pe.clone()]);
+        assert_eq!(s.events(&gid("mine"), None, 10).unwrap(), vec![mine.clone()]);
+        // Crafted events the hub should have dropped are skipped by the store as well.
+        let mut into_ours = peer_event(9, &gid("mine"));
+        into_ours.session_id = gid("mine");
+        let mut bad_id = peer_event(10, &ps.id);
+        bad_id.id = global_id(PEER, 11);
+        let orphan = peer_event(12, &global_id(PEER, "unknown"));
+        assert!(s.mirror_insert_events(PEER, &[into_ours, bad_id, orphan], true).unwrap().is_empty());
+        assert_eq!(s.events(&gid("mine"), None, 10).unwrap(), vec![mine.clone()]);
+
+        // The owner side of a sync only ever reads this machine's rows.
+        let (local, truncated) = s.local_events_after(0, 10).unwrap();
+        assert_eq!((local, truncated), (vec![mine.clone()], false));
+        assert_eq!(s.sync_sessions(0, 10).unwrap().iter().map(|x| x.id.clone()).collect::<Vec<_>>(), vec![gid("mine")]);
+        assert_eq!(s.sessions_active_since(0).unwrap().len(), 1, "the local cache never loads mirrored sessions");
+        assert_eq!(s.mirror_sessions(0).unwrap().iter().map(|x| x.id.clone()).collect::<Vec<_>>(), vec![ps.id.clone()]);
+        assert!(s.is_mirrored_session(&ps.id).unwrap() && !s.is_mirrored_session(&gid("mine")).unwrap());
+
+        // Pending requests, then the sync cursor, then revoke.
+        let req = PermissionRequest {
+            request_id: global_id(PEER, "r1"),
+            machine_id: PEER.into(),
+            session_id: ps.id.clone(),
+            agent_id: "codex".into(),
+            tool_call: Default::default(),
+            options: vec![],
+            created_at: 7,
+        };
+        s.mirror_put_pending(&req).unwrap();
+        assert_eq!(s.mirror_pending().unwrap(), vec![req.clone()]);
+        assert!(s.mirror_remove_pending(PEER, &req.request_id).unwrap());
+        s.mirror_put_pending(&req).unwrap();
+        s.upsert_device(&roster_entry(PEER, "Mac mini", "pk", None)).unwrap();
+        assert_eq!(s.mirror_cursor(PEER).unwrap(), 0);
+        assert_eq!(s.finish_mirror_sync(PEER).unwrap(), 1, "everything stored so far counts");
+        s.mirror_insert_events(PEER, &[peer_event(5, &ps.id)], true).unwrap();
+        assert_eq!(s.mirror_cursor(PEER).unwrap(), 5);
+        s.delete_mirror(PEER).unwrap();
+        assert!(s.mirror_sessions(0).unwrap().is_empty() && s.mirror_pending().unwrap().is_empty());
+        assert_eq!(s.mirror_cursor(PEER).unwrap(), 0);
+        assert!(s.events(&ps.id, None, 10).unwrap().is_empty());
+        assert_eq!(s.events(&gid("mine"), None, 10).unwrap(), vec![mine]);
+        assert_eq!(s.pets().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn mirror_snapshot_replaces_that_machines_set() {
+        let s = Store::open_in_memory(MID).unwrap();
+        s.upsert_session(&session("mine", 10)).unwrap();
+        let (a, b) = (peer_session("a", 5), peer_session("b", 6));
+        s.mirror_upsert_session(&a).unwrap();
+        s.mirror_upsert_session(&b).unwrap();
+        s.mirror_insert_events(PEER, &[peer_event(1, &a.id), peer_event(2, &b.id)], false).unwrap();
+        s.mirror_replace(PEER, &[b.clone(), session("evil", 1)], &[], &[]).unwrap();
+        assert_eq!(s.mirror_sessions(0).unwrap().iter().map(|x| x.id.clone()).collect::<Vec<_>>(), vec![b.id.clone()]);
+        assert!(s.events(&a.id, None, 10).unwrap().is_empty(), "a session left out takes its events with it");
+        assert_eq!(s.events(&b.id, None, 10).unwrap().len(), 1);
+        assert!(s.session(&gid("evil")).unwrap().is_none(), "items of another machine in a snapshot are skipped");
+        assert!(s.session(&gid("mine")).unwrap().is_some());
+        assert!(s.mirror_replace(MID, &[], &[], &[]).is_err());
+    }
+
+    #[test]
+    fn mirror_storage_is_capped_and_pruned() {
+        let s = Store::open_in_memory(MID).unwrap();
+        s.upsert_session(&session("mine", 1)).unwrap();
+        for i in 0..(MIRROR_MAX_SESSIONS + 5) {
+            s.mirror_upsert_session(&peer_session(&format!("s{i:04}"), 1000 + i)).unwrap();
+        }
+        let kept = s.mirror_sessions(0).unwrap();
+        assert_eq!(kept.len() as i64, MIRROR_MAX_SESSIONS);
+        assert!(kept.iter().all(|x| x.last_event_at >= 1005), "the oldest were evicted");
+        assert!(s.session(&gid("mine")).unwrap().is_some());
+
+        let sid = global_id(PEER, format!("s{:04}", MIRROR_MAX_SESSIONS + 4));
+        let events: Vec<HubEvent> = (1..=MIRROR_MAX_EVENTS_PER_SESSION + 5).map(|q| peer_event(q, &sid)).collect();
+        s.mirror_insert_events(PEER, &events, false).unwrap();
+        let stored = s.events(&sid, None, 5000).unwrap();
+        assert_eq!(stored.len() as i64, MIRROR_MAX_EVENTS_PER_SESSION);
+        assert_eq!(stored[0].seq, 6, "oldest events evicted first");
+
+        for i in 0..MIRROR_MAX_PETS {
+            let mut p = Pet {
+                id: global_id(PEER, format!("pet-a{i}")),
+                machine_id: PEER.into(),
+                agent_id: format!("a{i}"),
+                species: Species::Dog,
+                skin: "default".into(),
+                name: format!("P{i}"),
+                personality: String::new(),
+                mood: 50,
+                xp: 0,
+            };
+            s.mirror_upsert_pet(&p).unwrap();
+            if i == 0 {
+                p.name = "Renamed".into();
+                s.mirror_upsert_pet(&p).unwrap(); // an update is never refused
+            }
+        }
+        let extra = Pet { id: global_id(PEER, "pet-z"), agent_id: "z".into(), ..s.pets().unwrap().pop().unwrap() };
+        assert!(s.mirror_upsert_pet(&extra).is_err(), "pets beyond the cap are refused");
+
+        // Ended more than 7 days ago: pruned with its events. Recent or open: kept.
+        let now = 100 * 86_400_000;
+        let mut old = peer_session("old", now - 9 * 86_400_000);
+        old.ended_at = Some(now - 8 * 86_400_000);
+        let mut recent = peer_session("recent", now - 86_400_000);
+        recent.ended_at = Some(now - 86_400_000);
+        s.mirror_replace(PEER, &[old.clone(), recent.clone()], &[], &[]).unwrap();
+        s.mirror_insert_events(PEER, &[peer_event(1, &old.id)], false).unwrap();
+        assert_eq!(s.prune_mirror(now).unwrap(), 1);
+        assert_eq!(s.mirror_sessions(0).unwrap().iter().map(|x| x.id.clone()).collect::<Vec<_>>(), vec![recent.id]);
+        assert!(s.events(&old.id, None, 10).unwrap().is_empty());
+
+        // Rows of machines that are no longer paired go; this machine's stay.
+        assert!(s.delete_unpaired_mirrors(&[]).unwrap() > 0);
+        assert!(s.mirror_sessions(0).unwrap().is_empty());
+        assert!(s.pets().unwrap().is_empty());
+        assert!(s.session(&gid("mine")).unwrap().is_some());
+    }
+
+    #[test]
+    fn sync_reads_the_newest_local_events() {
+        let s = Store::open_in_memory(MID).unwrap();
+        s.upsert_session(&session("mine", 1)).unwrap();
+        for i in 0..5 {
+            s.insert_event(&gid("mine"), EventType::ToolCall, &json!({ "i": i }), i).unwrap();
+        }
+        let (v, truncated) = s.local_events_after(0, 3).unwrap();
+        assert_eq!(v.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![3, 4, 5]);
+        assert!(truncated);
+        let (v, truncated) = s.local_events_after(2, 10).unwrap();
+        assert_eq!(v.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![3, 4, 5]);
+        assert!(!truncated);
+        // Pruning never lowers the seq reported in sync_done (a peer would think we were reset).
+        assert_eq!(s.local_max_seq().unwrap(), 5);
+        s.prune_events_before(i64::MAX).unwrap();
+        assert_eq!(s.local_max_seq().unwrap(), 5);
+    }
+
+    /// Review fix 3: only events that are stored (inserted now or already there) move the cursor.
+    #[test]
+    fn skipped_events_never_move_the_cursor() {
+        let s = Store::open_in_memory(MID).unwrap();
+        s.upsert_device(&roster_entry(PEER, "Mac mini", "pk", None)).unwrap();
+        let ps = peer_session("s", 5);
+        s.mirror_upsert_session(&ps).unwrap();
+        let orphan = |seq| peer_event(seq, &global_id(PEER, "not-mirrored"));
+        s.mirror_insert_events(PEER, &[orphan(100), peer_event(5, &ps.id)], true).unwrap();
+        assert_eq!(s.mirror_cursor(PEER).unwrap(), 5);
+        s.mirror_insert_events(PEER, &[orphan(200)], true).unwrap();
+        let mut bad = peer_event(300, &ps.id);
+        bad.id = global_id(PEER, 301);
+        s.mirror_insert_events(PEER, &[bad], true).unwrap();
+        assert_eq!(s.mirror_cursor(PEER).unwrap(), 5, "skipped events never move it");
+        assert!(s.mirror_insert_events(PEER, &[peer_event(5, &ps.id)], true).unwrap().is_empty());
+        assert_eq!(s.mirror_cursor(PEER).unwrap(), 5, "an event already stored counts as stored");
+        assert_eq!(s.finish_mirror_sync(PEER).unwrap(), 5);
+        s.reset_mirror_events(PEER).unwrap();
+        assert_eq!(s.mirror_cursor(PEER).unwrap(), 0);
+        assert!(s.events(&ps.id, None, 10).unwrap().is_empty());
+        assert!(s.is_mirrored_session(&ps.id).unwrap(), "a reset keeps the sessions");
+    }
+
+    /// Review fix 4: a peer's mirrored payload bytes stay within the per-peer budget, oldest first out.
+    #[test]
+    fn mirrored_payload_bytes_stay_within_budget() {
+        let s = Store::open_in_memory(MID).unwrap();
+        s.set_mirror_byte_budget(10_000);
+        s.upsert_device(&roster_entry(PEER, "Mac mini", "pk", None)).unwrap();
+        let ps = peer_session("s", 5);
+        s.mirror_upsert_session(&ps).unwrap();
+        // A local event of the same size is never counted or evicted.
+        s.upsert_session(&session("mine", 1)).unwrap();
+        s.insert_event(&gid("mine"), EventType::ToolCall, &json!({ "t": "y".repeat(990) }), 1).unwrap();
+        for seq in 1..=40 {
+            let mut e = peer_event(seq, &ps.id);
+            e.payload = json!({ "t": "x".repeat(990) });
+            s.mirror_insert_events(PEER, &[e], false).unwrap();
+        }
+        let total: i64 = s
+            .conn()
+            .query_row("SELECT SUM(LENGTH(payload)) FROM events WHERE machine_id = ?1", [PEER], |r| r.get(0))
+            .unwrap();
+        assert!(total <= 10_000, "{total}");
+        let kept = s.events(&ps.id, None, 100).unwrap();
+        assert!(kept.first().unwrap().seq > 1, "the oldest were evicted");
+        assert_eq!(kept.last().unwrap().seq, 40, "the newest stay");
+        assert_eq!(s.events(&gid("mine"), None, 10).unwrap().len(), 1);
     }
 
     #[tokio::test]

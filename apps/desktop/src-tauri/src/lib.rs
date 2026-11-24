@@ -68,6 +68,7 @@ pub fn run() {
             quit_app,
             pet_window::set_hit_rects,
             pet_window::set_capture_all,
+            pet_window::set_follow_cursor,
             pet_window::set_pets_paused,
             pet_window::get_pets_paused,
             pet_window::open_panel,

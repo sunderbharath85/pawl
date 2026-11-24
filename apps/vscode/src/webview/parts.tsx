@@ -12,7 +12,7 @@ import {
   type SessionStatus,
   type ToolLocation,
 } from "@krypto/protocol";
-import { agentFor, petFor } from "../shared/machine";
+import { agentFor, groupByMachine, machineDisplayName, petFor, readOnlyReason, type HubState } from "@krypto/hub-client";
 import type { ConnInfo } from "../shared/messages";
 import { buildTranscript, type TranscriptItem } from "./transcript";
 import { post } from "./vscodeApi";
@@ -146,60 +146,93 @@ export function ConnBanner({ conn }: { conn: ConnInfo }) {
 
 const OPTION_ORDER: Record<PermissionOption["kind"], number> = { allow_once: 0, allow_always: 1, reject_once: 2, reject_always: 3 };
 
+/** Which machine this webview's hub runs on, and every known machine (for names and online state). */
+export type Place = Pick<HubState, "machine" | "machines">;
+
+/** "Mac mini" chip for another machine's item; greyed with "last seen" when that machine is offline. */
+function MachineChip({ place, machineId, now }: { place: Place; machineId: string; now: number }) {
+  if (!readOnlyReason(place, machineId)) return null;
+  const m = place.machines[machineId];
+  return (
+    <span className={`machine-chip${m?.online ? "" : " offline"}`} title={m?.online ? "Mirrored from that machine" : "Offline"}>
+      {machineDisplayName(m)}
+      {m?.online ? "" : ` · last seen ${relativeTime(m?.lastSeen ?? 0, now)}`}
+    </span>
+  );
+}
+
 export function ApprovalCard({
   request,
   session,
   agents,
   pets,
+  place,
   now,
 }: {
   request: PermissionRequest;
   session?: Session;
   agents: Agent[];
   pets: Pet[];
+  place: Place;
   now: number;
 }) {
   const [busy, setBusy] = useState(false);
+  // Another machine's request is read-only here until remote control (migration step 4).
+  const readOnly = readOnlyReason(place, request.machineId);
+  const offline = !!readOnly && !place.machines[request.machineId]?.online;
   const title = request.toolCall.title || request.toolCall.kind || "Tool call";
   const extra = [...request.options]
     .sort((a, b) => OPTION_ORDER[a.kind] - OPTION_ORDER[b.kind])
     .filter((o) => o.kind === "allow_always" || o.kind === "reject_always");
   const resolve = (msg: Parameters<typeof post>[0]) => {
+    if (readOnly) return;
     setBusy(true);
     post(msg);
     // The card disappears when the hub confirms; re-enable if it did not (e.g. hub error).
     setTimeout(() => setBusy(false), 4000);
   };
   return (
-    <div className="card approval">
+    <div className={`card approval${readOnly ? " remote" : ""}${offline ? " offline" : ""}`}>
       <div className="card-head">
         <span className={`kind kind-${request.toolCall.kind ?? "other"}`}>{request.toolCall.kind ?? "tool"}</span>
         <span className="muted">
           {petLabel(pets, request)} · {agentName(agents, request.agentId, request.machineId)}
           {session ? ` · ${basename(session.cwd)}` : ""} · {relativeTime(request.createdAt, now)}
         </span>
+        <MachineChip place={place} machineId={request.machineId} now={now} />
       </div>
       <div className="card-title">{title}</div>
       <Locations locations={request.toolCall.locations ?? []} cwd={session?.cwd} />
       <div className="actions">
-        <button className="primary" disabled={busy} onClick={() => resolve({ type: "approve", requestId: request.requestId })}>
+        <button
+          className="primary"
+          disabled={busy || !!readOnly}
+          title={readOnly ?? undefined}
+          onClick={() => resolve({ type: "approve", requestId: request.requestId })}
+        >
           Approve
         </button>
-        <button className="danger" disabled={busy} onClick={() => resolve({ type: "deny", requestId: request.requestId })}>
+        <button
+          className="danger"
+          disabled={busy || !!readOnly}
+          title={readOnly ?? undefined}
+          onClick={() => resolve({ type: "deny", requestId: request.requestId })}
+        >
           Deny
         </button>
         {extra.map((o) => (
           <button
             key={o.optionId}
             className="secondary small"
-            disabled={busy}
-            title={o.kind.replace("_", " ")}
+            disabled={busy || !!readOnly}
+            title={readOnly ?? o.kind.replace("_", " ")}
             onClick={() => resolve({ type: "resolve", requestId: request.requestId, optionId: o.optionId })}
           >
             {o.name}
           </button>
         ))}
       </div>
+      {readOnly && <div className="muted small remote-note">{readOnly}</div>}
     </div>
   );
 }
@@ -210,6 +243,7 @@ export function SessionList({
   sessions,
   agents,
   pets,
+  place,
   connected,
   showEnded,
   now,
@@ -219,6 +253,7 @@ export function SessionList({
   sessions: Session[];
   agents: Agent[];
   pets: Pet[];
+  place: Place;
   connected: boolean;
   showEnded: boolean;
   now: number;
@@ -232,6 +267,8 @@ export function SessionList({
   const open = sorted.filter((s) => !s.endedAt);
   const ended = sorted.filter((s) => s.endedAt);
   const shown = showEnded ? sorted : open;
+  // Grouped by machine; headings only once another machine's sessions are mirrored here.
+  const groups = useMemo(() => groupByMachine(place, shown), [place, shown]);
 
   if (!connected && sessions.length === 0) {
     return <div className="empty">Sessions appear here once the hub is connected.</div>;
@@ -246,24 +283,34 @@ export function SessionList({
           </button>
         </div>
       )}
-      <ul className="list">
-        {shown.map((s) => (
-          <li key={s.id}>
-            <button className={`row ${s.endedAt ? "ended" : ""}`} onClick={() => onSelect(s.id)} title={s.cwd}>
-              <StatusDot status={s.status} ended={!!s.endedAt} />
-              <span className="row-main">
-                <span className="row-title">
-                  {petLabel(pets, s)} · {agentName(agents, s.agentId, s.machineId)}
-                  <span className="muted"> · {s.title?.trim() || basename(s.cwd)}</span>
-                </span>
-                <span className="row-sub muted">
-                  {s.endedAt ? "ended" : STATUS_LABEL[s.status]} · {SOURCE_LABEL[s.source]} · {relativeTime(s.lastEventAt, now)}
-                </span>
-              </span>
-            </button>
-          </li>
-        ))}
-      </ul>
+      {groups.map((g) => (
+        <div key={g.machineId} className={`machine-group${g.online ? "" : " offline"}`}>
+          {groups.length > 1 && (
+            <div className="group-head">
+              {g.local ? `${machineDisplayName(g.machine)} (this machine)` : machineDisplayName(g.machine)}
+              {!g.online && <span className="muted"> · offline, last seen {relativeTime(g.machine?.lastSeen ?? 0, now)}</span>}
+            </div>
+          )}
+          <ul className="list">
+            {g.items.map((s) => (
+              <li key={s.id}>
+                <button className={`row ${s.endedAt ? "ended" : ""}`} onClick={() => onSelect(s.id)} title={s.cwd}>
+                  <StatusDot status={s.status} ended={!!s.endedAt} />
+                  <span className="row-main">
+                    <span className="row-title">
+                      {petLabel(pets, s)} · {agentName(agents, s.agentId, s.machineId)}
+                      <span className="muted"> · {s.title?.trim() || basename(s.cwd)}</span>
+                    </span>
+                    <span className="row-sub muted">
+                      {s.endedAt ? "ended" : STATUS_LABEL[s.status]} · {SOURCE_LABEL[s.source]} · {relativeTime(s.lastEventAt, now)}
+                    </span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
       {ended.length > 0 && (
         <button className="link toggle" onClick={onToggleEnded}>
           {showEnded ? "Hide ended sessions" : `Show ${ended.length} ended session${ended.length === 1 ? "" : "s"}`}
@@ -273,7 +320,7 @@ export function SessionList({
   );
 }
 
-function TranscriptRow({ item, cwd }: { item: TranscriptItem; cwd: string }) {
+function TranscriptRow({ item, cwd, machineName }: { item: TranscriptItem; cwd: string; machineName: string }) {
   switch (item.kind) {
     case "user":
       return <div className="msg user">{item.text}</div>;
@@ -318,6 +365,12 @@ function TranscriptRow({ item, cwd }: { item: TranscriptItem; cwd: string }) {
       return <div className="note error">⚠ {item.text}</div>;
     case "note":
       return <div className="note">{item.text}</div>;
+    case "truncated":
+      return (
+        <div className="note" title={item.bytes ? `${Math.max(1, Math.round(item.bytes / 1024))} KB not copied to this machine` : undefined}>
+          📦 Large output — open on {machineName}
+        </div>
+      );
   }
 }
 
@@ -326,6 +379,7 @@ export function SessionDetail({
   events,
   agents,
   pets,
+  place,
   pending,
   connected,
   now,
@@ -336,6 +390,7 @@ export function SessionDetail({
   events: HubEvent[];
   agents: Agent[];
   pets: Pet[];
+  place: Place;
   pending: PermissionRequest[];
   connected: boolean;
   now: number;
@@ -358,10 +413,15 @@ export function SessionDetail({
   }, [items]);
 
   const canPrompt = connected && session.source === "owned" && !session.endedAt;
-  const inWorkspace = workspaceFolders.some((f) => session.cwd.toLowerCase().startsWith(f.toLowerCase()));
+  // Another machine's session is a read-only mirror until remote control (migration step 4).
+  const readOnly = readOnlyReason(place, session.machineId);
+  const machine = place.machines[session.machineId];
+  const machineName = machineDisplayName(machine);
+  const offline = !!readOnly && !machine?.online;
+  const inWorkspace = !readOnly && workspaceFolders.some((f) => session.cwd.toLowerCase().startsWith(f.toLowerCase()));
 
   return (
-    <div className="detail">
+    <div className={`detail${offline ? " offline" : ""}`}>
       <div className="detail-head">
         <button className="icon" title="Back to sessions" onClick={onBack}>
           ‹
@@ -370,23 +430,31 @@ export function SessionDetail({
         <div className="detail-title">
           <div>
             {petLabel(pets, session)} · {agentName(agents, session.agentId, session.machineId)}{" "}
-            <span className="muted">· {session.endedAt ? "ended" : STATUS_LABEL[session.status]}</span>
+            <span className="muted">· {session.endedAt ? "ended" : STATUS_LABEL[session.status]}</span>{" "}
+            <MachineChip place={place} machineId={session.machineId} now={now} />
           </div>
           <div className="muted small" title={session.cwd}>
             {session.title?.trim() ? `${session.title.trim()} · ` : ""}
             {basename(session.cwd)}
-            {inWorkspace ? "" : " (outside this workspace)"} · {SOURCE_LABEL[session.source]} · started{" "}
+            {readOnly || inWorkspace ? "" : " (outside this workspace)"} · {SOURCE_LABEL[session.source]} · started{" "}
             {relativeTime(session.startedAt, now)}
           </div>
         </div>
         {connected && session.source === "owned" && isBusy(session) && (
-          <button className="danger small" onClick={() => post({ type: "cancel", sessionId: session.id })}>
+          <button
+            className="danger small"
+            disabled={!!readOnly}
+            title={readOnly ?? undefined}
+            onClick={() => post({ type: "cancel", sessionId: session.id })}
+          >
             Cancel
           </button>
         )}
       </div>
 
-      {pending.length > 0 && <div className="note permission">🔔 Waiting for your approval above.</div>}
+      {pending.length > 0 && (
+        <div className="note permission">🔔 {readOnly ? `Waiting for approval on ${machineName}.` : "Waiting for your approval above."}</div>
+      )}
 
       <div
         className="transcript"
@@ -399,13 +467,14 @@ export function SessionDetail({
         {items.length === 0 ? (
           <div className="empty">{session.source === "owned" ? "Nothing yet." : "This session reports through hooks; only milestones show up here."}</div>
         ) : (
-          items.map((item) => <TranscriptRow key={item.key} item={item} cwd={session.cwd} />)
+          items.map((item) => <TranscriptRow key={item.key} item={item} cwd={session.cwd} machineName={machineName} />)
         )}
       </div>
 
       {canPrompt ? (
         <Composer
-          placeholder={isBusy(session) ? "Queue a follow-up…" : "Reply to the agent…"}
+          placeholder={readOnly ?? (isBusy(session) ? "Queue a follow-up…" : "Reply to the agent…")}
+          disabled={!!readOnly}
           onSend={(text) => {
             stick.current = true;
             post({ type: "prompt", sessionId: session.id, text });

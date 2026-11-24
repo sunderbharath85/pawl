@@ -6,7 +6,6 @@ import {
   formatCountdown,
   inviteUsedBy,
   joinCommand,
-  machinesLine,
   pairingErrorText,
   presenceText,
   type PairingAction,
@@ -168,12 +167,6 @@ test("presenceText", () => {
   expect(presenceText({ online: true, lastSeen: 0 }, 1)).toBe("Online");
   expect(presenceText({ online: false, lastSeen: 0 }, 1)).toBe("Not seen yet");
   expect(presenceText({ online: false, lastSeen: 1_000 }, 1_000 + 5 * 60_000)).toBe("Last seen 5m ago");
-});
-
-test("machinesLine", () => {
-  expect(machinesLine(3, 2, true)).toBe("3 machines · 2 online");
-  expect(machinesLine(1, 1, true)).toBe("1 machine · 1 online");
-  expect(machinesLine(2, 1, false)).toBe("2 machines");
 });
 
 test("joinCommand quotes the URI for the shell", () => {

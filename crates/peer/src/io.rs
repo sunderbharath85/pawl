@@ -4,9 +4,12 @@
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::task::AbortHandle;
 
-/// Max WebSocket frame and message size, both directions.
-pub(crate) const MAX_FRAME: usize = 256 * 1024;
+/// Max WebSocket frame and message size, both directions. Fits the envelope of the largest body
+/// `PeerNode::send` accepts (MIRROR_FRAME_MAX_BYTES + 16 KiB, about 288 KiB once boxed and base64'd).
+pub(crate) const MAX_FRAME: usize = 320 * 1024;
 /// A peer that stops reading must not wedge our writer.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a closing socket may linger for the peer's close frame.
@@ -26,17 +29,37 @@ pub(crate) struct WsIo {
     /// Text frames from the peer; `None` once the socket is closed (or sent a binary frame).
     pub rx: mpsc::Receiver<String>,
     pub tx: mpsc::Sender<Outbound>,
+    reader: AbortHandle,
+    writer: AbortHandle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendFail {
+    /// The socket is not draining its queue (yet).
+    Full,
+    Closed,
 }
 
 impl WsIo {
-    /// Queue a text frame. False if the socket is gone or the queue is full.
-    pub fn send(&self, text: String) -> bool {
-        self.tx.try_send(Outbound::Text(text)).is_ok()
+    /// Queue a text frame.
+    pub fn send(&self, text: String) -> Result<(), SendFail> {
+        self.tx.try_send(Outbound::Text(text)).map_err(|e| match e {
+            TrySendError::Full(_) => SendFail::Full,
+            TrySendError::Closed(_) => SendFail::Closed,
+        })
     }
 
-    /// Close after the frames already queued.
+    /// Close after the frames already queued; abort at once if the queue is full (a stuck peer).
     pub fn close(self) {
-        let _ = self.tx.try_send(Outbound::Close);
+        if self.tx.try_send(Outbound::Close).is_err() {
+            self.abort();
+        }
+    }
+
+    /// Drop the socket now, discarding queued frames.
+    pub fn abort(self) {
+        self.reader.abort();
+        self.writer.abort();
     }
 }
 
@@ -113,7 +136,8 @@ where
         }
     });
 
-    tokio::spawn(async move {
+    let reader_abort = reader.abort_handle();
+    let writer = tokio::spawn(async move {
         loop {
             tokio::select! {
                 out = out_rx.recv() => match out {
@@ -139,5 +163,5 @@ where
         // Dropping both halves closes the TCP socket.
     });
 
-    WsIo { rx: in_rx, tx: out_tx }
+    WsIo { rx: in_rx, tx: out_tx, reader: reader_abort, writer: writer.abort_handle() }
 }

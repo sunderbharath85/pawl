@@ -65,12 +65,6 @@ export function presenceText(machine: Pick<Machine, "online" | "lastSeen">, now:
   return `Last seen ${timeAgo(machine.lastSeen, now)}`;
 }
 
-/** "3 machines · 2 online" (the sidebar line). */
-export function machinesLine(total: number, online: number, connected: boolean): string {
-  const n = `${total} machine${total === 1 ? "" : "s"}`;
-  return connected ? `${n} · ${online} online` : n;
-}
-
 /** The CLI equivalent shown next to an invite. */
 export function joinCommand(uri: string): string {
   return `krypto peer join "${uri}"`;

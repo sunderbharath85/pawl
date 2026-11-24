@@ -12,6 +12,7 @@ import {
   petLine,
   SAD_DECAY_MS,
   SPECIES_META,
+  stageShowsApproval,
   type DerivePetViewsInput,
 } from "../src/index";
 
@@ -277,6 +278,124 @@ describe("derivePetViews across machines", () => {
     expect(a!.activity).toBe("napping");
     expect(b!.activity).toBe("happy");
     expect(nextPetViewChange(at)).toBe(1000 + HAPPY_DECAY_MS);
+  });
+});
+
+describe("visitors and the active machine (L/A rules)", () => {
+  const L = MID;
+  const M = MID2;
+  const C = "atticbox0003";
+  const machines: Record<string, Machine> = {
+    [L]: { id: L, name: "Windows PC", os: "windows", lastSeen: 1000, online: true },
+    [M]: { id: M, name: "Mac mini", os: "macos", lastSeen: 1000, online: true },
+    [C]: { id: C, name: "Attic box", os: "linux", lastSeen: 900, online: false },
+  };
+  const home = pet;
+  const visitor: Pet = { ...pet, id: `${M}:p1`, machineId: M, name: "Pepper" };
+  const sleeper: Pet = { ...pet, id: `${C}:p1`, machineId: C, name: "Rex" };
+  const homeReq = perm();
+  const visitorReq = perm({ requestId: `${M}:r1`, machineId: M, sessionId: `${M}:s1` });
+  const sleeperReq = perm({ requestId: `${C}:r1`, machineId: C, sessionId: `${C}:s1` });
+  const place = (over: Partial<DerivePetViewsInput> = {}) =>
+    derivePetViews(input({ pets: [home, visitor, sleeper], machines, localMachineId: L, now: 2000, ...over }));
+
+  test("without localMachineId every pet is a home pet (compatibility)", () => {
+    const views = derivePetViews(input({ pets: [home, visitor], machines }));
+    expect(views.map((v) => [v.visitor, v.remoteOffline, v.away])).toEqual([
+      [false, false, undefined],
+      [false, false, undefined],
+    ]);
+  });
+
+  test("other machines' pets are visitors when online, remoteOffline otherwise", () => {
+    const [h, v, o] = place();
+    expect([h!.visitor, h!.remoteOffline]).toEqual([false, false]);
+    expect([v!.visitor, v!.remoteOffline, v!.machineName]).toEqual([true, false, "Mac mini"]);
+    expect([o!.visitor, o!.remoteOffline]).toEqual([false, true]);
+  });
+
+  test("a machine missing from `machines` counts as offline", () => {
+    const [, v] = derivePetViews(input({ pets: [home, visitor], localMachineId: L, now: 2000 }));
+    expect(v!.remoteOffline).toBe(true);
+    expect(v!.visitor).toBe(false);
+  });
+
+  test("A == L: home pet keeps its Approve/Deny bubble and stays home", () => {
+    const [h] = place({ pending: [homeReq], activeMachineId: L });
+    expect(h!.away).toBeUndefined();
+    expect(h!.activity).toBe("alert");
+    expect(h!.bubble).toMatchObject({ kind: "permission", requestId: "r1" });
+    expect(h!.bubble?.readOnly).toBeUndefined();
+  });
+
+  test("A != L: home pet with a pending approval runs to A", () => {
+    const [h] = place({ pending: [homeReq], activeMachineId: M });
+    expect(h!.away).toBe(M);
+    expect(h!.activity).toBe("alert");
+  });
+
+  test("activeMachineId defaults to localMachineId", () => {
+    const [h] = place({ pending: [homeReq] });
+    expect(h!.away).toBeUndefined();
+  });
+
+  test("a home pet without an approval never goes away", () => {
+    const [h] = place({ activeMachineId: M, sessions: [session({ status: "working" })] });
+    expect(h!.away).toBeUndefined();
+    expect(h!.activity).toBe("working");
+  });
+
+  test("A == L: a visitor with a pending approval ran here with a read-only bubble", () => {
+    const [, v] = place({ pending: [visitorReq], activeMachineId: L });
+    expect(v!.activity).toBe("alert");
+    expect(v!.bubble).toMatchObject({ kind: "permission", requestId: `${M}:r1`, readOnly: true });
+    expect(v!.bubble!.text).toContain("Needs approval on Mac mini");
+    expect(v!.away).toBeUndefined();
+  });
+
+  test("A != L: a visitor with a pending approval waits without a bubble", () => {
+    for (const a of [M, "thirdbox0004"]) {
+      const [, v] = place({ pending: [visitorReq], activeMachineId: a });
+      expect(v!.activity).toBe("alert");
+      expect(v!.bubble).toBeUndefined();
+    }
+  });
+
+  test("visitors keep their activity but drop chatter bubbles", () => {
+    const vs: Session = session({ id: `${M}:s1`, machineId: M, status: "done", lastEventAt: 1900 });
+    const stop = ev("stop", { stopReason: "end_turn" }, 1900, vs.id, M);
+    const [, v] = place({ sessions: [vs], lastEvents: { [vs.id]: stop } });
+    expect(v!.activity).toBe("happy");
+    expect(v!.bubble).toBeUndefined();
+  });
+
+  test("pets of an offline machine nap without bubbles, even with a stale approval", () => {
+    const [, , o] = place({ pending: [sleeperReq], activeMachineId: L });
+    expect(o!.activity).toBe("napping");
+    expect(o!.bubble).toBeUndefined();
+    expect(o!.sessionId).toBeUndefined();
+    expect(o!.since).toBe(900);
+  });
+
+  test("stageShowsApproval: only a home pet's own request (not away) or a visitor that ran here", () => {
+    // A == L: the home pet shows its request here.
+    expect(stageShowsApproval(place({ pending: [homeReq], activeMachineId: L }))).toBe(true);
+    // A != L: it ran away; nothing is shown here.
+    expect(stageShowsApproval(place({ pending: [homeReq], activeMachineId: M }))).toBe(false);
+    // A visitor's request shows only when it ran here (A == L).
+    expect(stageShowsApproval(place({ pending: [visitorReq], activeMachineId: L }))).toBe(true);
+    expect(stageShowsApproval(place({ pending: [visitorReq], activeMachineId: M }))).toBe(false);
+    // An offline machine's stale request, or no request at all.
+    expect(stageShowsApproval(place({ pending: [sleeperReq], activeMachineId: L }))).toBe(false);
+    expect(stageShowsApproval(place())).toBe(false);
+    // Say-bubbles never count.
+    expect(stageShowsApproval(place({ sessions: [session({ status: "waiting_permission" })] }))).toBe(false);
+  });
+
+  test("an offline machine's approval does not send home pets away", () => {
+    const [h] = place({ pending: [sleeperReq], activeMachineId: L });
+    expect(h!.away).toBeUndefined();
+    expect(h!.activity).toBe("napping");
   });
 });
 

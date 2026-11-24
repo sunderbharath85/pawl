@@ -5,7 +5,7 @@ use crate::invite::new_code;
 use crate::limits::{MAX_UNAUTH_PER_IP, MAX_UNAUTH_TOTAL, PAIR_MAX_FAILURES};
 use crate::MemoryRoster;
 use futures::{SinkExt, StreamExt};
-use krypto_protocol::MachineOs;
+use krypto_protocol::{EventType, HubEvent, MachineOs};
 use std::net::Ipv4Addr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
@@ -30,6 +30,7 @@ fn machine(id: &str, name: &str) -> Machine {
         last_seen: 0,
         online: true,
         hub_version: Some("test".into()),
+        user_active_at: None,
     }
 }
 
@@ -122,6 +123,46 @@ fn is_link_down(id: &str) -> impl Fn(&PeerEvent) -> bool + '_ {
 fn is_presence(id: &str) -> impl Fn(&PeerEvent) -> bool + '_ {
     move |e| matches!(e, PeerEvent::Presence { device_id, .. } if device_id == id)
 }
+fn is_body_from(id: &str) -> impl Fn(&PeerEvent) -> bool + '_ {
+    move |e| matches!(e, PeerEvent::Body { device_id, .. } if device_id == id)
+}
+
+impl TestNode {
+    /// The next `n` bodies from `from`, in order.
+    async fn bodies(&mut self, from: &str, n: usize) -> Vec<PeerBody> {
+        let mut out = Vec::with_capacity(n);
+        while out.len() < n {
+            if let PeerEvent::Body { body, .. } = self.expect("Body", is_body_from(from)).await {
+                out.push(body);
+            }
+        }
+        out
+    }
+}
+
+/// A mirror_events body whose serialized JSON is exactly `n` bytes.
+fn body_of_size(n: usize) -> PeerBody {
+    let make = |payload: String| PeerBody::MirrorEvents {
+        events: vec![HubEvent {
+            id: format!("{A}:1"),
+            seq: 1,
+            machine_id: A.into(),
+            session_id: format!("{A}:s"),
+            kind: EventType::ToolCall,
+            payload: serde_json::Value::String(payload),
+            ts: 1,
+        }],
+    };
+    let base = serde_json::to_vec(&make(String::new())).unwrap().len();
+    let body = make("x".repeat(n - base));
+    assert_eq!(serde_json::to_vec(&body).unwrap().len(), n);
+    body
+}
+
+fn sync_request(i: i64) -> PeerBody {
+    PeerBody::SyncRequest { since_seq: i }
+}
+
 fn is_presence_named<'a>(id: &'a str, name: &'a str) -> impl Fn(&PeerEvent) -> bool + 'a {
     move |e| matches!(e, PeerEvent::Presence { device_id, presence } if device_id == id && presence.machine.name == name)
 }
@@ -322,9 +363,9 @@ async fn pair_two_nodes_link_up_and_presence_both_ways() {
     b.expect("set_machine Presence", is_presence_named(A, "Renamed again")).await;
 
     // `send` reaches the live link only.
-    assert!(a.node.send(B, presence_body(A, "Direct")));
-    b.expect("direct", is_presence_named(A, "Direct")).await;
-    assert!(!a.node.send(C, presence_body(A, "Nobody")));
+    assert_eq!(a.node.send(B, sync_request(42)), Ok(()));
+    assert_eq!(b.bodies(A, 1).await, [sync_request(42)]);
+    assert_eq!(a.node.send(C, sync_request(43)), Err(SendError::NotLinked));
 
     a.node.shutdown().await;
     b.expect("LinkDown after shutdown", is_link_down(A)).await;
@@ -829,8 +870,10 @@ async fn duplicate_link_tie_break_keeps_smaller_ids_dial() {
     assert_eq!(a.node.test_link_dialed_by_me(B), Some(false));
     assert_eq!(b.node.test_link_dialed_by_me(A), Some(true));
 
-    // a dials as well: its link replaces b's on both sides.
+    // a dials as well: its link replaces b's on both sides, and both report LinkUp again (resync).
     assert!(a.node.test_dial_once(B).await);
+    a.expect("LinkUp for the replacing link", is_link_up(B)).await;
+    b.expect("LinkUp for the replacing link", is_link_up(A)).await;
     let deadline = Instant::now() + WAIT;
     while b.node.test_link_dialed_by_me(A) != Some(false) {
         assert!(Instant::now() < deadline, "b never switched to a's link");
@@ -1017,4 +1060,284 @@ fn jitter_in_range() {
         assert!(j >= Duration::from_millis(50) && j < Duration::from_millis(100), "{j:?}");
     }
     assert_eq!(jitter(Duration::ZERO), Duration::ZERO);
+}
+
+// ---------- disconnect ----------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnect_cools_down_both_directions_then_reconnects() {
+    // Both hubs listen, so both dial: during the cooldown a must neither dial b nor accept b's hellos.
+    let (mut a, _) = listening(A, fast()).await;
+    let mut b = node(B, fast());
+    b.node.listen(local()).await.unwrap();
+    pair(&mut a, &mut b).await;
+    a.log.clear();
+    b.log.clear();
+
+    let cooldown = Duration::from_millis(1500);
+    let start = Instant::now();
+    a.node.disconnect(B, cooldown);
+    a.expect("LinkDown", is_link_down(B)).await;
+    b.expect("LinkDown", is_link_down(A)).await;
+    // b's dialer keeps trying (backoff_max 400 ms) and a keeps refusing; a never dials.
+    a.expect_none(Duration::from_millis(1200), "LinkUp during the cooldown", is_link_up(B)).await;
+    assert!(b.position(is_link_up(A)).is_none(), "b linked during a's cooldown");
+    assert!(a.node.online().is_empty() && b.node.online().is_empty());
+    // Not a revoke: both rosters intact, nobody saw bye or Revoked.
+    assert!(a.roster.get(B).is_some() && b.roster.get(A).is_some());
+    let revoked = |e: &PeerEvent| matches!(e, PeerEvent::Revoked { .. });
+    assert!(a.position(revoked).is_none() && b.position(revoked).is_none());
+
+    // After the cooldown the link comes back by itself.
+    a.expect("LinkUp after the cooldown", is_link_up(B)).await;
+    b.expect("LinkUp after the cooldown", is_link_up(A)).await;
+    assert!(start.elapsed() >= cooldown, "reconnected after {:?}", start.elapsed());
+    assert_eq!(a.node.send(B, sync_request(1)), Ok(()));
+    assert_eq!(b.bodies(A, 1).await, [sync_request(1)]);
+
+    // A zero cooldown just drops the link; it comes straight back.
+    a.node.disconnect(B, Duration::ZERO);
+    a.expect("LinkDown", is_link_down(B)).await;
+    a.expect("LinkUp", is_link_up(B)).await;
+
+    // Unknown ids are a no-op.
+    a.log.clear();
+    a.node.disconnect(C, cooldown);
+    a.expect_none(Duration::from_millis(200), "any effect", |e| {
+        matches!(e, PeerEvent::LinkDown { .. } | PeerEvent::Revoked { .. })
+    })
+    .await;
+    assert!(lock(&a.node.inner.cooldowns).get(C).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnect_refuses_raw_hello_during_cooldown() {
+    let (mut a, addr) = listening(A, fast()).await;
+    let b_keys = DeviceKeys::generate();
+    let mut ws = stalled_peer(&mut a, addr, &b_keys).await;
+    a.node.disconnect(B, Duration::from_millis(800));
+    a.expect("LinkDown", is_link_down(B)).await;
+    // The old socket is closed without a bye.
+    loop {
+        match raw_next(&mut ws, WAIT).await {
+            RawNext::Text(t) => {
+                let env: PeerEnvelope = serde_json::from_str(&t).unwrap();
+                assert!(!matches!(open(&b_keys, &env, &a.pk()).unwrap(), PeerBody::Bye { .. }), "disconnect sent bye");
+            }
+            RawNext::Closed => break,
+            RawNext::Silent => panic!("socket not closed"),
+        }
+    }
+    let hello = || env_text(&seal(&b_keys, B, A, &a.pk(), time_seq(), &hello_body(B), false));
+    let mut ws = raw(addr).await;
+    ws.send(hello()).await.unwrap();
+    assert_closed_silently(&mut ws, WAIT).await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let mut ws = raw(addr).await;
+    ws.send(hello()).await.unwrap();
+    assert!(matches!(raw_next(&mut ws, WAIT).await, RawNext::Text(_)), "hello accepted after the cooldown");
+    a.expect("LinkUp", is_link_up(B)).await;
+}
+
+// ---------- step 3: bodies ----------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bodies_follow_link_up_in_arrival_order() {
+    // A peer bursts its hello and bodies before reading anything: LinkUp still comes first, bodies
+    // keep their order, and pair/hello/presence/bye never surface as Body.
+    let (mut a, addr) = listening(A, fast()).await;
+    let b_keys = DeviceKeys::generate();
+    add_paired(&a.roster, B, &b_keys.public_key(), None);
+    let a_pk = a.pk();
+    let mut ws = raw(addr).await;
+    let mut seq = time_seq();
+    let mut frame = |body: &PeerBody| {
+        seq += 1;
+        env_text(&seal(&b_keys, B, A, &a_pk, seq, body, false))
+    };
+    ws.feed(frame(&hello_body(B))).await.unwrap();
+    for i in 0..50 {
+        ws.feed(frame(&sync_request(i))).await.unwrap();
+        if i == 25 {
+            ws.feed(frame(&presence_body(B, "mid"))).await.unwrap();
+            ws.feed(frame(&hello_body(B))).await.unwrap();
+        }
+    }
+    ws.feed(frame(&PeerBody::SyncDone { seq: 99, truncated: false })).await.unwrap();
+    ws.flush().await.unwrap();
+
+    let got = a.bodies(B, 51).await;
+    let expected: Vec<PeerBody> =
+        (0..50).map(sync_request).chain([PeerBody::SyncDone { seq: 99, truncated: false }]).collect();
+    assert_eq!(got, expected);
+    let up = a.position(is_link_up(B)).expect("LinkUp");
+    let first_body = a.position(is_body_from(B)).unwrap();
+    assert!(up < first_body, "LinkUp must precede the link's bodies");
+    assert!(a.position(is_presence_named(B, "mid")).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bodies_between_nodes_in_order_both_ways() {
+    let (mut a, _) = listening(A, fast()).await;
+    let mut b = node(B, fast());
+    let inv = a.node.create_invite(None, TTL).unwrap();
+    b.node.join(&inv.to_uri()).await.unwrap();
+    // The joiner sends the moment join returns.
+    for i in 0..300 {
+        assert_eq!(b.node.send(A, sync_request(i)), Ok(()));
+    }
+    // The inviter sends the moment it sees LinkUp.
+    a.expect("LinkUp", is_link_up(B)).await;
+    for i in 0..300 {
+        assert_eq!(a.node.send(B, sync_request(i)), Ok(()));
+    }
+    let want: Vec<PeerBody> = (0..300).map(sync_request).collect();
+    assert_eq!(a.bodies(B, 300).await, want);
+    assert_eq!(b.bodies(A, 300).await, want);
+    // The byte budget is released as bodies leave the queue.
+    assert_eq!(a.node.test_queued_bytes(B), Some(0));
+    assert_eq!(b.node.test_queued_bytes(A), Some(0));
+    for n in [&a, &b] {
+        let peer = if n.id == A { B } else { A };
+        assert!(n.position(is_link_up(peer)).unwrap() < n.position(is_body_from(peer)).unwrap());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn too_large_body_never_sent_largest_allowed_delivered() {
+    let (mut a, _) = listening(A, fast()).await;
+    let mut b = node(B, fast());
+    pair(&mut a, &mut b).await;
+    assert_eq!(a.node.send(B, body_of_size(MAX_SEND_BODY_BYTES + 1)), Err(SendError::TooLarge));
+    b.expect_none(Duration::from_millis(300), "a Body", is_body_from(A)).await;
+    // The largest allowed body fits the socket's frame cap once boxed and base64'd.
+    assert_eq!(a.node.send(B, body_of_size(MAX_SEND_BODY_BYTES)), Ok(()));
+    let got = b.bodies(A, 1).await;
+    assert_eq!(serde_json::to_vec(&got[0]).unwrap().len(), MAX_SEND_BODY_BYTES);
+    // And the other way.
+    assert_eq!(b.node.send(A, body_of_size(MAX_SEND_BODY_BYTES)), Ok(()));
+    assert_eq!(a.bodies(B, 1).await.len(), 1);
+    assert!(a.position(is_link_down(B)).is_none() && b.position(is_link_down(A)).is_none());
+    assert_eq!(a.node.online().len(), 1);
+    assert_eq!(SendError::TooLarge.to_string(), "too_large");
+    assert_eq!(SendError::NotLinked.to_string(), "not_linked");
+    assert_eq!(SendError::Backpressure.to_string(), "backpressure");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn backpressure_closes_link_and_peer_reconnects() {
+    let (mut a, addr) = listening(A, fast()).await;
+    let b_keys = DeviceKeys::generate();
+    add_paired(&a.roster, B, &b_keys.public_key(), None);
+    let a_pk = a.pk();
+    let hello = || env_text(&seal(&b_keys, B, A, &a_pk, time_seq(), &hello_body(B), false));
+
+    let mut ws = raw(addr).await;
+    ws.send(hello()).await.unwrap();
+    assert!(matches!(raw_next(&mut ws, WAIT).await, RawNext::Text(_)));
+    a.expect("LinkUp", is_link_up(B)).await;
+
+    // The peer stops reading. Sends succeed until the socket and the link queue are full. Small bodies,
+    // so the 1024-frame cap trips long before the byte budget (1024 x 4 KiB = 4 MiB < 16 MiB).
+    let chunk = body_of_size(4 * 1024);
+    let mut result = Ok(());
+    let mut sent = 0usize;
+    for i in 0..200_000 {
+        result = a.node.send(B, chunk.clone());
+        if result.is_err() {
+            break;
+        }
+        sent += 1;
+        if i % 64 == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+    assert_eq!(result, Err(SendError::Backpressure), "after {sent} sends");
+    assert!(sent >= LINK_QUEUE, "the link queue holds {LINK_QUEUE} bodies before overflowing (sent {sent})");
+    a.expect("LinkDown on overflow", is_link_down(B)).await;
+    assert_eq!(a.node.send(B, sync_request(1)), Err(SendError::NotLinked));
+    assert!(a.node.online().is_empty());
+    drop(ws);
+
+    // The peer reconnects and the link works again.
+    let mut ws = raw(addr).await;
+    ws.send(hello()).await.unwrap();
+    assert!(matches!(raw_next(&mut ws, WAIT).await, RawNext::Text(_)));
+    a.expect("LinkUp again", is_link_up(B)).await;
+    let done = PeerBody::SyncDone { seq: 7, truncated: false };
+    assert_eq!(a.node.send(B, done.clone()), Ok(()));
+    loop {
+        let RawNext::Text(t) = raw_next(&mut ws, WAIT).await else { panic!("body never arrived") };
+        let env: PeerEnvelope = serde_json::from_str(&t).unwrap();
+        if open(&b_keys, &env, &a_pk).unwrap() == done {
+            break;
+        }
+    }
+}
+
+/// A peer that authenticates and then never reads. Returns the socket (keep it alive).
+async fn stalled_peer(a: &mut TestNode, addr: SocketAddr, b_keys: &DeviceKeys) -> RawWs {
+    add_paired(&a.roster, B, &b_keys.public_key(), None);
+    let mut ws = raw(addr).await;
+    ws.send(env_text(&seal(b_keys, B, A, &a.pk(), time_seq(), &hello_body(B), false))).await.unwrap();
+    assert!(matches!(raw_next(&mut ws, WAIT).await, RawNext::Text(_)));
+    a.expect("LinkUp", is_link_up(B)).await;
+    ws
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn byte_budget_overflow_closes_link() {
+    let (mut a, addr) = listening(A, fast()).await;
+    let b_keys = DeviceKeys::generate();
+    let _ws = stalled_peer(&mut a, addr, &b_keys).await;
+    // 200 KiB bodies: the 16 MiB budget holds about 81 of them, far below the 1024-frame cap.
+    let chunk = body_of_size(200 * 1024);
+    let mut result = Ok(());
+    let mut sent = 0usize;
+    for _ in 0..LINK_QUEUE {
+        result = a.node.send(B, chunk.clone());
+        if result.is_err() {
+            break;
+        }
+        sent += 1;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(result, Err(SendError::Backpressure), "after {sent} sends");
+    assert!(sent < LINK_QUEUE, "the byte budget must trip before the frame cap (sent {sent})");
+    assert!(sent >= LINK_QUEUE_BYTES / (200 * 1024), "the budget holds at least 16 MiB (sent {sent})");
+    a.expect("LinkDown on overflow", is_link_down(B)).await;
+    assert_eq!(a.node.send(B, sync_request(1)), Err(SendError::NotLinked));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_refuses_reserved_bodies() {
+    let (mut a, _) = listening(A, fast()).await;
+    let mut b = node(B, fast());
+    pair(&mut a, &mut b).await;
+    let reserved = [
+        PeerBody::PairRequest { code: new_code().1, machine: machine(A, "A"), addr: None, ts: 1 },
+        PeerBody::PairAccept { machine: machine(A, "A"), addr: None, req_seq: 1, ts: 1 },
+        PeerBody::PairReject { reason: PairRejectReason::BadRequest, ts: 1 },
+        PeerBody::Hello { machine: machine(A, "A"), addr: None, ts: 1 },
+        presence_body(A, "via send"),
+        PeerBody::Bye { reason: ByeReason::Revoked, ts: 1 },
+        PeerBody::Bye { reason: ByeReason::Shutdown, ts: 1 },
+    ];
+    for body in reserved {
+        assert_eq!(a.node.send(B, body.clone()), Err(SendError::Reserved), "{body:?}");
+        // Refused whether or not a link exists.
+        assert_eq!(a.node.send(C, body), Err(SendError::Reserved));
+    }
+    assert_eq!(SendError::Reserved.to_string(), "reserved");
+    // Nothing reached b: not revoked, no presence named "via send", link up.
+    b.expect_none(Duration::from_millis(400), "an effect of a reserved body", |e| {
+        matches!(e, PeerEvent::Revoked { .. } | PeerEvent::LinkDown { .. } | PeerEvent::Body { .. })
+            || is_presence_named(A, "via send")(e)
+    })
+    .await;
+    assert!(b.roster.get(A).is_some());
+    assert_eq!(b.node.online().len(), 1);
+    // Ordinary bodies still go through.
+    assert_eq!(a.node.send(B, sync_request(3)), Ok(()));
+    assert_eq!(b.bodies(A, 1).await, [sync_request(3)]);
 }

@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Agent, Session, SessionStatus } from "@krypto/protocol";
-import { agentFor } from "../shared/machine";
+import { agentFor } from "@krypto/hub-client";
 
 export function nonce(): string {
   return randomBytes(18).toString("base64").replace(/[^A-Za-z0-9]/g, "");

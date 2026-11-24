@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
-import { machineCounts, sortedMachines, type HubState } from "@krypto/hub-client";
+import { OS_LABEL, isLocal, machineCounts, machineDisplayName, machinesLine, sortedMachines, type HubState } from "@krypto/hub-client";
 import { SPECIES_META } from "@krypto/pet-engine";
 import { DEFAULT_SPECIES } from "@krypto/protocol";
-import { OS_LABEL, machineDisplayName, machinesLine, presenceLabel } from "../shared/machine";
+import { presenceLabel } from "../shared/machine";
 import type { HubConnection } from "./connection";
 import { ACTIVITY_LABEL, petViewsOf, primaryView } from "./petViews";
 import { agentName, isBusy } from "./util";
@@ -30,7 +30,10 @@ export class PetStatusBar implements vscode.Disposable {
   render(): void {
     const conn = this.hub.info;
     const state = this.hub.state;
-    const pendingCount = Object.keys(state.pending).length;
+    // Only this machine's approvals can be answered here; other machines' are mentioned in the tooltip.
+    const pending = Object.values(state.pending);
+    const pendingCount = pending.filter((p) => isLocal(state, p.machineId)).length;
+    const remotePending = pending.length - pendingCount;
     const hasPending = conn.status === "connected" && pendingCount > 0;
     if (hasPending !== this.lastHasPending) {
       this.lastHasPending = hasPending;
@@ -53,24 +56,26 @@ export class PetStatusBar implements vscode.Disposable {
     }
 
     const views = petViewsOf(state);
-    const primary = primaryView(views);
+    const home = views.filter((v) => !v.visitor && !v.remoteOffline);
+    const primary = primaryView(home);
     const species = primary?.species ?? DEFAULT_SPECIES;
     const activity = primary?.activity ?? "napping";
-    const busy = Object.values(state.sessions).filter(isBusy).length;
+    const busy = Object.values(state.sessions).filter((s) => isBusy(s) && isLocal(state, s.machineId)).length;
     const machineKey = sortedMachines(state)
       .map((m) => `${m.id}:${m.name}:${m.online}:${m.online ? "" : m.lastSeen}`)
       .join(",");
-    const petsKey = views.map((v) => `${v.petId}:${v.name}:${v.activity}`).join(",");
-    const key = `on|${machineKey}|${species}|${activity}|${pendingCount}|${busy}|${petsKey}`;
+    const petsKey = views.map((v) => `${v.petId}:${v.name}:${v.activity}:${v.visitor}:${v.away ?? ""}`).join(",");
+    const key = `on|${machineKey}|${species}|${activity}|${pendingCount}|${remotePending}|${busy}|${petsKey}`;
     if (key === this.lastKey) return;
     this.lastKey = key;
 
-    // Pets have names: lead with the most relevant pet's ("🐕 Biscuit working").
-    let text = `${SPECIES_META[species].emoji} ${primary ? `${primary.name} ` : ""}${ACTIVITY_LABEL[activity]}`;
+    // Pets have names: lead with the most relevant home pet's ("🐕 Biscuit working").
+    const away = primary?.away ? ` (ran to ${machineDisplayName(state.machines[primary.away])})` : "";
+    let text = `${SPECIES_META[species].emoji} ${primary ? `${primary.name} ` : ""}${ACTIVITY_LABEL[activity]}${away}`;
     if (pendingCount > 0) text += `  $(bell-dot) ${pendingCount}`;
     this.item.text = text;
     this.item.backgroundColor = pendingCount > 0 ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
-    this.item.tooltip = this.onlineTooltip(state, views, pendingCount, busy);
+    this.item.tooltip = this.onlineTooltip(state, views, pendingCount, remotePending, busy);
   }
 
   private offlineTooltip(state: HubState, unauthorized: boolean, missingToken: boolean): vscode.MarkdownString {
@@ -91,6 +96,7 @@ export class PetStatusBar implements vscode.Disposable {
     state: HubState,
     views: ReturnType<typeof petViewsOf>,
     pendingCount: number,
+    remotePending: number,
     busy: number,
   ): vscode.MarkdownString {
     const md = new vscode.MarkdownString(undefined, true);
@@ -114,12 +120,22 @@ export class PetStatusBar implements vscode.Disposable {
     }
     md.appendMarkdown("\n\n");
     this.appendMachines(md, state);
-    if (views.length === 0) md.appendMarkdown(`${SPECIES_META[DEFAULT_SPECIES].emoji} No pets yet — start a session.\n\n`);
-    for (const v of views) {
+    const home = views.filter((v) => !v.visitor && !v.remoteOffline);
+    const visitors = views.filter((v) => v.visitor);
+    if (home.length === 0) md.appendMarkdown(`${SPECIES_META[DEFAULT_SPECIES].emoji} No pets yet — start a session.\n\n`);
+    for (const v of home) {
       const name = agentName(state.agents, v.agentId, v.machineId);
-      md.appendMarkdown(`${SPECIES_META[v.species].emoji} **${escapeMd(v.name)}** (${escapeMd(name)}) — ${ACTIVITY_LABEL[v.activity]}\n\n`);
+      const where = v.away ? ` — ran to ${escapeMd(machineDisplayName(state.machines[v.away]))} with a request` : ` — ${ACTIVITY_LABEL[v.activity]}`;
+      md.appendMarkdown(`${SPECIES_META[v.species].emoji} **${escapeMd(v.name)}** (${escapeMd(name)})${where}\n\n`);
+    }
+    if (visitors.length > 0) {
+      const list = visitors
+        .map((v) => `${SPECIES_META[v.species].emoji} ${escapeMd(v.name)} _(${escapeMd(v.machineName ?? "another machine")})_`)
+        .join(", ");
+      md.appendMarkdown(`Visiting: ${list}\n\n`);
     }
     md.appendMarkdown(`${busy} busy session${busy === 1 ? "" : "s"}`);
+    if (remotePending > 0) md.appendMarkdown(` · ${remotePending} waiting on other machines`);
     if (pendingCount > 0) {
       md.appendMarkdown(` · **${pendingCount} waiting for approval**\n\n`);
       md.appendMarkdown("[$(check) Approve](command:krypto.approvePending) · [$(close) Deny](command:krypto.denyPending) · ");

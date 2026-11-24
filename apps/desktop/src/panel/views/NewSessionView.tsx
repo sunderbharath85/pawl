@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Agent } from "@krypto/protocol";
 import { errorText, shortPath } from "../../lib/format";
-import { petFor } from "../../lib/machine";
+import { isLocal, petFor } from "@krypto/hub-client";
 import { isTauri } from "../../lib/native";
 import { useSettings } from "../../lib/settings";
 import { usePanel } from "../context";
@@ -13,8 +13,12 @@ export function NewSessionView() {
   const { client, state, navigate, toast, meta } = usePanel();
   const [settings, setSettings] = useSettings();
   const agents = useMemo(
-    () => [...state.agents].sort((a, b) => Number(b.installed) - Number(a.installed) || a.name.localeCompare(b.name)),
-    [state.agents],
+    // Sessions start on this machine's hub, so only its own agents are offered.
+    () =>
+      state.agents
+        .filter((a) => isLocal(state, a.machineId))
+        .sort((a, b) => Number(b.installed) - Number(a.installed) || a.name.localeCompare(b.name)),
+    [state],
   );
   const [agentId, setAgentId] = useState(() => settings.lastAgentId);
   const [cwd, setCwd] = useState(() => settings.lastCwd);

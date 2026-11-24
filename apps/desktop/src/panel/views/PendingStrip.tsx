@@ -1,3 +1,4 @@
+import { isLocal } from "@krypto/hub-client";
 import { permissionSummary } from "../../lib/format";
 import { usePanel } from "../context";
 import { PermissionCard } from "./PermissionCard";
@@ -5,7 +6,10 @@ import { PermissionCard } from "./PermissionCard";
 /** The oldest pending approval pinned above every view (except Approvals itself). */
 export function PendingStrip() {
   const { state, navigate } = usePanel();
-  const pending = Object.values(state.pending).sort((a, b) => a.createdAt - b.createdAt);
+  // Pin the oldest request answerable here; other machines' requests come after (read-only).
+  const pending = Object.values(state.pending).sort(
+    (a, b) => Number(isLocal(state, b.machineId)) - Number(isLocal(state, a.machineId)) || a.createdAt - b.createdAt,
+  );
   if (pending.length === 0) return null;
   const first = pending[0]!;
   return (

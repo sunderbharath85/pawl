@@ -411,7 +411,7 @@ Reuse the versions the hub already uses for `axum 0.8 (ws)`, `tokio-tungstenite 
 ### Links + presence
 - Listener (opt-in, off by default): `krypto serve --peer-listen <ip[:port]>` or config.toml `[peer] listen = "ip:port"`
   (default port 47801). Serves **only** `GET /peer` (WebSocket); every other path 404; any request carrying an
-  `Origin` header -> 403 (blocks browsers); max frame 256 KiB; an unauthenticated socket must send a valid first frame
+  `Origin` header -> 403 (blocks browsers); max WebSocket frame/message 320 KiB (a 216 KiB body is ~288 KiB boxed + base64; raised in step 3); an unauthenticated socket must send a valid first frame
   within 5 s; at most 16 unauthenticated sockets at once. Binding 0.0.0.0 / :: logs a warning. It never exposes the
   local API.
 - Dialer: for every non-revoked hub in the roster with an `addr` and no live link, dial with backoff 1 s -> 60 s (jitter).
@@ -515,3 +515,88 @@ Error enums implement `Display` with the snake_case wire codes (`bad_uri`, `self
 - VS Code: status-bar tooltip lists machines with online state; command "Krypto: Show Machines" (read-only QuickPick).
   No pairing UI in VS Code.
 - Remote pets and sessions are not shown yet (step 3).
+
+## Step 3 — Mirror events + visitors (PLAN.md migration step 3) — protocol v4
+
+Branch `step-3-mirror-visitors`. Protocol already updated by the orchestrator (PROTOCOL_VERSION = 4):
+`Machine.userActiveAt?`, `USER_ACTIVITY_REPORT_MS` (10 s), `USER_ACTIVE_WINDOW_MS` (10 min), ClientMsg
+`user_activity{}` -> `{}`, `MirrorUpdate`, PeerBody `mirror{update}`, `sync_request{sinceSeq}`,
+`mirror_snapshot{sessions,pets,pendingPermissions}`, `mirror_events{events}`, `sync_done{seq,truncated}`,
+`MIRROR_PAYLOAD_MAX_BYTES` (64 KiB), `MIRROR_SYNC_MAX_EVENTS` (2000), `MIRROR_FRAME_MAX_BYTES` (200 KiB),
+`TruncatedPayload` / `isTruncatedPayload` (Rust `truncated_payload(bytes)`). Welcome's sessions / pets /
+pendingPermissions now cover every machine. Read the doc comments there; they are the spec.
+
+Scope: owners stream their state to paired hubs; each hub keeps a **read-only** mirror and shows it to its local
+clients; visitors area; "runs to you"; notify only where the user is. **Not** in step 3: acting on a remote session
+or approval (step 4 — remote items stay read-only and every ClientMsg naming a remote id still gets `not_owner`),
+repos (step 5), relay (step 6). Peer frames still never reach ClientMsg handling.
+
+### Ownership (step 3)
+| Role | Owns |
+|---|---|
+| sde-peer | `crates/peer/` |
+| sde-hubcore | `crates/hub/` (+ `crates/brain/` for the status-reply change below) |
+| fe-apps | `packages/hub-client/`, `packages/pet-engine/`, `apps/desktop/`, `apps/vscode/` |
+
+No new dependencies expected; ask t13 first if one seems needed.
+
+### Peer layer (sde-peer)
+- Deliver every authenticated body other than pair/hello/presence/bye to the hub as
+  `PeerEvent::Body { device_id: String, body: PeerBody }`, in arrival order per link.
+- `PeerNode::send(device_id, body) -> Result<(), SendError>` (replaces the bool): `NotLinked`, `TooLarge` (serialized
+  body > MIRROR_FRAME_MAX_BYTES + 16 KiB headroom, never sent), `Backpressure`. Per-link outbound queue bounded
+  (1024 frames); on overflow close the link (the peer resyncs on reconnect) and return `Backpressure`.
+- `PeerEvent::LinkUp` must fire before any `Body` from that link.
+
+### Mirror protocol (sde-hubcore)
+- **Outbound (owner):** every local `ServerMsg` of type session / event / pet / permission_request /
+  permission_resolved / notification for an item with this hub's machineId is also sent to every linked peer as
+  `mirror{update}`. Mirrored items are never re-forwarded (no relaying of a third machine's data). Event payloads whose
+  JSON exceeds MIRROR_PAYLOAD_MAX_BYTES are replaced by `truncated_payload(bytes)`.
+- **Sync on link-up:** right after LinkUp each side sends `sync_request{sinceSeq}` = highest event seq it has mirrored
+  from that peer (0 if none). The owner answers `mirror_snapshot` (open sessions + sessions ended in the last 7 days,
+  max 200; all pets; all pending permissions), then `mirror_events` batches (events with seq > sinceSeq, newest
+  MIRROR_SYNC_MAX_EVENTS, sent oldest first, each body < MIRROR_FRAME_MAX_BYTES), then `sync_done`. Live `mirror`
+  updates may interleave; apply idempotently (events keyed by global id, upserts by id).
+- **Inbound validation (security):** drop (and log at warn with the device id, never the payload) any item whose
+  machineId, or the machine prefix of its id / sessionId / requestId, is not the sender's device id. Drop events whose
+  id is not `${machineId}:${seq}`. Never let a peer write a row owned by this hub or a third machine. Cap mirror storage
+  per peer (max 500 sessions, 2000 events per session, oldest pruned).
+- **Storage:** mirror rows live in the normal tables with their machine_id (schema v4 if columns are needed, e.g.
+  `mirrored` flag or per-peer sync cursor). `mirror_snapshot` replaces that peer's sessions/pets/pending set. Revoke
+  (either side) deletes every mirrored row of that machine. Prune ended mirrored sessions older than 7 days.
+- **Local clients:** mirrored items are broadcast as ordinary ServerMsgs (`session`, `event`, `pet`,
+  `permission_request`, `permission_resolved`, `notification`) and included in Welcome. `get_events` /
+  `list_sessions` serve mirrored sessions from the mirror. Rules, watchdog and auto-approve never run on mirrored items.
+  When a peer goes offline its mirror stays (clients grey it out); nothing is deleted.
+- **Activity:** `user_activity` stamps this machine's `userActiveAt = now`; presence carries it (heartbeat, plus an
+  immediate presence when the user becomes active after >= 30 s idle). Peers' presence updates their Machine. Broadcast
+  `ServerMsg::Machine` when userActiveAt moves by >= 30 s or the active machine changes (not every report).
+- **Brain:** status replies include mirrored sessions, naming the machine ("Claude on Mac mini is working on ...").
+  Commands that would act on a remote session answer that remote control arrives later.
+
+### Clients (fe-apps)
+- **Remove the step-2 client filters** (`useLocalHubState`, `HubConnection.local`, `isRemote` / `remote()` guards);
+  show every machine's data, filtered by the rules below.
+- **hub-client:** `activeMachineId(state, now): MachineId` (online machine with the latest userActiveAt within
+  USER_ACTIVE_WINDOW_MS; else this machine); `isLocal(state, id)`; `reportUserActivity()` throttled to
+  USER_ACTIVITY_REPORT_MS. Move the duplicated desktop/VS Code helpers into hub-client (`petFor`, `agentFor`,
+  rename-error text, `SessionBackfill`, `petNames`) and delete the copies.
+- **pet-engine:** `PetView` gains `visitor: boolean` (pet's machine is not this one), `away?: MachineId` (this pet has
+  a pending approval but the user is active on another machine: it "ran to" that machine) and `remoteOffline: boolean`.
+  `derivePetViews` input gains `localMachineId` and `activeMachineId`. Visitors are only produced for online machines.
+  Rules on local machine L with active machine A: a home pet with a pending approval gets `away = A` when A != L; a
+  visitor with a pending approval shows its request bubble only when A == L (it "ran here"), otherwise it is a plain
+  visitor in the waiting pose.
+- **Desktop strip:** home pets as today; a visitors area on the right (machine badge "Biscuit · Mac mini", max 6,
+  then "+N"); a visitor with a pending approval runs in from the screen edge with a read-only bubble ("needs approval
+  on Mac mini" — approving here is step 4; click opens the panel at that request). A local pet whose approval is
+  `away` walks off-screen and returns when this machine becomes active again. While any approval is pending, the strip
+  follows the monitor under the cursor (primary monitor otherwise).
+- **Desktop panel + VS Code:** sessions grouped by machine; remote sessions and transcripts read-only (prompt, cancel,
+  approve disabled with "Open on <machine> to act — remote control arrives in a later update"); offline machines'
+  items greyed with "last seen"; `TruncatedPayload` renders as "Large output — open on <machine>".
+- **Notifications:** OS / VS Code notifications only on the active machine (`activeMachineId === local`), for every
+  machine's events, so the user is told once, where they are.
+- **Activity reporting:** desktop reports on global cursor movement (pet_window already polls it) and panel input;
+  VS Code on window focus, editor edits and selection changes. Both throttled.

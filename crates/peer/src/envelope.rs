@@ -76,10 +76,23 @@ pub fn seal(
     include_pk: bool,
 ) -> PeerEnvelope {
     let plaintext = serde_json::to_vec(body).expect("PeerBody serializes");
+    seal_plaintext(keys, from, to, to_pk, seq, &plaintext, include_pk)
+}
+
+/// `seal` for a body that is already serialized (UTF-8 JSON of a `PeerBody`).
+pub(crate) fn seal_plaintext(
+    keys: &DeviceKeys,
+    from: &str,
+    to: &str,
+    to_pk: &[u8; 32],
+    seq: u64,
+    plaintext: &[u8],
+    include_pk: bool,
+) -> PeerEnvelope {
     let nonce = make_nonce(&keys.public_key(), to_pk, seq);
     let ciphertext = keys
         .salsa_box(to_pk)
-        .encrypt(crypto_box::Nonce::from_slice(&nonce), plaintext.as_slice())
+        .encrypt(crypto_box::Nonce::from_slice(&nonce), plaintext)
         .expect("crypto_box encryption cannot fail for in-memory buffers");
     PeerEnvelope {
         v: PEER_PROTOCOL_VERSION,

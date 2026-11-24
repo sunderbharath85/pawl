@@ -21,5 +21,5 @@ pub use b64::B64Error;
 pub use envelope::{open, seal, OpenError};
 pub use invite::{Invite, InviteError};
 pub use keys::DeviceKeys;
-pub use node::{JoinError, PeerEvent, PeerNode, PeerTimings};
+pub use node::{JoinError, PeerEvent, PeerNode, PeerTimings, SendError, MAX_SEND_BODY_BYTES};
 pub use roster::{MemoryRoster, Roster, RosterEntry};

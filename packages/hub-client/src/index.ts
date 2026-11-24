@@ -4,8 +4,6 @@ export {
   HubClient,
   HubRequestError,
   JOIN_PEER_TIMEOUT_MS,
-  MACHINE_NAME_MAX,
-  normalizeMachineName,
   pickPermissionOption,
   type HubClientOptions,
   type RequestOptions,
@@ -21,7 +19,6 @@ export {
   mergeEvents,
   reduceServerMsg,
   removeDevice,
-  scopeToMachine,
   sortedMachines,
   upsertDevice,
   upsertMachine,
@@ -31,6 +28,35 @@ export {
   type HubState,
   type StateLimits,
 } from "./state";
+export {
+  activeMachineId,
+  agentFor,
+  checkMachineName,
+  groupByMachine,
+  isLocal,
+  MACHINE_NAME_MAX,
+  machineDisplayName,
+  machinesLine,
+  machineSummary,
+  normalizeMachineName,
+  OS_LABEL,
+  petFor,
+  readOnlyReason,
+  renameErrorText,
+  UNKNOWN_MACHINE_NAME,
+  type MachineGroup,
+  type MachineNameCheck,
+} from "./machine";
+export { checkPetName, PET_NAME_MAX, petNameMessage, petRenameErrorText, type PetNameCheck, type PetNameError } from "./petNames";
+export {
+  BACKFILL_WINDOW,
+  backfillSession,
+  SessionBackfill,
+  sessionBackfill,
+  type BackfillResult,
+  type EventSource,
+  type FetchEvents,
+} from "./backfill";
 export {
   extractInviteUri,
   INVITE_TTL_DEFAULT_SECS,

@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { lastEventsBySession, type HubState } from "@krypto/hub-client";
+import { activeMachineId, lastEventsBySession, type HubState } from "@krypto/hub-client";
 import { derivePetViews, type PetView } from "@krypto/pet-engine";
 import { DEFAULT_SPECIES, type Pet } from "@krypto/protocol";
 
@@ -21,9 +21,12 @@ export function fallbackPet(machineId: string): Pet {
   };
 }
 
+/** Every machine's pets; plus the placeholder dog when this machine has none of its own yet. */
 export function petList(state: HubState): Pet[] {
   const pets = Object.values(state.pets);
-  return pets.length > 0 ? pets : [fallbackPet(state.machine?.id ?? "")];
+  const own = state.machine?.id;
+  const hasLocal = pets.some((p) => !own || p.machineId === own);
+  return hasLocal ? pets : [fallbackPet(own ?? ""), ...pets];
 }
 
 export function usePetViews(state: HubState, now: number): PetView[] {
@@ -35,6 +38,9 @@ export function usePetViews(state: HubState, now: number): PetView[] {
         pending: Object.values(state.pending),
         lastEvents: lastEventsBySession(state),
         machines: state.machines,
+        // Visitors and "runs to you" (PLAN.md migration step 3).
+        localMachineId: state.machine?.id,
+        activeMachineId: activeMachineId(state, now),
         now,
       });
     } catch (err) {

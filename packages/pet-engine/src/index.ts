@@ -10,7 +10,15 @@ export {
   type PetActivity,
 } from "./activity";
 export { hashString, PET_LINES, petLine, SPECIES_LIST, SPECIES_META } from "./lines";
-export { derivePetViews, describePermission, nextPetViewChange, type DerivePetViewsInput, type PetBubbleData, type PetView } from "./views";
+export {
+  derivePetViews,
+  describePermission,
+  nextPetViewChange,
+  stageShowsApproval,
+  type DerivePetViewsInput,
+  type PetBubbleData,
+  type PetView,
+} from "./views";
 export {
   clearSpriteManifestCache,
   loadSpriteManifest,

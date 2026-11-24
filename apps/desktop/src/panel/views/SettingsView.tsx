@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { MACHINE_NAME_MAX } from "@krypto/hub-client";
+import { MACHINE_NAME_MAX, OS_LABEL, checkMachineName, machineDisplayName, renameErrorText } from "@krypto/hub-client";
 import { errorText } from "../../lib/format";
-import { OS_LABEL, checkMachineName, machineDisplayName, renameErrorText } from "../../lib/machine";
 import { isTauri, native, onNative, type HubCredentials } from "../../lib/native";
 import { notify } from "../../lib/notifications";
 import { useSettings, type DesktopSettings } from "../../lib/settings";

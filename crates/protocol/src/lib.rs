@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const HUB_DEFAULT_PORT: u16 = 47800;
 pub const HUB_HOST: &str = "127.0.0.1";
 pub const HUB_DATA_DIR_NAME: &str = "krypto";
@@ -56,7 +56,17 @@ pub struct Machine {
     pub online: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hub_version: Option<String>,
+    /// Last local user input seen by that machine's clients (desktop cursor/keys, VS Code focus/edits).
+    /// The active machine is the online machine with the latest value within USER_ACTIVE_WINDOW_MS;
+    /// if none qualifies, every machine treats itself as active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_active_at: Option<UnixMs>,
 }
+
+/// Clients report user activity at most this often (ClientMsg `user_activity`).
+pub const USER_ACTIVITY_REPORT_MS: i64 = 10_000;
+/// Activity older than this does not make a machine the active one.
+pub const USER_ACTIVE_WINDOW_MS: i64 = 10 * 60_000;
 
 /// Global id `${machine_id}:${local_id}`. Every id on the wire is global.
 pub fn global_id(machine_id: &str, local_id: impl std::fmt::Display) -> String {
@@ -189,6 +199,31 @@ pub enum ByeReason {
     Shutdown,
 }
 
+/// Owner -> peer live update for the read-only mirror. Every id inside carries the owner's machine id;
+/// receivers drop any item whose machine id is not the sender's device id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum MirrorUpdate {
+    Session { session: Session },
+    Event { event: HubEvent },
+    Pet { pet: Pet },
+    PermissionRequest { request: PermissionRequest },
+    PermissionResolved { request_id: RequestId, session_id: SessionId, outcome: PermissionOutcome, by: ResolvedBy },
+    Notification { notification: HubNotification },
+}
+
+/// Event payloads larger than this (serialized) are mirrored as a TruncatedPayload.
+pub const MIRROR_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
+/// A sync sends at most this many of the newest events (sync_done.truncated says if more existed).
+pub const MIRROR_SYNC_MAX_EVENTS: usize = 2000;
+/// Senders split mirror_events batches so each serialized body stays under this.
+pub const MIRROR_FRAME_MAX_BYTES: usize = 200 * 1024;
+
+/// Stands in for a mirrored event payload that was too large: `{"truncated":true,"bytes":n}`.
+pub fn truncated_payload(bytes: usize) -> Value {
+    serde_json::json!({ "truncated": true, "bytes": bytes })
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum PeerBody {
@@ -217,6 +252,16 @@ pub enum PeerBody {
     },
     Presence { presence: Presence },
     Bye { reason: ByeReason, ts: UnixMs },
+    /// Live mirror update, owner -> peer (migration step 3).
+    Mirror { update: MirrorUpdate },
+    /// Sent by a peer after hello: "send me your state and events with seq > since_seq" (0 = everything).
+    SyncRequest { since_seq: i64 },
+    /// Owner's reply to sync_request: open + recent sessions, pets, pending permissions (replaces the mirror's copy).
+    MirrorSnapshot { sessions: Vec<Session>, pets: Vec<Pet>, pending_permissions: Vec<PermissionRequest> },
+    /// Batches of events, oldest first, each batch under MIRROR_FRAME_MAX_BYTES.
+    MirrorEvents { events: Vec<HubEvent> },
+    /// End of a sync. `seq` = highest event seq sent; `truncated` = older events were skipped.
+    SyncDone { seq: i64, truncated: bool },
 }
 
 // ---------- agents ----------
@@ -718,6 +763,8 @@ pub enum ClientMsg {
     JoinPeer { id: String, uri: String },
     /// Unpair a device: its links close, it can no longer connect, and the peer is told. Errors: not_found.
     RevokeDevice { id: String, device_id: String },
+    /// The user is active on this machine (clients throttle to USER_ACTIVITY_REPORT_MS). Hub stamps the time.
+    UserActivity { id: String },
 }
 
 impl ClientMsg {
@@ -739,7 +786,8 @@ impl ClientMsg {
             | ClientMsg::UpdateMachine { id, .. }
             | ClientMsg::CreateInvite { id, .. }
             | ClientMsg::JoinPeer { id, .. }
-            | ClientMsg::RevokeDevice { id, .. } => id,
+            | ClientMsg::RevokeDevice { id, .. }
+            | ClientMsg::UserActivity { id } => id,
         }
     }
 }
@@ -756,6 +804,8 @@ pub struct Welcome {
     pub machines: Vec<Machine>,
     /// The pairing roster (never includes this hub).
     pub devices: Vec<Device>,
+    // sessions / pets / pending_permissions below cover every machine: this hub's own plus the
+    // read-only mirror of paired hubs (each item carries its machine_id).
     pub peer: PeerStatus,
     pub agents: Vec<Agent>,
     pub sessions: Vec<Session>,
@@ -828,6 +878,10 @@ mod tests {
         assert_eq!(serde_json::to_value(&st).unwrap(), serde_json::json!({"listening":null,"publicKey":"k"}));
         let m: ClientMsg = serde_json::from_str(r#"{"type":"create_invite","id":"1"}"#).unwrap();
         assert_eq!(m, ClientMsg::CreateInvite { id: "1".into(), ttl_secs: None, addr: None });
+        let b = PeerBody::SyncRequest { since_seq: 5 };
+        assert_eq!(serde_json::to_value(&b).unwrap(), serde_json::json!({"type":"sync_request","sinceSeq":5}));
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"user_activity","id":"9"}"#).unwrap();
+        assert_eq!(m.id(), "9");
         let s = ServerMsg::MachineRemoved { machine_id: "abcdef012345".into() };
         assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::json!({"type":"machine_removed","machineId":"abcdef012345"}));
     }

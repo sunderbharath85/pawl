@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { HubRequestError } from "@krypto/hub-client";
 import type { Pet } from "@krypto/protocol";
-import { checkPetName, PET_NAME_MAX, petRenameErrorText } from "./petNames";
+import { checkPetName, HubRequestError, PET_NAME_MAX, petRenameErrorText } from "../src/index";
 
 const pet = (id: string, name: string, machineId = "aaaaaaaaaaaa"): Pet => ({
   id: `${machineId}:${id}`,

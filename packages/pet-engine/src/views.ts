@@ -18,6 +18,8 @@ export interface PetBubbleData {
   text: string;
   kind: "say" | "permission";
   requestId?: string | undefined;
+  /** A permission bubble that cannot be answered here (a visitor's; remote approval arrives in step 4). */
+  readOnly?: boolean | undefined;
 }
 
 export interface PetView {
@@ -39,6 +41,15 @@ export interface PetView {
   mood: number;
   /** Pet skin (from `Pet.skin`), passed through for rendering. */
   skin?: string | undefined;
+  /** The pet lives on another machine that is online: it shows in the stage's visitors area. */
+  visitor: boolean;
+  /**
+   * A home pet with a pending approval while the user is active on another machine: it "ran to" that
+   * machine (where it shows up as a visitor with its request). The stage walks it off-screen.
+   */
+  away?: MachineId | undefined;
+  /** The pet lives on another machine that is offline: not on the stage; lists grey it out. */
+  remoteOffline: boolean;
 }
 
 export interface DerivePetViewsInput {
@@ -48,8 +59,15 @@ export interface DerivePetViewsInput {
   /** Latest event per session id (e.g. hub-client `lastEventsBySession` or `lastSignificantEvents`). */
   lastEvents: Record<string, HubEvent | undefined>;
   now: number;
-  /** Known machines by id (hub-client `state.machines`); used for `PetView.machineName`. */
+  /** Known machines by id (hub-client `state.machines`); names and online state of each pet's machine. */
   machines?: Record<MachineId, Machine> | undefined;
+  /**
+   * This hub's machine id (L). Pets of other machines become visitors (machine online) or remoteOffline.
+   * Omitted: every pet is treated as a home pet.
+   */
+  localMachineId?: MachineId | undefined;
+  /** The machine the user is active on (A, hub-client `activeMachineId`). Defaults to `localMachineId`. */
+  activeMachineId?: MachineId | undefined;
 }
 
 const BUSY: ReadonlySet<SessionStatus> = new Set<SessionStatus>(["thinking", "working", "waiting_permission"]);
@@ -116,6 +134,65 @@ function sameOwner(pet: Pick<Pet, "machineId" | "agentId">, x: { machineId: Mach
 }
 
 function derivePet(pet: Pet, input: DerivePetViewsInput, seedBase: number): Derived {
+  const local = input.localMachineId;
+  if (local === undefined || pet.machineId === local) return deriveActivity(pet, input, seedBase, { visitor: false, remoteOffline: false });
+  const online = input.machines?.[pet.machineId]?.online === true;
+  return deriveActivity(pet, input, seedBase, { visitor: online, remoteOffline: !online });
+}
+
+/**
+ * Apply the visitor rules on local machine L with active machine A:
+ * - a home pet with a pending approval gets `away = A` when A != L (it ran to the user);
+ * - a visitor with a pending approval shows its (read-only) request bubble only when A == L (it ran
+ *   here); otherwise it is a plain visitor in the waiting pose (alert, no bubble);
+ * - visitors only ever show permission bubbles; pets of offline machines nap, without bubbles.
+ */
+function applyPlace(view: PetView, pet: Pet, input: DerivePetViewsInput, pendingReq: PermissionRequest | undefined): PetView {
+  const local = input.localMachineId;
+  const active = input.activeMachineId || local;
+  if (!view.visitor && !view.remoteOffline) {
+    if (pendingReq && local !== undefined && active !== undefined && active !== local) return { ...view, away: active };
+    return view;
+  }
+  if (view.remoteOffline) {
+    const lastSeen = input.machines?.[pet.machineId]?.lastSeen ?? 0;
+    const { bubble: _bubble, sessionId: _sid, ...rest } = view;
+    return { ...rest, activity: "napping", since: lastSeen };
+  }
+  if (pendingReq) {
+    if (active === local) {
+      const where = view.machineName ?? "its machine";
+      return {
+        ...view,
+        bubble: {
+          kind: "permission",
+          requestId: pendingReq.requestId,
+          readOnly: true,
+          text: `${describePermission(pendingReq)}? Needs approval on ${where}.`,
+        },
+      };
+    }
+    const { bubble: _bubble, ...rest } = view;
+    return { ...rest, activity: "alert" };
+  }
+  if (view.bubble) {
+    const { bubble: _bubble, ...rest } = view;
+    return rest;
+  }
+  return view;
+}
+
+interface Place {
+  visitor: boolean;
+  remoteOffline: boolean;
+}
+
+function deriveActivity(pet: Pet, input: DerivePetViewsInput, seedBase: number, place: Place): Derived {
+  const derived = deriveCore(pet, input, seedBase, place);
+  return { view: applyPlace(derived.view, pet, input, derived.pending), nextAt: place.remoteOffline ? null : derived.nextAt };
+}
+
+function deriveCore(pet: Pet, input: DerivePetViewsInput, seedBase: number, place: Place): Derived & { pending?: PermissionRequest } {
   const { now } = input;
   const base = {
     petId: pet.id,
@@ -126,6 +203,8 @@ function derivePet(pet: Pet, input: DerivePetViewsInput, seedBase: number): Deri
     name: pet.name,
     mood: pet.mood,
     skin: pet.skin,
+    visitor: place.visitor,
+    remoteOffline: place.remoteOffline,
   };
   const seed = (t: number) => seedBase + Math.floor(t / 1000);
 
@@ -153,6 +232,7 @@ function derivePet(pet: Pet, input: DerivePetViewsInput, seedBase: number): Deri
         },
       },
       nextAt: null,
+      pending: req,
     };
   }
 
@@ -232,6 +312,8 @@ function derivePet(pet: Pet, input: DerivePetViewsInput, seedBase: number): Deri
  * Pure: what each pet is doing at `now`. One view per pet, in input order.
  * Priority: pending permission (alert + Approve/Deny) > busy session (thinking/working/planning)
  * > recent end_turn (happy, 6 s) / error (sad, 10 s) > idle > napping (60 s without activity).
+ * With `localMachineId`, other machines' pets are visitors (online) or remoteOffline, and the
+ * L/A rules of `applyPlace` decide who runs where (see `PetView.away`).
  */
 export function derivePetViews(input: DerivePetViewsInput): PetView[] {
   return input.pets.map((pet) => derivePet(pet, input, hashString(pet.id)).view);
@@ -248,4 +330,15 @@ export function nextPetViewChange(input: DerivePetViewsInput): number | null {
     if (nextAt != null && nextAt > input.now && (next == null || nextAt < next)) next = nextAt;
   }
   return next;
+}
+
+/**
+ * True while a stage of these views shows an approval request: a home pet's permission bubble (not
+ * `away`), or a visitor that ran here with its request. The desktop strip follows the cursor's
+ * monitor only then.
+ */
+export function stageShowsApproval(views: readonly PetView[]): boolean {
+  return views.some(
+    (v) => v.bubble?.kind === "permission" && !v.remoteOffline && (v.visitor || v.away === undefined),
+  );
 }

@@ -1,4 +1,6 @@
 import { useMemo } from "react";
+import { isLocal, machineDisplayName } from "@krypto/hub-client";
+import type { Session } from "@krypto/protocol";
 import { STATUS_META, SOURCE_LABEL, agentName, isActive, sessionTitle, timeAgo } from "../../lib/format";
 import { usePanel } from "../context";
 import * as I from "../icons";
@@ -22,7 +24,17 @@ export function HomeView() {
   );
   const pendingCount = Object.keys(state.pending).length;
   const notes = state.notifications.slice(-5).reverse();
-  const lead = views[0];
+  // This machine's pets on the rug (visitors live on their own machines).
+  const homeViews = views.filter((v) => !v.visitor && !v.remoteOffline);
+  const rug = homeViews.length > 0 ? homeViews : views;
+  const lead = rug[0];
+  /** " · Mac mini" for another machine's session (greyed when that machine is offline). */
+  const where = (s: Session) =>
+    isLocal(state, s.machineId) ? null : (
+      <span className={`chip chip-soft chip-machine${state.machines[s.machineId]?.online ? "" : " is-offline"}`}>
+        {machineDisplayName(state.machines[s.machineId])}
+      </span>
+    );
 
   return (
     <section className="view home">
@@ -57,7 +69,7 @@ export function HomeView() {
         </div>
         <div className="home-hero-pets">
           <div className="home-rug" />
-          {(views.length > 0 ? views.slice(0, 4) : []).map((v, i) => (
+          {rug.slice(0, 4).map((v, i) => (
             <button
               key={v.petId}
               className="home-pet"
@@ -85,6 +97,7 @@ export function HomeView() {
                   <button className="mini-row" onClick={() => navigate({ view: "session", sessionId: s.id })}>
                     <span className={`dot tone-${STATUS_META[s.status].tone}`} />
                     <span className="mini-title">{sessionTitle(s, state.agents)}</span>
+                    {where(s)}
                     <span className="muted">{STATUS_META[s.status].label}</span>
                   </button>
                 </li>
@@ -104,6 +117,7 @@ export function HomeView() {
                   <button className="mini-row" onClick={() => navigate({ view: "session", sessionId: s.id })}>
                     <span className={`dot tone-${STATUS_META[s.status].tone}`} />
                     <span className="mini-title">{sessionTitle(s, state.agents)}</span>
+                    {where(s)}
                     <span className="muted">
                       {agentName(state.agents, s.agentId, s.machineId)} · {SOURCE_LABEL[s.source]} · {timeAgo(s.lastEventAt, now)}
                     </span>

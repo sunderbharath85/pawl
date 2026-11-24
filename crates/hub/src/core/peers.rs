@@ -43,18 +43,42 @@ fn wire(e: impl std::fmt::Display) -> anyhow::Error {
 }
 
 /// A roster entry with live state: online while a link is up, lastSeen = the latest authenticated
-/// frame we know of.
-fn live_machine(e: &RosterEntry, online: bool, frame_ts: Option<UnixMs>) -> Machine {
+/// frame we know of, userActiveAt from its latest presence.
+fn live_machine(e: &RosterEntry, online: bool, frame_ts: Option<UnixMs>, presence: Option<&Presence>) -> Machine {
     let mut m = e.machine.clone();
     m.id = e.device.id.clone();
     m.online = online;
     m.last_seen = m.last_seen.max(e.device.last_seen.unwrap_or(0)).max(frame_ts.unwrap_or(0));
+    m.user_active_at = presence.and_then(presence_activity);
     m
 }
 
-/// What clients are told about with `ServerMsg::Machine` (lastSeen alone is no reason).
+/// A peer's presence in this hub's clock: its timestamps are shifted by `now - presence.ts` (the
+/// peer's clock offset, as of arrival) and never land in the future.
+pub(crate) fn presence_to_local_clock(mut p: Presence, now: UnixMs) -> Presence {
+    let offset = now.saturating_sub(p.ts);
+    let shift = |t: UnixMs| t.saturating_add(offset).clamp(0, now);
+    p.user_active_at = p.user_active_at.map(shift);
+    p.machine.user_active_at = p.machine.user_active_at.map(shift);
+    p.machine.last_seen = shift(p.machine.last_seen);
+    p.ts = now;
+    p
+}
+
+/// A presence's userActiveAt (either copy; the later wins).
+fn presence_activity(p: &Presence) -> Option<UnixMs> {
+    p.user_active_at.max(p.machine.user_active_at)
+}
+
+/// What clients are told about with `ServerMsg::Machine`: lastSeen alone is no reason, and
+/// userActiveAt only when it moved by ACTIVITY_STEP_MS.
 fn same_view(a: &Machine, b: &Machine) -> bool {
-    a.name == b.name && a.os == b.os && a.hub_version == b.hub_version && a.online == b.online
+    let activity_close = match (a.user_active_at, b.user_active_at) {
+        (Some(x), Some(y)) => x.abs_diff(y) < ACTIVITY_STEP_MS as u64,
+        (None, None) => true,
+        _ => false,
+    };
+    a.name == b.name && a.os == b.os && a.hub_version == b.hub_version && a.online == b.online && activity_close
 }
 
 fn sorted_devices(roster: &BTreeMap<String, RosterEntry>) -> Vec<Device> {
@@ -73,6 +97,9 @@ fn presence_key(p: &Presence) -> Value {
     let mut p = p.clone();
     p.ts = 0;
     p.machine.last_seen = 0;
+    // Activity has its own push rule (see `Hub::user_activity`).
+    p.user_active_at = None;
+    p.machine.user_active_at = None;
     serde_json::to_value(&p).unwrap_or(Value::Null)
 }
 
@@ -110,7 +137,7 @@ impl Hub {
             .roster
             .values()
             .filter(|e| e.device.kind == DeviceKind::Hub)
-            .map(|e| (e.device.id.clone(), live_machine(e, false, None)))
+            .map(|e| (e.device.id.clone(), live_machine(e, false, None, None)))
             .collect();
         peers.sent = sent;
         peers.devices_sent = devices_key(&peers.roster);
@@ -158,24 +185,29 @@ impl Hub {
             .filter(|e| e.device.kind == DeviceKind::Hub)
             .map(|e| {
                 let ts = online.get(&e.device.id).copied();
-                live_machine(e, ts.is_some(), ts)
+                live_machine(e, ts.is_some(), ts, peers.presence.get(&e.device.id))
             })
             .collect();
         v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.id.cmp(&b.id)));
         v
     }
 
-    /// Pet names on other machines, from their latest presence (pet names are unique across all
-    /// known machines).
+    /// Pet names on other machines, from the mirror and their latest presence (pet names are
+    /// unique across all known machines).
     pub(super) fn remote_pet_names(&self) -> Vec<String> {
         let mid = &self.inner.machine_id;
-        self.peers()
+        let mut names: Vec<String> = self
+            .peers()
             .presence
             .values()
             .flat_map(|p| p.pets.iter())
             .filter(|p| &p.machine_id != mid)
             .map(|p| p.name.clone())
-            .collect()
+            .collect();
+        names.extend(self.mirror_pets().into_iter().filter(|p| &p.machine_id != mid).map(|p| p.name));
+        names.sort();
+        names.dedup();
+        names
     }
 
     // ------------------------------------------------------------ presence
@@ -188,11 +220,11 @@ impl Hub {
         let mut pets: Vec<Pet> = st.pets.values().filter(|p| p.machine_id == st.machine_id).cloned().collect();
         pets.sort_by(|a, b| a.agent_id.cmp(&b.agent_id).then_with(|| a.id.cmp(&b.id)));
         Presence {
+            user_active_at: machine.user_active_at,
             machine,
             agents: st.agents.clone(),
             repos: Vec::new(),
             pets,
-            user_active_at: None,
             ts: krypto_protocol::now_ms(),
         }
     }
@@ -200,11 +232,20 @@ impl Hub {
     /// Hand the link layer a fresh snapshot when something peers see changed (rename, agents,
     /// pets); it pushes it at once and then on every heartbeat.
     pub(super) fn refresh_presence(&self) {
+        self.hand_presence(false);
+    }
+
+    /// Push the current snapshot now even if nothing but activity changed.
+    pub(super) fn push_presence(&self) {
+        self.hand_presence(true);
+    }
+
+    fn hand_presence(&self, force: bool) {
         // Held across snapshot + hand-off so two callers cannot push an older snapshot last.
         let mut pushed = self.inner.presence_pushed.lock().unwrap_or_else(|p| p.into_inner());
         let p = self.presence_snapshot();
         let key = presence_key(&p);
-        if pushed.as_ref() == Some(&key) {
+        if !force && pushed.as_ref() == Some(&key) {
             return;
         }
         *pushed = Some(key);
@@ -288,7 +329,7 @@ impl Hub {
                     None,
                     None,
                 );
-                self.inner.bus.send(ServerMsg::Notification { notification });
+                self.inner.bus.send_local(ServerMsg::Notification { notification });
                 self.sync_peers(Some((&device.id, true))).await;
             }
             PeerEvent::PairRejected { remote_addr, reason } => {
@@ -305,16 +346,23 @@ impl Hub {
             PeerEvent::LinkUp { device_id, .. } => {
                 tracing::info!("link up: {device_id}");
                 self.sync_peers(Some((&device_id, true))).await;
+                // On every LinkUp: a new link can replace a live one and lose what was queued on it.
+                if self.peers().roster.get(&device_id).is_some_and(|e| e.device.kind == DeviceKind::Hub) {
+                    self.request_sync(&device_id).await;
+                }
             }
             PeerEvent::LinkDown { device_id } => {
                 tracing::info!("link down: {device_id}");
+                self.link_lost(&device_id);
                 self.sync_peers(Some((&device_id, false))).await;
             }
+            PeerEvent::Body { device_id, body } => self.on_peer_body(&device_id, body).await,
             PeerEvent::Presence { device_id, presence } => {
                 if !self.peers().roster.contains_key(&device_id) {
                     // Not (or no longer) paired: never keep its data.
                     return;
                 }
+                let presence = presence_to_local_clock(presence, krypto_protocol::now_ms());
                 self.peers().presence.insert(device_id.clone(), presence);
                 self.sync_peers(Some((&device_id, true))).await;
             }
@@ -338,6 +386,8 @@ impl Hub {
         if let Err(e) = self.inner.store.run(move |s| s.revoke_device(&id, now)).await {
             tracing::error!("revoke {device_id} in hub.db: {e:#}");
         }
+        // Revoke (either side) deletes everything mirrored from that machine.
+        self.drop_mirror(device_id).await;
         if let Some(e) = entry {
             let (kind, verb) =
                 if by_peer { (PairingAuditKind::RevokedByPeer, "unpaired by") } else { (PairingAuditKind::Revoked, "unpaired") };
@@ -352,7 +402,7 @@ impl Hub {
                     None,
                     None,
                 );
-                self.inner.bus.send(ServerMsg::Notification { notification });
+                self.inner.bus.send_local(ServerMsg::Notification { notification });
             }
         }
         self.sync_peers(None).await;
@@ -401,7 +451,7 @@ impl Hub {
                     Some((t, on)) if t == id => on,
                     _ => online.contains_key(id),
                 };
-                let m = live_machine(e, is_online, online.get(id).copied());
+                let m = live_machine(e, is_online, online.get(id).copied(), peers.presence.get(id));
                 if peers.sent.get(id).is_none_or(|s| !same_view(s, &m)) {
                     peers.sent.insert(id.clone(), m.clone());
                     out.push(ServerMsg::Machine { machine: m });
@@ -411,6 +461,7 @@ impl Hub {
         for msg in out {
             self.inner.bus.send(msg);
         }
+        self.check_active_machine(false);
     }
 
     async fn audit_pairing(
@@ -435,5 +486,61 @@ impl Hub {
         if let Err(e) = self.inner.store.run(move |s| s.insert_pairing_audit(&entry)).await {
             tracing::error!("pairing audit write failed: {e:#}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use krypto_protocol::MachineOs;
+
+    fn presence(ts: UnixMs, active: Option<UnixMs>) -> Presence {
+        Presence {
+            machine: Machine {
+                id: "zyxwvu987654".into(),
+                name: "Mac mini".into(),
+                os: MachineOs::Macos,
+                last_seen: ts,
+                online: true,
+                hub_version: None,
+                user_active_at: active,
+            },
+            agents: vec![],
+            repos: vec![],
+            pets: vec![],
+            user_active_at: active,
+            ts,
+        }
+    }
+
+    #[test]
+    fn peer_clocks_are_converted_to_ours() {
+        let now = 1_000_000;
+        // Peer clock 5 min ahead: its "10 s ago" is our "10 s ago", not "5 min in the future".
+        let p = presence_to_local_clock(presence(now + 300_000, Some(now + 290_000)), now);
+        assert_eq!((p.user_active_at, p.machine.user_active_at), (Some(now - 10_000), Some(now - 10_000)));
+        assert_eq!((p.ts, p.machine.last_seen), (now, now));
+        // Peer clock 1 h behind.
+        let p = presence_to_local_clock(presence(now - 3_600_000, Some(now - 3_600_000 - 2_000)), now);
+        assert_eq!(p.user_active_at, Some(now - 2_000));
+        // Activity stamped after the presence (peer races its own clock) is clamped to now.
+        let p = presence_to_local_clock(presence(now, Some(now + 5_000)), now);
+        assert_eq!(p.user_active_at, Some(now));
+        assert_eq!(presence_to_local_clock(presence(now, None), now).user_active_at, None);
+        // Absurd values never overflow and land in [0, now].
+        let p = presence_to_local_clock(presence(i64::MIN, Some(i64::MAX)), now);
+        assert_eq!(p.user_active_at, Some(now));
+        let p = presence_to_local_clock(presence(i64::MAX, Some(i64::MIN)), now);
+        assert_eq!((p.user_active_at, p.machine.last_seen), (Some(0), now), "lastSeen = the presence time = now");
+    }
+
+    #[test]
+    fn machine_diffs_never_overflow() {
+        let m = |at: Option<UnixMs>| presence(0, at).machine;
+        assert!(!same_view(&m(Some(i64::MIN)), &m(Some(i64::MAX))));
+        assert!(same_view(&m(Some(i64::MAX)), &m(Some(i64::MAX - 1))));
+        assert!(!same_view(&m(Some(0)), &m(None)));
+        assert!(same_view(&m(Some(1_000)), &m(Some(1_000 + ACTIVITY_STEP_MS - 1))));
+        assert!(!same_view(&m(Some(1_000)), &m(Some(1_000 + ACTIVITY_STEP_MS))));
     }
 }

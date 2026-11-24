@@ -12,7 +12,7 @@ import {
   shortPath,
   timeAgo,
 } from "../../lib/format";
-import { sessionBackfill } from "../../lib/backfill";
+import { machineDisplayName, readOnlyReason, sessionBackfill } from "@krypto/hub-client";
 import { usePanel } from "../context";
 import { buildFeed, STOP_LABEL, type FeedItem } from "../feed";
 import * as I from "../icons";
@@ -69,9 +69,14 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const status = STATUS_META[session.status];
   const active = isActive(session);
   const canPrompt = session.source === "owned" && !session.endedAt;
+  // Another machine's session is a read-only mirror until remote control (migration step 4).
+  const readOnly = readOnlyReason(state, session.machineId);
+  const machine = state.machines[session.machineId];
+  const machineName = machineDisplayName(machine);
+  const offline = !!readOnly && !machine?.online;
 
   return (
-    <section className="session-view">
+    <section className={`session-view${offline ? " is-offline" : ""}`}>
       <header className="session-head">
         <PetAvatar species={pet?.species ?? "dog"} activity={pet?.activity ?? "idle"} size={64} />
         <div className="session-head-main">
@@ -81,6 +86,12 @@ export function SessionView({ sessionId }: { sessionId: string }) {
               <span className={`dot tone-${status.tone}`} /> {status.label}
             </span>
             <span className="chip">{agentName(state.agents, session.agentId, session.machineId)}</span>
+            {readOnly && (
+              <span className={`chip chip-machine${offline ? " is-offline" : ""}`} title={readOnly}>
+                <I.Monitor size={13} /> {machineName}
+                {offline ? ` · offline, last seen ${timeAgo(machine?.lastSeen ?? 0, now)}` : ""}
+              </span>
+            )}
             <span className="chip chip-soft">{SOURCE_LABEL[session.source]}</span>
             <span className="chip chip-soft mono" title={session.cwd}>
               <I.Folder size={13} /> {shortPath(session.cwd || "~", 3)}
@@ -96,6 +107,8 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         {canPrompt && active && (
           <button
             className="pill pill-bad"
+            disabled={!!readOnly}
+            title={readOnly ?? undefined}
             onClick={() => client.cancel(session.id).catch((err) => toast(errorText(err), "error"))}
           >
             <I.Stop size={14} /> Cancel turn
@@ -117,7 +130,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
           </div>
         )}
         {feed.map((item) => (
-          <FeedRow key={item.key} item={item} />
+          <FeedRow key={item.key} item={item} machineName={machineName} />
         ))}
         {pending.map((req) => (
           <div className="feed-pending" key={req.requestId}>
@@ -134,7 +147,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
       </div>
 
       {canPrompt ? (
-        <PromptBar sessionId={session.id} busy={active} />
+        <PromptBar sessionId={session.id} busy={active} disabledReason={readOnly} />
       ) : (
         <div className="prompt-note">
           {session.endedAt
@@ -146,7 +159,13 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   );
 }
 
-function FeedRow({ item }: { item: FeedItem }) {
+/** "84 KB" / "1.2 MB". */
+function sizeLabel(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+function FeedRow({ item, machineName }: { item: FeedItem; machineName: string }) {
   switch (item.kind) {
     case "text":
       if (item.role === "user")
@@ -239,17 +258,23 @@ function FeedRow({ item }: { item: FeedItem }) {
           {item.icon} {item.text}
         </div>
       );
+    case "truncated":
+      return (
+        <div className="notice notice-muted" title={item.bytes ? `${sizeLabel(item.bytes)} not copied to this machine` : undefined}>
+          📦 Large output — open on {machineName}
+        </div>
+      );
   }
 }
 
-function PromptBar({ sessionId, busy }: { sessionId: string; busy: boolean }) {
+function PromptBar({ sessionId, busy, disabledReason }: { sessionId: string; busy: boolean; disabledReason: string | null }) {
   const { client, toast } = usePanel();
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
 
   const send = async () => {
     const t = text.trim();
-    if (!t || sending) return;
+    if (!t || sending || disabledReason) return;
     setSending(true);
     try {
       await client.prompt(sessionId, t);
@@ -272,7 +297,12 @@ function PromptBar({ sessionId, busy }: { sessionId: string; busy: boolean }) {
       <textarea
         value={text}
         rows={2}
-        placeholder={busy ? "The agent is mid-turn; send a follow-up when it finishes (or cancel)…" : "Ask the agent to do something…"}
+        disabled={!!disabledReason}
+        title={disabledReason ?? undefined}
+        placeholder={
+          disabledReason ??
+          (busy ? "The agent is mid-turn; send a follow-up when it finishes (or cancel)…" : "Ask the agent to do something…")
+        }
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -281,7 +311,7 @@ function PromptBar({ sessionId, busy }: { sessionId: string; busy: boolean }) {
           }
         }}
       />
-      <button className="pill pill-primary send" type="submit" disabled={!text.trim() || sending}>
+      <button className="pill pill-primary send" type="submit" disabled={!text.trim() || sending || !!disabledReason}>
         <I.Send size={15} /> Send
       </button>
     </form>

@@ -1,17 +1,18 @@
 // Pure: turn a session's event log into display items for the session detail view.
-import type {
-  ErrorPayload,
-  HookPayload,
-  HubEvent,
-  PermissionResolvedPayload,
-  PlanEntry,
-  PlanPayload,
-  StopPayload,
-  TextPayload,
-  ToolCallPayload,
-  ToolCallStatus,
-  ToolKind,
-  ToolLocation,
+import {
+  isTruncatedPayload,
+  type ErrorPayload,
+  type HookPayload,
+  type HubEvent,
+  type PermissionResolvedPayload,
+  type PlanEntry,
+  type PlanPayload,
+  type StopPayload,
+  type TextPayload,
+  type ToolCallPayload,
+  type ToolCallStatus,
+  type ToolKind,
+  type ToolLocation,
 } from "@krypto/protocol";
 
 export type TranscriptItem =
@@ -32,7 +33,9 @@ export type TranscriptItem =
   | { kind: "permission"; key: string; text: string; ts: number }
   | { kind: "stop"; key: string; reason: string; ts: number }
   | { kind: "error"; key: string; text: string; ts: number }
-  | { kind: "note"; key: string; text: string; ts: number };
+  | { kind: "note"; key: string; text: string; ts: number }
+  /** A mirrored event whose payload was too large to copy over (open the session on its machine). */
+  | { kind: "truncated"; key: string; bytes: number; ts: number };
 
 function text(payload: unknown): string {
   const t = (payload as Partial<TextPayload> | null)?.text;
@@ -58,6 +61,13 @@ export function buildTranscript(events: readonly HubEvent[]): TranscriptItem[] {
 
   for (const e of events) {
     const last = items[items.length - 1];
+    if (isTruncatedPayload(e.payload)) {
+      const bytes = typeof e.payload.bytes === "number" ? e.payload.bytes : 0;
+      // Consecutive large chunks read as one gap.
+      if (last?.kind === "truncated") items[items.length - 1] = { ...last, bytes: last.bytes + bytes };
+      else items.push({ kind: "truncated", key: e.id, bytes, ts: e.ts });
+      continue;
+    }
     switch (e.type) {
       case "user_message": {
         const t = text(e.payload);

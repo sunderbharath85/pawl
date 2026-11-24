@@ -1,13 +1,21 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
-import { MACHINE_NAME_MAX, normalizeMachineName } from "@krypto/hub-client";
+import {
+  checkPetName,
+  isLocal,
+  MACHINE_NAME_MAX,
+  normalizeMachineName,
+  OS_LABEL,
+  petFor,
+  petRenameErrorText,
+  readOnlyReason,
+  renameErrorText,
+} from "@krypto/hub-client";
 import { SPECIES_META } from "@krypto/pet-engine";
 import type { Agent, Machine, PermissionRequest, Pet, Session, Species } from "@krypto/protocol";
 import { HubOfflineError, type HubConnection } from "./connection";
 import { installHooks, startHub, type HookTargetId } from "./hubProcess";
 import { machinePickItems } from "./machineList";
-import { OS_LABEL, petFor, renameErrorText } from "../shared/machine";
-import { checkPetName, petRenameErrorText } from "../shared/petNames";
 import type { PetWebviews } from "./petView";
 import { agentName, errorMessage, isBusy, isInWorkspace, isOpen, relativeTime, sessionLabel } from "./util";
 
@@ -103,10 +111,11 @@ export class Commands {
   }
 
   private async pickAgent(): Promise<Agent | undefined> {
-    const agents = [...this.hub.state.agents];
+    // Sessions start on this machine's hub, so only its own agents are offered.
+    const agents = this.hub.state.agents.filter((a) => isLocal(this.hub.state, a.machineId));
     if (agents.length === 0) {
       const refreshed = await this.hub.api.listAgents(true);
-      agents.push(...refreshed);
+      agents.push(...refreshed.filter((a) => isLocal(this.hub.state, a.machineId)));
     }
     if (agents.length === 0) {
       void vscode.window.showWarningMessage("Krypto: the hub found no agents. Install an ACP agent (e.g. Claude Code or Codex) and try again.");
@@ -161,11 +170,18 @@ export class Commands {
     return chosen?.[0]?.fsPath;
   }
 
+  /** Remote sessions, approvals and pets are read-only until remote control (migration step 4). */
+  private assertLocal(machineId: string): void {
+    const why = readOnlyReason(this.hub.state, machineId);
+    if (why) throw new Error(why);
+  }
+
+  /** This machine's sessions matching `filter` (only those can be prompted or cancelled from here). */
   private sessionItems(filter: (s: Session) => boolean): SessionItem[] {
     const state = this.hub.state;
     const now = Date.now();
     return Object.values(state.sessions)
-      .filter(filter)
+      .filter((s) => isLocal(state, s.machineId) && filter(s))
       .sort((a, b) => {
         const wa = isInWorkspace(a.cwd) ? 1 : 0;
         const wb = isInWorkspace(b.cwd) ? 1 : 0;
@@ -202,6 +218,7 @@ export class Commands {
             "no open sessions started by the pet. Use “Krypto: Start Session” first.",
           );
     if (!session) return;
+    this.assertLocal(session.machineId);
     if (session.source !== "owned") {
       throw new Error("only sessions started by the pet can be prompted (this one runs in another tool)");
     }
@@ -225,6 +242,7 @@ export class Commands {
         ? this.hub.state.sessions[sessionId]
         : await this.pickSession("Krypto: Cancel Session", (s) => s.source === "owned" && isBusy(s), "nothing to cancel — no busy sessions.");
     if (!session) return;
+    this.assertLocal(session.machineId);
     await api.cancel(session.id);
     void vscode.window.setStatusBarMessage(
       `Krypto: cancelled ${agentName(this.hub.state.agents, session.agentId, session.machineId)}`,
@@ -239,10 +257,18 @@ export class Commands {
     const state = this.hub.state;
     let req: PermissionRequest | undefined =
       typeof requestId === "string" && requestId ? state.pending[requestId] : undefined;
+    if (req) this.assertLocal(req.machineId);
     if (!req) {
-      const pending = Object.values(state.pending).sort((a, b) => a.createdAt - b.createdAt);
+      const pending = Object.values(state.pending)
+        .filter((p) => isLocal(state, p.machineId))
+        .sort((a, b) => a.createdAt - b.createdAt);
       if (pending.length === 0) {
-        void vscode.window.showInformationMessage("Krypto: nothing is waiting for approval.");
+        const remote = Object.keys(state.pending).length;
+        void vscode.window.showInformationMessage(
+          remote > 0
+            ? `Krypto: nothing here is waiting for approval (${remote} on other machines; answer those there).`
+            : "Krypto: nothing is waiting for approval.",
+        );
         return;
       }
       if (pending.length === 1) req = pending[0];
@@ -329,8 +355,14 @@ export class Commands {
   private async pickPet(title: string, petId?: string): Promise<Pet | undefined> {
     const state = this.hub.state;
     const known = typeof petId === "string" && petId ? state.pets[petId] : undefined;
-    if (known) return known;
-    const pets = Object.values(state.pets).sort((a, b) => a.name.localeCompare(b.name));
+    if (known) {
+      this.assertLocal(known.machineId);
+      return known;
+    }
+    // Another machine's pets belong to its hub.
+    const pets = Object.values(state.pets)
+      .filter((p) => isLocal(state, p.machineId))
+      .sort((a, b) => a.name.localeCompare(b.name));
     if (pets.length === 0) {
       void vscode.window.showInformationMessage("Krypto: no pets yet — each agent gets one when the hub discovers it.");
       return undefined;

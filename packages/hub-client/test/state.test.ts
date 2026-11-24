@@ -9,7 +9,6 @@ import {
   mergeEvents,
   reduceServerMsg,
   removeDevice,
-  scopeToMachine,
   sortedMachines,
   upsertMachine,
 } from "../src/state";
@@ -353,37 +352,5 @@ describe("machine list helpers", () => {
   test("machineCounts counts every machine, this one included", () => {
     expect(machineCounts(state)).toEqual({ total: 3, online: 2 });
     expect(machineCounts(initialHubState())).toEqual({ total: 0, online: 0 });
-  });
-});
-
-describe("scopeToMachine", () => {
-  const remotePet = { ...pet, id: `${MID2}:p1`, machineId: MID2 };
-  const remoteSession = session(`${MID2}:s1`, { machineId: MID2 });
-  const remoteReq = permission(`${MID2}:r1`, { machineId: MID2, sessionId: `${MID2}:s1` });
-  const base = applyWelcome(initialHubState(), welcome);
-
-  test("returns the same state when everything is local (or no machine is known)", () => {
-    expect(scopeToMachine(base, MID)).toBe(base);
-    expect(scopeToMachine(base, undefined)).toBe(base);
-  });
-
-  test("hides another machine's pets, sessions and permission requests", () => {
-    const mixed = {
-      ...base,
-      pets: { ...base.pets, [remotePet.id]: remotePet },
-      sessions: { ...base.sessions, [remoteSession.id]: remoteSession },
-      pending: { ...base.pending, [remoteReq.requestId]: remoteReq },
-    };
-    const s = scopeToMachine(mixed, MID);
-    expect(Object.keys(s.pets)).toEqual(["p1"]);
-    expect(Object.keys(s.sessions)).toEqual(["s1"]);
-    expect(Object.keys(s.pending)).toEqual(["r1"]);
-    expect(s.machines).toBe(mixed.machines);
-  });
-
-  test("keeps untouched collections by identity", () => {
-    const s = scopeToMachine({ ...base, pets: { ...base.pets, [remotePet.id]: remotePet } }, MID);
-    expect(s.sessions).toBe(base.sessions);
-    expect(s.pending).toBe(base.pending);
   });
 });

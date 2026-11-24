@@ -2,6 +2,7 @@
 //! hook feeds into sessions + events; applies permission rules; answers every `ClientMsg`.
 
 mod host;
+mod mirror;
 mod peers;
 
 use std::collections::{HashMap, HashSet};
@@ -19,7 +20,7 @@ use krypto_protocol::{
     ChatRole, ClientKind, ClientMsg, ErrorPayload, EventType, HistorySession, HookSource, HubEvent, HubNotification,
     Machine, MachineId, NotificationLevel, PermissionOptionKind, PermissionOutcome, PermissionRequest,
     PermissionResolvedPayload, Pet, PetId, PetPatch, RequestId, ResolvedBy, Rule, RuleAction, ServerMsg, Session,
-    SessionId, SessionSource, SessionStatus, StopPayload, UnixMs, Welcome, PROTOCOL_VERSION,
+    SessionId, SessionSource, SessionStatus, StopPayload, UnixMs, Welcome, PROTOCOL_VERSION, USER_ACTIVE_WINDOW_MS,
 };
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -44,6 +45,35 @@ const SETTING_DAILY_REPORT: &str = "daily_report_date";
 const HOOK_ALERT_DEDUPE_MS: i64 = 10_000;
 /// Longest pet name, in characters (after trimming).
 pub const MAX_PET_NAME_CHARS: usize = 40;
+/// userActiveAt changes smaller than this are not worth a presence push or a `machine` broadcast.
+pub const ACTIVITY_STEP_MS: i64 = 30_000;
+/// Events handed to the brain: up to this many of this machine's, plus up to half as many mirrored.
+const BRAIN_EVENTS: u32 = 400;
+
+/// This machine's user activity (ClientMsg `user_activity`) and what was last announced of it.
+#[derive(Default)]
+struct Activity {
+    /// Latest report.
+    user_active_at: Option<UnixMs>,
+    /// The value in the last presence pushed to peers.
+    pushed: Option<UnixMs>,
+    /// The value in the last `machine` broadcast to local clients.
+    announced: Option<UnixMs>,
+    /// The active machine as last announced.
+    active: Option<MachineId>,
+}
+
+/// The machine the user is at: the online machine with the latest userActiveAt within
+/// USER_ACTIVE_WINDOW_MS, else `local` (each machine then treats itself as active).
+pub fn active_machine(machines: &[Machine], local: &str, now: UnixMs) -> MachineId {
+    machines
+        .iter()
+        .filter(|m| m.online || m.id == local)
+        .filter_map(|m| m.user_active_at.filter(|t| (0..=now).contains(t) && now.saturating_sub(*t) <= USER_ACTIVE_WINDOW_MS).map(|t| (t, m)))
+        .max_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.id.cmp(&a.1.id)))
+        .map(|(_, m)| m.id.clone())
+        .unwrap_or_else(|| local.to_string())
+}
 
 /// Machine-readable ack errors: when one is anywhere in a request's error chain, the `ack` error is
 /// exactly this code (clients switch on it).
@@ -212,6 +242,9 @@ struct Inner {
     presence_pushed: Mutex<Option<Value>>,
     /// Serializes roster changes (peer events, revoke) so each is audited and announced once.
     peer_ops: tokio::sync::Mutex<()>,
+    /// Read-only copy of paired hubs' sessions, pets and pending requests (see `mirror.rs`).
+    mirror: Mutex<mirror::MirrorCache>,
+    activity: Mutex<Activity>,
 }
 
 /// The hub. Cheap to clone; all clones share state.
@@ -245,7 +278,7 @@ impl Hub {
         let machine_id = machine.id.clone();
         let now = krypto_protocol::now_ms();
         let retention_days = config.event_retention_days;
-        let (agents, mut sessions, mut pets, db_rules) = store
+        let (agents, mut sessions, mut pets, db_rules, mirror_sessions, mirror_pending) = store
             .run(move |s| {
                 if retention_days > 0 {
                     let n = s.prune_events_before(now - retention_days as i64 * DAY_MS)?;
@@ -253,7 +286,22 @@ impl Hub {
                         tracing::info!("pruned {n} events older than {retention_days} days");
                     }
                 }
-                Ok((s.agents()?, s.sessions_active_since(now - CACHE_WINDOW_MS)?, s.pets()?, s.rules()?))
+                // Mirror rows of machines that are no longer paired (revoked while this hub was
+                // down) go; ended mirrored sessions past retention go.
+                let paired: Vec<String> = s.roster()?.into_iter().map(|e| e.device.id).collect();
+                let n = s.delete_unpaired_mirrors(&paired)?;
+                if n > 0 {
+                    tracing::info!("deleted {n} mirror rows of machines that are no longer paired");
+                }
+                s.prune_mirror(now)?;
+                Ok((
+                    s.agents()?,
+                    s.sessions_active_since(now - CACHE_WINDOW_MS)?,
+                    s.pets()?,
+                    s.rules()?,
+                    s.mirror_sessions(now - crate::store::MIRROR_RETENTION_MS)?,
+                    s.mirror_pending()?,
+                ))
             })
             .await?;
 
@@ -319,6 +367,8 @@ impl Hub {
             state.index_session(&s);
             state.sessions.insert(s.id.clone(), s);
         }
+        // Pets of every machine were deduped together; only this machine's are the hub's own.
+        let (pets, mirror_pets): (Vec<Pet>, Vec<Pet>) = pets.into_iter().partition(|p| p.machine_id == machine_id);
         for p in pets {
             state.pets.insert(p.id.clone(), p);
         }
@@ -346,13 +396,20 @@ impl Hub {
                 peers: Mutex::new(peers::Peers::default()),
                 presence_pushed: Mutex::new(None),
                 peer_ops: tokio::sync::Mutex::new(()),
+                mirror: Mutex::new(mirror::MirrorCache::default()),
+                activity: Mutex::new(Activity::default()),
             }),
         };
+        hub.set_mirror(mirror_sessions, mirror_pets, mirror_pending);
+        let tap = hub.inner.bus.tap();
+        tokio::spawn(hub.clone().mirror_out_loop(tap));
+        tokio::spawn(hub.clone().mirror_prune_loop());
         hub.load_peers().await?;
         hub.refresh_presence();
         tokio::spawn(hub.clone().peer_loop(peer_rx));
+        // About this hub's config: never mirrored to peers.
         for notification in startup_notices {
-            hub.inner.bus.send(ServerMsg::Notification { notification });
+            hub.inner.bus.send_local(ServerMsg::Notification { notification });
         }
         for pet in renamed {
             hub.inner.bus.send(ServerMsg::Pet { pet });
@@ -406,7 +463,66 @@ impl Hub {
 
     /// This machine, as reported to clients right now (online, lastSeen = now).
     pub fn machine(&self) -> Machine {
-        self.inner.machine.lock().unwrap_or_else(|p| p.into_inner()).local_machine()
+        let mut m = self.inner.machine.lock().unwrap_or_else(|p| p.into_inner()).local_machine();
+        m.user_active_at = self.activity().user_active_at;
+        m
+    }
+
+    fn activity(&self) -> MutexGuard<'_, Activity> {
+        self.inner.activity.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The machine the user is at right now (see [`active_machine`]).
+    pub fn active_machine_id(&self) -> MachineId {
+        active_machine(&self.machines(), &self.inner.machine_id, krypto_protocol::now_ms())
+    }
+
+    /// ClientMsg `user_activity`: stamp this machine's userActiveAt. Peers hear it with the next
+    /// heartbeat, or at once when it moved by ACTIVITY_STEP_MS (the user came back after a pause);
+    /// local clients get `machine` under the same rule or when the active machine changes.
+    pub fn user_activity(&self) {
+        let now = krypto_protocol::now_ms();
+        let (push, announce) = {
+            let mut a = self.activity();
+            a.user_active_at = Some(now);
+            let push = a.pushed.is_none_or(|t| now.saturating_sub(t) >= ACTIVITY_STEP_MS);
+            if push {
+                a.pushed = Some(now);
+            }
+            let announce = a.announced.is_none_or(|t| now.saturating_sub(t) >= ACTIVITY_STEP_MS);
+            if announce {
+                a.announced = Some(now);
+            }
+            (push, announce)
+        };
+        if push {
+            self.push_presence();
+        }
+        if announce {
+            self.inner.bus.send(ServerMsg::Machine { machine: self.machine() });
+        }
+        self.check_active_machine(announce);
+    }
+
+    /// Announce both machines when the active machine changed. `local_sent`: this machine's
+    /// `machine` was just broadcast.
+    pub(super) fn check_active_machine(&self, local_sent: bool) {
+        let machines = self.machines();
+        let active = active_machine(&machines, &self.inner.machine_id, krypto_protocol::now_ms());
+        let previous = {
+            let mut a = self.activity();
+            if a.active.as_deref() == Some(active.as_str()) {
+                return;
+            }
+            a.active.replace(active.clone())
+        };
+        let Some(previous) = previous else { return }; // first computation: nothing changed for clients
+        for m in machines.into_iter().filter(|m| m.id == active || m.id == previous) {
+            if local_sent && m.id == self.inner.machine_id {
+                continue;
+            }
+            self.inner.bus.send(ServerMsg::Machine { machine: m });
+        }
     }
 
     /// Every known machine: this one first, then every paired (not revoked) hub with its online
@@ -462,7 +578,18 @@ impl Hub {
         let machines = self.machines();
         let devices = self.devices();
         let peer = self.peer_status();
+        let shown = |s: &Session| {
+            s.ended_at.is_none() || now - s.last_event_at.max(s.ended_at.unwrap_or(0)) <= WELCOME_ENDED_WINDOW_MS
+        };
+        let (mut sessions, mut pets, mut pending) =
+            (self.mirror_sessions(shown), self.mirror_pets(), self.mirror_pending());
         let st = self.st();
+        sessions.extend(st.sessions_sorted(shown));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.last_event_at));
+        pets.extend(st.sorted_pets());
+        sort_pets(&mut pets);
+        pending.extend(st.sorted_pending());
+        pending.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.request_id.cmp(&b.request_id)));
         Welcome {
             protocol_version: PROTOCOL_VERSION,
             hub_version: crate::HUB_VERSION.to_string(),
@@ -471,11 +598,9 @@ impl Hub {
             devices,
             peer,
             agents: st.agents.clone(),
-            sessions: st.sessions_sorted(|s| {
-                s.ended_at.is_none() || now - s.last_event_at.max(s.ended_at.unwrap_or(0)) <= WELCOME_ENDED_WINDOW_MS
-            }),
-            pets: st.sorted_pets(),
-            pending_permissions: st.sorted_pending(),
+            sessions,
+            pets,
+            pending_permissions: pending,
             rules: st.rules.clone(),
         }
     }
@@ -553,17 +678,27 @@ impl Hub {
                 self.revoke_device(&device_id, actor).await?;
                 json!({})
             }
+            ClientMsg::UserActivity { .. } => {
+                self.user_activity();
+                json!({})
+            }
         })
     }
 
+    /// Sessions of every machine (this hub's and the mirror's), newest activity first.
     pub async fn list_sessions(&self, include_ended: bool) -> Result<Vec<Session>> {
         if !include_ended {
-            return Ok(self.st().sessions_sorted(|s| s.ended_at.is_none()));
+            let mut v = self.mirror_sessions(|s| s.ended_at.is_none());
+            v.extend(self.st().sessions_sorted(|s| s.ended_at.is_none()));
+            v.sort_by_key(|s| std::cmp::Reverse(s.last_event_at));
+            return Ok(v);
         }
         let mut stored = self.inner.store.run(|s| s.recent_sessions(500)).await?;
+        let mirrored: HashMap<SessionId, Session> =
+            self.mirror_sessions(|_| true).into_iter().map(|s| (s.id.clone(), s)).collect();
         let st = self.st();
         for s in stored.iter_mut() {
-            if let Some(c) = st.sessions.get(&s.id) {
+            if let Some(c) = st.sessions.get(&s.id).or_else(|| mirrored.get(&s.id)) {
                 *s = c.clone();
             }
         }
@@ -575,10 +710,17 @@ impl Hub {
         Ok(stored)
     }
 
-    /// Events of one of this machine's sessions; `since_seq` is the `HubEvent.seq` cursor.
+    /// Events of a session of this machine, or of a session mirrored from a paired hub (read-only);
+    /// `since_seq` is the `HubEvent.seq` cursor (the owner's seq).
     pub async fn events(&self, session_id: &str, since_seq: Option<i64>, limit: Option<u32>) -> Result<Vec<HubEvent>> {
-        self.check_owned(session_id)?;
         let limit = limit.unwrap_or(DEFAULT_EVENTS_LIMIT).clamp(1, MAX_EVENTS_LIMIT);
+        if let Err(e) = self.check_owned(session_id) {
+            if AckCode::find(&e) == Some(AckCode::NotOwner) && self.is_mirrored_session(session_id).await? {
+                let sid = session_id.to_string();
+                return self.inner.store.run(move |s| s.events(&sid, since_seq, limit)).await;
+            }
+            return Err(e);
+        }
         let sid = session_id.to_string();
         let cached = self.st().sessions.contains_key(session_id);
         self.inner
@@ -1377,25 +1519,39 @@ impl Hub {
     }
 
     async fn brain_context(&self, pet: Option<Pet>) -> BrainContext {
-        let (agents, sessions, pending) = {
+        let now = krypto_protocol::now_ms();
+        let recent = |s: &Session| s.ended_at.is_none() || now - s.last_event_at <= DAY_MS;
+        // Mirrored sessions and requests too: status replies name their machine. Actions on them
+        // are refused by the brain (remote control is a later step) and by `check_owned`.
+        let (mut sessions, mut pending) = (self.mirror_sessions(recent), self.mirror_pending());
+        let agents = {
             let st = self.st();
-            let now = krypto_protocol::now_ms();
-            (
-                st.agents.clone(),
-                st.sessions_sorted(|s| s.ended_at.is_none() || now - s.last_event_at <= DAY_MS),
-                st.sorted_pending(),
-            )
+            sessions.extend(st.sessions_sorted(recent));
+            pending.extend(st.sorted_pending());
+            st.agents.clone()
         };
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.last_event_at));
+        pending.sort_by_key(|p| p.created_at);
         // Recent milestones plus the latest streaming text, so "what's Claude doing?" has both.
         let recent_events = self
             .inner
             .store
             .run(|s| {
-                let mut v = s.recent_events(200, true)?;
-                v.extend(s.recent_events(200, false)?);
-                v.sort_by_key(|e| e.seq);
-                v.dedup_by_key(|e| e.seq);
-                Ok(v)
+                // This machine's events first; mirrored ones get at most half the budget, so a
+                // chatty peer cannot crowd out local context (or flood the prompt with its text).
+                let dedupe = |mut v: Vec<HubEvent>| {
+                    // seq is per machine: order by time, dedupe by the global id.
+                    v.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.id.cmp(&b.id)));
+                    v.dedup_by(|a, b| a.id == b.id);
+                    v
+                };
+                let mut local = s.recent_events_of(true, BRAIN_EVENTS / 2, true)?;
+                local.extend(s.recent_events_of(true, BRAIN_EVENTS / 2, false)?);
+                let mut remote = s.recent_events_of(false, BRAIN_EVENTS / 4, true)?;
+                remote.extend(s.recent_events_of(false, BRAIN_EVENTS / 4, false)?);
+                let mut v = dedupe(local);
+                v.extend(dedupe(remote));
+                Ok(dedupe(v))
             })
             .await
             .unwrap_or_default();
@@ -1673,6 +1829,10 @@ pub fn sanitize_rules(rules: Vec<Rule>) -> (Vec<Rule>, Vec<(String, String)>) {
 }
 
 /// Comparison key for pet names: trimmed, case-insensitive.
+fn sort_pets(pets: &mut [Pet]) {
+    pets.sort_by(|a, b| a.machine_id.cmp(&b.machine_id).then(a.agent_id.cmp(&b.agent_id)).then(a.id.cmp(&b.id)));
+}
+
 fn name_key(name: &str) -> String {
     name.trim().to_lowercase()
 }
@@ -1691,11 +1851,16 @@ pub fn validate_pet_name(name: &str) -> Result<String> {
 /// Make pet names unique (trimmed, case-insensitive). `pets` is oldest first: the oldest pet keeps a
 /// name, later duplicates (and blank names) of this machine's pets get
 /// `growth::default_name(machine, agent, taken)`. Other machines' pets are never renamed here (their
-/// owner names them), so their names are reserved first. Returns the indices of renamed pets.
+/// owner names them). A clash with another machine's pet is settled the same way on both hubs: the
+/// pet of the machine whose id sorts first keeps the name, so exactly one owner renames. Returns the
+/// indices of renamed pets.
 pub fn dedupe_pet_names(pets: &mut [Pet], local_machine_id: &str) -> Vec<usize> {
     let mut taken: Vec<String> = pets.iter().map(|p| p.name.clone()).collect();
-    let mut kept: HashSet<String> =
-        pets.iter().filter(|p| p.machine_id != local_machine_id).map(|p| name_key(&p.name)).collect();
+    let mut kept: HashSet<String> = pets
+        .iter()
+        .filter(|p| p.machine_id != local_machine_id && p.machine_id.as_str() < local_machine_id)
+        .map(|p| name_key(&p.name))
+        .collect();
     let mut renamed = Vec::new();
     for (i, pet) in pets.iter_mut().enumerate().filter(|(_, p)| p.machine_id == local_machine_id) {
         let key = name_key(&pet.name);

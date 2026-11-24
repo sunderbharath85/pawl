@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Device, Machine } from "@krypto/protocol";
-import { machinesLine, presenceLabel } from "../shared/machine";
+import { machinesLine } from "@krypto/hub-client";
+import { presenceLabel } from "../shared/machine";
 import { machinePickItems } from "./machineList";
 
 const ME = "winpc0000001";

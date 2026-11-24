@@ -9,7 +9,7 @@ import {
   shortPath,
   timeAgo,
 } from "../../lib/format";
-import { petFor } from "../../lib/machine";
+import { machineDisplayName, petFor, readOnlyReason } from "@krypto/hub-client";
 import { usePanel } from "../context";
 import { PetAvatar } from "../PetAvatar";
 
@@ -40,8 +40,13 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
   const session = state.sessions[req.sessionId];
   const kind = req.toolCall.kind ?? "other";
   const options = [...req.options].sort((a, b) => OPTION_ORDER[a.kind] - OPTION_ORDER[b.kind]);
+  // Another machine's request is read-only here until remote control (migration step 4).
+  const readOnly = readOnlyReason(state, req.machineId);
+  const machine = state.machines[req.machineId];
+  const offline = !!readOnly && !machine?.online;
 
   const resolve = async (optionId: string | null, label: string) => {
+    if (readOnly) return;
     setBusy(optionId ?? "cancel");
     try {
       await client.resolvePermission(req.requestId, optionId);
@@ -57,14 +62,23 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
   const locations = req.toolCall.locations ?? [];
 
   return (
-    <article className={`perm-card${compact ? " is-compact" : ""}${highlight ? " is-highlight" : ""}`}>
+    <article
+      className={`perm-card${compact ? " is-compact" : ""}${highlight ? " is-highlight" : ""}${readOnly ? " is-remote" : ""}${offline ? " is-offline" : ""}`}
+    >
       <div className="perm-head">
         <PetAvatar species={pet?.species ?? "dog"} activity="alert" size={compact ? 40 : 56} />
         <div className="perm-title">
           <div className="perm-who">
             <strong>{pet?.name ?? "Your pet"}</strong> fetched a request from{" "}
             <strong>{agentName(state.agents, req.agentId, req.machineId)}</strong>
+            {readOnly && (
+              <>
+                {" "}
+                on <strong>{machineDisplayName(machine)}</strong>
+              </>
+            )}
             <span className="muted"> · {timeAgo(req.createdAt, now)}</span>
+            {offline && <span className="muted"> · machine offline, last seen {timeAgo(machine?.lastSeen ?? 0, now)}</span>}
           </div>
           <div className="perm-what">
             <span className={`kind-chip kind-${kind}`}>
@@ -104,17 +118,24 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
           <button
             key={o.optionId}
             className={OPTION_CLASS[o.kind]}
-            disabled={busy !== null}
+            disabled={busy !== null || !!readOnly}
+            title={readOnly ?? undefined}
             onClick={() => void resolve(o.optionId, o.name)}
           >
             {busy === o.optionId ? "…" : o.name}
           </button>
         ))}
         {!options.some((o) => o.kind.startsWith("reject")) && (
-          <button className="pill pill-bad" disabled={busy !== null} onClick={() => void resolve(null, "Denied")}>
+          <button
+            className="pill pill-bad"
+            disabled={busy !== null || !!readOnly}
+            title={readOnly ?? undefined}
+            onClick={() => void resolve(null, "Denied")}
+          >
             Deny
           </button>
         )}
+        {readOnly && <span className="remote-note">{readOnly}</span>}
       </div>
     );
   }

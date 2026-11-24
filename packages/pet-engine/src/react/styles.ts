@@ -287,6 +287,10 @@ ${SP("bird")}[data-walking="true"] .ap-leg-f1{animation:ap-walk .36s ease-in-out
   background:rgba(20,22,28,.62);color:#fff;font:700 10.5px/1.4 ui-rounded,system-ui,-apple-system,"Segoe UI",sans-serif;pointer-events:none}
 .ap-stage-bubble{position:absolute;transform:translateX(-50%);z-index:2;pointer-events:none;width:max-content;max-width:var(--ap-bubble-max,240px)}
 .ap-stage-bubble .ap-bubble{max-width:100%}
+.ap-bubble-readonly{background:#f3f6ff;box-shadow:0 4px 14px rgba(63,100,200,.22),0 0 0 1.5px #9db4ee}
+.ap-stage-visitor .ap-stage-name{background:rgba(52,72,140,.72)}
+.ap-stage-more{position:absolute;transform:translateX(-50%);pointer-events:auto;min-width:28px;padding:2px 7px;border-radius:11px;text-align:center;
+  background:rgba(52,72,140,.78);color:#fff;font:800 11px/18px ui-rounded,system-ui,-apple-system,"Segoe UI",sans-serif}
 
 /* ---------- reduced motion: keep static poses, drop movement ---------- */
 @media (prefers-reduced-motion: reduce){

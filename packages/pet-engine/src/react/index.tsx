@@ -5,4 +5,4 @@ export { PetStage, type PetStageProps } from "./PetStage";
 export { usePetStyles, usePetViews, usePrefersReducedMotion, type PetViewsSource } from "./hooks";
 export { configurePetStyles, ensurePetStyles, PET_CSS } from "./styles";
 export { SpeciesSvg } from "./art";
-export { bubblePlacement, computeLanes, type Lane } from "./stage-logic";
+export { bubblePlacement, computeLanes, layoutVisitors, MAX_VISITORS, VISITOR_SCALE, type Lane, type VisitorLayout } from "./stage-logic";

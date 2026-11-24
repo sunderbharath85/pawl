@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { derivePetViews, lastSignificantEvents, type PetView } from "@krypto/pet-engine";
 import { PetStage } from "@krypto/pet-engine/react";
-import { machineCounts } from "@krypto/hub-client";
+import { activeMachineId, isLocal, machineCounts, machineDisplayName, machineSummary, machinesLine } from "@krypto/hub-client";
 import { DEFAULT_SPECIES, type Session } from "@krypto/protocol";
-import { machineDisplayName, machineSummary, machinesLine } from "../shared/machine";
 import type { ConnInfo, HostToWebview, SpritesInfo, WebviewHubState } from "../shared/messages";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ApprovalCard, ChatPanel, ConnBanner, SessionDetail, SessionList, Toasts, type Toast } from "./parts";
@@ -32,6 +31,8 @@ const SLEEPY_DOG: PetView = {
   activity: "napping",
   since: 0,
   mood: 70,
+  visitor: false,
+  remoteOffline: false,
 };
 
 const INITIAL_CONN: ConnInfo = { status: "connecting", offline: false, missingToken: false, url: "" };
@@ -117,6 +118,15 @@ export function App() {
   const sessions = useMemo(() => Object.values(hub.sessions), [hub.sessions]);
   const pending = useMemo(() => Object.values(hub.pending).sort((a, b) => a.createdAt - b.createdAt), [hub.pending]);
   const pets = useMemo(() => Object.values(hub.pets), [hub.pets]);
+  /** This hub's machine and every known one: names, online state, read-only checks. */
+  const place = useMemo(() => ({ machine: hub.machine, machines: hub.machines }), [hub.machine, hub.machines]);
+  // Chat goes to this machine's hub, so only its own pets answer.
+  const localPets = useMemo(() => pets.filter((p) => isLocal(place, p.machineId)), [pets, place]);
+  // This machine's requests first (answerable here), then other machines' (read-only).
+  const sortedPending = useMemo(
+    () => [...pending].sort((a, b) => Number(isLocal(place, b.machineId)) - Number(isLocal(place, a.machineId)) || a.createdAt - b.createdAt),
+    [pending, place],
+  );
   const machineTotals = useMemo(() => machineCounts({ machines: hub.machines }), [hub.machines]);
 
   const lastEvents = useMemo(() => lastSignificantEvents(hub.events), [hub.events]);
@@ -124,13 +134,24 @@ export function App() {
   const views: PetView[] = useMemo(() => {
     if (!connected) return [SLEEPY_DOG];
     try {
-      const derived = derivePetViews({ pets, sessions, pending, lastEvents, machines: hub.machines, now });
-      return derived.length > 0 ? derived : [SLEEPY_DOG];
+      const derived = derivePetViews({
+        pets,
+        sessions,
+        pending,
+        lastEvents,
+        machines: hub.machines,
+        // Visitors and "runs to you" (PLAN.md migration step 3).
+        localMachineId: hub.machine?.id,
+        activeMachineId: activeMachineId(place, now),
+        now,
+      });
+      // Keep the sleepy dog at home when this machine has no pet of its own (visitors only).
+      return derived.some((v) => !v.visitor && !v.remoteOffline) ? derived : [SLEEPY_DOG, ...derived];
     } catch (err) {
       console.error("[krypto] derivePetViews failed", err);
       return [SLEEPY_DOG];
     }
-  }, [connected, pets, sessions, pending, lastEvents, hub.machines, now]);
+  }, [connected, pets, sessions, pending, lastEvents, hub.machines, hub.machine, place, now]);
 
   const selected: Session | undefined = persisted.selectedSessionId ? hub.sessions[persisted.selectedSessionId] : undefined;
 
@@ -148,9 +169,11 @@ export function App() {
           .filter((s) => s.machineId === pet.machineId && s.agentId === pet.agentId)
           .sort((a, b) => b.lastEventAt - a.lastEventAt)[0];
       if (target) update({ tab: "sessions", selectedSessionId: target.id });
-      else update({ tab: "chat", chatPetId: petId });
+      // Chat goes to this machine's hub: a visitor without a session just shows the list.
+      else if (isLocal(place, pet.machineId)) update({ tab: "chat", chatPetId: petId });
+      else update({ tab: "sessions", selectedSessionId: null });
     },
-    [connected, hub.pets, hub.sessions, sessions, views, update],
+    [connected, hub.pets, hub.sessions, sessions, views, update, place],
   );
 
   return (
@@ -204,13 +227,14 @@ export function App() {
           <h2>
             Needs you <span className="count">{pending.length}</span>
           </h2>
-          {pending.map((req) => (
+          {sortedPending.map((req) => (
             <ApprovalCard
               key={req.requestId}
               request={req}
               session={hub.sessions[req.sessionId]}
               agents={hub.agents}
               pets={pets}
+              place={place}
               now={now}
             />
           ))}
@@ -258,6 +282,7 @@ export function App() {
               events={hub.events[selected.id] ?? []}
               agents={hub.agents}
               pets={pets}
+              place={place}
               pending={pending.filter((p) => p.sessionId === selected.id)}
               connected={connected}
               now={now}
@@ -269,6 +294,7 @@ export function App() {
               sessions={sessions}
               agents={hub.agents}
               pets={pets}
+              place={place}
               connected={connected}
               showEnded={persisted.showEnded}
               now={now}
@@ -279,7 +305,7 @@ export function App() {
         ) : (
           <ChatPanel
             chat={hub.chat}
-            pets={pets}
+            pets={localPets}
             agents={hub.agents}
             connected={connected}
             petId={persisted.chatPetId}
@@ -289,10 +315,14 @@ export function App() {
       </main>
 
       <footer className="footer">
-        <button className="link" disabled={!connected || pets.length === 0} onClick={() => post({ type: "command", command: "renamePet" })}>
+        <button className="link" disabled={!connected || localPets.length === 0} onClick={() => post({ type: "command", command: "renamePet" })}>
           Rename pet
         </button>
-        <button className="link" disabled={!connected || pets.length === 0} onClick={() => post({ type: "command", command: "changeSpecies" })}>
+        <button
+          className="link"
+          disabled={!connected || localPets.length === 0}
+          onClick={() => post({ type: "command", command: "changeSpecies" })}
+        >
           Change species
         </button>
         <button className="link" onClick={() => post({ type: "command", command: "installHooks" })}>

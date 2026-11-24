@@ -17,7 +17,10 @@ function isPromise(v: unknown): v is Promise<unknown> {
   return typeof v === "object" && v !== null && typeof (v as { then?: unknown }).then === "function";
 }
 
-/** Speech bubble for a pet; permission bubbles get Approve/Deny buttons. Null when the view has no bubble. */
+/**
+ * Speech bubble for a pet; permission bubbles get Approve/Deny buttons unless `readOnly` (a visitor's
+ * request, answered on its own machine). Null when the view has no bubble.
+ */
 export function PetBubble(props: PetBubbleProps): JSX.Element | null {
   const { view, onApprove, onDeny, onClick, className, approveLabel = "Approve", denyLabel = "Deny" } = props;
   usePetStyles();
@@ -41,6 +44,7 @@ export function PetBubble(props: PetBubbleProps): JSX.Element | null {
 
   if (!bubble) return null;
   const isPermission = bubble.kind === "permission";
+  const actionable = isPermission && !bubble.readOnly;
 
   const run = (which: "approve" | "deny", fn?: () => void | Promise<unknown>) => (e: MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
@@ -71,13 +75,13 @@ export function PetBubble(props: PetBubbleProps): JSX.Element | null {
     }
   };
 
-  const cls = ["ap-bubble", `ap-bubble-${bubble.kind}`, className ?? ""].filter(Boolean).join(" ");
+  const cls = ["ap-bubble", `ap-bubble-${bubble.kind}`, bubble.readOnly ? "ap-bubble-readonly" : "", className ?? ""].filter(Boolean).join(" ");
   return (
     <div
       className={cls}
-      role={isPermission ? "alertdialog" : "status"}
-      aria-live={isPermission ? "assertive" : "polite"}
-      aria-label={isPermission ? `${view.name} needs permission` : undefined}
+      role={actionable ? "alertdialog" : "status"}
+      aria-live={actionable ? "assertive" : "polite"}
+      aria-label={actionable ? `${view.name} needs permission` : isPermission ? `${view.name} needs approval on another machine` : undefined}
       data-clickable={onClick ? "true" : "false"}
       data-pet-hit="bubble"
       data-pet-id={view.petId}
@@ -86,7 +90,7 @@ export function PetBubble(props: PetBubbleProps): JSX.Element | null {
       onKeyDown={onClick ? onKey : undefined}
     >
       <div className="ap-bubble-text">{bubble.text}</div>
-      {isPermission && (onApprove || onDeny) ? (
+      {actionable && (onApprove || onDeny) ? (
         <div className="ap-bubble-actions">
           {onApprove ? (
             <button type="button" className="ap-btn ap-btn-approve" disabled={busy !== null} onClick={run("approve", onApprove)}>

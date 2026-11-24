@@ -1,17 +1,18 @@
 // Folds a session's raw HubEvents into readable feed items: streamed text chunks
 // become paragraphs, tool_call + tool_call_update merge into one card, etc.
-import type {
-  HookPayload,
+import {
+  isTruncatedPayload,
+  type HookPayload,
   HubEvent,
-  PermissionOutcome,
-  PermissionRequest,
-  PermissionResolvedPayload,
-  PlanEntry,
-  StopReason,
-  ToolCallPayload,
-  ToolCallStatus,
-  ToolKind,
-  ToolLocation,
+  type PermissionOutcome,
+  type PermissionRequest,
+  type PermissionResolvedPayload,
+  type PlanEntry,
+  type StopReason,
+  type ToolCallPayload,
+  type ToolCallStatus,
+  type ToolKind,
+  type ToolLocation,
 } from "@krypto/protocol";
 
 export type FeedItem =
@@ -31,7 +32,9 @@ export type FeedItem =
   | { kind: "resolved"; key: string; requestId: string; outcome: PermissionOutcome | null; by: string; ts: number }
   | { kind: "stop"; key: string; reason: StopReason | string; ts: number }
   | { kind: "error"; key: string; message: string; ts: number }
-  | { kind: "notice"; key: string; icon: string; text: string; ts: number };
+  | { kind: "notice"; key: string; icon: string; text: string; ts: number }
+  /** A mirrored event whose payload was too large to copy over (open the session on its machine). */
+  | { kind: "truncated"; key: string; bytes: number; ts: number };
 
 function obj(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
@@ -67,6 +70,14 @@ export function buildFeed(events: readonly HubEvent[]): FeedItem[] {
   };
 
   for (const ev of events) {
+    if (isTruncatedPayload(ev.payload)) {
+      const bytes = typeof ev.payload.bytes === "number" ? ev.payload.bytes : 0;
+      const last = items[items.length - 1];
+      // Consecutive large chunks read as one gap.
+      if (last && last.kind === "truncated") items[items.length - 1] = { ...last, bytes: last.bytes + bytes };
+      else items.push({ kind: "truncated", key: ev.id, bytes, ts: ev.ts });
+      continue;
+    }
     switch (ev.type) {
       case "agent_message_chunk":
         appendText("agent", ev);

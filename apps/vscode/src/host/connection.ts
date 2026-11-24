@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import WebSocket from "ws";
-import { DEFAULT_HUB_WS_URL, HubClient, scopeToMachine, toHubWsUrl, type HubState } from "@krypto/hub-client";
+import { DEFAULT_HUB_WS_URL, HubClient, toHubWsUrl, type HubState } from "@krypto/hub-client";
 import { readHubCredentials } from "@krypto/hub-client/node";
 import type { ServerMsg } from "@krypto/protocol";
 import type { ConnInfo } from "../shared/messages";
@@ -56,8 +56,6 @@ export class HubConnection implements vscode.Disposable {
   private readonly msgListeners = new Set<(msg: ServerMsg, state: HubState) => void>();
   private readonly disposables: vscode.Disposable[] = [];
   private conn: ConnInfo = { status: "disconnected", offline: false, missingToken: false, url: DEFAULT_HUB_WS_URL };
-  private scopedFrom: HubState | null = null;
-  private scoped: HubState | null = null;
 
   constructor(
     private readonly clientVersion: string,
@@ -74,20 +72,11 @@ export class HubConnection implements vscode.Disposable {
   }
 
   /**
-   * Current hub state (empty when no client exists yet), limited to this machine's pets, sessions and
-   * approvals: paired machines are listed in `machines` / `devices`, their work arrives in migration step 3.
+   * Current hub state (empty when no client exists yet): every machine's sessions, pets and approvals
+   * (this hub's own plus the read-only mirror of paired hubs, PLAN.md migration step 3).
    */
   get state(): HubState {
-    return this.client ? this.local(this.client.getState()) : emptyHubState(this.conn.status);
-  }
-
-  /** `scopeToMachine`, memoized on the client's state identity. */
-  private local(state: HubState): HubState {
-    if (state !== this.scopedFrom || !this.scoped) {
-      this.scopedFrom = state;
-      this.scoped = scopeToMachine(state, state.machine?.id);
-    }
-    return this.scoped;
+    return this.client?.getState() ?? emptyHubState(this.conn.status);
   }
 
   get info(): ConnInfo {
@@ -181,9 +170,8 @@ export class HubConnection implements vscode.Disposable {
     return { url: toHubWsUrl(url), token };
   }
 
-  private handleUpdate(client: HubClient, raw: HubState, msg: ServerMsg | undefined): void {
+  private handleUpdate(client: HubClient, state: HubState, msg: ServerMsg | undefined): void {
     if (client !== this.client) return; // stale client after restart
-    const state = this.local(raw);
     if (state.status !== this.lastStatus) this.onStatusChange(state);
     if (msg) {
       for (const fn of this.msgListeners) {

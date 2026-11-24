@@ -1,5 +1,5 @@
 import type { Agent, PermissionRequest, Session, SessionStatus, ToolKind } from "@krypto/protocol";
-import { agentFor } from "./machine";
+import { agentFor } from "@krypto/hub-client";
 
 export const STATUS_META: Record<SessionStatus, { label: string; tone: string }> = {
   idle: { label: "Idle", tone: "idle" },

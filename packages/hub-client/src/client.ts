@@ -17,6 +17,7 @@ import type {
   Session,
   Welcome,
 } from "@krypto/protocol";
+import { USER_ACTIVITY_REPORT_MS } from "@krypto/protocol";
 import {
   applyAck,
   applyWelcome,
@@ -29,6 +30,7 @@ import {
   type HubState,
   type StateLimits,
 } from "./state";
+import { MACHINE_NAME_MAX, normalizeMachineName } from "./machine";
 import { INVITE_TTL_MAX_SECS, INVITE_TTL_MIN_SECS, parseInviteUri } from "./peer";
 import { toHubWsUrl } from "./url";
 
@@ -158,6 +160,8 @@ export class HubClient {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly stateListeners = new Set<StateListener>();
   private readonly typeListeners = new Map<string, Set<AnyMsgListener>>();
+  /** When `user_activity` was last sent on the current connection (reset by every hello). */
+  private lastActivityReport = -Infinity;
 
   constructor(opts: HubClientOptions) {
     // `??` (not spread) so an explicit `undefined` still gets the default.
@@ -431,6 +435,20 @@ export class HubClient {
     await this.request<"revoke_device">({ type: "revoke_device", deviceId });
   }
 
+  /**
+   * Tell the hub the user is active on this machine (cursor, keys, editor focus…). Call it on every
+   * input; it sends `user_activity` at most once per USER_ACTIVITY_REPORT_MS, and only while connected
+   * (nothing is queued for later). Returns true if a report was sent.
+   */
+  reportUserActivity(now: number = Date.now()): boolean {
+    if (!this.isReady() || now - this.lastActivityReport < USER_ACTIVITY_REPORT_MS) return false;
+    this.lastActivityReport = now;
+    this.request<"user_activity">({ type: "user_activity" }).catch(() => {
+      // Older hubs answer with an error; activity is best effort.
+    });
+    return true;
+  }
+
   // ---------------------------------------------------------------- internals
 
   /** This hub's machine id, waiting for the hello `Welcome` if it has not arrived yet. */
@@ -601,6 +619,8 @@ export class HubClient {
     if (msg.ok) {
       this.handshakeDone = true;
       this.attempts = 0;
+      // A fresh connection reports the next input at once.
+      this.lastActivityReport = -Infinity;
       const next = msg.result
         ? applyWelcome(this.state, msg.result as Welcome)
         : { ...this.state, status: "connected" as const, lastError: undefined };
@@ -728,16 +748,6 @@ export class HubClient {
       if (set) for (const fn of [...set]) safeCall(() => fn(msg));
     }
   }
-}
-
-/** Max machine display name length (Unicode code points), matching the hub's validation. */
-export const MACHINE_NAME_MAX = 40;
-
-/** Trimmed machine name if it is 1–`MACHINE_NAME_MAX` code points long, else null. */
-export function normalizeMachineName(name: string): string | null {
-  const trimmed = name.trim();
-  const length = [...trimmed].length;
-  return length >= 1 && length <= MACHINE_NAME_MAX ? trimmed : null;
 }
 
 /** Option id for an approve/deny decision: allow → allow_once ?? allow_always; reject → reject_once ?? null. */

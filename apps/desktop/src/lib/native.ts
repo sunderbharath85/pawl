@@ -53,6 +53,8 @@ export const native = {
   quit: () => invoke<void>("quit_app"),
   setHitRects: (rects: HitRect[]) => invoke<void>("set_hit_rects", { rects }),
   setCaptureAll: (capture: boolean) => invoke<void>("set_capture_all", { capture }),
+  /** While the strip shows an approval it follows the monitor under the cursor. */
+  setFollowCursor: (follow: boolean) => invoke<void>("set_follow_cursor", { follow }),
   setPetsPaused: (paused: boolean) => invoke<void>("set_pets_paused", { paused }),
   getPetsPaused: () => invoke<boolean>("get_pets_paused"),
   openPanel: (focus?: PanelFocus) => invoke<void>("open_panel", { focus: focus ?? null }),
@@ -64,6 +66,8 @@ export interface NativeEvents {
   "pets-paused": boolean;
   "pet-hover": boolean;
   "panel-focus": PanelFocus;
+  /** The global cursor moved (throttled by Rust): the user is on this machine. */
+  "user-activity": null;
 }
 
 export function onNative<K extends keyof NativeEvents>(name: K, fn: (payload: NativeEvents[K]) => void): () => void {

@@ -8,7 +8,7 @@
 //   - later syncs (reconnects) catch up after the newest seq we hold; when the gap
 //     is a full page or more, the latest window replaces the catch-up (anything
 //     older would be trimmed by the client's cap anyway).
-import { latestEventSeq, type HubState } from "@krypto/hub-client";
+import { latestEventSeq, type HubState } from "./state";
 import type { HubEvent } from "@krypto/protocol";
 
 /** Events requested per page; matches hub-client's per-session cap. */
@@ -75,5 +75,5 @@ export class SessionBackfill {
   }
 }
 
-/** One tracker per window (both desktop windows load their own module instance). */
+/** A shared tracker (each window / extension host loads its own module instance). */
 export const sessionBackfill = new SessionBackfill();

@@ -1,11 +1,15 @@
 import { useEffect, useRef } from "react";
+import { isLocal } from "@krypto/hub-client";
 import { usePanel } from "../context";
 import { PetAvatar } from "../PetAvatar";
 import { PermissionCard } from "./PermissionCard";
 
 export function ApprovalsView({ focusRequestId }: { focusRequestId?: string }) {
   const { state } = usePanel();
-  const pending = Object.values(state.pending).sort((a, b) => a.createdAt - b.createdAt);
+  // This machine's requests first (answerable here), then other machines' (read-only), oldest first.
+  const pending = Object.values(state.pending).sort(
+    (a, b) => Number(isLocal(state, b.machineId)) - Number(isLocal(state, a.machineId)) || a.createdAt - b.createdAt,
+  );
   const focusRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

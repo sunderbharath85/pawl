@@ -50,6 +50,7 @@ impl MachineIdentity {
             last_seen,
             online,
             hub_version: Some(crate::HUB_VERSION.to_string()),
+            user_active_at: None,
         }
     }
 

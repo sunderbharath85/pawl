@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import type { WebviewToHost } from "./shared/messages";
-import { sessionBackfill } from "./host/backfill";
+import { sessionBackfill } from "@krypto/hub-client";
+import { ActivityReporter } from "./host/activity";
 import { Commands } from "./host/commands";
 import { HubConnection } from "./host/connection";
 import { EditedFilesWatcher } from "./host/editedFiles";
@@ -40,6 +41,7 @@ export function activate(context: vscode.ExtensionContext): void {
       log,
     ),
     new EditedFilesWatcher(hub, log),
+    new ActivityReporter(hub),
     ...commands.register(),
   );
 

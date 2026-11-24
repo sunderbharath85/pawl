@@ -1,13 +1,14 @@
 // OS notifications (tauri-plugin-notification) for permission requests, turn
-// completions and hub `notification` messages. Attached once, in the pet window.
+// completions and hub `notification` messages of every machine. Attached once, in the pet
+// window. Only the machine the user is active on speaks up, so they are told once, where they are.
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import type { HubClient, HubState } from "@krypto/hub-client";
+import { petFor, type HubClient } from "@krypto/hub-client";
 import { SPECIES_META } from "@krypto/pet-engine";
 import type { StopPayload } from "@krypto/protocol";
 import { isTauri } from "./native";
 import { readSettings } from "./settings";
 import { agentName, permissionSummary, sessionTitle } from "./format";
-import { petFor } from "./machine";
+import { notifiesHere, onMachine } from "./where";
 
 let permission: Promise<boolean> | null = null;
 
@@ -47,10 +48,9 @@ export async function notify(title: string, body: string): Promise<void> {
   }
 }
 
-/** True for another machine's item (when this hub's machine is known). */
-function isRemote(state: HubState, machineId: string): boolean {
-  return !!state.machine && machineId !== state.machine.id;
-}
+/** Events older than this are history (a mirror sync after reconnecting), not news. */
+const FRESH_MS = 2 * 60_000;
+
 
 /** Wire hub messages → OS notifications. Returns an unsubscribe function. */
 export function attachNotifications(client: HubClient): () => void {
@@ -58,24 +58,29 @@ export function attachNotifications(client: HubClient): () => void {
 
   const offPermission = client.onMessage("permission_request", ({ request }) => {
     const state = client.getState();
-    // Another machine's requests are not shown (or answerable) here before migration step 3.
-    if (isRemote(state, request.machineId)) return;
-    if (!readSettings().notifyPermissions || !once(`perm:${request.requestId}`)) return;
+    if (!readSettings().notifyPermissions || !notifiesHere(state) || !once(`perm:${request.requestId}`)) return;
     const pet = petFor(Object.values(state.pets), request.machineId, request.agentId);
     const sound = SPECIES_META[pet?.species ?? "dog"]?.sound ?? "Woof!";
     const who = pet?.name ?? "Your pet";
-    void notify(`${sound} ${who} needs you`, `${agentName(state.agents, request.agentId, request.machineId)} wants to: ${permissionSummary(request)}`);
+    const where = onMachine(state, request.machineId);
+    // Another machine's request is read-only here (remote approval arrives in a later update).
+    const tail = where ? ` Answer it${where}.` : "";
+    void notify(
+      `${sound} ${who} needs you${where}`,
+      `${agentName(state.agents, request.agentId, request.machineId)} wants to: ${permissionSummary(request)}.${tail}`,
+    );
   });
 
   const offEvent = client.onMessage("event", ({ event }) => {
     if (!readSettings().notifyTurns) return;
+    if (Date.now() - event.ts > FRESH_MS) return;
     const state = client.getState();
     const session = state.sessions[event.sessionId];
     // Hook-fed sessions announce themselves through hub `notification` messages instead.
-    if (!session || session.source !== "owned" || isRemote(state, session.machineId)) return;
+    if (!session || session.source !== "owned" || !notifiesHere(state)) return;
     const agent = agentName(state.agents, session.agentId, session.machineId);
     const pet = petFor(Object.values(state.pets), session.machineId, session.agentId);
-    const name = pet ? `${pet.name} (${agent})` : agent;
+    const name = `${pet ? `${pet.name} (${agent})` : agent}${onMachine(state, session.machineId)}`;
     if (event.type === "stop") {
       const reason = (event.payload as Partial<StopPayload> | null)?.stopReason;
       if (reason === "cancelled" || !once(`stop:${event.id}`)) return;
@@ -88,9 +93,11 @@ export function attachNotifications(client: HubClient): () => void {
   });
 
   const offNotification = client.onMessage("notification", ({ notification }) => {
-    if (isRemote(client.getState(), notification.machineId)) return;
+    const state = client.getState();
+    if (Date.now() - notification.ts > FRESH_MS || !notifiesHere(state)) return;
     if (!readSettings().notifyHub || !once(`hub:${notification.id}`)) return;
-    void notify(notification.title, notification.body);
+    const where = onMachine(state, notification.machineId);
+    void notify(where ? `${notification.title} (${where.slice(4)})` : notification.title, notification.body);
   });
 
   return () => {

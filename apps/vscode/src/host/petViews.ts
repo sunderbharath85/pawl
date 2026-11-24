@@ -1,4 +1,4 @@
-import type { HubState } from "@krypto/hub-client";
+import { activeMachineId, type HubState } from "@krypto/hub-client";
 import { derivePetViews, lastSignificantEvents, type PetActivity, type PetView } from "@krypto/pet-engine";
 
 /** Higher = more important to surface in the status bar. */
@@ -32,6 +32,9 @@ export function petViewsOf(state: HubState, now = Date.now()): PetView[] {
       pending: Object.values(state.pending),
       lastEvents: lastSignificantEvents(state.events),
       machines: state.machines,
+      // Visitors and "runs to you" (PLAN.md migration step 3).
+      localMachineId: state.machine?.id,
+      activeMachineId: activeMachineId(state, now),
       now,
     });
   } catch {

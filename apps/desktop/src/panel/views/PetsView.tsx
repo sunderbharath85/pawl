@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { SPECIES_META } from "@krypto/pet-engine";
 import type { Pet, Species } from "@krypto/protocol";
-import { agentName, errorText } from "../../lib/format";
-import { checkPetName, petRenameErrorText } from "../../lib/petNames";
+import { agentName, errorText, timeAgo } from "../../lib/format";
+import { checkPetName, groupByMachine, machineDisplayName, petRenameErrorText, readOnlyReason } from "@krypto/hub-client";
 import { usePanel } from "../context";
 import { ACTIVITY_LABEL, PetAvatar } from "../PetAvatar";
 
 const SPECIES: Species[] = ["dog", "cat", "bird", "robot"];
 
 export function PetsView({ focusPetId }: { focusPetId?: string }) {
-  const { state } = usePanel();
+  const { state, now } = usePanel();
   const pets = Object.values(state.pets).sort((a, b) => a.name.localeCompare(b.name));
+  const groups = groupByMachine(state, pets);
 
   return (
     <section className="view">
@@ -25,11 +26,21 @@ export function PetsView({ focusPetId }: { focusPetId?: string }) {
           <p>The hub adopts a pet for each agent it discovers. Connect to the hub to meet them.</p>
         </div>
       ) : (
-        <div className="pet-grid">
-          {pets.map((p) => (
-            <PetCard key={p.id} pet={p} focused={p.id === focusPetId} />
-          ))}
-        </div>
+        groups.map((g) => (
+          <div key={g.machineId} className={`pet-group${g.online ? "" : " is-offline"}`}>
+            {groups.length > 1 && (
+              <h2 className="section-title">
+                {g.local ? `${machineDisplayName(g.machine)} (this machine)` : `Visiting from ${machineDisplayName(g.machine)}`}
+                {!g.online && <span className="muted"> · offline, last seen {timeAgo(g.machine?.lastSeen ?? 0, now)}</span>}
+              </h2>
+            )}
+            <div className="pet-grid">
+              {g.items.map((p) => (
+                <PetCard key={p.id} pet={p} focused={p.id === focusPetId} />
+              ))}
+            </div>
+          </div>
+        ))
       )}
     </section>
   );
@@ -45,6 +56,8 @@ function PetCard({ pet, focused }: { pet: Pet; focused: boolean }) {
   const [nameError, setNameError] = useState<string | null>(null);
   const ref = useRef<HTMLElement>(null);
   const view = views.find((v) => v.petId === pet.id);
+  // Another machine's pet is shown read-only (its own hub owns it).
+  const readOnly = readOnlyReason(state, pet.machineId);
   // Names are unique across every known pet (all machines); check as the user types.
   const nameCheck = name.trim() === pet.name ? null : checkPetName(name, pet.id, Object.values(state.pets));
   const liveNameError = nameCheck && !nameCheck.ok ? nameCheck.error : null;
@@ -66,7 +79,7 @@ function PetCard({ pet, focused }: { pet: Pet; focused: boolean }) {
   }, [focused]);
 
   const save = async () => {
-    if (!dirty || saving) return;
+    if (!dirty || saving || readOnly) return;
     if (nameCheck && !nameCheck.ok) {
       setNameError(nameCheck.error);
       return;
@@ -90,13 +103,18 @@ function PetCard({ pet, focused }: { pet: Pet; focused: boolean }) {
   };
 
   return (
-    <article ref={ref} className={`pet-card${focused ? " is-highlight" : ""}`}>
+    <article ref={ref} className={`pet-card${focused ? " is-highlight" : ""}${readOnly ? " is-remote" : ""}`}>
       <div className="pet-card-stage">
         <PetAvatar species={species} activity={species !== pet.species ? "happy" : (view?.activity ?? "idle")} size={120} />
       </div>
       <div className="pet-card-body">
-        <div className="pet-card-agent">Watches {agentName(state.agents, pet.agentId, pet.machineId)}</div>
+        <div className="pet-card-agent">
+          Watches {agentName(state.agents, pet.agentId, pet.machineId)}
+          {readOnly ? ` on ${machineDisplayName(state.machines[pet.machineId])}` : ""}
+        </div>
         <input
+          disabled={!!readOnly}
+          title={readOnly ?? undefined}
           className={`input pet-name-input${shownNameError ? " is-invalid" : ""}`}
           value={name}
           onChange={(e) => {
@@ -122,6 +140,7 @@ function PetCard({ pet, focused }: { pet: Pet; focused: boolean }) {
               role="radio"
               aria-checked={species === s}
               className={`species-option${species === s ? " is-active" : ""}`}
+              disabled={!!readOnly}
               onClick={() => setSpecies(s)}
               title={SPECIES_META[s].label}
             >
@@ -134,6 +153,7 @@ function PetCard({ pet, focused }: { pet: Pet; focused: boolean }) {
           <span className="field-label">Personality</span>
           <input
             className="input"
+            disabled={!!readOnly}
             value={personality}
             maxLength={120}
             placeholder="eager, loyal, a bit goofy"
@@ -152,7 +172,8 @@ function PetCard({ pet, focused }: { pet: Pet; focused: boolean }) {
           </div>
           <div className="muted">{view ? ACTIVITY_LABEL[view.activity] : ""}</div>
         </div>
-        <div className="form-actions">
+        {readOnly && <span className="remote-note">{readOnly}</span>}
+        <div className="form-actions" hidden={!!readOnly}>
           <button className="pill pill-primary" disabled={!dirty || saving || !!liveNameError} onClick={() => void save()}>
             {saving ? "Saving…" : "Save"}
           </button>

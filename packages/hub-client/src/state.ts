@@ -365,28 +365,3 @@ export function machineCounts(state: Pick<HubState, "machines">): { total: numbe
   const all = Object.values(state.machines);
   return { total: all.length, online: all.filter((m) => m.online).length };
 }
-
-/**
- * A view of `state` limited to one machine's pets, sessions and permission requests (events stay keyed
- * by session id). Until migration step 3 the clients show only this hub's own work, even if a hub
- * forwards a peer's. Returns `state` itself when nothing belongs to another machine.
- */
-export function scopeToMachine(state: HubState, machineId: MachineId | undefined): HubState {
-  if (!machineId) return state;
-  const foreign = <T extends { machineId: MachineId }>(rec: Record<string, T>) => Object.values(rec).some((x) => x.machineId !== machineId);
-  const keep = <T extends { machineId: MachineId }>(rec: Record<string, T>) => {
-    const out: Record<string, T> = {};
-    for (const [k, v] of Object.entries(rec)) if (v.machineId === machineId) out[k] = v;
-    return out;
-  };
-  const p = foreign(state.pets);
-  const s = foreign(state.sessions);
-  const r = foreign(state.pending);
-  if (!p && !s && !r) return state;
-  return {
-    ...state,
-    pets: p ? keep(state.pets) : state.pets,
-    sessions: s ? keep(state.sessions) : state.sessions,
-    pending: r ? keep(state.pending) : state.pending,
-  };
-}

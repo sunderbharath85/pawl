@@ -1,4 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { isLocal } from "@krypto/hub-client";
 import { SPECIES_META } from "@krypto/pet-engine";
 import { agentName, clockTime, errorText } from "../../lib/format";
 import { petList } from "../../lib/pets";
@@ -10,7 +11,8 @@ const SUGGESTIONS = ["What's everyone doing?", "Summarize the last session", "Ap
 
 export function ChatView({ initialPetId }: { initialPetId?: string }) {
   const { client, state, views, toast, meta, navigate } = usePanel();
-  const pets = useMemo(() => petList(state), [state]);
+  // Chat goes to this machine's hub, so only its own pets answer (paired machines' pets are visitors).
+  const pets = useMemo(() => petList(state).filter((p) => isLocal(state, p.machineId)), [state]);
   const [petId, setPetId] = useState<string | undefined>(() => initialPetId ?? pets[0]?.id);
   const pet = pets.find((p) => p.id === petId) ?? pets[0];
   const [text, setText] = useState("");

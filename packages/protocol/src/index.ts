@@ -3,7 +3,7 @@
 // crates/protocol/src/lib.rs and must stay byte-compatible (camelCase fields,
 // snake_case `type` tags). Change both together.
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 export const HUB_DEFAULT_PORT = 47800;
 export const HUB_HOST = "127.0.0.1";
 /** Folder name under the OS data dir (Win %APPDATA%, mac ~/Library/Application Support, linux ~/.local/share). */
@@ -33,7 +33,18 @@ export interface Machine {
   lastSeen: UnixMs;
   online: boolean;
   hubVersion?: string;
+  /**
+   * Last local user input seen by that machine's clients (desktop cursor/keys, VS Code focus/edits).
+   * The active machine is the online machine with the latest value within USER_ACTIVE_WINDOW_MS;
+   * if none qualifies, every machine treats itself as active.
+   */
+  userActiveAt?: UnixMs;
 }
+
+/** Clients report user activity at most this often (ClientMsg `user_activity`). */
+export const USER_ACTIVITY_REPORT_MS = 10_000;
+/** Activity older than this does not make a machine the active one. */
+export const USER_ACTIVE_WINDOW_MS = 10 * 60_000;
 
 /**
  * Global ids: `${machineId}:${localId}` for agents' sessions, pets, permission requests,
@@ -383,6 +394,35 @@ export interface PeerEnvelope {
 export type PairRejectReason = "invalid_invite" | "bad_request";
 export type ByeReason = "revoked" | "shutdown";
 
+/**
+ * Owner -> peer live update for the read-only mirror. Every id inside carries the owner's machineId;
+ * receivers drop any item whose machineId is not the sender's device id.
+ */
+export type MirrorUpdate =
+  | { type: "session"; session: Session }
+  | { type: "event"; event: HubEvent }
+  | { type: "pet"; pet: Pet }
+  | { type: "permission_request"; request: PermissionRequest }
+  | { type: "permission_resolved"; requestId: RequestId; sessionId: SessionId; outcome: PermissionOutcome; by: ResolvedBy }
+  | { type: "notification"; notification: HubNotification };
+
+/** Event payloads larger than this (serialized) are mirrored as a TruncatedPayload. */
+export const MIRROR_PAYLOAD_MAX_BYTES = 64 * 1024;
+/** A sync sends at most this many of the newest events (sync_done.truncated says if more existed). */
+export const MIRROR_SYNC_MAX_EVENTS = 2000;
+/** Senders split mirror_events batches so each serialized body stays under this. */
+export const MIRROR_FRAME_MAX_BYTES = 200 * 1024;
+
+/** Stands in for a mirrored event payload that was too large; open the session on its machine to see it. */
+export interface TruncatedPayload {
+  truncated: true;
+  bytes: number;
+}
+
+export function isTruncatedPayload(p: unknown): p is TruncatedPayload {
+  return typeof p === "object" && p !== null && (p as { truncated?: unknown }).truncated === true;
+}
+
 export type PeerBody =
   | { type: "pair_request"; code: string; machine: Machine; addr?: string; ts: UnixMs }
   /** `reqSeq` echoes the pair_request envelope seq, so an old captured pair_accept cannot answer a new request. */
@@ -391,7 +431,17 @@ export type PeerBody =
   /** First frame on every link after pairing, both directions. */
   | { type: "hello"; machine: Machine; addr?: string; ts: UnixMs }
   | { type: "presence"; presence: Presence }
-  | { type: "bye"; reason: ByeReason; ts: UnixMs };
+  | { type: "bye"; reason: ByeReason; ts: UnixMs }
+  /** Live mirror update, owner -> peer (migration step 3). */
+  | { type: "mirror"; update: MirrorUpdate }
+  /** Sent by a peer after hello: "send me your state and events with seq > sinceSeq" (0 = everything). */
+  | { type: "sync_request"; sinceSeq: number }
+  /** Owner's reply to sync_request: open + recent sessions, pets, pending permissions (replaces the mirror's copy). */
+  | { type: "mirror_snapshot"; sessions: Session[]; pets: Pet[]; pendingPermissions: PermissionRequest[] }
+  /** Batches of events, oldest first, each batch under MIRROR_FRAME_MAX_BYTES. */
+  | { type: "mirror_events"; events: HubEvent[] }
+  /** End of a sync. `seq` = highest event seq sent; `truncated` = older events were skipped. */
+  | { type: "sync_done"; seq: number; truncated: boolean };
 
 export type PeerBodyType = PeerBody["type"];
 
@@ -427,7 +477,9 @@ export type ClientMsg =
   /** Pair with another hub from its invite URI. Errors: bad_uri, self_invite, unreachable, invite_rejected, timeout. */
   | { type: "join_peer"; id: string; uri: string }
   /** Unpair a device: its links close, it can no longer connect, and the peer is told. Errors: not_found. */
-  | { type: "revoke_device"; id: string; deviceId: string };
+  | { type: "revoke_device"; id: string; deviceId: string }
+  /** The user is active on this machine (throttled by clients to USER_ACTIVITY_REPORT_MS). Hub stamps the time. */
+  | { type: "user_activity"; id: string };
 
 export type ClientMsgType = ClientMsg["type"];
 
@@ -450,6 +502,7 @@ export interface AckResults {
   create_invite: { uri: string; expiresAt: UnixMs };
   join_peer: { device: Device; machine: Machine };
   revoke_device: Record<string, never>;
+  user_activity: Record<string, never>;
 }
 
 // ---------- hub -> client ----------
@@ -464,6 +517,7 @@ export interface Welcome {
   devices: Device[];
   peer: PeerStatus;
   agents: Agent[];
+  /** Sessions, pets and pending permissions of every machine: this hub's own plus the read-only mirror of paired hubs. */
   sessions: Session[];
   pets: Pet[];
   pendingPermissions: PermissionRequest[];

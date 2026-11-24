@@ -3,10 +3,12 @@
 A dog (or cat, bird, robot) that watches and drives your coding agents through the local **Krypto hub**.
 
 - **Status bar:** the lead pet's emoji and name, what it is doing, and how many approvals are waiting. The
-  tooltip names this machine (with a rename link) and lists the paired machines with their online state.
-  Click to open the pet.
-- **Pet view** (activity bar → Krypto): this machine's name (plus "N machines · M online" once paired), the pets (every pet shows its name), sessions, live transcript,
-  Approve/Deny cards and chat.
+  tooltip names this machine (with a rename link), lists the paired machines with their online state, and
+  names visiting pets and approvals waiting on other machines. Click to open the pet.
+- **Pet view** (activity bar → Krypto): this machine's name (plus "N machines · M online" once paired), the pets
+  (every pet shows its name), sessions grouped by machine, live transcript, Approve/Deny cards and chat.
+  Paired machines' pets visit on the right, and a pet with a waiting approval runs to the machine you are
+  using. Other machines' sessions and approvals are read-only here (remote control comes later).
   `Krypto: Open Pet in Editor` opens the same view in an editor tab.
 - **Commands:** Start Session, Prompt Session, Cancel Session, Approve Pending, Deny Pending, Show Pet,
   Rename Pet, Change Pet Species, Rename This Machine, Show Machines (read-only; pair machines in the desktop
@@ -15,7 +17,8 @@ A dog (or cat, bird, robot) that watches and drives your coding agents through t
   HEAD) opens in a preview tab — `krypto.openEditedFiles`: `off` | `open` | `diff`.
 - **Notifications:** permission requests of pet-owned sessions (with Approve/Deny), finished turns and hub
   nudges — `krypto.notifications`: `all` | `permissions` | `off`. A window only speaks up for sessions inside
-  its workspace, or when it is the focused window.
+  its workspace, or when it is the focused window. With paired machines, only the machine you are using
+  notifies (for every machine's sessions); VS Code focus, edits and selections tell the hub you are here.
 
 The extension host owns the only hub connection (`ws://127.0.0.1:47800/ws`, token from the hub data dir);
 the webview never opens a socket. When the hub is down the pet naps and the status bar offers **Start hub**,
