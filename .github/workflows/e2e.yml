@@ -1,0 +1,44 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # Keep each suite's temp dir (hub data and logs) so a failure can be inspected from the artifact.
+      E2E_KEEP: "1"
+      TMPDIR: ${{ runner.temp }}/e2e
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: mkdir -p "$TMPDIR"
+      - run: bun install --frozen-lockfile
+      - run: cargo build -p pawl-hub
+      - name: Install Chromium
+        working-directory: e2e
+        run: bunx playwright install --with-deps chromium
+      - name: End-to-end tests
+        working-directory: e2e
+        run: bun test --timeout 120000 ./tests
+      - name: Keep hub data and logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-temp
+          path: ${{ runner.temp }}/e2e
+          retention-days: 7

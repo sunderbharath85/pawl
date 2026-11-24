@@ -89,6 +89,19 @@
         "ws": "^8.23.0",
       },
     },
+    "e2e": {
+      "name": "@pawl/e2e",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pawl/hub-client": "workspace:*",
+        "@pawl/protocol": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "playwright": "1.65.1",
+        "typescript": "^5.9.0",
+      },
+    },
     "packages/hub-client": {
       "name": "@pawl/hub-client",
       "version": "0.1.0",
@@ -519,18 +532,6 @@
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
-    "@pawl/desktop": ["@pawl/desktop@workspace:apps/desktop"],
-
-    "@pawl/hub-client": ["@pawl/hub-client@workspace:packages/hub-client"],
-
-    "@pawl/mobile": ["@pawl/mobile@workspace:apps/mobile"],
-
-    "@pawl/pet-engine": ["@pawl/pet-engine@workspace:packages/pet-engine"],
-
-    "@pawl/protocol": ["@pawl/protocol@workspace:packages/protocol"],
-
-    "@pawl/relay": ["@pawl/relay@workspace:services/relay"],
-
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.2.6", "", { "dependencies": { "@tybys/wasm-util": "^0.10.3" }, "peerDependencies": { "@emnapi/core": "^1.7.1 || 2.0.0-beta.2", "@emnapi/runtime": "^1.7.1 || 2.0.0-beta.2" } }, "sha512-mRyDmEw9/fCDXCGfL1sbgIw/GUK0PVxRW4YwgPN61F3LQ+fSyoBFarJVzgGyhF6kRzEQZ0FejDqm4WLXSeqQmw=="],
 
     "@noxcturnal/noxcturnal-darwin-arm64": ["@noxcturnal/noxcturnal-darwin-arm64@0.1.14", "", { "os": "darwin", "cpu": "arm64" }, "sha512-5g1fvtfmDsaDzNoqZicO7UKUUaGm9HOTJy30KNxXbSJRreLOQwK0fd0wuAA0OEbBgJSQAvVdAovpjT5HvYRIWw=="],
@@ -550,6 +551,20 @@
     "@noxcturnal/noxcturnal-win32-x64-msvc": ["@noxcturnal/noxcturnal-win32-x64-msvc@0.1.14", "", { "os": "win32", "cpu": "x64" }, "sha512-qiiOLLQUYnLZai3traWx90yzMLGZlkvwGNYMFkGw5MwnMifVgfl3Z3ooFiSYaVKjkTYqxBF9rOCvhFL6yXaoxA=="],
 
     "@oxc-project/types": ["@oxc-project/types@0.156.0", "", {}, "sha512-1Duyg48TdJNdyhEB8Xn1L36bT9Pv6GUtlKjHxOys8xkaF/rQq3XJE+bAurSK/AgIz5mGFsb77cn9Pb20+WCScw=="],
+
+    "@pawl/desktop": ["@pawl/desktop@workspace:apps/desktop"],
+
+    "@pawl/e2e": ["@pawl/e2e@workspace:e2e"],
+
+    "@pawl/hub-client": ["@pawl/hub-client@workspace:packages/hub-client"],
+
+    "@pawl/mobile": ["@pawl/mobile@workspace:apps/mobile"],
+
+    "@pawl/pet-engine": ["@pawl/pet-engine@workspace:packages/pet-engine"],
+
+    "@pawl/protocol": ["@pawl/protocol@workspace:packages/protocol"],
+
+    "@pawl/relay": ["@pawl/relay@workspace:services/relay"],
 
     "@poppinss/colors": ["@poppinss/colors@4.1.6", "", { "dependencies": { "kleur": "^4.1.5" } }, "sha512-H9xkIdFswbS8n1d6vmRd8+c10t2Qe+rZITbbDHHkQixH5+2x1FDGmi/0K+WgWiqQFKPSlIYB7jlH6Kpfn6Fleg=="],
 
@@ -1087,8 +1102,6 @@
 
     "kleur": ["kleur@3.0.3", "", {}, "sha512-eTIzlVOSUR+JxdDFepEYcBMtZ9Qqdef+rnzWdRZuMbOywu5tO2w2N7rqjoANZ5k9vywhL6Br1VRjUIgTQx4E8w=="],
 
-    "pawl-vscode": ["pawl-vscode@workspace:apps/vscode"],
-
     "lan-network": ["lan-network@0.2.1", "", { "bin": { "lan-network": "dist/lan-network-cli.js" } }, "sha512-ONPnazC96VKDntab9j9JKwIWhZ4ZUceB4A9Epu4Ssg0hYFmtHZSeQ+n15nIwTFmcBUKtExOer8WTJ4GF9MO64A=="],
 
     "leven": ["leven@3.1.0", "", {}, "sha512-qsda+H8jTaUaN/x5vzW2rzc+8Rw4TAQ/4KjB46IwK5VH+IlVeeeje/EoZRpiXvIqjFgK84QffqPztGI3VBLG1A=="],
@@ -1239,9 +1252,15 @@
 
     "pathe": ["pathe@2.0.3", "", {}, "sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w=="],
 
+    "pawl-vscode": ["pawl-vscode@workspace:apps/vscode"],
+
     "picocolors": ["picocolors@1.1.1", "", {}, "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA=="],
 
     "picomatch": ["picomatch@4.0.7", "", {}, "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA=="],
+
+    "playwright": ["playwright@1.65.1", "", { "dependencies": { "playwright-core": "1.65.1" }, "bin": { "playwright": "cli.js" } }, "sha512-vJ1FuoOrNwOKHUIVEvSt3jT1L+wjjDpwhwIstKtfvTh8XIG4FG4bIFuvNdMxi81LGfAhUgUZleVFaOLY4RIUUw=="],
+
+    "playwright-core": ["playwright-core@1.65.1", "", { "bin": { "playwright-core": "cli.js" } }, "sha512-hqPpz7blSMPxWVdoeE1yiBSzXsKiVOd2k+kjCvmUywD2GPO2Dd9HfcWnq9NN0GHbNZDFgZ9JfBFr+X5/BLo0qw=="],
 
     "plist": ["plist@3.1.1", "", { "dependencies": { "@xmldom/xmldom": "^0.9.10", "base64-js": "^1.5.1", "xmlbuilder": "^15.1.1" } }, "sha512-ZIfcLJC+7E7FBFnDxm9MPmt7D+DidyQ26lewieO75AdhA2ayMtsJSES0iWzqJQbcVRSrTufQoy0DR94xHue0oA=="],
 

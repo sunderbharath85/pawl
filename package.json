@@ -4,7 +4,7 @@
   "license": "MIT",
   "version": "0.1.0",
   "packageManager": "bun@1.4.4",
-  "workspaces": ["packages/*", "apps/*", "services/*"],
+  "workspaces": ["packages/*", "apps/*", "services/*", "e2e"],
   "scripts": {
     "typecheck": "bun run --filter '*' typecheck",
     "build": "bun run --filter '*' build"

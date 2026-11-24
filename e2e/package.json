@@ -1,0 +1,21 @@
+{
+  "name": "@pawl/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "pretest": "cargo build -q -p pawl-hub",
+    "test": "bun test --timeout 90000 ./tests",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pawl/hub-client": "workspace:*",
+    "@pawl/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "playwright": "1.65.1",
+    "typescript": "^5.9.0"
+  }
+}

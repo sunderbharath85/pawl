@@ -73,6 +73,13 @@ The parentheses run each command in a subshell, so you stay at the repository ro
 
 If you change the desktop or VS Code app, also make sure it still builds: `bun run build` in `apps/desktop` or `apps/vscode`.
 
+End to end (real hubs, the relay under `wrangler dev`, the phone protocol and the desktop UI in Chromium; about 10 s, also run in CI). See [e2e/README.md](e2e/README.md):
+
+```sh
+cargo build -p pawl-hub
+(cd e2e && bunx playwright install chromium && bun test --timeout 120000 ./tests)
+```
+
 Add focused unit tests for new logic. Rust tests live next to the code (`#[cfg(test)]`); TypeScript tests use `bun test` (`*.test.ts` / `*.test.tsx`).
 
 ## Contracts and wire types
