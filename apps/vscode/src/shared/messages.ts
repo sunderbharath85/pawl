@@ -44,7 +44,8 @@ export type WebviewCommand =
   | "reconnect"
   | "openPanel"
   | "renameMachine"
-  | "renamePet";
+  | "renamePet"
+  | "showMachines";
 
 export type WebviewToHost =
   | { type: "ready" }

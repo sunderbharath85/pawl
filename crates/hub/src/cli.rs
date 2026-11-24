@@ -11,8 +11,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use futures::{SinkExt, StreamExt};
 use krypto_discovery::hooks::HookTarget;
 use krypto_protocol::{
-    Agent, ClientKind, ClientMsg, EventType, HubEvent, Machine, MachineOs, PermissionOptionKind, PermissionOutcome,
-    PermissionRequest, PlanPayload, ResolvedBy, ServerMsg, Session, ToolCallPayload, Welcome,
+    Agent, ClientKind, ClientMsg, Device, DeviceKind, EventType, HubEvent, Machine, MachineOs, PeerStatus,
+    PermissionOptionKind, PermissionOutcome, PermissionRequest, PlanPayload, ResolvedBy, ServerMsg, Session,
+    ToolCallPayload, Welcome,
 };
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
@@ -38,8 +39,13 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Run the hub daemon (listens on 127.0.0.1 only)
-    Serve,
+    /// Run the hub daemon (the local API listens on 127.0.0.1 only)
+    Serve {
+        /// Also accept hub-to-hub links (pairing + presence) on this address, e.g. 192.168.1.20 or
+        /// 192.168.1.20:47801 (default port 47801). Overrides config.toml [peer] listen.
+        #[arg(long, value_name = "IP[:PORT]")]
+        peer_listen: Option<String>,
+    },
     /// List ACP agents (from the running hub, else discovered locally)
     Agents {
         /// Re-fetch the ACP registry instead of using the 24h cache
@@ -98,6 +104,40 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Pair with other machines' hubs (needs a running hub)
+    Peer {
+        #[command(subcommand)]
+        action: PeerAction,
+    },
+    /// List this machine and every paired machine (online state, last seen, address)
+    Machines {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PeerAction {
+    /// Create a one-time invite (prints the URI and the `krypto peer join` line for the other machine)
+    Invite {
+        /// Seconds the invite stays valid (60-3600, default 600)
+        #[arg(long, value_name = "SECS")]
+        ttl: Option<u32>,
+        /// Address the other hub dials, "host:port" (default: the listener's; required if it binds 0.0.0.0)
+        #[arg(long, value_name = "HOST:PORT")]
+        addr: Option<String>,
+    },
+    /// Pair with the hub that created this invite URI
+    Join {
+        /// krypto://peer?... (quote it: it contains '&')
+        uri: String,
+    },
+    /// Unpair a machine: it can no longer connect, and it is told
+    Revoke {
+        /// Machine id or name (see `krypto machines`)
+        machine: String,
+    },
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,13 +166,15 @@ pub async fn run() -> ExitCode {
             run_hook(&paths, cli.port, &source, args).await;
             return ExitCode::SUCCESS;
         }
-        Command::Serve => run_serve(paths, cli.port).await,
+        Command::Serve { peer_listen } => run_serve(paths, cli.port, peer_listen).await,
         Command::Agents { refresh, json } => run_agents(&paths, cli.port, refresh, json).await,
         Command::Sessions { json } => run_sessions(&paths, cli.port, json).await,
         Command::Start { agent, cwd, prompt, local } => run_start(paths, cli.port, agent, cwd, prompt, local).await,
         Command::InstallHooks { target, apply, repo } => run_install_hooks(target, apply, repo),
         Command::Token => run_token(&paths),
         Command::Machine { name, json } => run_machine(&paths, cli.port, name, json).await,
+        Command::Peer { action } => run_peer(&paths, cli.port, action).await,
+        Command::Machines { json } => run_machines(&paths, cli.port, json).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -166,10 +208,16 @@ async fn shutdown_signal() {
     tracing::info!("shutting down");
 }
 
-async fn run_serve(paths: Paths, port_flag: Option<u16>) -> Result<()> {
+async fn run_serve(paths: Paths, port_flag: Option<u16>, peer_listen: Option<String>) -> Result<()> {
+    if let Some(l) = &peer_listen {
+        config::parse_peer_listen(l).context("--peer-listen")?;
+    }
     paths.ensure()?;
     let _log = logging::init(Some(&paths.log), "info", "info");
-    let cfg = HubConfig::load_or_init(&paths)?;
+    let mut cfg = HubConfig::load_or_init(&paths)?;
+    if peer_listen.is_some() {
+        cfg.peer.listen = peer_listen;
+    }
     let token = config::load_or_create_token(&paths)?;
     let machine = machine::load_or_create(&paths)?;
     let port = config::serve_port(port_flag, &cfg);
@@ -370,6 +418,8 @@ fn empty_welcome() -> Welcome {
         hub_version: String::new(),
         machine,
         machines: vec![],
+        devices: vec![],
+        peer: PeerStatus { listening: None, public_key: String::new() },
         agents: vec![],
         sessions: vec![],
         pets: vec![],
@@ -425,6 +475,197 @@ impl Conn {
 
 fn rid() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+// ---------------------------------------------------------------- peer / machines
+
+/// Friendly text for the pairing ack error codes (the hub answers with the bare code).
+fn peer_error_text(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "peer_listener_off" => {
+            "this hub's peer listener is off, so it cannot invite. Restart it with \
+             `krypto serve --peer-listen <LAN-IP>` or set [peer] listen = \"<LAN-IP>:47801\" in config.toml"
+        }
+        "invalid" => "invalid invite options: --ttl must be 60-3600 seconds and --addr a reachable host:port \
+                      (required when the listener binds 0.0.0.0 or ::)",
+        "bad_uri" => "that is not a valid Krypto invite (expected krypto://peer?...)",
+        "self_invite" => "that invite was created by this machine; run `krypto peer join` on the other machine",
+        "unreachable" => "could not reach the inviting hub at the invite's address (same network? firewall?)",
+        "invite_rejected" => "the inviting hub rejected the invite: it is wrong, expired or already used; create a new one",
+        "timeout" => "the inviting hub did not answer in time",
+        "not_found" => "no such paired machine",
+        _ => return None,
+    })
+}
+
+/// A request on the running hub, with pairing error codes turned into readable text.
+async fn peer_request(conn: &mut Conn, msg: ClientMsg) -> Result<Value> {
+    conn.request(msg).await.map_err(|e| {
+        let code = e.to_string();
+        match peer_error_text(&code) {
+            Some(text) => anyhow!("{text} ({code})"),
+            None => e,
+        }
+    })
+}
+
+/// invite/join/revoke act on the running hub's link layer.
+async fn running_hub(paths: &Paths, port_flag: Option<u16>) -> Result<RemoteHub> {
+    match RemoteHub::connect(paths, port_flag).await? {
+        Some(hub) => Ok(hub),
+        None => bail!("no hub is running for this data dir; start it first (`krypto serve`, add --peer-listen <LAN-IP> to invite)"),
+    }
+}
+
+/// Peer-supplied names are shown as-is but never as terminal control sequences.
+fn printable(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+}
+
+fn local_time(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|t| t.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "?".into())
+}
+
+async fn run_peer(paths: &Paths, port_flag: Option<u16>, action: PeerAction) -> Result<()> {
+    let hub = running_hub(paths, port_flag).await?;
+    let me = hub.welcome.machine.clone();
+    let devices = hub.welcome.devices.clone();
+    let mut conn = Conn::Remote(Box::new(hub));
+    match action {
+        PeerAction::Invite { ttl, addr } => {
+            let v = peer_request(&mut conn, ClientMsg::CreateInvite { id: rid(), ttl_secs: ttl, addr }).await?;
+            let uri = v.get("uri").and_then(Value::as_str).context("hub sent no invite uri")?;
+            let expires_at = v.get("expiresAt").and_then(Value::as_i64).unwrap_or(0);
+            let mins = ((expires_at - krypto_protocol::now_ms()).max(0) + 59_999) / 60_000;
+            println!(
+                "Invite to pair with {} (single use, expires at {} - in {mins} min):",
+                printable(&me.name),
+                local_time(expires_at)
+            );
+            println!();
+            println!("  {uri}");
+            println!();
+            println!("On the other machine, run:");
+            println!();
+            println!("  krypto peer join \"{uri}\"");
+        }
+        PeerAction::Join { uri } => {
+            let v = peer_request(&mut conn, ClientMsg::JoinPeer { id: rid(), uri }).await?;
+            let device: Device = serde_json::from_value(v.get("device").cloned().unwrap_or_default()).context("parse device")?;
+            let machine: Machine =
+                serde_json::from_value(v.get("machine").cloned().unwrap_or_default()).context("parse machine")?;
+            println!(
+                "Paired with {} ({}, {}){}",
+                printable(&machine.name),
+                machine.id,
+                enum_label(&machine.os),
+                device.addr.as_deref().map(|a| format!(" at {a}")).unwrap_or_default()
+            );
+        }
+        PeerAction::Revoke { machine } => {
+            let device = resolve_device(&devices, &machine)?;
+            peer_request(&mut conn, ClientMsg::RevokeDevice { id: rid(), device_id: device.id.clone() }).await?;
+            println!(
+                "Revoked {} ({}): it can no longer connect. Pair again with a new invite.",
+                printable(&device.name),
+                device.id
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A paired device by exact id, else by name (trimmed, case-insensitive; must be unambiguous).
+fn resolve_device<'a>(devices: &'a [Device], query: &str) -> Result<&'a Device> {
+    let q = query.trim();
+    if let Some(d) = devices.iter().find(|d| d.id == q) {
+        return Ok(d);
+    }
+    let by_name: Vec<&Device> = devices.iter().filter(|d| d.name.trim().to_lowercase() == q.to_lowercase()).collect();
+    match by_name.as_slice() {
+        [d] => Ok(d),
+        [] => bail!("no paired machine with id or name {q:?} (see `krypto machines`)"),
+        many => bail!(
+            "{} paired machines are named {q:?}; use the id: {}",
+            many.len(),
+            many.iter().map(|d| d.id.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+/// `krypto machines`: from the running hub (live online state), else from hub.db (peers offline).
+async fn run_machines(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> Result<()> {
+    let (machines, devices, listening, hub_running) = match RemoteHub::connect(paths, port_flag).await? {
+        Some(hub) => {
+            let w = hub.welcome;
+            (w.machines, w.devices, w.peer.listening, true)
+        }
+        None => {
+            paths.ensure()?;
+            let me = machine::load_or_create(paths)?;
+            let roster = if paths.db.exists() {
+                let store = crate::store::Store::open(&paths.db, &me.id)?;
+                store.run(|s| s.roster()).await?
+            } else {
+                Vec::new()
+            };
+            let mut machines = vec![me.to_machine(false, krypto_protocol::now_ms())];
+            let mut devices = Vec::new();
+            for e in roster {
+                let mut m = e.machine;
+                m.online = false;
+                if e.device.kind == DeviceKind::Hub {
+                    machines.push(m);
+                }
+                devices.push(e.device);
+            }
+            (machines, devices, None, false)
+        }
+    };
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "machines": machines, "devices": devices }))?);
+        return Ok(());
+    }
+    let now = krypto_protocol::now_ms();
+    let rows: Vec<Vec<String>> = machines
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let this = i == 0;
+            let status = match (this, m.online) {
+                (true, _) if hub_running => "this machine".to_string(),
+                (true, _) => "this machine (hub not running)".to_string(),
+                (false, true) => "online".to_string(),
+                (false, false) => "offline".to_string(),
+            };
+            let seen = match (this, m.online) {
+                (true, _) if !hub_running => "-".to_string(),
+                (true, _) | (false, true) => "now".to_string(),
+                (false, false) => ago(now, m.last_seen),
+            };
+            let addr = if this {
+                listening.clone()
+            } else {
+                devices.iter().find(|d| d.id == m.id).and_then(|d| d.addr.clone())
+            };
+            vec![
+                printable(&m.name),
+                m.id.clone(),
+                enum_label(&m.os),
+                status,
+                seen,
+                addr.unwrap_or_else(|| "-".into()),
+            ]
+        })
+        .collect();
+    print_table(&["NAME", "ID", "OS", "STATUS", "LAST SEEN", "PEER ADDR"], &rows);
+    if machines.len() == 1 {
+        println!();
+        println!("No paired machines. Pair one with `krypto peer invite` (needs `krypto serve --peer-listen <LAN-IP>`).");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- agents / sessions
@@ -955,6 +1196,78 @@ mod tests {
         assert!(matches!(c.command, Command::Machine { name: Some(ref n), json: false } if n == "Windows PC"));
         let c = Cli::try_parse_from(["krypto", "machine", "--json"]).unwrap();
         assert!(matches!(c.command, Command::Machine { name: None, json: true }));
+        let c = Cli::try_parse_from(["krypto", "serve", "--peer-listen", "192.168.1.20"]).unwrap();
+        assert!(matches!(c.command, Command::Serve { peer_listen: Some(ref l) } if l == "192.168.1.20"));
+        let c = Cli::try_parse_from(["krypto", "peer", "invite", "--ttl", "120", "--addr", "10.0.0.2:47801"]).unwrap();
+        assert!(matches!(
+            c.command,
+            Command::Peer { action: PeerAction::Invite { ttl: Some(120), addr: Some(ref a) } } if a == "10.0.0.2:47801"
+        ));
+        let c = Cli::try_parse_from(["krypto", "peer", "join", "krypto://peer?v=1&mid=x"]).unwrap();
+        assert!(matches!(c.command, Command::Peer { action: PeerAction::Join { ref uri } } if uri.starts_with("krypto://")));
+        let c = Cli::try_parse_from(["krypto", "peer", "revoke", "Mac mini"]).unwrap();
+        assert!(matches!(c.command, Command::Peer { action: PeerAction::Revoke { ref machine } } if machine == "Mac mini"));
+        let c = Cli::try_parse_from(["krypto", "machines", "--json"]).unwrap();
+        assert!(matches!(c.command, Command::Machines { json: true }));
+        assert!(Cli::try_parse_from(["krypto", "peer"]).is_err());
+    }
+
+    fn device(id: &str, name: &str) -> Device {
+        Device {
+            id: id.into(),
+            kind: DeviceKind::Hub,
+            name: name.into(),
+            public_key: "pk".into(),
+            paired_at: 0,
+            last_seen: None,
+            addr: None,
+        }
+    }
+
+    #[test]
+    fn revoke_targets_resolve_by_id_or_unique_name() {
+        let ds = vec![device("aaaaaa111111", "Mac mini"), device("bbbbbb222222", "Laptop"), device("cccccc333333", "laptop")];
+        assert_eq!(resolve_device(&ds, "aaaaaa111111").unwrap().id, "aaaaaa111111");
+        assert_eq!(resolve_device(&ds, " mac MINI ").unwrap().id, "aaaaaa111111");
+        let err = resolve_device(&ds, "Laptop").unwrap_err().to_string();
+        assert!(err.contains("bbbbbb222222") && err.contains("cccccc333333"), "{err}");
+        assert!(resolve_device(&ds, "nope").unwrap_err().to_string().contains("no paired machine"));
+    }
+
+    #[test]
+    fn pairing_error_codes_read_well() {
+        for code in ["peer_listener_off", "invalid", "bad_uri", "self_invite", "unreachable", "invite_rejected", "timeout", "not_found"] {
+            assert!(peer_error_text(code).is_some(), "{code}");
+        }
+        assert_eq!(peer_error_text("something else"), None);
+        assert_eq!(printable("Mac\u{1b}[2Jmini"), "Mac?[2Jmini");
+    }
+
+    /// `krypto machines` without a hub lists this machine from machine.toml and peers from hub.db.
+    #[tokio::test]
+    async fn machines_command_without_a_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::in_dir(dir.path());
+        if std::env::var(config::ENV_TOKEN).is_ok() {
+            return; // an env token could reach a real hub; never touch it from tests
+        }
+        run_machines(&paths, Some(9), true).await.unwrap();
+        let me = machine::load(&paths).unwrap().expect("created");
+        let store = crate::store::Store::open(&paths.db, &me.id).unwrap();
+        let mut d = device("zyxwvu987654", "Mac mini");
+        d.addr = Some("10.0.0.2:47801".into());
+        let m = Machine {
+            id: d.id.clone(),
+            name: d.name.clone(),
+            os: MachineOs::Macos,
+            last_seen: 5,
+            online: false,
+            hub_version: Some("0.1.0".into()),
+        };
+        store.upsert_device(&krypto_peer::RosterEntry { device: d, machine: m }).unwrap();
+        drop(store);
+        run_machines(&paths, Some(9), false).await.unwrap();
+        run_machines(&paths, Some(9), true).await.unwrap();
     }
 
     #[test]

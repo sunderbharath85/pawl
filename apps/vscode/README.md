@@ -3,12 +3,14 @@
 A dog (or cat, bird, robot) that watches and drives your coding agents through the local **Krypto hub**.
 
 - **Status bar:** the lead pet's emoji and name, what it is doing, and how many approvals are waiting. The
-  tooltip names this machine (with a rename link). Click to open the pet.
-- **Pet view** (activity bar → Krypto): this machine's name, the pets (every pet shows its name), sessions, live transcript,
+  tooltip names this machine (with a rename link) and lists the paired machines with their online state.
+  Click to open the pet.
+- **Pet view** (activity bar → Krypto): this machine's name (plus "N machines · M online" once paired), the pets (every pet shows its name), sessions, live transcript,
   Approve/Deny cards and chat.
   `Krypto: Open Pet in Editor` opens the same view in an editor tab.
 - **Commands:** Start Session, Prompt Session, Cancel Session, Approve Pending, Deny Pending, Show Pet,
-  Rename Pet, Change Pet Species, Rename This Machine, Install Agent Hooks, Start Hub, Reconnect to Hub.
+  Rename Pet, Change Pet Species, Rename This Machine, Show Machines (read-only; pair machines in the desktop
+  app or with `krypto peer`), Install Agent Hooks, Start Hub, Reconnect to Hub.
 - **Edits:** when an agent finishes editing a file inside this workspace, the file (or a diff against git
   HEAD) opens in a preview tab — `krypto.openEditedFiles`: `off` | `open` | `diff`.
 - **Notifications:** permission requests of pet-owned sessions (with Approve/Deny), finished turns and hub

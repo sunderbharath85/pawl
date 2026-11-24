@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
-import type { HubState } from "@krypto/hub-client";
+import { machineCounts, sortedMachines, type HubState } from "@krypto/hub-client";
 import { SPECIES_META } from "@krypto/pet-engine";
 import { DEFAULT_SPECIES } from "@krypto/protocol";
-import { OS_LABEL, machineDisplayName } from "../shared/machine";
+import { OS_LABEL, machineDisplayName, machinesLine, presenceLabel } from "../shared/machine";
 import type { HubConnection } from "./connection";
 import { ACTIVITY_LABEL, petViewsOf, primaryView } from "./petViews";
 import { agentName, isBusy } from "./util";
@@ -57,7 +57,9 @@ export class PetStatusBar implements vscode.Disposable {
     const species = primary?.species ?? DEFAULT_SPECIES;
     const activity = primary?.activity ?? "napping";
     const busy = Object.values(state.sessions).filter(isBusy).length;
-    const machineKey = state.machine ? `${state.machine.id}:${state.machine.name}` : "";
+    const machineKey = sortedMachines(state)
+      .map((m) => `${m.id}:${m.name}:${m.online}:${m.online ? "" : m.lastSeen}`)
+      .join(",");
     const petsKey = views.map((v) => `${v.petId}:${v.name}:${v.activity}`).join(",");
     const key = `on|${machineKey}|${species}|${activity}|${pendingCount}|${busy}|${petsKey}`;
     if (key === this.lastKey) return;
@@ -93,7 +95,14 @@ export class PetStatusBar implements vscode.Disposable {
   ): vscode.MarkdownString {
     const md = new vscode.MarkdownString(undefined, true);
     md.isTrusted = {
-      enabledCommands: ["krypto.showPet", "krypto.approvePending", "krypto.denyPending", "krypto.startSession", "krypto.renameMachine"],
+      enabledCommands: [
+        "krypto.showPet",
+        "krypto.approvePending",
+        "krypto.denyPending",
+        "krypto.startSession",
+        "krypto.renameMachine",
+        "krypto.showMachines",
+      ],
     };
     md.appendMarkdown("**Krypto**");
     const machine = state.machine;
@@ -104,6 +113,7 @@ export class PetStatusBar implements vscode.Disposable {
       );
     }
     md.appendMarkdown("\n\n");
+    this.appendMachines(md, state);
     if (views.length === 0) md.appendMarkdown(`${SPECIES_META[DEFAULT_SPECIES].emoji} No pets yet — start a session.\n\n`);
     for (const v of views) {
       const name = agentName(state.agents, v.agentId, v.machineId);
@@ -118,6 +128,25 @@ export class PetStatusBar implements vscode.Disposable {
     }
     md.appendMarkdown("[Show pet](command:krypto.showPet) · [$(add) Start session](command:krypto.startSession)");
     return md;
+  }
+
+  /** Paired machines with their online state (this machine is the header line). */
+  private appendMachines(md: vscode.MarkdownString, state: HubState): void {
+    const { total, online } = machineCounts(state);
+    if (total === 0) return;
+    const show = "[$(list-flat) Machines](command:krypto.showMachines \"Show machines\")";
+    if (total === 1) {
+      md.appendMarkdown(`$(remote-explorer) No other machines paired yet · ${show}\n\n`);
+      return;
+    }
+    md.appendMarkdown(`$(remote-explorer) **${machinesLine(total, online)}** · ${show}\n\n`);
+    const now = Date.now();
+    for (const m of sortedMachines(state)) {
+      if (m.id === state.machine?.id) continue;
+      const os = OS_LABEL[m.os] ?? m.os;
+      const dot = m.online ? "$(circle-filled)" : "$(circle-outline)";
+      md.appendMarkdown(`${dot} ${escapeMd(machineDisplayName(m))} _(${escapeMd(os)})_ — ${escapeMd(presenceLabel(m, now))}\n\n`);
+    }
   }
 
   dispose(): void {

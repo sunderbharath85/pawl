@@ -3,7 +3,7 @@
 // crates/protocol/src/lib.rs and must stay byte-compatible (camelCase fields,
 // snake_case `type` tags). Change both together.
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 export const HUB_DEFAULT_PORT = 47800;
 export const HUB_HOST = "127.0.0.1";
 /** Folder name under the OS data dir (Win %APPDATA%, mac ~/Library/Application Support, linux ~/.local/share). */
@@ -305,6 +305,96 @@ export interface HubNotification {
   ts: UnixMs;
 }
 
+// ---------- devices + peer link (migration step 2) ----------
+export type DeviceKind = "hub" | "phone";
+
+/** A paired device (the pairing roster; never includes this hub). A hub's device id is its machineId. */
+export interface Device {
+  id: string;
+  kind: DeviceKind;
+  name: string;
+  /** Base64 (standard, padded) X25519 public key. */
+  publicKey: string;
+  pairedAt: UnixMs;
+  lastSeen?: UnixMs;
+  /** The device's peer-listener address "host:port", when known. */
+  addr?: string;
+}
+
+/** This hub's peer-link status. */
+export interface PeerStatus {
+  /** Bound peer-listener address, or null when the listener is off (the default). */
+  listening: string | null;
+  /** This hub's base64 X25519 public key. */
+  publicKey: string;
+}
+
+/** A repo a hub can run agents in. Filled in migration step 5; hubs send [] until then. */
+export interface RepoRef {
+  name: string;
+  path: string;
+}
+
+/** Heartbeat a hub sends each paired hub every PRESENCE_INTERVAL_MS and on change. */
+export interface Presence {
+  machine: Machine;
+  agents: Agent[];
+  repos: RepoRef[];
+  pets: Pet[];
+  /** Last local user input on this machine (step 3 uses it for "runs to you"). */
+  userActiveAt?: UnixMs;
+  ts: UnixMs;
+}
+
+export const PEER_PROTOCOL_VERSION = 1;
+export const PEER_DEFAULT_PORT = 47801;
+/** The only route the peer listener serves (WebSocket). */
+export const PEER_PATH = "/peer";
+export const PRESENCE_INTERVAL_MS = 15_000;
+/** A peer with no authenticated frame for this long is offline. */
+export const PRESENCE_OFFLINE_MS = 45_000;
+
+/**
+ * Hub <-> hub frame (JSON text over WebSocket). `box` is a NaCl box (X25519 + XSalsa20-Poly1305)
+ * of the UTF-8 JSON `PeerBody`, from the sender's secret key to the receiver's public key.
+ * Invite URI: `krypto://peer?v=1&mid=<machineId>&pk=<base64url pk>&addr=<host:port>&code=<base64url 16 bytes>&exp=<unix ms>`.
+ */
+export interface PeerEnvelope {
+  v: 1;
+  /** Sender device id. */
+  from: string;
+  /** Receiver device id. */
+  to: string;
+  /** Per (from, to), strictly increasing across restarts; the receiver drops seq <= the last it accepted. */
+  seq: number;
+  /**
+   * Base64, 24 bytes: 15 random || dir (1 if sender pk < receiver pk bytewise, else 0) || seq as u64 big-endian.
+   * NaCl box has no AAD, so binding seq and direction into the nonce authenticates them: open() rejects a nonce
+   * whose seq != `seq` or whose dir is wrong (stops seq-bumped replays and frames reflected back to their sender).
+   */
+  nonce: string;
+  /** Base64 ciphertext. */
+  box: string;
+  /** Base64 sender public key. Only on `pair_request` (the receiver does not know the sender yet). */
+  pk?: string;
+}
+
+/** One reason for every bad invite (wrong, expired or used code) so the listener is no oracle. */
+export type PairRejectReason = "invalid_invite" | "bad_request";
+export type ByeReason = "revoked" | "shutdown";
+
+export type PeerBody =
+  | { type: "pair_request"; code: string; machine: Machine; addr?: string; ts: UnixMs }
+  /** `reqSeq` echoes the pair_request envelope seq, so an old captured pair_accept cannot answer a new request. */
+  | { type: "pair_accept"; machine: Machine; addr?: string; reqSeq: number; ts: UnixMs }
+  | { type: "pair_reject"; reason: PairRejectReason; ts: UnixMs }
+  /** First frame on every link after pairing, both directions. */
+  | { type: "hello"; machine: Machine; addr?: string; ts: UnixMs }
+  | { type: "presence"; presence: Presence }
+  | { type: "bye"; reason: ByeReason; ts: UnixMs };
+
+export type PeerBodyType = PeerBody["type"];
+
 // ---------- hooks ----------
 export type HookSource = "claude" | "codex" | "copilot";
 
@@ -327,7 +417,17 @@ export type ClientMsg =
   | { type: "update_pet"; id: string; petId: PetId; patch: Partial<Pick<Pet, "species" | "name" | "skin" | "personality">> }
   | { type: "set_rules"; id: string; rules: Rule[] }
   /** Rename this hub's machine (only the local machine for now). */
-  | { type: "update_machine"; id: string; machineId: MachineId; name: string };
+  | { type: "update_machine"; id: string; machineId: MachineId; name: string }
+  /**
+   * One-time pairing invite (single use; ttlSecs 60..3600, default 600). Needs the peer listener on.
+   * `addr` overrides the advertised "host:port" (required when the listener binds 0.0.0.0 / ::).
+   * Errors: peer_listener_off, invalid.
+   */
+  | { type: "create_invite"; id: string; ttlSecs?: number; addr?: string }
+  /** Pair with another hub from its invite URI. Errors: bad_uri, self_invite, unreachable, invite_rejected, timeout. */
+  | { type: "join_peer"; id: string; uri: string }
+  /** Unpair a device: its links close, it can no longer connect, and the peer is told. Errors: not_found. */
+  | { type: "revoke_device"; id: string; deviceId: string };
 
 export type ClientMsgType = ClientMsg["type"];
 
@@ -347,6 +447,9 @@ export interface AckResults {
   update_pet: { pet: Pet };
   set_rules: { rules: Rule[] };
   update_machine: { machine: Machine };
+  create_invite: { uri: string; expiresAt: UnixMs };
+  join_peer: { device: Device; machine: Machine };
+  revoke_device: Record<string, never>;
 }
 
 // ---------- hub -> client ----------
@@ -355,8 +458,11 @@ export interface Welcome {
   hubVersion: string;
   /** The machine this hub runs on. */
   machine: Machine;
-  /** Every known machine, including this one (peers arrive in migration step 2). */
+  /** This machine first, then every paired (not revoked) hub with its online state. */
   machines: Machine[];
+  /** The pairing roster (never includes this hub). */
+  devices: Device[];
+  peer: PeerStatus;
   agents: Agent[];
   sessions: Session[];
   pets: Pet[];
@@ -379,6 +485,13 @@ export type ServerMsg =
   | { type: "pet"; pet: Pet }
   | { type: "chat"; message: ChatMessage }
   | { type: "notification"; notification: HubNotification }
-  | { type: "machine"; machine: Machine };
+  /** Sent when a machine is added, renamed, or goes online/offline (not on every heartbeat). */
+  | { type: "machine"; machine: Machine }
+  /** A paired machine was revoked (here or by the peer). */
+  | { type: "machine_removed"; machineId: MachineId }
+  /** The full pairing roster after any change. */
+  | { type: "devices"; devices: Device[] }
+  /** Peer listener started or stopped. */
+  | { type: "peer_status"; peer: PeerStatus };
 
 export type ServerMsgType = ServerMsg["type"];

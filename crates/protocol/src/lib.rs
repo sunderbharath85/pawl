@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const HUB_DEFAULT_PORT: u16 = 47800;
 pub const HUB_HOST: &str = "127.0.0.1";
 pub const HUB_DATA_DIR_NAME: &str = "krypto";
@@ -79,6 +79,144 @@ pub fn now_ms() -> UnixMs {
 /// `dirs::data_dir()/krypto` (Win %APPDATA%\krypto). Callers create it.
 pub fn data_dir() -> Option<std::path::PathBuf> {
     dirs::data_dir().map(|d| d.join(HUB_DATA_DIR_NAME))
+}
+
+// ---------- devices + peer link (migration step 2) ----------
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceKind {
+    Hub,
+    Phone,
+}
+
+/// A paired device (the pairing roster; never includes this hub). A hub's device id is its machine id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Device {
+    pub id: String,
+    pub kind: DeviceKind,
+    pub name: String,
+    /// Base64 (standard, padded) X25519 public key.
+    pub public_key: String,
+    pub paired_at: UnixMs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<UnixMs>,
+    /// The device's peer-listener address "host:port", when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addr: Option<String>,
+}
+
+/// This hub's peer-link status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerStatus {
+    /// Bound peer-listener address, or None when the listener is off (the default). Serialized as null.
+    pub listening: Option<String>,
+    /// This hub's base64 X25519 public key.
+    pub public_key: String,
+}
+
+/// A repo a hub can run agents in. Filled in migration step 5; hubs send [] until then.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoRef {
+    pub name: String,
+    pub path: String,
+}
+
+/// Heartbeat a hub sends each paired hub every PRESENCE_INTERVAL_MS and on change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Presence {
+    pub machine: Machine,
+    pub agents: Vec<Agent>,
+    #[serde(default)]
+    pub repos: Vec<RepoRef>,
+    #[serde(default)]
+    pub pets: Vec<Pet>,
+    /// Last local user input on this machine (step 3 uses it for "runs to you").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_active_at: Option<UnixMs>,
+    pub ts: UnixMs,
+}
+
+pub const PEER_PROTOCOL_VERSION: u8 = 1;
+pub const PEER_DEFAULT_PORT: u16 = 47801;
+/// The only route the peer listener serves (WebSocket).
+pub const PEER_PATH: &str = "/peer";
+pub const PRESENCE_INTERVAL_MS: i64 = 15_000;
+/// A peer with no authenticated frame for this long is offline.
+pub const PRESENCE_OFFLINE_MS: i64 = 45_000;
+
+/// Hub <-> hub frame (JSON text over WebSocket). `box` is a NaCl box (X25519 + XSalsa20-Poly1305,
+/// `crypto_box::SalsaBox`) of the UTF-8 JSON `PeerBody`, from the sender's secret key to the receiver's
+/// public key. Invite URI:
+/// `krypto://peer?v=1&mid=<machineId>&pk=<base64url pk>&addr=<host:port>&code=<base64url 16 bytes>&exp=<unix ms>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerEnvelope {
+    pub v: u8,
+    /// Sender device id.
+    pub from: String,
+    /// Receiver device id.
+    pub to: String,
+    /// Per (from, to), strictly increasing across restarts; the receiver drops seq <= the last it accepted.
+    pub seq: u64,
+    /// Base64, 24 bytes: 15 random || dir (1 if sender pk < receiver pk bytewise, else 0) || seq u64 BE.
+    /// NaCl box has no AAD, so binding seq and direction into the nonce authenticates them: open() rejects a
+    /// nonce whose seq != `seq` or whose dir is wrong (stops seq-bumped replays and reflected frames).
+    pub nonce: String,
+    /// Base64 ciphertext.
+    #[serde(rename = "box")]
+    pub ciphertext: String,
+    /// Base64 sender public key. Only on `pair_request`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pk: Option<String>,
+}
+
+/// One reason for every bad invite (wrong, expired or used code) so the listener is no oracle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairRejectReason {
+    InvalidInvite,
+    BadRequest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ByeReason {
+    Revoked,
+    Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum PeerBody {
+    PairRequest {
+        code: String,
+        machine: Machine,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        addr: Option<String>,
+        ts: UnixMs,
+    },
+    /// `req_seq` echoes the pair_request envelope seq, so an old captured pair_accept cannot answer a new request.
+    PairAccept {
+        machine: Machine,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        addr: Option<String>,
+        req_seq: u64,
+        ts: UnixMs,
+    },
+    PairReject { reason: PairRejectReason, ts: UnixMs },
+    /// First frame on every link after pairing, both directions.
+    Hello {
+        machine: Machine,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        addr: Option<String>,
+        ts: UnixMs,
+    },
+    Presence { presence: Presence },
+    Bye { reason: ByeReason, ts: UnixMs },
 }
 
 // ---------- agents ----------
@@ -565,6 +703,21 @@ pub enum ClientMsg {
     SetRules { id: String, rules: Vec<Rule> },
     /// Rename this hub's machine (local machine only for now).
     UpdateMachine { id: String, machine_id: MachineId, name: String },
+    /// One-time pairing invite (single use; ttl_secs 60..=3600, default 600). Needs the peer listener on.
+    /// `addr` overrides the advertised "host:port" (required when the listener binds 0.0.0.0 / ::).
+    /// Errors: peer_listener_off, invalid. Ack result `{uri, expiresAt}`.
+    CreateInvite {
+        id: String,
+        #[serde(default)]
+        ttl_secs: Option<u32>,
+        #[serde(default)]
+        addr: Option<String>,
+    },
+    /// Pair with another hub from its invite URI. Ack result `{device, machine}`.
+    /// Errors: bad_uri, self_invite, unreachable, invite_rejected, timeout.
+    JoinPeer { id: String, uri: String },
+    /// Unpair a device: its links close, it can no longer connect, and the peer is told. Errors: not_found.
+    RevokeDevice { id: String, device_id: String },
 }
 
 impl ClientMsg {
@@ -583,7 +736,10 @@ impl ClientMsg {
             | ClientMsg::Chat { id, .. }
             | ClientMsg::UpdatePet { id, .. }
             | ClientMsg::SetRules { id, .. }
-            | ClientMsg::UpdateMachine { id, .. } => id,
+            | ClientMsg::UpdateMachine { id, .. }
+            | ClientMsg::CreateInvite { id, .. }
+            | ClientMsg::JoinPeer { id, .. }
+            | ClientMsg::RevokeDevice { id, .. } => id,
         }
     }
 }
@@ -596,8 +752,11 @@ pub struct Welcome {
     pub hub_version: String,
     /// The machine this hub runs on.
     pub machine: Machine,
-    /// Every known machine, including this one.
+    /// This machine first, then every paired (not revoked) hub with its online state.
     pub machines: Vec<Machine>,
+    /// The pairing roster (never includes this hub).
+    pub devices: Vec<Device>,
+    pub peer: PeerStatus,
     pub agents: Vec<Agent>,
     pub sessions: Vec<Session>,
     pub pets: Vec<Pet>,
@@ -624,7 +783,14 @@ pub enum ServerMsg {
     Pet { pet: Pet },
     Chat { message: ChatMessage },
     Notification { notification: HubNotification },
+    /// Sent when a machine is added, renamed, or goes online/offline (not on every heartbeat).
     Machine { machine: Machine },
+    /// A paired machine was revoked (here or by the peer).
+    MachineRemoved { machine_id: MachineId },
+    /// The full pairing roster after any change.
+    Devices { devices: Vec<Device> },
+    /// Peer listener started or stopped.
+    PeerStatus { peer: PeerStatus },
 }
 
 impl ServerMsg {
@@ -650,6 +816,20 @@ mod tests {
         assert_eq!(parse_global_id("no-colon"), None);
         let m = ClientMsg::UpdateMachine { id: "1".into(), machine_id: "abcdef012345".into(), name: "Mac mini".into() };
         assert_eq!(serde_json::to_value(&m).unwrap(), serde_json::json!({"type":"update_machine","id":"1","machineId":"abcdef012345","name":"Mac mini"}));
+    }
+
+    #[test]
+    fn peer_wire_shape() {
+        let env = PeerEnvelope { v: 1, from: "a".into(), to: "b".into(), seq: 7, nonce: "n".into(), ciphertext: "c".into(), pk: None };
+        assert_eq!(serde_json::to_value(&env).unwrap(), serde_json::json!({"v":1,"from":"a","to":"b","seq":7,"nonce":"n","box":"c"}));
+        let b = PeerBody::Bye { reason: ByeReason::Revoked, ts: 1 };
+        assert_eq!(serde_json::to_value(&b).unwrap(), serde_json::json!({"type":"bye","reason":"revoked","ts":1}));
+        let st = PeerStatus { listening: None, public_key: "k".into() };
+        assert_eq!(serde_json::to_value(&st).unwrap(), serde_json::json!({"listening":null,"publicKey":"k"}));
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"create_invite","id":"1"}"#).unwrap();
+        assert_eq!(m, ClientMsg::CreateInvite { id: "1".into(), ttl_secs: None, addr: None });
+        let s = ServerMsg::MachineRemoved { machine_id: "abcdef012345".into() };
+        assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::json!({"type":"machine_removed","machineId":"abcdef012345"}));
     }
 
     #[test]

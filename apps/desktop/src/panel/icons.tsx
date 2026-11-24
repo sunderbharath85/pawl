@@ -120,3 +120,20 @@ export const Monitor = (p: P) => (
     <path d="M12 16v4" />
   </svg>
 );
+
+/** Two screens: the paired machines. */
+export const Machines = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="2.5" y="5" width="12" height="8.5" rx="1.6" />
+    <path d="M6 17h5M8.5 13.5V17" />
+    <rect x="16" y="8" width="5.5" height="10" rx="1.4" />
+    <path d="M18.75 15.5h.01" />
+  </svg>
+);
+
+export const Copy = (p: P) => (
+  <svg {...base(p)}>
+    <rect x="8.5" y="8.5" width="11" height="11" rx="2" />
+    <path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5" />
+  </svg>
+);

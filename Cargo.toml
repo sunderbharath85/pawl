@@ -15,7 +15,7 @@ krypto-protocol = { path = "crates/protocol" }
 krypto-acp = { path = "crates/acp" }
 krypto-discovery = { path = "crates/discovery" }
 krypto-brain = { path = "crates/brain" }
-krypto-relay-link = { path = "crates/relay-link" }
+krypto-peer = { path = "crates/peer" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1,0 +1,24 @@
+[package]
+name = "krypto-peer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hub-to-hub pairing and E2E-encrypted peer links for Krypto"
+
+[dependencies]
+krypto-protocol = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+# Same versions as crates/hub.
+axum = { version = "0.8.9", features = ["ws"] }
+tokio-tungstenite = "0.29.0"
+getrandom = "0.4.3"
+subtle = "2.6.1"
+hex = "0.4.3"
+# NaCl crypto_box (X25519 + XSalsa20-Poly1305), tweetnacl `nacl.box` compatible. Nonces and keys come
+# from getrandom, so the crate's own rand_core/getrandom feature stays off.
+crypto_box = { version = "0.9.1", default-features = false, features = ["alloc", "salsa20"] }

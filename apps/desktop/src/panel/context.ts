@@ -11,7 +11,8 @@ export type Route =
   | { view: "approvals"; requestId?: string }
   | { view: "pets"; petId?: string }
   | { view: "rules" }
-  | { view: "settings" };
+  | { view: "settings" }
+  | { view: "machines" };
 
 export interface PanelCtx {
   conn: HubConnection;

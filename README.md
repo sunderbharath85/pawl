@@ -38,7 +38,7 @@ The goal is to cover all of your machines: a session on a Windows PC shows up as
 - **Hooks cover the sessions you start yourself.** Claude Code, Codex and Copilot can call a command on hook events. `krypto install-hooks` adds `krypto hook <source>` to their config; it POSTs the hook JSON to the hub and gives up silently within 2 seconds if the hub is down, so it never blocks the agent. Approvals for these sessions stay in the agent's own UI; Krypto shows their status.
 - **Clients talk only to their own machine's hub,** over HTTP and WebSocket on `127.0.0.1`.
 - **Discovery** reads the [ACP registry](https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json) (cached for 24 hours, with a built-in fallback list) and checks what is installed on `PATH`, through `npx`/`uvx`, or as a cached binary. Claude Code is reached through the `@agentclientprotocol/claude-agent-acp` adapter and Codex through `codex-acp`.
-- **Multi-machine (in progress):** each hub will connect outbound to a relay. Every hub-to-hub and hub-to-phone payload will be end-to-end encrypted, so the relay only routes ciphertext. A direct LAN or Tailscale link between paired hubs will be an optional fast path. No machine will need an inbound port. See [PLAN.md](PLAN.md).
+- **Multi-machine (in progress):** hubs on the same LAN or Tailscale network can already pair and see each other online over an end-to-end encrypted link. Next, each hub will also connect outbound to a relay. Every hub-to-hub and hub-to-phone payload will be end-to-end encrypted, so the relay only routes ciphertext. A direct LAN or Tailscale link between paired hubs will be an optional fast path. No machine will need an inbound port. See [PLAN.md](PLAN.md).
 
 ## Status
 
@@ -54,7 +54,7 @@ Krypto is pre-1.0. Single-machine v1 is built; multi-machine support is being ad
 | Desktop app | Builds and typechecks; not yet tested end to end |
 | VS Code extension | Builds and typechecks; not yet tested end to end |
 | Pet art | Done: dog, cat, bird and robot, 9 animations each |
-| Multi-machine (PLAN.md migration steps 1–7) | In progress. Step 1 (machine identity: global ids, machine names, pet names) is underway; pairing, presence, mirroring and remote intents come next |
+| Multi-machine (PLAN.md migration steps 1–7) | In progress. Done: step 1 (machine identity: global ids, machine names, pet names) and step 2 (pairing + presence over the LAN). Next: mirroring other machines' sessions, remote approvals, the relay |
 | Relay | Not built |
 | Phone app | Not built. Only a scaffold and the relay/crypto/pairing libraries exist |
 
@@ -109,6 +109,24 @@ The hub listens on `127.0.0.1:47800` only. `--port` changes the port. On first s
 
 `--data-dir` or `KRYPTO_HUB_DATA_DIR` points it somewhere else. `krypto sessions` lists open and recent sessions.
 
+### Optional: pair two machines (LAN or Tailscale)
+
+The hub-to-hub listener is off by default. Turn it on for the machine that creates the invite, using that machine's LAN or Tailscale IP (default port 47801), or set `[peer] listen = "ip:port"` in `config.toml`:
+
+```sh
+./target/debug/krypto serve --peer-listen 192.168.1.20
+./target/debug/krypto peer invite            # prints a one-time URI (valid 10 min, --ttl to change)
+```
+
+On the other machine, with its hub running:
+
+```sh
+./target/debug/krypto peer join "krypto://peer?v=1&..."
+./target/debug/krypto machines               # both machines, online state, last seen
+```
+
+`krypto peer revoke <machine id or name>` unpairs a machine on both sides. The desktop panel's Machines view does the same with buttons. Treat an invite URI like a password until it is used or expires.
+
 ### 5. Track the agent sessions you start yourself
 
 ```sh
@@ -150,6 +168,7 @@ crates/protocol/       krypto-protocol: Rust mirror of the wire types
 crates/acp/            krypto-acp: ACP client host (spawns agents, permission flow)
 crates/discovery/      krypto-discovery: ACP registry, install detection, hook normalize/forward/install
 crates/brain/          krypto-brain: permission rules, chat intents, watchdog, pet growth
+crates/peer/           krypto-peer: device keys, pairing invites, encrypted hub-to-hub links and presence
 crates/hub/            krypto-hub: the hub daemon and the `krypto` CLI (SQLite store, axum server)
 packages/protocol/     @krypto/protocol: TypeScript wire types (source of truth)
 packages/hub-client/   @krypto/hub-client: WebSocket client and state (+ React and Node helpers)
@@ -169,7 +188,8 @@ Approving an agent's request can run commands on your machine, so the defaults a
 - **Sensitive paths always ask:** `.env*`, keys and certificates, `.ssh`, `.aws`, credential files, the hub's own token and similar paths are never auto-approved. A deny rule still denies.
 - **File access:** the ACP file read/write methods the hub serves are limited to the session's working folder. The agent process itself runs with your user's permissions, as it would without Krypto.
 - **Audit log:** every approval and denial is recorded in `hub.db` with who decided, what, when and the outcome.
-- **Multi-machine (planned):** device keys exchanged at pairing, NaCl box (X25519 + XSalsa20-Poly1305) encryption end to end, per-sender sequence numbers against replay, and an explicit confirmation (or biometrics on the phone) for approvals made on another device.
+- **Pairing and peer links:** each hub has a long-term X25519 key (`device.key` in the data directory, never logged). Pairing uses a one-time invite (single use, expires in at most an hour) that carries the inviting hub's public key, so a machine in the middle cannot answer. Every frame is a NaCl box (X25519 + XSalsa20-Poly1305), and its sequence number and direction are bound into the nonce, so frames cannot be replayed or reflected. The peer listener is off by default, serves only `/peer`, refuses browser requests and unknown or revoked keys, and limits connections and pairing attempts per IP. In this step peers exchange only presence: they cannot send commands or approvals to your hub.
+- **Multi-machine (planned):** an explicit confirmation (or biometrics on the phone) for approvals made on another device, and a relay that only sees ciphertext.
 
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 

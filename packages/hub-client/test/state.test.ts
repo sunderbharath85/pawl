@@ -1,6 +1,19 @@
 import { describe, expect, test } from "bun:test";
-import { applyAck, applyWelcome, initialHubState, lastEventsBySession, latestEventSeq, mergeEvents, reduceServerMsg, upsertMachine } from "../src/state";
-import { event, machine, machine2, MID, MID2, permission, pet, session, welcome } from "./fixtures";
+import {
+  applyAck,
+  applyWelcome,
+  initialHubState,
+  lastEventsBySession,
+  latestEventSeq,
+  machineCounts,
+  mergeEvents,
+  reduceServerMsg,
+  removeDevice,
+  scopeToMachine,
+  sortedMachines,
+  upsertMachine,
+} from "../src/state";
+import { device2, event, machine, machine2, MID, MID2, peerOff, peerOn, permission, pet, session, welcome } from "./fixtures";
 
 const small = { eventCap: 3, chatCap: 10, notificationCap: 2 };
 
@@ -238,5 +251,139 @@ describe("events keyed by global id, ordered by seq", () => {
   test("cap keeps the newest by seq", () => {
     const merged = mergeEvents(undefined, [event(9), event(2), event(5), event(7)], 2);
     expect(merged.map((e) => e.seq)).toEqual([7, 9]);
+  });
+});
+
+describe("pairing roster + peer link (protocol v3)", () => {
+  const paired = applyWelcome(initialHubState(), { ...welcome, machines: [machine, machine2], devices: [device2], peer: peerOn });
+
+  test("initial state has an empty roster and no peer status", () => {
+    const s = initialHubState();
+    expect(s.devices).toEqual([]);
+    expect(s.peer).toBeUndefined();
+  });
+
+  test("applyWelcome stores devices and peer status, replacing the previous snapshot", () => {
+    expect(paired.devices).toEqual([device2]);
+    expect(paired.peer).toEqual(peerOn);
+    const again = applyWelcome(paired, welcome);
+    expect(again.devices).toEqual([]);
+    expect(again.peer).toEqual(peerOff);
+  });
+
+  test("a pre-v3 Welcome (no devices / peer) leaves an empty roster and no peer status", () => {
+    const legacy = applyWelcome(paired, { ...welcome, devices: undefined, peer: undefined } as never);
+    expect(legacy.devices).toEqual([]);
+    expect(legacy.peer).toBeUndefined();
+  });
+
+  test("devices replaces the roster", () => {
+    const s = reduceServerMsg(applyWelcome(initialHubState(), welcome), { type: "devices", devices: [device2] });
+    expect(s.devices).toEqual([device2]);
+    expect(reduceServerMsg(s, { type: "devices", devices: [] }).devices).toEqual([]);
+  });
+
+  test("peer_status replaces the listener status", () => {
+    const s = reduceServerMsg(paired, { type: "peer_status", peer: peerOff });
+    expect(s.peer).toEqual(peerOff);
+    expect(paired.peer).toEqual(peerOn); // immutable
+  });
+
+  test("machine_removed drops the machine and its roster entry", () => {
+    const s = reduceServerMsg(paired, { type: "machine_removed", machineId: MID2 });
+    expect(Object.keys(s.machines)).toEqual([MID]);
+    expect(s.devices).toEqual([]);
+    expect(paired.machines[MID2]).toEqual(machine2); // immutable
+  });
+
+  test("machine_removed never drops this hub's own machine; unknown ids are a no-op", () => {
+    expect(reduceServerMsg(paired, { type: "machine_removed", machineId: MID })).toBe(paired);
+    expect(reduceServerMsg(paired, { type: "machine_removed", machineId: "nobody000000" })).toBe(paired);
+  });
+
+  test("a machine going offline / online flips in place", () => {
+    const online = reduceServerMsg(paired, { type: "machine", machine: { ...machine2, online: true, lastSeen: 50 } });
+    expect(online.machines[MID2]?.online).toBe(true);
+    const offline = reduceServerMsg(online, { type: "machine", machine: { ...machine2, online: false, lastSeen: 60 } });
+    expect(offline.machines[MID2]).toMatchObject({ online: false, lastSeen: 60 });
+    expect(offline.machine).toBe(paired.machine);
+  });
+
+  test("join_peer ack adds the device and machine; replaying it does not duplicate", () => {
+    const base = applyWelcome(initialHubState(), welcome);
+    const req = { type: "join_peer" as const, uri: "krypto://peer?x" };
+    const s = applyAck(base, req, { device: device2, machine: { ...machine2, online: true } });
+    expect(s.devices).toEqual([device2]);
+    expect(s.machines[MID2]?.online).toBe(true);
+    const again = applyAck(s, req, { device: { ...device2, addr: "10.0.0.2:47801" }, machine: machine2 });
+    expect(again.devices).toHaveLength(1);
+    expect(again.devices[0]?.addr).toBe("10.0.0.2:47801");
+    expect(applyAck(base, req, undefined)).toBe(base);
+  });
+
+  test("revoke_device ack removes the device (and its machine) optimistically", () => {
+    const s = applyAck(paired, { type: "revoke_device", deviceId: MID2 }, {});
+    expect(s.devices).toEqual([]);
+    expect(s.machines[MID2]).toBeUndefined();
+    expect(s.machines[MID]).toEqual(machine);
+  });
+
+  test("removeDevice also forgets a roster-only device (e.g. a phone, which has no machine)", () => {
+    const phone = { ...device2, id: "phone-1", kind: "phone" as const, name: "Pixel" };
+    const s = removeDevice({ ...paired, devices: [device2, phone] }, "phone-1");
+    expect(s.devices).toEqual([device2]);
+    expect(s.machines).toBe(paired.machines);
+  });
+
+  test("create_invite ack leaves state unchanged (the URI is never stored)", () => {
+    const s = applyAck(paired, { type: "create_invite" }, { uri: "krypto://peer?secret", expiresAt: 5 });
+    expect(s).toBe(paired);
+    expect(JSON.stringify(s)).not.toContain("secret");
+  });
+});
+
+describe("machine list helpers", () => {
+  const third = { ...machine2, id: "linuxbox0003", name: "Attic box", os: "linux" as const, online: true };
+  const state = applyWelcome(initialHubState(), { ...welcome, machines: [machine2, third, machine] });
+
+  test("sortedMachines: this machine first, then online, then by name", () => {
+    expect(sortedMachines(state).map((m) => m.id)).toEqual([MID, "linuxbox0003", MID2]);
+  });
+
+  test("machineCounts counts every machine, this one included", () => {
+    expect(machineCounts(state)).toEqual({ total: 3, online: 2 });
+    expect(machineCounts(initialHubState())).toEqual({ total: 0, online: 0 });
+  });
+});
+
+describe("scopeToMachine", () => {
+  const remotePet = { ...pet, id: `${MID2}:p1`, machineId: MID2 };
+  const remoteSession = session(`${MID2}:s1`, { machineId: MID2 });
+  const remoteReq = permission(`${MID2}:r1`, { machineId: MID2, sessionId: `${MID2}:s1` });
+  const base = applyWelcome(initialHubState(), welcome);
+
+  test("returns the same state when everything is local (or no machine is known)", () => {
+    expect(scopeToMachine(base, MID)).toBe(base);
+    expect(scopeToMachine(base, undefined)).toBe(base);
+  });
+
+  test("hides another machine's pets, sessions and permission requests", () => {
+    const mixed = {
+      ...base,
+      pets: { ...base.pets, [remotePet.id]: remotePet },
+      sessions: { ...base.sessions, [remoteSession.id]: remoteSession },
+      pending: { ...base.pending, [remoteReq.requestId]: remoteReq },
+    };
+    const s = scopeToMachine(mixed, MID);
+    expect(Object.keys(s.pets)).toEqual(["p1"]);
+    expect(Object.keys(s.sessions)).toEqual(["s1"]);
+    expect(Object.keys(s.pending)).toEqual(["r1"]);
+    expect(s.machines).toBe(mixed.machines);
+  });
+
+  test("keeps untouched collections by identity", () => {
+    const s = scopeToMachine({ ...base, pets: { ...base.pets, [remotePet.id]: remotePet } }, MID);
+    expect(s.sessions).toBe(base.sessions);
+    expect(s.pending).toBe(base.pending);
   });
 });

@@ -6,9 +6,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use krypto_peer::{Roster, RosterEntry};
 use krypto_protocol::{
-    global_id, is_valid_machine_id, parse_global_id, Agent, ChatMessage, ChatRole, EventType, HubEvent, MachineId,
-    PermissionOptionKind, Pet, ResolvedBy, Rule, Session, SessionId, ToolKind, UnixMs,
+    global_id, is_valid_machine_id, parse_global_id, Agent, ChatMessage, ChatRole, Device, DeviceKind, EventType,
+    HubEvent, Machine, MachineId, MachineOs, PermissionOptionKind, Pet, ResolvedBy, Rule, Session, SessionId, ToolKind,
+    UnixMs,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Row, Transaction};
 use serde::{de::DeserializeOwned, Serialize};
@@ -21,7 +23,8 @@ enum Migration {
 }
 
 /// Ordered schema migrations; `PRAGMA user_version` = number applied.
-const MIGRATIONS: &[Migration] = &[Migration::Sql(SCHEMA_V1), Migration::Code(migrate_v2)];
+const MIGRATIONS: &[Migration] =
+    &[Migration::Sql(SCHEMA_V1), Migration::Code(migrate_v2), Migration::Sql(SCHEMA_V3)];
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE agents (
@@ -114,6 +117,36 @@ CREATE TABLE pets_v2 (
 CREATE INDEX sessions_machine ON sessions(machine_id, last_event_at);
 "#;
 
+/// v3 (pairing): the device roster with per-peer frame counters, and the pairing audit log.
+const SCHEMA_V3: &str = r#"
+CREATE TABLE devices (
+    id           TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    os           TEXT NOT NULL,
+    hub_version  TEXT,
+    public_key   TEXT NOT NULL,
+    addr         TEXT,
+    paired_at    INTEGER NOT NULL,
+    last_seen    INTEGER,
+    revoked_at   INTEGER,
+    last_rx_seq  INTEGER NOT NULL DEFAULT 0,
+    last_tx_seq  INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE pairing_audit (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           INTEGER NOT NULL,
+    machine_id   TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    device_id    TEXT,
+    device_name  TEXT,
+    remote_addr  TEXT,
+    actor        TEXT NOT NULL,
+    detail       TEXT
+);
+CREATE INDEX pairing_audit_ts ON pairing_audit(ts);
+"#;
+
 const SETTING_RULES_SET: &str = "rules_set";
 /// The machine id hub.db was migrated with; every stored global id carries it.
 const SETTING_MACHINE_ID: &str = "machine_id";
@@ -149,6 +182,37 @@ pub struct AuditEntry {
     pub option_id: Option<String>,
     pub option_kind: Option<PermissionOptionKind>,
     pub outcome: AuditOutcome,
+    pub detail: Option<String>,
+}
+
+/// What a pairing audit entry records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingAuditKind {
+    /// A device was paired (either side of the invite).
+    Paired,
+    /// A pairing attempt on our listener failed (bad code, expired invite, malformed request).
+    PairRejected,
+    /// We revoked a device.
+    Revoked,
+    /// The device revoked us (`bye{revoked}`), so we revoked it too.
+    RevokedByPeer,
+}
+
+/// One pairing event. Never holds invite codes or keys.
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct PairingAuditEntry {
+    pub id: i64,
+    pub ts: UnixMs,
+    /// This hub.
+    pub machine_id: MachineId,
+    pub kind: PairingAuditKind,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    /// Socket address of the other side, when known (always set for `pair_rejected`).
+    pub remote_addr: Option<String>,
+    /// e.g. "desktop#3", "cli#1", "peer".
+    pub actor: String,
     pub detail: Option<String>,
 }
 
@@ -209,6 +273,53 @@ fn row_session(r: &Row<'_>) -> rusqlite::Result<Session> {
 }
 
 const SESSION_COLS: &str = "data, last_event_at, ended_at";
+
+/// Columns read by [`row_roster_entry`].
+const DEVICE_COLS: &str = "id, kind, name, os, hub_version, public_key, addr, paired_at, last_seen";
+
+/// A roster row: the device plus its last known machine view (offline; the hub adds live state).
+fn row_roster_entry(r: &Row<'_>) -> rusqlite::Result<RosterEntry> {
+    let id: String = r.get(0)?;
+    let kind: String = r.get(1)?;
+    let name: String = r.get(2)?;
+    let os: String = r.get(3)?;
+    let paired_at: UnixMs = r.get(7)?;
+    let last_seen: Option<UnixMs> = r.get(8)?;
+    let machine = Machine {
+        id: id.clone(),
+        name: name.clone(),
+        os: enum_from(&os).unwrap_or(MachineOs::Other),
+        last_seen: last_seen.unwrap_or(paired_at),
+        online: false,
+        hub_version: r.get(4)?,
+    };
+    let device = Device {
+        id,
+        kind: enum_from(&kind).unwrap_or(DeviceKind::Hub),
+        name,
+        public_key: r.get(5)?,
+        paired_at,
+        last_seen,
+        addr: r.get(6)?,
+    };
+    Ok(RosterEntry { device, machine })
+}
+
+/// The per-device frame counters.
+#[derive(Clone, Copy)]
+enum SeqCol {
+    Rx,
+    Tx,
+}
+
+impl SeqCol {
+    fn name(self) -> &'static str {
+        match self {
+            SeqCol::Rx => "last_rx_seq",
+            SeqCol::Tx => "last_tx_seq",
+        }
+    }
+}
 
 impl Store {
     /// Open (and migrate) hub.db for this machine. Refuses a db that belongs to another machine id.
@@ -593,6 +704,121 @@ impl Store {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    // ------------------------------------------------------------ devices (pairing roster)
+
+    /// A paired device that is not revoked.
+    pub fn roster_entry(&self, device_id: &str) -> Result<Option<RosterEntry>> {
+        let c = self.conn();
+        let sql = format!("SELECT {DEVICE_COLS} FROM devices WHERE id = ?1 AND revoked_at IS NULL");
+        Ok(c.query_row(&sql, [device_id], row_roster_entry).optional()?)
+    }
+
+    /// Every paired device that is not revoked, oldest pairing first.
+    pub fn roster(&self) -> Result<Vec<RosterEntry>> {
+        let c = self.conn();
+        let sql = format!("SELECT {DEVICE_COLS} FROM devices WHERE revoked_at IS NULL ORDER BY paired_at, id");
+        let mut st = c.prepare(&sql)?;
+        let rows = st.query_map([], row_roster_entry)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Insert or re-pair a device: replaces its key and details and clears `revoked_at`. The receive
+    /// counter restarts only when the key changed (frames under the old key can no longer be opened);
+    /// the send counter never goes back.
+    pub fn upsert_device(&self, e: &RosterEntry) -> Result<()> {
+        let d = &e.device;
+        self.conn().execute(
+            "INSERT INTO devices (id, kind, name, os, hub_version, public_key, addr, paired_at, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                kind = excluded.kind, name = excluded.name, os = excluded.os, hub_version = excluded.hub_version,
+                last_rx_seq = CASE WHEN public_key = excluded.public_key THEN last_rx_seq ELSE 0 END,
+                public_key = excluded.public_key, addr = excluded.addr, paired_at = excluded.paired_at,
+                last_seen = excluded.last_seen, revoked_at = NULL",
+            params![
+                d.id,
+                enum_str(&d.kind),
+                d.name,
+                enum_str(&e.machine.os),
+                e.machine.hub_version,
+                d.public_key,
+                d.addr,
+                d.paired_at,
+                d.last_seen
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// An authenticated frame from a paired device: refresh what it says about itself. `addr` None
+    /// keeps the stored address (a hub without a listener, or one bound to 0.0.0.0, sends none).
+    pub fn update_device_seen(&self, device_id: &str, m: &Machine, addr: Option<&str>, ts: UnixMs) -> Result<()> {
+        self.conn().execute(
+            "UPDATE devices SET name = ?2, os = ?3, hub_version = ?4, addr = COALESCE(?5, addr),
+                    last_seen = MAX(COALESCE(last_seen, 0), ?6)
+             WHERE id = ?1 AND revoked_at IS NULL",
+            params![device_id, m.name, enum_str(&m.os), m.hub_version, addr, ts],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a device revoked. True if it was paired (and not already revoked).
+    pub fn revoke_device(&self, device_id: &str, ts: UnixMs) -> Result<bool> {
+        let n = self
+            .conn()
+            .execute("UPDATE devices SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL", params![device_id, ts])?;
+        Ok(n > 0)
+    }
+
+    /// A frame counter (`last_rx_seq` / `last_tx_seq`); 0 for an unknown device.
+    fn device_seq(&self, device_id: &str, col: SeqCol) -> Result<u64> {
+        let sql = format!("SELECT {} FROM devices WHERE id = ?1", col.name());
+        let v: Option<i64> = self.conn().query_row(&sql, [device_id], |r| r.get(0)).optional()?;
+        // Stored bit-for-bit as i64 (SQLite has no u64).
+        Ok(v.map_or(0, |v| v as u64))
+    }
+
+    fn set_device_seq(&self, device_id: &str, col: SeqCol, seq: u64) -> Result<()> {
+        let sql = format!("UPDATE devices SET {} = ?2 WHERE id = ?1", col.name());
+        self.conn().execute(&sql, params![device_id, seq as i64])?;
+        Ok(())
+    }
+
+    /// Append a pairing audit entry (`id` is ignored and assigned). Returns the new id.
+    pub fn insert_pairing_audit(&self, a: &PairingAuditEntry) -> Result<i64> {
+        let c = self.conn();
+        c.execute(
+            "INSERT INTO pairing_audit (ts, machine_id, kind, device_id, device_name, remote_addr, actor, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![a.ts, a.machine_id, enum_str(&a.kind), a.device_id, a.device_name, a.remote_addr, a.actor, a.detail],
+        )?;
+        Ok(c.last_insert_rowid())
+    }
+
+    /// Latest pairing audit entries (newest first).
+    pub fn pairing_audit(&self, limit: u32) -> Result<Vec<PairingAuditEntry>> {
+        let c = self.conn();
+        let mut st = c.prepare(
+            "SELECT id, ts, machine_id, kind, device_id, device_name, remote_addr, actor, detail
+             FROM pairing_audit ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = st.query_map([limit], |r| {
+            let kind: String = r.get(3)?;
+            Ok(PairingAuditEntry {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                machine_id: r.get(2)?,
+                kind: enum_from(&kind).unwrap_or(PairingAuditKind::PairRejected),
+                device_id: r.get(4)?,
+                device_name: r.get(5)?,
+                remote_addr: r.get(6)?,
+                actor: r.get(7)?,
+                detail: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     // ------------------------------------------------------------ settings
 
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
@@ -605,6 +831,69 @@ impl Store {
             params![key, value],
         )?;
         Ok(())
+    }
+}
+
+/// The pairing roster `krypto-peer` reads and updates. Quick synchronous calls on the store's
+/// connection; a failing write is logged (the link layer has no way to report it).
+impl Roster for Store {
+    fn get(&self, device_id: &str) -> Option<RosterEntry> {
+        self.roster_entry(device_id).unwrap_or_else(|e| {
+            tracing::warn!("roster: read {device_id}: {e:#}");
+            None
+        })
+    }
+
+    fn list(&self) -> Vec<RosterEntry> {
+        self.roster().unwrap_or_else(|e| {
+            tracing::warn!("roster: list: {e:#}");
+            Vec::new()
+        })
+    }
+
+    fn upsert(&self, entry: RosterEntry) {
+        if let Err(e) = self.upsert_device(&entry) {
+            tracing::warn!("roster: save {}: {e:#}", entry.device.id);
+        }
+    }
+
+    fn update_seen(&self, device_id: &str, machine: &Machine, addr: Option<&str>, ts: UnixMs) {
+        if let Err(e) = self.update_device_seen(device_id, machine, addr, ts) {
+            tracing::warn!("roster: update {device_id}: {e:#}");
+        }
+    }
+
+    fn revoke(&self, device_id: &str) {
+        if let Err(e) = self.revoke_device(device_id, krypto_protocol::now_ms()) {
+            tracing::warn!("roster: revoke {device_id}: {e:#}");
+        }
+    }
+
+    fn last_rx_seq(&self, device_id: &str) -> u64 {
+        self.device_seq(device_id, SeqCol::Rx).unwrap_or_else(|e| {
+            tracing::warn!("roster: read rx seq of {device_id}: {e:#}");
+            // Unknown: refuse every frame rather than accept a replay.
+            u64::MAX
+        })
+    }
+
+    fn set_last_rx_seq(&self, device_id: &str, seq: u64) {
+        if let Err(e) = self.set_device_seq(device_id, SeqCol::Rx, seq) {
+            tracing::warn!("roster: save rx seq of {device_id}: {e:#}");
+        }
+    }
+
+    fn last_tx_seq(&self, device_id: &str) -> u64 {
+        self.device_seq(device_id, SeqCol::Tx).unwrap_or_else(|e| {
+            tracing::warn!("roster: read tx seq of {device_id}: {e:#}");
+            0
+        })
+    }
+
+    fn set_last_tx_seq(&self, device_id: &str, seq: u64) {
+        if let Err(e) = self.set_device_seq(device_id, SeqCol::Tx, seq) {
+            tracing::warn!("roster: save tx seq of {device_id}: {e:#}");
+        }
     }
 }
 
@@ -1077,6 +1366,136 @@ mod tests {
         let got = s.audit_log(10).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0], AuditEntry { id, ..a });
+    }
+
+    fn roster_entry(id: &str, name: &str, pk: &str, addr: Option<&str>) -> RosterEntry {
+        RosterEntry {
+            device: Device {
+                id: id.into(),
+                kind: DeviceKind::Hub,
+                name: name.into(),
+                public_key: pk.into(),
+                paired_at: 100,
+                last_seen: Some(100),
+                addr: addr.map(Into::into),
+            },
+            machine: Machine {
+                id: id.into(),
+                name: name.into(),
+                os: MachineOs::Macos,
+                last_seen: 100,
+                online: false,
+                hub_version: Some("0.1.0".into()),
+            },
+        }
+    }
+
+    #[test]
+    fn roster_follows_the_peer_contract() {
+        const PEER: &str = "zyxwvu987654";
+        let s = Store::open_in_memory(MID).unwrap();
+        let r: &dyn Roster = &s;
+        assert!(r.list().is_empty());
+        assert_eq!((r.last_rx_seq(PEER), r.last_tx_seq(PEER)), (0, 0), "unknown ids read 0");
+        r.set_last_rx_seq(PEER, 9); // no row yet: a no-op
+        assert_eq!(r.last_rx_seq(PEER), 0);
+
+        let e = roster_entry(PEER, "Mac mini", "pk-1", Some("10.0.0.2:47801"));
+        r.upsert(e.clone());
+        assert_eq!(r.get(PEER), Some(e.clone()));
+        assert_eq!(r.list(), vec![e.clone()]);
+
+        // Counters are stored as given, including values above i64::MAX and going down.
+        r.set_last_rx_seq(PEER, u64::MAX - 1);
+        r.set_last_tx_seq(PEER, 1_700_000_000_000_000);
+        assert_eq!((r.last_rx_seq(PEER), r.last_tx_seq(PEER)), (u64::MAX - 1, 1_700_000_000_000_000));
+        r.set_last_rx_seq(PEER, 5);
+        assert_eq!(r.last_rx_seq(PEER), 5);
+
+        // update_seen: name/os/version/lastSeen from the frame; addr only when given.
+        let mut m = e.machine.clone();
+        m.name = "Studio".into();
+        m.os = MachineOs::Linux;
+        m.hub_version = Some("0.2.0".into());
+        r.update_seen(PEER, &m, None, 500);
+        let got = r.get(PEER).unwrap();
+        assert_eq!(got.device.name, "Studio");
+        assert_eq!(got.device.addr.as_deref(), Some("10.0.0.2:47801"), "addr None keeps the stored one");
+        assert_eq!(got.device.last_seen, Some(500));
+        assert_eq!((got.machine.name.as_str(), got.machine.os, got.machine.last_seen), ("Studio", MachineOs::Linux, 500));
+        assert_eq!(got.machine.hub_version.as_deref(), Some("0.2.0"));
+        assert!(!got.machine.online, "the roster never says online");
+        r.update_seen(PEER, &m, Some("10.0.0.3:47801"), 600);
+        assert_eq!(r.get(PEER).unwrap().device.addr.as_deref(), Some("10.0.0.3:47801"));
+        r.update_seen("aaaaaa000000", &m, None, 700); // unknown id: no-op
+        assert_eq!(r.list().len(), 1);
+
+        // Revoked devices disappear from get/list and are not updated; re-pairing restores them.
+        r.revoke(PEER);
+        assert_eq!(r.get(PEER), None);
+        assert!(r.list().is_empty());
+        assert!(!s.revoke_device(PEER, 1).unwrap(), "already revoked");
+        r.update_seen(PEER, &m, None, 900);
+        let again = roster_entry(PEER, "Mac mini", "pk-2", None);
+        r.upsert(again.clone());
+        assert_eq!(r.get(PEER), Some(again), "re-pair replaces key, name and addr and clears revoked");
+        assert_eq!(r.last_rx_seq(PEER), 0, "a new key restarts the receive counter");
+        assert_eq!(r.last_tx_seq(PEER), 1_700_000_000_000_000, "the send counter never goes back on its own");
+    }
+
+    #[test]
+    fn pairing_audit_roundtrip() {
+        let s = Store::open_in_memory(MID).unwrap();
+        let a = PairingAuditEntry {
+            id: 0,
+            ts: 42,
+            machine_id: MID.into(),
+            kind: PairingAuditKind::RevokedByPeer,
+            device_id: Some("zyxwvu987654".into()),
+            device_name: Some("Mac mini".into()),
+            remote_addr: Some("10.0.0.2:47801".into()),
+            actor: "peer".into(),
+            detail: None,
+        };
+        let id = s.insert_pairing_audit(&a).unwrap();
+        let rejected = PairingAuditEntry {
+            kind: PairingAuditKind::PairRejected,
+            device_id: None,
+            device_name: None,
+            detail: Some("invalid_invite".into()),
+            ..a.clone()
+        };
+        let id2 = s.insert_pairing_audit(&rejected).unwrap();
+        assert_eq!(s.pairing_audit(10).unwrap(), vec![PairingAuditEntry { id: id2, ..rejected }, PairingAuditEntry { id, ..a }]);
+        assert_eq!(enum_str(&PairingAuditKind::RevokedByPeer), "revoked_by_peer");
+    }
+
+    /// A v2 hub.db (step 1) gains the roster and pairing audit tables and keeps its data.
+    #[test]
+    fn v3_migration_adds_the_roster() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("hub.db");
+        {
+            let mut c = Connection::open(&p).unwrap();
+            for (i, step) in MIGRATIONS.iter().take(2).enumerate() {
+                let tx = c.transaction().unwrap();
+                match step {
+                    Migration::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                    Migration::Code(f) => f(&tx, MID).unwrap(),
+                }
+                tx.pragma_update(None, "user_version", (i + 1) as i64).unwrap();
+                tx.commit().unwrap();
+            }
+            c.execute("INSERT INTO settings (key, value) VALUES ('kept', 'yes')", []).unwrap();
+        }
+        let s = Store::open(&p, MID).unwrap();
+        let v: i64 = s.conn().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 3);
+        assert_eq!(s.setting("kept").unwrap().as_deref(), Some("yes"));
+        assert!(s.roster().unwrap().is_empty());
+        s.upsert_device(&roster_entry("zyxwvu987654", "Mac mini", "pk", None)).unwrap();
+        assert_eq!(s.roster().unwrap().len(), 1);
+        assert!(s.pairing_audit(5).unwrap().is_empty());
     }
 
     #[tokio::test]

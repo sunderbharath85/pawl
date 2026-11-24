@@ -73,6 +73,12 @@ export class Notifier implements vscode.Disposable {
     return inWorkspace || vscode.window.state.focused;
   }
 
+  /** Another machine's item: not shown (or answerable) in this window before migration step 3. */
+  private remote(machineId: string): boolean {
+    const own = this.hub.state.machine;
+    return !!own && machineId !== own.id;
+  }
+
   private who(machineId: string, agentId: string): string {
     const state = this.hub.state;
     const pet = petFor(Object.values(state.pets), machineId, agentId);
@@ -82,7 +88,7 @@ export class Notifier implements vscode.Disposable {
   }
 
   private onPermission(req: PermissionRequest): void {
-    if (this.level === "off") return;
+    if (this.level === "off" || this.remote(req.machineId)) return;
     const session = this.hub.state.sessions[req.sessionId];
     if (session && session.source !== "owned") return; // approvals for vendor-extension sessions stay in VS Code
     if (!this.relevant(req.sessionId)) return;
@@ -157,7 +163,7 @@ export class Notifier implements vscode.Disposable {
 
   private onHubNotification(n: HubNotification): void {
     const level = this.level;
-    if (level === "off") return;
+    if (level === "off" || this.remote(n.machineId)) return;
     const pending = n.sessionId
       ? Object.values(this.hub.state.pending).filter((p) => p.sessionId === n.sessionId)
       : [];

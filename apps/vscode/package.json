@@ -102,6 +102,12 @@
         "title": "Rename This Machine",
         "category": "Krypto",
         "icon": "$(device-desktop)"
+      },
+      {
+        "command": "krypto.showMachines",
+        "title": "Show Machines",
+        "category": "Krypto",
+        "icon": "$(remote-explorer)"
       }
     ],
     "viewsContainers": {
@@ -160,6 +166,11 @@
           "command": "krypto.renameMachine",
           "when": "view == krypto.petView",
           "group": "1_pet@4"
+        },
+        {
+          "command": "krypto.showMachines",
+          "when": "view == krypto.petView",
+          "group": "1_pet@5"
         }
       ],
       "commandPalette": [

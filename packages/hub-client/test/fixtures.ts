@@ -1,12 +1,21 @@
-import { globalId, type Agent, type HubEvent, type Machine, type Pet, type PermissionRequest, type Session, type Welcome } from "@krypto/protocol";
+import { globalId, type Agent, type Device, type HubEvent, type Machine, type PeerStatus, type Pet, type PermissionRequest, type Session, type Welcome } from "@krypto/protocol";
 
 /** This hub's machine id (12 chars [a-z0-9]). */
 export const MID = "winpc0000001";
-/** A paired machine (arrives in migration step 2; reducers must already handle it). */
+/** A paired machine (migration step 2). */
 export const MID2 = "macmini00002";
 
 export const machine: Machine = { id: MID, name: "Windows PC", os: "windows", lastSeen: 1, online: true, hubVersion: "0.1.0" };
 export const machine2: Machine = { id: MID2, name: "Mac mini", os: "macos", lastSeen: 1, online: false };
+
+/** The roster entry for `machine2` (a hub's device id is its machine id). */
+export const device2: Device = { id: MID2, kind: "hub", name: "Mac mini", publicKey: "cGstbWFjbWluaQ==", pairedAt: 100, lastSeen: 1, addr: "192.168.1.20:47801" };
+
+export const peerOff: PeerStatus = { listening: null, publicKey: "cGstd2lucGM=" };
+export const peerOn: PeerStatus = { listening: "192.168.1.10:47801", publicKey: "cGstd2lucGM=" };
+
+/** A well-formed invite URI from `machine2` (code is a dummy). */
+export const inviteFrom2 = `krypto://peer?v=1&mid=${MID2}&pk=cGstbWFjbWluaQ&addr=192.168.1.20:47801&code=AAAAAAAAAAAAAAAAAAAAAA&exp=1900000000000`;
 
 export const agent: Agent = { id: "claude-code", machineId: MID, name: "Claude Code", command: ["npx", "x"], installed: true, source: "registry" };
 
@@ -50,10 +59,12 @@ export function permission(requestId: string, over: Partial<PermissionRequest> =
 }
 
 export const welcome: Welcome = {
-  protocolVersion: 2,
+  protocolVersion: 3,
   hubVersion: "0.1.0",
   machine,
   machines: [machine],
+  devices: [],
+  peer: peerOff,
   agents: [agent],
   sessions: [session("s1")],
   pets: [pet],

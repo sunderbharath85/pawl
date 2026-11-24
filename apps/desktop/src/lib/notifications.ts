@@ -1,7 +1,7 @@
 // OS notifications (tauri-plugin-notification) for permission requests, turn
 // completions and hub `notification` messages. Attached once, in the pet window.
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import type { HubClient } from "@krypto/hub-client";
+import type { HubClient, HubState } from "@krypto/hub-client";
 import { SPECIES_META } from "@krypto/pet-engine";
 import type { StopPayload } from "@krypto/protocol";
 import { isTauri } from "./native";
@@ -47,13 +47,20 @@ export async function notify(title: string, body: string): Promise<void> {
   }
 }
 
+/** True for another machine's item (when this hub's machine is known). */
+function isRemote(state: HubState, machineId: string): boolean {
+  return !!state.machine && machineId !== state.machine.id;
+}
+
 /** Wire hub messages → OS notifications. Returns an unsubscribe function. */
 export function attachNotifications(client: HubClient): () => void {
   void ensurePermission();
 
   const offPermission = client.onMessage("permission_request", ({ request }) => {
-    if (!readSettings().notifyPermissions || !once(`perm:${request.requestId}`)) return;
     const state = client.getState();
+    // Another machine's requests are not shown (or answerable) here before migration step 3.
+    if (isRemote(state, request.machineId)) return;
+    if (!readSettings().notifyPermissions || !once(`perm:${request.requestId}`)) return;
     const pet = petFor(Object.values(state.pets), request.machineId, request.agentId);
     const sound = SPECIES_META[pet?.species ?? "dog"]?.sound ?? "Woof!";
     const who = pet?.name ?? "Your pet";
@@ -65,7 +72,7 @@ export function attachNotifications(client: HubClient): () => void {
     const state = client.getState();
     const session = state.sessions[event.sessionId];
     // Hook-fed sessions announce themselves through hub `notification` messages instead.
-    if (!session || session.source !== "owned") return;
+    if (!session || session.source !== "owned" || isRemote(state, session.machineId)) return;
     const agent = agentName(state.agents, session.agentId, session.machineId);
     const pet = petFor(Object.values(state.pets), session.machineId, session.agentId);
     const name = pet ? `${pet.name} (${agent})` : agent;
@@ -81,6 +88,7 @@ export function attachNotifications(client: HubClient): () => void {
   });
 
   const offNotification = client.onMessage("notification", ({ notification }) => {
+    if (isRemote(client.getState(), notification.machineId)) return;
     if (!readSettings().notifyHub || !once(`hub:${notification.id}`)) return;
     void notify(notification.title, notification.body);
   });

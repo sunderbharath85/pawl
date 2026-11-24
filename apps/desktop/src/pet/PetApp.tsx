@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { useHubState } from "@krypto/hub-client/react";
 import { PetSprite, PetStage } from "@krypto/pet-engine/react";
 import type { PetActivity, PetSpritesConfig } from "@krypto/pet-engine";
 import type { ConnectionMeta } from "../lib/connection";
@@ -10,13 +9,14 @@ import { usePetViews } from "../lib/pets";
 import { useSettings } from "../lib/settings";
 import { useSprites } from "../lib/sprites";
 import { useConnection } from "../lib/useConnection";
+import { useLocalHubState } from "../lib/useLocalHubState";
 import { useNow } from "../lib/useNow";
 import { ErrorBoundary } from "../lib/ErrorBoundary";
 import { startHitRectReporter } from "./hitRects";
 
 export function PetApp() {
   const { conn, meta, client } = useConnection();
-  const state = useHubState(client);
+  const state = useLocalHubState(client);
   const now = useNow(1000);
   const sprites = useSprites();
   const [settings] = useSettings();

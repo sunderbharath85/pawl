@@ -160,6 +160,15 @@ button.link:hover:not(:disabled) {
 .machine-bar .spacer {
   flex: 1;
 }
+.machine-bar .machine-count {
+  flex: none;
+  color: var(--muted);
+  font-weight: 400;
+  white-space: nowrap;
+}
+.machine-bar .machine-count:hover {
+  color: var(--vscode-textLink-foreground);
+}
 
 .banner {
   border-radius: var(--radius);

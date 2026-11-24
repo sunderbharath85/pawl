@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { derivePetViews, lastSignificantEvents, type PetView } from "@krypto/pet-engine";
 import { PetStage } from "@krypto/pet-engine/react";
+import { machineCounts } from "@krypto/hub-client";
 import { DEFAULT_SPECIES, type Session } from "@krypto/protocol";
-import { machineDisplayName, machineSummary } from "../shared/machine";
+import { machineDisplayName, machineSummary, machinesLine } from "../shared/machine";
 import type { ConnInfo, HostToWebview, SpritesInfo, WebviewHubState } from "../shared/messages";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ApprovalCard, ChatPanel, ConnBanner, SessionDetail, SessionList, Toasts, type Toast } from "./parts";
@@ -11,6 +12,7 @@ import { loadPersisted, post, savePersisted, type PersistedState } from "./vscod
 const EMPTY_STATE: WebviewHubState = {
   status: "disconnected",
   machines: {},
+  devices: [],
   agents: [],
   sessions: {},
   pets: {},
@@ -115,6 +117,7 @@ export function App() {
   const sessions = useMemo(() => Object.values(hub.sessions), [hub.sessions]);
   const pending = useMemo(() => Object.values(hub.pending).sort((a, b) => a.createdAt - b.createdAt), [hub.pending]);
   const pets = useMemo(() => Object.values(hub.pets), [hub.pets]);
+  const machineTotals = useMemo(() => machineCounts({ machines: hub.machines }), [hub.machines]);
 
   const lastEvents = useMemo(() => lastSignificantEvents(hub.events), [hub.events]);
 
@@ -160,6 +163,15 @@ export function App() {
         </svg>
         <span className="machine-name">{machineDisplayName(hub.machine)}</span>
         <span className="spacer" />
+        {connected && machineTotals.total > 1 && (
+          <button
+            className="link small machine-count"
+            title="Show machines"
+            onClick={() => post({ type: "command", command: "showMachines" })}
+          >
+            {machinesLine(machineTotals.total, machineTotals.online)}
+          </button>
+        )}
         <button
           className="link small"
           disabled={!connected || !hub.machine}

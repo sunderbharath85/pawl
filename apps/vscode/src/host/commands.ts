@@ -5,6 +5,7 @@ import { SPECIES_META } from "@krypto/pet-engine";
 import type { Agent, Machine, PermissionRequest, Pet, Session, Species } from "@krypto/protocol";
 import { HubOfflineError, type HubConnection } from "./connection";
 import { installHooks, startHub, type HookTargetId } from "./hubProcess";
+import { machinePickItems } from "./machineList";
 import { OS_LABEL, petFor, renameErrorText } from "../shared/machine";
 import { checkPetName, petRenameErrorText } from "../shared/petNames";
 import type { PetWebviews } from "./petView";
@@ -47,6 +48,7 @@ export class Commands {
       reg("krypto.startHub", () => startHub(this.hub, this.log)),
       reg("krypto.reconnect", () => this.hub.restart()),
       reg("krypto.renameMachine", (name?: string) => this.renameMachine(name)),
+      reg("krypto.showMachines", () => this.showMachines()),
     ];
   }
 
@@ -295,6 +297,30 @@ export class Commands {
     }
     this.log.info(`renamed machine ${updated.id} to "${updated.name}"`);
     void vscode.window.setStatusBarMessage(`Krypto: this machine is now “${updated.name}”`, 4000);
+  }
+
+  /**
+   * Read-only list of this machine and every paired hub with its online state, kept live while open.
+   * Pairing and revoking happen in the desktop app (or `krypto peer …`), not here.
+   */
+  showMachines(): void {
+    const qp = vscode.window.createQuickPick<vscode.QuickPickItem>();
+    qp.placeholder = "Read-only. Pair or revoke machines in the Krypto desktop app or with krypto peer.";
+    qp.matchOnDescription = true;
+    qp.matchOnDetail = true;
+    const render = () => {
+      const { title, items } = machinePickItems(this.hub.state, this.hub.connected);
+      qp.title = title;
+      qp.items = items;
+    };
+    render();
+    const sub = this.hub.onState(() => render());
+    qp.onDidAccept(() => qp.hide());
+    qp.onDidHide(() => {
+      sub.dispose();
+      qp.dispose();
+    });
+    qp.show();
   }
 
   // ---------------- pets ----------------

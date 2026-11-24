@@ -2,11 +2,12 @@
 
 use std::fmt;
 use std::io::Write as _;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use krypto_discovery::{CustomAgent, DiscoveryConfig};
-use krypto_protocol::{Rule, HUB_DEFAULT_PORT, HUB_HOST, HUB_TOKEN_FILE};
+use krypto_protocol::{Rule, HUB_DEFAULT_PORT, HUB_HOST, HUB_TOKEN_FILE, PEER_DEFAULT_PORT};
 use serde::{Deserialize, Serialize};
 
 /// Env var: overrides the token (hub and clients).
@@ -22,6 +23,8 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub const DB_FILE: &str = "hub.db";
 pub const LOG_FILE: &str = "hub.log";
 pub const REGISTRY_CACHE_FILE: &str = "registry-cache.json";
+/// X25519 device secret for hub-to-hub links (64 hex chars). Never logged, printed or sent.
+pub const DEVICE_KEY_FILE: &str = "device.key";
 
 /// Files inside the hub data dir.
 #[derive(Debug, Clone)]
@@ -32,6 +35,8 @@ pub struct Paths {
     pub config: PathBuf,
     /// `machine.toml`: this machine's id + name (see [`crate::machine`]).
     pub machine: PathBuf,
+    /// `device.key`: this hub's peer-link secret key (see `krypto_peer::DeviceKeys`).
+    pub device_key: PathBuf,
     pub log: PathBuf,
     pub registry_cache: PathBuf,
 }
@@ -44,6 +49,7 @@ impl Paths {
             token: data_dir.join(HUB_TOKEN_FILE),
             config: data_dir.join(CONFIG_FILE),
             machine: data_dir.join(crate::machine::MACHINE_FILE),
+            device_key: data_dir.join(DEVICE_KEY_FILE),
             log: data_dir.join(LOG_FILE),
             registry_cache: data_dir.join(REGISTRY_CACHE_FILE),
             data_dir,
@@ -143,6 +149,40 @@ impl WatchdogSection {
     }
 }
 
+/// `[peer]`: hub-to-hub links (pairing + presence).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PeerSection {
+    /// Peer listener address "ip[:port]" (default port 47801). Unset = no listener (the default):
+    /// this hub can still join other hubs' invites and dial them, but cannot invite.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
+}
+
+impl PeerSection {
+    /// The listener address, if one is configured.
+    pub fn listen_addr(&self) -> Result<Option<SocketAddr>> {
+        match self.listen.as_deref().map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(s) => parse_peer_listen(s).map(Some),
+        }
+    }
+}
+
+/// "ip[:port]" -> socket address; the port defaults to 47801. IPv6 with a port needs brackets
+/// ("[::1]:47801"). Host names are refused: the listener binds an interface, not a name.
+pub fn parse_peer_listen(s: &str) -> Result<SocketAddr> {
+    let s = s.trim();
+    if let Ok(a) = s.parse::<SocketAddr>() {
+        return Ok(a);
+    }
+    let bare = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')).unwrap_or(s);
+    match bare.parse::<IpAddr>() {
+        Ok(ip) => Ok(SocketAddr::new(ip, PEER_DEFAULT_PORT)),
+        Err(_) => bail!("peer listen address must be \"ip\" or \"ip:port\" (e.g. 192.168.1.20:47801), got {s:?}"),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HubConfig {
@@ -163,6 +203,7 @@ pub struct HubConfig {
     pub owned_session_idle_hours: u32,
     /// Events older than this are pruned at startup (0 = keep forever).
     pub event_retention_days: u32,
+    pub peer: PeerSection,
 }
 
 impl Default for HubConfig {
@@ -178,6 +219,7 @@ impl Default for HubConfig {
             hook_session_stale_hours: 12,
             owned_session_idle_hours: 12,
             event_retention_days: 30,
+            peer: PeerSection::default(),
         }
     }
 }
@@ -194,6 +236,9 @@ const CONFIG_TEMPLATE: &str = r#"# Krypto hub configuration. Every key is option
 # model = "claude-haiku-5-5"   # key comes from the ANTHROPIC_API_KEY env var
 # ollama_url = "http://127.0.0.1:11434"
 # ollama_model = "llama3.2"
+#
+# [peer]
+# listen = "192.168.1.20:47801"   # hub-to-hub listener (off by default; needed to create invites)
 #
 # [watchdog]
 # waiting_nudge_after_ms = 300000
@@ -239,6 +284,7 @@ impl HubConfig {
     pub fn parse(text: &str) -> Result<Self> {
         let cfg: HubConfig = toml::from_str(text)?;
         cfg.daily_report_minutes_checked()?; // validate early
+        cfg.peer.listen_addr().context("[peer] listen")?;
         Ok(cfg)
     }
 
@@ -433,6 +479,25 @@ match = { toolKind = "read" }
         // the shipped template must parse to the defaults
         let t = HubConfig::parse(CONFIG_TEMPLATE).unwrap();
         assert_eq!(t.port, HUB_DEFAULT_PORT);
+    }
+
+    #[test]
+    fn peer_listen_addresses() {
+        assert_eq!(parse_peer_listen("192.168.1.20").unwrap(), "192.168.1.20:47801".parse().unwrap());
+        assert_eq!(parse_peer_listen(" 127.0.0.1:47911 ").unwrap(), "127.0.0.1:47911".parse().unwrap());
+        assert_eq!(parse_peer_listen("0.0.0.0").unwrap(), "0.0.0.0:47801".parse().unwrap());
+        assert_eq!(parse_peer_listen("::1").unwrap(), "[::1]:47801".parse().unwrap());
+        assert_eq!(parse_peer_listen("[::1]").unwrap(), "[::1]:47801".parse().unwrap());
+        assert_eq!(parse_peer_listen("[::1]:5000").unwrap(), "[::1]:5000".parse().unwrap());
+        for bad in ["localhost", "my-pc:47801", "1.2.3.4:99999", "", "1.2.3.4:"] {
+            assert!(parse_peer_listen(bad).is_err(), "{bad:?}");
+        }
+        let cfg = HubConfig::parse("[peer]\nlisten = \"10.0.0.5\"").unwrap();
+        assert_eq!(cfg.peer.listen_addr().unwrap(), Some("10.0.0.5:47801".parse().unwrap()));
+        assert_eq!(HubConfig::parse("").unwrap().peer.listen_addr().unwrap(), None);
+        assert_eq!(HubConfig::parse("[peer]\nlisten = \" \"").unwrap().peer.listen_addr().unwrap(), None);
+        let err = format!("{:#}", HubConfig::parse("[peer]\nlisten = \"my-pc\"").unwrap_err());
+        assert!(err.contains("[peer] listen"), "{err}");
     }
 
     #[test]

@@ -4,11 +4,13 @@ import type {
   Agent,
   ChatMessage,
   ClientMsg,
+  Device,
   HubEvent,
   HubNotification,
   Machine,
   MachineId,
   Pet,
+  PeerStatus,
   PermissionRequest,
   Rule,
   ServerMsg,
@@ -37,8 +39,12 @@ export interface HubState {
   notifications: HubNotification[];
   /** The machine this hub runs on (from the hello `Welcome`; kept across reconnects). */
   machine?: Machine | undefined;
-  /** Every known machine by id, including this hub's own (peers arrive in migration step 2). */
+  /** Every known machine by id: this hub's own plus every paired (not revoked) hub, with its online state. */
   machines: Record<MachineId, Machine>;
+  /** The pairing roster (never includes this hub). Replaced by every Welcome and `devices` message. */
+  devices: Device[];
+  /** This hub's peer-listener status; undefined until a protocol v3 hub said hello. */
+  peer?: PeerStatus | undefined;
   /** From the hello `Welcome`, once connected at least once. */
   hubVersion?: string | undefined;
   /** Last connection/handshake error, cleared on successful hello. */
@@ -72,6 +78,7 @@ export function initialHubState(): HubState {
     chat: [],
     notifications: [],
     machines: {},
+    devices: [],
   };
 }
 
@@ -129,6 +136,32 @@ export function upsertMachine(state: HubState, machine: Machine): HubState {
   };
 }
 
+/**
+ * Forget a paired device: drops it from `devices` and, for a hub (whose device id is its machine id),
+ * from `machines`. This hub's own machine is never removed. Returns `state` itself when nothing changes.
+ */
+export function removeDevice(state: HubState, deviceId: string): HubState {
+  const own = state.machine?.id === deviceId;
+  const inMachines = !own && deviceId in state.machines;
+  const devices = state.devices.filter((d) => d.id !== deviceId);
+  if (!inMachines && devices.length === state.devices.length) return state;
+  let machines = state.machines;
+  if (inMachines) {
+    const { [deviceId]: _gone, ...rest } = state.machines;
+    machines = rest;
+  }
+  return { ...state, machines, devices: devices.length === state.devices.length ? state.devices : devices };
+}
+
+/** Insert or replace a device in the roster (by id). */
+export function upsertDevice(state: HubState, device: Device): HubState {
+  const idx = state.devices.findIndex((d) => d.id === device.id);
+  const devices = state.devices.slice();
+  if (idx >= 0) devices[idx] = device;
+  else devices.push(device);
+  return { ...state, devices };
+}
+
 function upsertById<T extends { id: string }>(items: readonly T[], item: T, cap: number): T[] {
   const idx = items.findIndex((x) => x.id === item.id);
   if (idx >= 0) {
@@ -165,6 +198,9 @@ export function applyWelcome(state: HubState, welcome: Welcome): HubState {
     hubVersion: welcome.hubVersion,
     machine,
     machines,
+    devices: welcome.devices ?? [],
+    // A pre-v3 hub has no peer link at all.
+    peer: welcome.peer ?? undefined,
     lastError: undefined,
     agents: welcome.agents ?? [],
     sessions: byKey(welcome.sessions ?? [], (s) => s.id),
@@ -205,6 +241,12 @@ export function reduceServerMsg(state: HubState, msg: ServerMsg, limits: StateLi
       return { ...state, notifications: upsertById(state.notifications, msg.notification, limits.notificationCap) };
     case "machine":
       return upsertMachine(state, msg.machine);
+    case "machine_removed":
+      return removeDevice(state, msg.machineId);
+    case "devices":
+      return { ...state, devices: msg.devices ?? [] };
+    case "peer_status":
+      return { ...state, peer: msg.peer };
     default: {
       // Unknown message type from a newer hub: ignore.
       const _exhaustive: never = msg;
@@ -280,6 +322,17 @@ export function applyAck(
       const machine = (result as Partial<AckResults["update_machine"]> | undefined)?.machine;
       return machine ? upsertMachine(state, machine) : state;
     }
+    case "join_peer": {
+      // The hub also broadcasts `devices` + `machine`; folding the ack shows the new peer at once.
+      const res = result as Partial<AckResults["join_peer"]> | undefined;
+      let next = state;
+      if (res?.device) next = upsertDevice(next, res.device);
+      if (res?.machine) next = upsertMachine(next, res.machine);
+      return next;
+    }
+    case "revoke_device":
+      // ok:true means the device is gone; the hub follows up with `machine_removed` + `devices`.
+      return removeDevice(state, request.deviceId);
     default:
       return state;
   }
@@ -290,4 +343,50 @@ export function lastEventsBySession(state: Pick<HubState, "events">): Record<str
   const out: Record<string, HubEvent | undefined> = {};
   for (const [sid, evs] of Object.entries(state.events)) out[sid] = evs[evs.length - 1];
   return out;
+}
+
+/**
+ * Machines for display: this hub's own first, then online before offline, then by name.
+ * Includes only what `state.machines` holds (this hub plus paired hubs).
+ */
+export function sortedMachines(state: Pick<HubState, "machine" | "machines">): Machine[] {
+  const own = state.machine?.id;
+  return Object.values(state.machines).sort(
+    (a, b) =>
+      Number(b.id === own) - Number(a.id === own) ||
+      Number(b.online) - Number(a.online) ||
+      a.name.localeCompare(b.name) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+}
+
+/** "N machines · M online" numbers: every known machine (this one included) and how many are online. */
+export function machineCounts(state: Pick<HubState, "machines">): { total: number; online: number } {
+  const all = Object.values(state.machines);
+  return { total: all.length, online: all.filter((m) => m.online).length };
+}
+
+/**
+ * A view of `state` limited to one machine's pets, sessions and permission requests (events stay keyed
+ * by session id). Until migration step 3 the clients show only this hub's own work, even if a hub
+ * forwards a peer's. Returns `state` itself when nothing belongs to another machine.
+ */
+export function scopeToMachine(state: HubState, machineId: MachineId | undefined): HubState {
+  if (!machineId) return state;
+  const foreign = <T extends { machineId: MachineId }>(rec: Record<string, T>) => Object.values(rec).some((x) => x.machineId !== machineId);
+  const keep = <T extends { machineId: MachineId }>(rec: Record<string, T>) => {
+    const out: Record<string, T> = {};
+    for (const [k, v] of Object.entries(rec)) if (v.machineId === machineId) out[k] = v;
+    return out;
+  };
+  const p = foreign(state.pets);
+  const s = foreign(state.sessions);
+  const r = foreign(state.pending);
+  if (!p && !s && !r) return state;
+  return {
+    ...state,
+    pets: p ? keep(state.pets) : state.pets,
+    sessions: s ? keep(state.sessions) : state.sessions,
+    pending: r ? keep(state.pending) : state.pending,
+  };
 }

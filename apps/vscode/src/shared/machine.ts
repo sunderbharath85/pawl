@@ -23,6 +23,26 @@ export function machineSummary(machine: Machine | undefined): string {
   return `${machineDisplayName(machine)} · ${OS_LABEL[machine.os] ?? machine.os} · id ${machine.id}`;
 }
 
+/** "3 machines · 2 online" (this machine included). */
+export function machinesLine(total: number, online: number): string {
+  return `${total} machine${total === 1 ? "" : "s"} · ${online} online`;
+}
+
+/**
+ * Online state of a paired machine: "online", or "offline · last seen 14:05" (a clock time, or a date
+ * when older than today, so a tooltip rendered once never goes stale).
+ */
+export function presenceLabel(machine: Pick<Machine, "online" | "lastSeen">, now = Date.now()): string {
+  if (machine.online) return "online";
+  if (!machine.lastSeen) return "offline · not seen yet";
+  const seen = new Date(machine.lastSeen);
+  const today = new Date(now).toDateString() === seen.toDateString();
+  const when = today
+    ? seen.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : seen.toLocaleDateString([], { month: "short", day: "numeric" });
+  return `offline · last seen ${when}`;
+}
+
 /** The pet that watches `agentId` on `machineId` (agent ids repeat across machines). */
 export function petFor(pets: Iterable<Pet>, machineId: string, agentId: string): Pet | undefined {
   for (const p of pets) if (p.machineId === machineId && p.agentId === agentId) return p;

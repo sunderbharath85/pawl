@@ -2,6 +2,7 @@
 //! hook feeds into sessions + events; applies permission rules; answers every `ClientMsg`.
 
 mod host;
+mod peers;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -12,6 +13,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use krypto_acp::HostEvent;
 use krypto_brain::chat::{Brain, BrainAction, BrainContext, BrainReply};
 use krypto_brain::watchdog::Watchdog;
+use krypto_peer::PeerNode;
 use krypto_protocol::{
     global_id, is_valid_machine_id, parse_global_id, Agent, AgentCapabilities, AgentId, AgentSource, ChatMessage,
     ChatRole, ClientKind, ClientMsg, ErrorPayload, EventType, HistorySession, HookSource, HubEvent, HubNotification,
@@ -202,6 +204,14 @@ struct Inner {
     /// Warnings raised while loading (e.g. dropped unsafe rules); replayed to every new client
     /// until the condition is fixed.
     startup_notices: Mutex<Vec<HubNotification>>,
+    /// Hub-to-hub links (pairing, presence).
+    peer: PeerNode,
+    /// The hub's view of the pairing roster (see `peers.rs`).
+    peers: Mutex<peers::Peers>,
+    /// The last presence snapshot handed to the link layer, minus timestamps.
+    presence_pushed: Mutex<Option<Value>>,
+    /// Serializes roster changes (peer events, revoke) so each is audited and announced once.
+    peer_ops: tokio::sync::Mutex<()>,
 }
 
 /// The hub. Cheap to clone; all clones share state.
@@ -313,6 +323,7 @@ impl Hub {
             state.pets.insert(p.id.clone(), p);
         }
 
+        let (peer, peer_rx) = Self::new_peer_node(&paths, machine.local_machine(), &store)?;
         let (shutdown, _) = watch::channel(false);
         let hub = Hub {
             inner: Arc::new(Inner {
@@ -331,8 +342,15 @@ impl Hub {
                 discovery: tokio::sync::Mutex::new(()),
                 shutdown,
                 startup_notices: Mutex::new(startup_notices.clone()),
+                peer,
+                peers: Mutex::new(peers::Peers::default()),
+                presence_pushed: Mutex::new(None),
+                peer_ops: tokio::sync::Mutex::new(()),
             }),
         };
+        hub.load_peers().await?;
+        hub.refresh_presence();
+        tokio::spawn(hub.clone().peer_loop(peer_rx));
         for notification in startup_notices {
             hub.inner.bus.send(ServerMsg::Notification { notification });
         }
@@ -342,6 +360,7 @@ impl Hub {
 
         tokio::spawn(hub.clone().pet_flush_loop());
         if background {
+            hub.start_peer_links().await?;
             let h = hub.clone();
             tokio::spawn(async move {
                 if let Err(e) = h.refresh_agents(false).await {
@@ -390,9 +409,12 @@ impl Hub {
         self.inner.machine.lock().unwrap_or_else(|p| p.into_inner()).local_machine()
     }
 
-    /// Every known machine, this one first. Only this one until pairing lands (PLAN step 2).
+    /// Every known machine: this one first, then every paired (not revoked) hub with its online
+    /// state from the link layer.
     pub fn machines(&self) -> Vec<Machine> {
-        vec![self.machine()]
+        let mut v = vec![self.machine()];
+        v.extend(self.peer_machines());
+        v
     }
 
     /// Ok if `id` is a global id owned by this machine; else `not_owner` (another machine's prefix)
@@ -438,12 +460,16 @@ impl Hub {
         let now = krypto_protocol::now_ms();
         let machine = self.machine();
         let machines = self.machines();
+        let devices = self.devices();
+        let peer = self.peer_status();
         let st = self.st();
         Welcome {
             protocol_version: PROTOCOL_VERSION,
             hub_version: crate::HUB_VERSION.to_string(),
             machine,
             machines,
+            devices,
+            peer,
             agents: st.agents.clone(),
             sessions: st.sessions_sorted(|s| {
                 s.ended_at.is_none() || now - s.last_event_at.max(s.ended_at.unwrap_or(0)) <= WELCOME_ENDED_WINDOW_MS
@@ -454,10 +480,12 @@ impl Hub {
         }
     }
 
-    /// Stop background tasks, flush pets and shut down every agent connection.
+    /// Stop background tasks, flush pets, say `bye{shutdown}` to every paired hub and shut down
+    /// every agent connection.
     pub async fn shutdown(&self) {
         let _ = self.inner.shutdown.send(true);
         self.flush_pets().await;
+        self.inner.peer.shutdown().await;
         self.inner.host.shutdown().await;
     }
 
@@ -518,6 +546,12 @@ impl Hub {
             ClientMsg::SetRules { rules, .. } => json!({ "rules": self.set_rules(rules).await? }),
             ClientMsg::UpdateMachine { machine_id, name, .. } => {
                 json!({ "machine": self.update_machine(&machine_id, &name).await? })
+            }
+            ClientMsg::CreateInvite { ttl_secs, addr, .. } => self.create_invite(ttl_secs, addr)?,
+            ClientMsg::JoinPeer { uri, .. } => self.join_peer(&uri).await?,
+            ClientMsg::RevokeDevice { device_id, .. } => {
+                self.revoke_device(&device_id, actor).await?;
+                json!({})
             }
         })
     }
@@ -686,13 +720,16 @@ impl Hub {
             Ok(v.to_string())
         }
         self.check_owned(pet_id)?;
+        let remote_names = self.remote_pet_names();
         let pet = {
             let mut st = self.st();
             let name = match &patch.name {
                 Some(n) => {
                     let n = validate_pet_name(n)?;
                     let key = name_key(&n);
-                    if st.pets.values().any(|p| p.id != pet_id && name_key(&p.name) == key) {
+                    if st.pets.values().any(|p| p.id != pet_id && name_key(&p.name) == key)
+                        || remote_names.iter().any(|r| name_key(r) == key)
+                    {
                         return Err(AckCode::NameTaken.into());
                     }
                     Some(n)
@@ -720,6 +757,7 @@ impl Hub {
         let p = pet.clone();
         self.inner.store.run(move |s| s.upsert_pet(&p)).await?;
         self.inner.bus.send(ServerMsg::Pet { pet: pet.clone() });
+        self.refresh_presence();
         Ok(pet)
     }
 
@@ -775,6 +813,8 @@ impl Hub {
         *self.inner.machine.lock().unwrap_or_else(|p| p.into_inner()) = next;
         let machine = self.machine();
         tracing::info!("machine renamed to {:?}", machine.name);
+        self.inner.peer.set_machine(machine.clone());
+        self.refresh_presence();
         self.inner.bus.send(ServerMsg::Machine { machine: machine.clone() });
         Ok(machine)
     }
@@ -802,6 +842,7 @@ impl Hub {
         for a in agents.iter().filter(|a| a.installed) {
             self.ensure_pet(&a.id).await;
         }
+        self.refresh_presence();
         Ok(agents)
     }
 
@@ -831,14 +872,16 @@ impl Hub {
             tracing::warn!("persist agent capabilities: {e:#}");
         }
         self.inner.bus.send(ServerMsg::Agents { agents });
+        self.refresh_presence();
     }
 
     // ------------------------------------------------------------ pets
 
     /// Every agent with activity gets a dog (krypto_brain::growth::default_pet), named so it never
-    /// repeats the name of any pet this hub knows.
+    /// repeats the name of any pet this hub knows (its own and paired hubs').
     async fn ensure_pet(&self, agent_id: &str) {
         let mid = self.inner.machine_id.clone();
+        let remote_names = self.remote_pet_names();
         let created = {
             let mut st = self.st();
             if st.pet_for(&mid, agent_id).is_some() {
@@ -847,7 +890,8 @@ impl Hub {
                 let mut agent =
                     st.agents.iter().find(|a| a.id == agent_id).cloned().unwrap_or_else(|| placeholder_agent(agent_id, &mid));
                 agent.machine_id = mid.clone();
-                let taken: Vec<String> = st.pets.values().map(|p| p.name.clone()).collect();
+                let mut taken: Vec<String> = st.pets.values().map(|p| p.name.clone()).collect();
+                taken.extend(remote_names);
                 let mut pet = krypto_brain::growth::default_pet(&agent, &taken);
                 pet.agent_id = agent_id.to_string();
                 pet.machine_id = mid.clone();
@@ -864,6 +908,7 @@ impl Hub {
                 tracing::warn!("persist pet: {e:#}");
             }
             self.inner.bus.send(ServerMsg::Pet { pet });
+            self.refresh_presence();
         }
     }
 
@@ -893,6 +938,8 @@ impl Hub {
         for pet in pets {
             self.inner.bus.send(ServerMsg::Pet { pet });
         }
+        // Mood/xp changes reach peers at most once per flush interval.
+        self.refresh_presence();
     }
 
     async fn pet_flush_loop(self) {

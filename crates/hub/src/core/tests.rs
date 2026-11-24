@@ -144,6 +144,9 @@ async fn hello_returns_welcome_shape() {
     assert_eq!(w.machine.hub_version.as_deref(), Some(crate::HUB_VERSION));
     assert!(krypto_protocol::now_ms() - w.machine.last_seen < 60_000);
     assert_eq!(w.machines, vec![w.machine.clone()]);
+    assert!(w.devices.is_empty(), "nothing paired");
+    assert_eq!(w.peer.listening, None, "the peer listener is off by default");
+    assert_eq!(w.peer.public_key.len(), 44, "base64 of a 32-byte key");
 }
 
 #[tokio::test]
@@ -848,4 +851,259 @@ async fn update_pet_names_are_validated_and_unique() {
         assert_eq!(ack_error(f.hub.handle(rename(codex.id.clone(), bad.clone()), &actor()).await), "invalid", "{bad:?}");
     }
     assert_eq!(f.hub.store().pets().unwrap().into_iter().find(|p| p.id == codex.id).unwrap().name, forty);
+}
+
+// ---------------------------------------------------------------- pairing + presence (step 2)
+
+use crate::store::{PairingAuditEntry, PairingAuditKind};
+use krypto_protocol::{Device, DeviceKind};
+
+/// A real hub (fake ACP host) in `dir` with its own machine id; `listen` = config.toml [peer] listen.
+async fn peer_hub_in(dir: &std::path::Path, mid: &str, name: &str, listen: Option<&str>) -> Hub {
+    let paths = Paths::in_dir(dir);
+    let store = Store::open(&paths.db, mid).unwrap();
+    let mut config = HubConfig { offline: true, ..Default::default() };
+    config.peer.listen = listen.map(Into::into);
+    let machine = MachineIdentity { id: mid.into(), name: name.into() };
+    let hub = Hub::build(
+        HubOptions { paths, config, token: "t".repeat(64), machine, background: false },
+        store,
+        Host::Fake(FakeHost::default()),
+    )
+    .await
+    .unwrap();
+    hub.start_peer_links().await.unwrap();
+    hub
+}
+
+async fn peer_hub(mid: &str, name: &str, listen: Option<&str>) -> (Hub, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = peer_hub_in(dir.path(), mid, name, listen).await;
+    (hub, dir)
+}
+
+/// The next broadcast matching `pred` (10 s cap, far below the 45 s offline timeout).
+async fn wait_for(rx: &mut broadcast::Receiver<ServerMsg>, what: &str, pred: impl Fn(&ServerMsg) -> bool) -> ServerMsg {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match rx.recv().await {
+                Ok(m) if pred(&m) => return m,
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(e) => panic!("bus closed while waiting for {what}: {e}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+}
+
+/// Poll the pairing audit log until an entry of `kind` shows up (peer events are handled async).
+async fn wait_audit(hub: &Hub, kind: PairingAuditKind) -> PairingAuditEntry {
+    for _ in 0..100 {
+        if let Some(e) = hub.store().pairing_audit(50).unwrap().into_iter().find(|e| e.kind == kind) {
+            return e;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("no {kind:?} pairing audit entry");
+}
+
+fn is_machine(m: &ServerMsg, id: &str, online: bool) -> bool {
+    matches!(m, ServerMsg::Machine { machine } if machine.id == id && machine.online == online)
+}
+
+async fn invite(hub: &Hub, ttl_secs: Option<u32>, addr: Option<&str>) -> ServerMsg {
+    hub.handle(ClientMsg::CreateInvite { id: "i".into(), ttl_secs, addr: addr.map(Into::into) }, &actor()).await
+}
+
+async fn join(hub: &Hub, uri: &str) -> ServerMsg {
+    hub.handle(ClientMsg::JoinPeer { id: "j".into(), uri: uri.into() }, &actor()).await
+}
+
+/// Pair `b` (no listener) with `a` (listener on); returns once both see the other online.
+async fn pair(a: &Hub, b: &Hub) {
+    let mut arx = a.subscribe();
+    let mut brx = b.subscribe();
+    let uri = ack_result(invite(a, None, None).await)["uri"].as_str().unwrap().to_string();
+    ack_result(join(b, &uri).await);
+    let (a_id, b_id) = (a.machine_id().to_string(), b.machine_id().to_string());
+    wait_for(&mut arx, "a sees b online", |m| is_machine(m, &b_id, true)).await;
+    wait_for(&mut brx, "b sees a online", |m| is_machine(m, &a_id, true)).await;
+}
+
+#[tokio::test]
+async fn pairing_requests_answer_bare_codes() {
+    let (a, _da) = peer_hub(MID, "Desk", Some("127.0.0.1:0")).await;
+    let (b, _db) = peer_hub(OTHER, "Laptop", None).await;
+
+    // Welcome carries the peer status; the key is base64 of 32 bytes.
+    let wa = a.welcome();
+    let listening = wa.peer.listening.clone().expect("listener on");
+    assert!(listening.starts_with("127.0.0.1:") && !listening.ends_with(":0"), "{listening}");
+    assert_eq!(wa.peer.public_key.len(), 44);
+    assert!(wa.devices.is_empty());
+    assert_eq!(b.welcome().peer.listening, None);
+    assert_ne!(b.welcome().peer.public_key, wa.peer.public_key);
+
+    assert_eq!(ack_error(invite(&b, None, None).await), "peer_listener_off");
+    for ttl in [0, 59, 3601] {
+        assert_eq!(ack_error(invite(&a, Some(ttl), None).await), "invalid", "ttl {ttl}");
+    }
+    let v = ack_result(invite(&a, Some(60), None).await);
+    let expires = v["expiresAt"].as_i64().unwrap();
+    assert!((expires - krypto_protocol::now_ms() - 60_000).abs() < 5_000);
+    let uri = v["uri"].as_str().unwrap().to_string();
+    assert!(uri.starts_with("krypto://peer?"), "{uri}");
+    assert_eq!(krypto_peer::Invite::parse(&uri).unwrap().addr, listening);
+
+    assert_eq!(ack_error(join(&b, "not an invite").await), "bad_uri");
+    assert_eq!(ack_error(join(&a, &uri).await), "self_invite");
+
+    // A wrong code is refused (and audited on the inviter) without pairing anything.
+    let mut forged = krypto_peer::Invite::parse(&uri).unwrap();
+    forged.code = krypto_peer::b64::encode_url(&[7u8; 16]);
+    assert_eq!(ack_error(join(&b, &forged.to_uri()).await), "invite_rejected");
+    let rejected = wait_audit(&a, PairingAuditKind::PairRejected).await;
+    assert_eq!(rejected.detail.as_deref(), Some("invalid_invite"));
+    assert!(rejected.remote_addr.is_some());
+    assert!(a.devices().is_empty() && b.devices().is_empty());
+
+    assert_eq!(
+        ack_error(b.handle(ClientMsg::RevokeDevice { id: "r".into(), device_id: MID.into() }, &actor()).await),
+        "not_found"
+    );
+}
+
+#[tokio::test]
+async fn two_hubs_pair_see_each_other_and_revoke() {
+    let (a, _da) = peer_hub(MID, "Desk", Some("127.0.0.1:0")).await;
+    let (b, _db) = peer_hub(OTHER, "Laptop", None).await;
+    let mut arx = a.subscribe();
+    let mut brx = b.subscribe();
+
+    let uri = ack_result(invite(&a, Some(120), None).await)["uri"].as_str().unwrap().to_string();
+    let v = ack_result(join(&b, &uri).await);
+    let device: Device = serde_json::from_value(v["device"].clone()).unwrap();
+    let machine: Machine = serde_json::from_value(v["machine"].clone()).unwrap();
+    assert_eq!((device.id.as_str(), device.kind), (MID, DeviceKind::Hub));
+    assert_eq!(device.addr, a.peer_status().listening);
+    assert_eq!(device.public_key, a.peer_status().public_key);
+    assert_eq!((machine.id.as_str(), machine.name.as_str(), machine.online), (MID, "Desk", true));
+
+    // Both sides: the roster, then the other machine online.
+    wait_for(&mut arx, "a: devices", |m| matches!(m, ServerMsg::Devices { devices } if devices.iter().any(|d| d.id == OTHER)))
+        .await;
+    wait_for(&mut arx, "a: laptop online", |m| is_machine(m, OTHER, true)).await;
+    wait_for(&mut brx, "b: devices", |m| matches!(m, ServerMsg::Devices { devices } if devices.iter().any(|d| d.id == MID)))
+        .await;
+    wait_for(&mut brx, "b: desk online", |m| is_machine(m, MID, true)).await;
+
+    let wa = a.welcome();
+    assert_eq!(wa.machines.iter().map(|m| (m.id.as_str(), m.online)).collect::<Vec<_>>(), [(MID, true), (OTHER, true)]);
+    assert_eq!(wa.machines[1].name, "Laptop");
+    assert_eq!(wa.devices.len(), 1);
+    assert_eq!(wa.devices[0].public_key, b.peer_status().public_key);
+    let wb = b.welcome();
+    assert_eq!(wb.machines.iter().map(|m| (m.id.as_str(), m.online)).collect::<Vec<_>>(), [(OTHER, true), (MID, true)]);
+    assert_eq!(wa.machines, a.machines(), "BrainContext and Welcome share the list");
+
+    let paired = wait_audit(&a, PairingAuditKind::Paired).await;
+    assert_eq!((paired.device_id.as_deref(), paired.detail.as_deref()), (Some(OTHER), Some("accepted our invite")));
+    let joined = wait_audit(&b, PairingAuditKind::Paired).await;
+    assert_eq!((joined.device_id.as_deref(), joined.detail.as_deref()), (Some(MID), Some("joined their invite")));
+
+    // The invite was single use.
+    let (c, _dc) = peer_hub("cccccc333333", "Third", None).await;
+    assert_eq!(ack_error(join(&c, &uri).await), "invite_rejected");
+
+    // A rename travels by presence and is announced once.
+    ack_result(b.handle(ClientMsg::UpdateMachine { id: "m".into(), machine_id: OTHER.into(), name: "Laptop 2".into() }, &actor()).await);
+    wait_for(&mut arx, "a: rename", |m| matches!(m, ServerMsg::Machine { machine } if machine.id == OTHER && machine.name == "Laptop 2" && machine.online)).await;
+    assert_eq!(a.welcome().machines[1].name, "Laptop 2");
+    assert_eq!(a.devices()[0].name, "Laptop 2");
+
+    // Peer machine ids are never ours: requests naming them stay not_owner.
+    let err = ack_error(a.handle(ClientMsg::UpdateMachine { id: "m".into(), machine_id: OTHER.into(), name: "x".into() }, &actor()).await);
+    assert_eq!(err, "not_owner");
+
+    // B revokes A: both drop the other, both audit it, neither can reconnect.
+    ack_result(b.handle(ClientMsg::RevokeDevice { id: "r".into(), device_id: MID.into() }, &actor()).await);
+    wait_for(&mut brx, "b: desk removed", |m| matches!(m, ServerMsg::MachineRemoved { machine_id } if machine_id == MID)).await;
+    wait_for(&mut arx, "a: laptop removed", |m| matches!(m, ServerMsg::MachineRemoved { machine_id } if machine_id == OTHER)).await;
+    assert_eq!(b.welcome().machines.len(), 1);
+    assert!(b.welcome().devices.is_empty());
+    let revoked = wait_audit(&b, PairingAuditKind::Revoked).await;
+    assert_eq!((revoked.device_id.as_deref(), revoked.actor.as_str()), (Some(MID), actor().label.as_str()));
+    let by_peer = wait_audit(&a, PairingAuditKind::RevokedByPeer).await;
+    assert_eq!(by_peer.device_id.as_deref(), Some(OTHER));
+    for _ in 0..100 {
+        if a.welcome().machines.len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(a.welcome().machines.len(), 1);
+    assert!(a.store().roster().unwrap().is_empty() && b.store().roster().unwrap().is_empty());
+    assert_eq!(b.store().pairing_audit(50).unwrap().iter().filter(|e| e.kind == PairingAuditKind::Revoked).count(), 1, "audited once");
+    assert_eq!(
+        ack_error(b.handle(ClientMsg::RevokeDevice { id: "r2".into(), device_id: MID.into() }, &actor()).await),
+        "not_found"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_says_bye_and_restart_reconnects() {
+    let (a, _da) = peer_hub(MID, "Desk", Some("127.0.0.1:0")).await;
+    let db = tempfile::tempdir().unwrap();
+    let b = peer_hub_in(db.path(), OTHER, "Laptop", None).await;
+    pair(&a, &b).await;
+    let mut arx = a.subscribe();
+
+    // bye{shutdown}: offline at once, still paired.
+    b.shutdown().await;
+    drop(b);
+    wait_for(&mut arx, "a: laptop offline", |m| is_machine(m, OTHER, false)).await;
+    let w = a.welcome();
+    assert_eq!(w.machines.iter().map(|m| (m.id.as_str(), m.online)).collect::<Vec<_>>(), [(MID, true), (OTHER, false)]);
+    assert_eq!(w.devices.len(), 1);
+    assert!(a.store().pairing_audit(50).unwrap().iter().all(|e| e.kind == PairingAuditKind::Paired));
+
+    // A restarted B dials every known hub (connect_known) and both are online again.
+    let b = peer_hub_in(db.path(), OTHER, "Laptop", None).await;
+    let mut brx = b.subscribe();
+    assert_eq!(b.welcome().machines.len(), 2, "the roster survives a restart");
+    wait_for(&mut arx, "a: laptop back", |m| is_machine(m, OTHER, true)).await;
+    if !b.welcome().machines[1].online {
+        wait_for(&mut brx, "b: desk back", |m| is_machine(m, MID, true)).await;
+    }
+}
+
+/// Presence carries this hub's own pets; their names count as taken on the paired hub.
+#[tokio::test]
+async fn presence_pets_are_taken_names() {
+    let (a, _da) = peer_hub(MID, "Desk", Some("127.0.0.1:0")).await;
+    let (b, _db) = peer_hub(OTHER, "Laptop", None).await;
+    pair(&a, &b).await;
+    b.ensure_pet("codex").await;
+    let b_pet = b.pets().into_iter().find(|p| p.agent_id == "codex").unwrap();
+    assert_eq!(b_pet.machine_id, OTHER);
+    for _ in 0..200 {
+        if a.remote_pet_names().contains(&b_pet.name) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(a.remote_pet_names(), vec![b_pet.name.clone()]);
+    a.ensure_pet("codex").await;
+    let a_pet = a.pets().into_iter().find(|p| p.agent_id == "codex").unwrap();
+    assert_ne!(name_key(&a_pet.name), name_key(&b_pet.name), "default names avoid the peer's pets");
+    let err = ack_error(
+        a.handle(
+            ClientMsg::UpdatePet { id: "n".into(), pet_id: a_pet.id.clone(), patch: PetPatch { name: Some(b_pet.name.to_lowercase()), ..Default::default() } },
+            &actor(),
+        )
+        .await,
+    );
+    assert_eq!(err, "name_taken");
+    assert!(a.pets().iter().all(|p| p.machine_id == MID), "remote pets are not shown before step 3");
 }

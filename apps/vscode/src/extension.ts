@@ -61,6 +61,7 @@ const WEBVIEW_COMMANDS = {
   openPanel: "krypto.openPetPanel",
   renameMachine: "krypto.renameMachine",
   renamePet: "krypto.renamePet",
+  showMachines: "krypto.showMachines",
 } as const;
 
 async function handleWebviewMessage(msg: WebviewToHost, hub: HubConnection): Promise<void> {

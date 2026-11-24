@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useHubState } from "@krypto/hub-client/react";
 import { onNative, type PanelFocus } from "../lib/native";
 import { usePetViews } from "../lib/pets";
 import { useSprites } from "../lib/sprites";
 import { useConnection } from "../lib/useConnection";
+import { useLocalHubState } from "../lib/useLocalHubState";
 import { useNow } from "../lib/useNow";
 import { PanelContext, type PanelCtx, type Route } from "./context";
 import { Sidebar } from "./Sidebar";
@@ -16,6 +16,7 @@ import { ApprovalsView } from "./views/ApprovalsView";
 import { PetsView } from "./views/PetsView";
 import { RulesView } from "./views/RulesView";
 import { SettingsView } from "./views/SettingsView";
+import { MachinesView } from "./views/MachinesView";
 import { PendingStrip } from "./views/PendingStrip";
 
 interface Toast {
@@ -46,7 +47,8 @@ function routeFromFocus(focus: PanelFocus): Route {
 
 export function PanelApp() {
   const { conn, meta, client } = useConnection();
-  const state = useHubState(client);
+  // Only this machine's pets/sessions until migration step 3; paired machines live in state.machines.
+  const state = useLocalHubState(client);
   const now = useNow(1000);
   const sprites = useSprites();
   const views = usePetViews(state, now);
@@ -119,5 +121,7 @@ function renderRoute(route: Route) {
       return <RulesView />;
     case "settings":
       return <SettingsView />;
+    case "machines":
+      return <MachinesView />;
   }
 }

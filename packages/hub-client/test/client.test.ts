@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { HubClient, HubRequestError, MACHINE_NAME_MAX, normalizeMachineName, pickPermissionOption, type HubClientOptions } from "../src/index";
-import { event, FakeSocket, machine, machine2, MID, MID2, permission, session, tick, welcome } from "./fixtures";
+import {
+  HubClient,
+  HubRequestError,
+  JOIN_PEER_TIMEOUT_MS,
+  MACHINE_NAME_MAX,
+  normalizeMachineName,
+  pickPermissionOption,
+  type HubClientOptions,
+} from "../src/index";
+import { device2, event, FakeSocket, inviteFrom2, machine, machine2, MID, MID2, peerOff, peerOn, permission, session, tick, welcome } from "./fixtures";
 
 function makeClient(over: Partial<HubClientOptions> = {}): HubClient {
   return new HubClient({
@@ -451,5 +459,127 @@ describe("machine identity", () => {
     expect(normalizeMachineName("")).toBeNull();
     expect(normalizeMachineName("🐶".repeat(MACHINE_NAME_MAX))).toBe("🐶".repeat(MACHINE_NAME_MAX));
     expect(normalizeMachineName("a".repeat(MACHINE_NAME_MAX + 1))).toBeNull();
+  });
+});
+
+describe("pairing (protocol v3)", () => {
+  function connected(over: Partial<HubClientOptions> = {}) {
+    const c = client(over);
+    c.connect();
+    const ws = FakeSocket.last();
+    ws.handshake();
+    return { c, ws };
+  }
+
+  test("welcome, devices, peer_status and machine_removed update state", () => {
+    const c = client();
+    c.connect();
+    const ws = FakeSocket.last();
+    ws.handshake({ ...welcome, machines: [machine, machine2], devices: [device2], peer: peerOff });
+    expect(c.getState().devices).toEqual([device2]);
+    expect(c.getState().peer).toEqual(peerOff);
+    ws.receive({ type: "peer_status", peer: peerOn });
+    expect(c.getState().peer?.listening).toBe("192.168.1.10:47801");
+    ws.receive({ type: "machine_removed", machineId: MID2 });
+    expect(c.getState().machines[MID2]).toBeUndefined();
+    expect(c.getState().devices).toEqual([]);
+    ws.receive({ type: "devices", devices: [device2] });
+    expect(c.getState().devices).toEqual([device2]);
+  });
+
+  test("createInvite sends only the given options and resolves with the URI", async () => {
+    const { c, ws } = connected();
+    const p = c.createInvite();
+    const sent = ws.lastSent();
+    expect(sent).toEqual({ type: "create_invite", id: sent.id });
+    ws.receive({ type: "ack", id: sent.id, ok: true, result: { uri: inviteFrom2, expiresAt: 123 } });
+    expect(await p).toEqual({ uri: inviteFrom2, expiresAt: 123 });
+
+    const p2 = c.createInvite({ ttlSecs: 120, addr: " 192.168.1.10:47801 " });
+    expect(ws.lastSent()).toMatchObject({ type: "create_invite", ttlSecs: 120, addr: "192.168.1.10:47801" });
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: true, result: { uri: inviteFrom2, expiresAt: 1 } });
+    await p2;
+  });
+
+  test("createInvite checks ttl and addr locally; hub errors keep their code", async () => {
+    const { c, ws } = connected();
+    const before = ws.sent.length;
+    await expect(c.createInvite({ ttlSecs: 59 })).rejects.toMatchObject({ code: "invalid", requestType: "create_invite" });
+    await expect(c.createInvite({ ttlSecs: 3601 })).rejects.toMatchObject({ code: "invalid" });
+    await expect(c.createInvite({ ttlSecs: 90.5 })).rejects.toMatchObject({ code: "invalid" });
+    await expect(c.createInvite({ addr: "my host:1" })).rejects.toMatchObject({ code: "invalid" });
+    expect(ws.sent.length).toBe(before);
+    const p = c.createInvite({ addr: "  " }); // a blank addr is omitted, not an error
+    expect(ws.lastSent()).toEqual({ type: "create_invite", id: ws.lastSent().id });
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: false, error: "peer_listener_off" });
+    await expect(p).rejects.toMatchObject({ code: "peer_listener_off" });
+  });
+
+  test("joinPeer sends the trimmed URI and folds the new peer into state", async () => {
+    const { c, ws } = connected();
+    const p = c.joinPeer(`  ${inviteFrom2}\n`);
+    const sent = ws.lastSent();
+    expect(sent).toEqual({ type: "join_peer", id: sent.id, uri: inviteFrom2 });
+    ws.receive({ type: "ack", id: sent.id, ok: true, result: { device: device2, machine: { ...machine2, online: true } } });
+    const res = await p;
+    expect(res.device.id).toBe(MID2);
+    expect(c.getState().devices).toEqual([device2]);
+    expect(c.getState().machines[MID2]?.online).toBe(true);
+  });
+
+  test("joinPeer rejects bad and self invites locally; hub errors keep their code", async () => {
+    const { c, ws } = connected();
+    const before = ws.sent.length;
+    await expect(c.joinPeer("hello")).rejects.toMatchObject({ code: "bad_uri", requestType: "join_peer" });
+    await expect(c.joinPeer(inviteFrom2.replace(MID2, MID))).rejects.toMatchObject({ code: "self_invite" });
+    expect(ws.sent.length).toBe(before);
+    for (const code of ["unreachable", "invite_rejected", "timeout", "bad_uri"]) {
+      const p = c.joinPeer(inviteFrom2);
+      ws.receive({ type: "ack", id: ws.lastSent().id, ok: false, error: code });
+      await expect(p).rejects.toMatchObject({ code });
+    }
+  });
+
+  test("joinPeer waits longer than an ordinary request (the hub dials for up to 10 s)", async () => {
+    const { c, ws } = connected({ requestTimeoutMs: 20 });
+    let settled = false;
+    const p = c.joinPeer(inviteFrom2).finally(() => (settled = true));
+    await tick(60);
+    expect(settled).toBe(false);
+    expect(JOIN_PEER_TIMEOUT_MS).toBeGreaterThanOrEqual(15_000);
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: false, error: "unreachable" });
+    await expect(p).rejects.toMatchObject({ code: "unreachable" });
+  });
+
+  test("revokeDevice sends the device id and drops it on ok", async () => {
+    const c = client();
+    c.connect();
+    const ws = FakeSocket.last();
+    ws.handshake({ ...welcome, machines: [machine, machine2], devices: [device2] });
+    const p = c.revokeDevice(MID2);
+    const sent = ws.lastSent();
+    expect(sent).toEqual({ type: "revoke_device", id: sent.id, deviceId: MID2 });
+    ws.receive({ type: "ack", id: sent.id, ok: true, result: {} });
+    await p;
+    expect(c.getState().devices).toEqual([]);
+    expect(c.getState().machines[MID2]).toBeUndefined();
+
+    const missing = c.revokeDevice("gone00000000");
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: false, error: "not_found" });
+    await expect(missing).rejects.toMatchObject({ code: "not_found", requestType: "revoke_device" });
+  });
+
+  test("errors never echo the invite URI", async () => {
+    const { c, ws } = connected();
+    const p = c.joinPeer(inviteFrom2);
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: false, error: "invite_rejected" });
+    const err = (await p.catch((e: unknown) => e)) as Error;
+    expect(err.message).not.toContain("krypto://");
+    expect(err.message).not.toContain("AAAAAAAAAAAAAAAAAAAAAA");
+    const local = (await c.joinPeer(inviteFrom2.replace("v=1", "v=0")).catch((e: unknown) => e)) as Error;
+    expect(local).toMatchObject({ code: "bad_uri" });
+    expect(local.message).not.toContain("AAAAAAAAAAAAAAAAAAAAAA");
+    expect(local.message).not.toContain("krypto://");
+    expect(c.getState().lastError ?? "").not.toContain("krypto://");
   });
 });

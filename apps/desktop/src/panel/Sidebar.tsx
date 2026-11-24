@@ -1,13 +1,15 @@
 import { useMemo, useState, type ReactNode } from "react";
+import { machineCounts } from "@krypto/hub-client";
 import type { Session } from "@krypto/protocol";
 import { STATUS_META, SOURCE_LABEL, agentName, isActive, sessionTitle, timeAgo } from "../lib/format";
 import { OS_LABEL, machineDisplayName, machineSummary } from "../lib/machine";
+import { machinesLine } from "../lib/pairing";
 import { usePanel, type Route } from "./context";
 import * as I from "./icons";
 import { ACTIVITY_LABEL, PetAvatar, activityUrgency, safePetLine } from "./PetAvatar";
 
 export function Sidebar() {
-  const { state, views, route, navigate, now } = usePanel();
+  const { state, views, route, navigate, now, meta } = usePanel();
   const [showEnded, setShowEnded] = useState(false);
   const [heroIdx, setHeroIdx] = useState(0);
 
@@ -35,11 +37,14 @@ export function Sidebar() {
     { route: { view: "chat" }, label: "Chat", icon: <I.Chat /> },
     { route: { view: "approvals" }, label: "Approvals", icon: <I.Bell />, badge: pendingCount },
     { route: { view: "pets" }, label: "Pets", icon: <I.Bone /> },
+    { route: { view: "machines" }, label: "Machines", icon: <I.Machines /> },
     { route: { view: "rules" }, label: "Rules", icon: <I.Shield /> },
     { route: { view: "settings" }, label: "Settings", icon: <I.Gear /> },
   ];
 
   const machine = state.machine;
+  const counts = machineCounts(state);
+  const connected = meta.phase === "connected";
 
   return (
     <aside className="sidebar">
@@ -56,6 +61,17 @@ Rename it in Settings`}
         </span>
         {machine && <span className="machine-tag-os">{OS_LABEL[machine.os] ?? machine.os}</span>}
       </button>
+      {counts.total > 0 && (
+        <button
+          className={`machines-line${route.view === "machines" ? " is-active" : ""}`}
+          onClick={() => navigate({ view: "machines" })}
+          title="Paired machines"
+        >
+          <span className={`dot${connected && counts.online > 1 ? " tone-done" : ""}`} aria-hidden />
+          <span>{machinesLine(counts.total, counts.online, connected)}</span>
+          {counts.total === 1 && <span className="machines-line-cta">Pair</span>}
+        </button>
+      )}
 
       <button
         className={`hero tone-${hero?.activity ?? "napping"}`}

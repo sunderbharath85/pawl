@@ -29,6 +29,7 @@ import {
   type HubState,
   type StateLimits,
 } from "./state";
+import { INVITE_TTL_MAX_SECS, INVITE_TTL_MIN_SECS, parseInviteUri } from "./peer";
 import { toHubWsUrl } from "./url";
 
 export interface HubClientOptions {
@@ -89,6 +90,18 @@ interface PendingRequest {
   resolve(result: unknown): void;
   reject(err: Error): void;
 }
+
+/** Per-call request options. */
+export interface RequestOptions {
+  /** Ack timeout for this request; defaults to the client's `requestTimeoutMs`. */
+  timeoutMs?: number | undefined;
+}
+
+/**
+ * Client-side wait for a `join_peer` ack. The hub gives up dialing after 10 s and then answers
+ * `unreachable` / `timeout` itself; this only has to outlast that.
+ */
+export const JOIN_PEER_TIMEOUT_MS = 30_000;
 
 type StateListener = (state: HubState, msg?: ServerMsg) => void;
 type AnyMsgListener = (msg: ServerMsg) => void;
@@ -240,7 +253,10 @@ export class HubClient {
    * on timeout (`timeout`, default 15 s), on disconnect after send (`disconnected`), when closed (`closed`)
    * or unauthorized (`unauthorized`). Requests made while (re)connecting are queued until the hello completes.
    */
-  request<T extends keyof AckResults>(msg: DistributiveOmit<Extract<ClientMsg, { type: T }>, "id">): Promise<AckResults[T]> {
+  request<T extends keyof AckResults>(
+    msg: DistributiveOmit<Extract<ClientMsg, { type: T }>, "id">,
+    options?: RequestOptions,
+  ): Promise<AckResults[T]> {
     const request = msg as unknown as ClientRequest;
     return new Promise<AckResults[T]>((resolve, reject) => {
       if (this.state.status === "unauthorized") {
@@ -262,7 +278,7 @@ export class HubClient {
           if (this.pending.delete(id)) {
             reject(new HubRequestError("timeout", request.type, `hub request "${request.type}" timed out`));
           }
-        }, this.opts.requestTimeoutMs),
+        }, options?.timeoutMs ?? this.opts.requestTimeoutMs),
         resolve: resolve as (r: unknown) => void,
         reject,
       };
@@ -369,6 +385,50 @@ export class HubClient {
     const machineId = await this.localMachineId("update_machine");
     const res = await this.request<"update_machine">({ type: "update_machine", machineId, name: trimmed });
     return res.machine;
+  }
+
+  /**
+   * Create a one-time pairing invite on this hub (needs its peer listener on). `ttlSecs` must be an
+   * integer in 60..3600 (default 600 on the hub) and `addr` overrides the advertised "host:port";
+   * both are checked locally first (code `invalid`). Hub errors: `peer_listener_off`, `invalid`.
+   * The URI holds a one-time secret: show it, never log or store it.
+   */
+  async createInvite(opts: { ttlSecs?: number | undefined; addr?: string | undefined } = {}): Promise<AckResults["create_invite"]> {
+    const msg: DistributiveOmit<Extract<ClientMsg, { type: "create_invite" }>, "id"> = { type: "create_invite" };
+    if (opts.ttlSecs !== undefined) {
+      const ttl = opts.ttlSecs;
+      if (!Number.isInteger(ttl) || ttl < INVITE_TTL_MIN_SECS || ttl > INVITE_TTL_MAX_SECS) {
+        throw new HubRequestError("invalid", "create_invite", `invite lifetime must be ${INVITE_TTL_MIN_SECS}–${INVITE_TTL_MAX_SECS} seconds`);
+      }
+      msg.ttlSecs = ttl;
+    }
+    const addr = opts.addr?.trim();
+    if (addr) {
+      if (/\s/.test(addr)) throw new HubRequestError("invalid", "create_invite", "invite address must be host:port");
+      msg.addr = addr;
+    }
+    return this.request<"create_invite">(msg);
+  }
+
+  /**
+   * Pair this hub with another one from its invite URI. Rejects locally with `bad_uri` (not an invite)
+   * or `self_invite` (made by this hub) without contacting the hub. Hub errors: `bad_uri`, `self_invite`,
+   * `unreachable`, `invite_rejected`, `timeout`. Resolves with the new device and its machine, which are
+   * also folded into `state.devices` / `state.machines`.
+   */
+  async joinPeer(uri: string): Promise<AckResults["join_peer"]> {
+    const trimmed = uri.trim();
+    const info = parseInviteUri(trimmed);
+    if (!info) throw new HubRequestError("bad_uri", "join_peer", "not a Krypto pairing invite");
+    if (info.machineId === this.state.machine?.id) {
+      throw new HubRequestError("self_invite", "join_peer", "the invite was created by this hub");
+    }
+    return this.request<"join_peer">({ type: "join_peer", uri: trimmed }, { timeoutMs: Math.max(JOIN_PEER_TIMEOUT_MS, this.opts.requestTimeoutMs) });
+  }
+
+  /** Unpair a device (its links close and it can no longer connect; the peer is told). Hub error: `not_found`. */
+  async revokeDevice(deviceId: string): Promise<void> {
+    await this.request<"revoke_device">({ type: "revoke_device", deviceId });
   }
 
   // ---------------------------------------------------------------- internals

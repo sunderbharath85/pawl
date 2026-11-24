@@ -48,7 +48,7 @@ another owner's files.
 - Data dir: `krypto_protocol::data_dir()` = `dirs::data_dir()/krypto`
   (Windows `%APPDATA%\krypto`, macOS `~/Library/Application Support/krypto`,
   Linux `~/.local/share/krypto`). Contains `machine.toml` (`id`, `name`: this machine's identity; never edit `id`), `hub.db` (SQLite), `token`,
-  `config.toml`, `registry-cache.json`.
+  `config.toml`, `registry-cache.json`, `device.key` (X25519 secret for peer links; never read by clients, never logged).
 - `token`: 32 random bytes hex, created by the hub on first start. Clients read it
   (env `KRYPTO_HUB_TOKEN` overrides).
 - Endpoints (crate `krypto-hub`):
@@ -352,3 +352,166 @@ impl Watchdog { pub fn new(cfg: WatchdogConfig, machine_id: MachineId) -> Self; 
 - desktop/vscode (fe-apps): show pet names by default; show the machine name (panel header / status-bar tooltip);
   desktop Settings + VS Code command "Krypto: Rename This Machine" call `updateMachine`; use `seq` cursors.
 - mobile: frozen; only keep `bunx tsc --noEmit` green against protocol v2 (fe-core does the minimal type fixes).
+
+## Step 2 — Pairing + LAN presence (PLAN.md migration step 2) — protocol v3
+
+Branch `step-2-pairing-presence`. Protocol already updated by the orchestrator (PROTOCOL_VERSION = 3):
+`Device`, `DeviceKind`, `PeerStatus`, `RepoRef`, `Presence`, `PeerEnvelope`, `PeerBody`, `PairRejectReason`,
+`ByeReason`, constants `PEER_DEFAULT_PORT` (47801), `PEER_PATH` ("/peer"), `PRESENCE_INTERVAL_MS` (15 s),
+`PRESENCE_OFFLINE_MS` (45 s). ClientMsgs `create_invite{ttlSecs?,addr?}` -> `{uri,expiresAt}`,
+`join_peer{uri}` -> `{device,machine}`, `revoke_device{deviceId}` -> `{}`. ServerMsgs `machine_removed{machineId}`,
+`devices{devices}`, `peer_status{peer}`. `Welcome.devices` + `Welcome.peer`. Read the doc comments there; they are the spec.
+
+Scope: pairing, encrypted links, presence heartbeats, online/offline. **Not** in step 2: event mirroring and remote
+pets on screen (step 3), intents (step 4), relay (step 6), phone and group-roster introduction (step 7).
+Peer frames never reach ClientMsg handling: a peer can only pair, say hello, send presence and say bye.
+
+### Ownership (step 2)
+| Role | Owns |
+|---|---|
+| sde-peer | `crates/peer/` (`krypto-peer`, new; skeleton exists) |
+| sde-hubcore | `crates/hub/` |
+| fe-apps | `apps/desktop/`, `apps/vscode/`, `packages/hub-client/` |
+
+Dependencies: `crypto_box` is the only new one (approved; sde-peer adds it to `crates/peer/Cargo.toml`).
+Reuse the versions the hub already uses for `axum 0.8 (ws)`, `tokio-tungstenite 0.29`, `getrandom 0.4`, `subtle`,
+`hex`. Base64 is hand-rolled in `krypto-peer` (no `base64` crate). Ask t13 before adding anything else.
+
+### Crypto + wire
+- Device key: X25519 secret in `data_dir/device.key` (64 hex chars; unix mode 0600). Created on first start from
+  getrandom. Never logged, printed or sent. Public key on the wire = base64 standard padded (URI: base64url, no padding).
+- Box: `crypto_box::SalsaBox` (NaCl `crypto_box`, compatible with tweetnacl `nacl.box`). Nonce (24 bytes) =
+  15 random bytes || dir byte (1 if sender pk < receiver pk bytewise, else 0) || seq u64 big-endian. NaCl box has no
+  AAD, so this binds the plaintext `seq` and the direction into the authenticated nonce; `open()` rejects a nonce
+  whose seq differs from `env.seq` or whose dir is wrong (no seq-bumped replays, no frames reflected to their
+  sender). The TS side (step 7) must use the same layout.
+- `seq`: sender uses `max(last_tx + 1, now_ms * 1000)` per peer and persists `last_tx`; receiver accepts only
+  `seq > last_rx` for that peer and persists `last_rx`. Survives restarts on both sides.
+- Invite URI: `krypto://peer?v=1&mid=<machineId>&pk=<b64url pk>&addr=<host:port>&code=<b64url 16 random bytes>&exp=<unix ms>`.
+  Code: CSPRNG, single use (consumed on the first matching attempt even if a later step fails), compared in constant
+  time (`subtle`), held in memory only, never logged. TTL 60..=3600 s, default 600. A wrong code does NOT burn
+  invites (anyone who knows the hub's public key could block pairing); instead pair attempts are rate-limited
+  per remote IP and `PairRejected` events are coalesced. 128-bit codes make guessing infeasible.
+- Peer-reported addrs (`hello`/`pair_request`/`pair_accept` `addr`) are stored only if they are IP literals in
+  private (10/8, 172.16/12, 192.168/16), Tailscale CGNAT (100.64/10), link-local, loopback or IPv6 ULA ranges;
+  otherwise they are ignored. The addr in an invite URI (typed by the user) is not restricted.
+
+### Pairing (inviter A must have the listener on; joiner B dials)
+1. A `create_invite` -> URI (addr = the `addr` arg, else the bound listener addr; error `invalid` if that is 0.0.0.0 / ::).
+2. B `join_peer{uri}`: parse (`bad_uri`), reject its own mid (`self_invite`), dial `ws://<addr>/peer` (`unreachable`,
+   10 s `timeout`), send envelope `{from:B, to:A, pk:B.pk, box: pair_request{code, machine:B, addr:B.listening?}}`
+   sealed B.sk -> A.pk (A.pk comes from the URI, so a man in the middle cannot answer).
+3. A: a first frame carrying `pk` is accepted only while at least one invite is live (else close, no reply). Decrypt,
+   check `to == A`, `machine.id == from`, valid machine id, `from != A`, then the code. On success upsert B in the roster
+   (re-pairing replaces the key and clears revoked), audit-log it, reply `pair_accept{machine:A, addr, reqSeq}`
+  (`reqSeq` = the request envelope's seq; B rejects a mismatch, so an old captured accept cannot be replayed); the socket
+   becomes the live link. On failure reply `pair_reject{invalid_invite|bad_request}` and close; audit-log the attempt.
+4. B: decrypt `pair_accept` with A.pk from the URI, store A (addr from the URI); the link is live.
+
+### Links + presence
+- Listener (opt-in, off by default): `krypto serve --peer-listen <ip[:port]>` or config.toml `[peer] listen = "ip:port"`
+  (default port 47801). Serves **only** `GET /peer` (WebSocket); every other path 404; any request carrying an
+  `Origin` header -> 403 (blocks browsers); max frame 256 KiB; an unauthenticated socket must send a valid first frame
+  within 5 s; at most 16 unauthenticated sockets at once. Binding 0.0.0.0 / :: logs a warning. It never exposes the
+  local API.
+- Dialer: for every non-revoked hub in the roster with an `addr` and no live link, dial with backoff 1 s -> 60 s (jitter).
+  First frame: `hello{machine, addr?}`; the listener checks `from` is in the roster and not revoked, `to` is itself,
+  decrypts with the roster key, checks seq, replies `hello`. Any check fails -> close without reply.
+- Authenticated `hello`/`presence` update the stored addr, name, os, hubVersion and lastSeen.
+- Two live links to one peer: keep the one dialed by the hub with the smaller machine id; close the other.
+- Presence: sent right after hello, then every 15 s, and immediately when the snapshot changes (rename, agents, pets).
+  No authenticated frame for 45 s -> offline, close the link. Socket closed or `bye` -> offline at once.
+- Revoke: `bye{revoked}` on the live link, close, mark revoked, stop dialing. Receiving `bye{revoked}` marks the
+  sender revoked too (mutual). Audit-log both.
+
+### `krypto-peer` API (sde-peer implements; sde-hubcore codes against it)
+```rust
+pub mod b64 { pub fn encode(b: &[u8]) -> String; pub fn decode(s: &str) -> Result<Vec<u8>, B64Error>;
+              pub fn encode_url(b: &[u8]) -> String; pub fn decode_url(s: &str) -> Result<Vec<u8>, B64Error>; }
+
+pub struct DeviceKeys { /* private */ }
+impl DeviceKeys {
+    pub fn load_or_create(path: &Path) -> anyhow::Result<Self>;
+    pub fn generate() -> Self;
+    pub fn public_key(&self) -> [u8; 32];
+    pub fn public_b64(&self) -> String;
+}   // no Debug/Display that could print the secret
+
+pub struct Invite { pub machine_id: MachineId, pub public_key: [u8; 32], pub addr: String, pub code: String, pub expires_at: UnixMs }
+impl Invite { pub fn to_uri(&self) -> String; pub fn parse(uri: &str) -> Result<Invite, InviteError>; }
+
+pub fn seal(keys: &DeviceKeys, from: &str, to: &str, to_pk: &[u8; 32], seq: u64, body: &PeerBody, include_pk: bool) -> PeerEnvelope;
+pub fn open(keys: &DeviceKeys, env: &PeerEnvelope, sender_pk: &[u8; 32]) -> Result<PeerBody, OpenError>;
+
+/// Roster storage the hub provides (SQLite). Sync, quick calls.
+pub trait Roster: Send + Sync + 'static {
+    fn get(&self, device_id: &str) -> Option<RosterEntry>;      // non-revoked only
+    fn list(&self) -> Vec<RosterEntry>;                          // non-revoked only
+    fn upsert(&self, entry: RosterEntry);                        // re-pair: replace key, clear revoked
+    fn update_seen(&self, device_id: &str, machine: &Machine, addr: Option<&str>, ts: UnixMs);
+    fn revoke(&self, device_id: &str);
+    fn last_rx_seq(&self, device_id: &str) -> u64;
+    fn set_last_rx_seq(&self, device_id: &str, seq: u64);
+    fn last_tx_seq(&self, device_id: &str) -> u64;
+    fn set_last_tx_seq(&self, device_id: &str, seq: u64);
+}
+pub struct RosterEntry { pub device: Device, pub machine: Machine /* last known; online false */ }
+
+pub enum PeerEvent {
+    Paired { device: Device, machine: Machine, we_invited: bool },
+    PairRejected { remote_addr: String, reason: PairRejectReason },
+    LinkUp { device_id: String, machine: Machine },
+    LinkDown { device_id: String },
+    Presence { device_id: String, presence: Presence },
+    Revoked { device_id: String, by_peer: bool },
+}
+
+pub struct PeerTimings { pub presence_interval: Duration, pub offline_after: Duration, pub handshake_timeout: Duration,
+                         pub backoff_min: Duration, pub backoff_max: Duration }   // Default = the constants above
+
+#[derive(Clone)] pub struct PeerNode { /* Arc inner */ }
+impl PeerNode {
+    pub fn new(keys: DeviceKeys, me: Machine, roster: Arc<dyn Roster>, events: UnboundedSender<PeerEvent>) -> Self;
+    pub fn with_timings(self, t: PeerTimings) -> Self;
+    pub fn public_b64(&self) -> String;
+    pub async fn listen(&self, addr: SocketAddr) -> anyhow::Result<SocketAddr>;   // returns the bound addr
+    pub fn listening(&self) -> Option<SocketAddr>;
+    pub fn create_invite(&self, advertise: Option<String>, ttl: Duration) -> Result<Invite, InviteError>; // ListenerOff, Invalid
+    pub async fn join(&self, uri: &str) -> Result<(Device, Machine), JoinError>; // BadUri, SelfInvite, Unreachable, Rejected, Timeout
+    pub fn connect_known(&self);                 // idempotent: dial loops for every roster hub with an addr
+    pub fn set_machine(&self, me: Machine);
+    pub fn set_presence(&self, p: Presence);     // latest snapshot; pushed now and every presence_interval
+    pub fn send(&self, device_id: &str, body: PeerBody) -> bool;   // for step 3+
+    pub async fn revoke(&self, device_id: &str);
+    pub fn online(&self) -> Vec<(String, UnixMs)>;   // linked device ids + last authenticated frame ts
+    pub async fn shutdown(&self);                // bye{shutdown} to every link
+}
+```
+Error enums implement `Display` with the snake_case wire codes (`bad_uri`, `self_invite`, `unreachable`,
+`invite_rejected`, `timeout`, `peer_listener_off`, `invalid`) so the hub can ack them verbatim.
+
+### Hub (sde-hubcore)
+- Store schema v3: `devices` (id, kind, name, os, hub_version, public_key, addr, paired_at, last_seen, revoked_at,
+  last_rx_seq, last_tx_seq) + `impl Roster`. The audit log gains pairing entries (paired, pair_rejected, revoked,
+  revoked_by_peer).
+- Startup: `DeviceKeys::load_or_create(data_dir/device.key)`, `PeerNode::new`, listen if configured, `connect_known()`.
+  Keep the presence snapshot fresh (machine, agents, own pets, `repos: []`). Shutdown sends `bye{shutdown}`.
+- PeerEvents -> `ServerMsg::Machine` (online flips, renames), `MachineRemoved`, `Devices`. Welcome: `machines` = self
+  then roster hubs (`online` from `PeerNode::online()`), `devices`, `peer`.
+- ClientMsgs `create_invite`, `join_peer`, `revoke_device` per the protocol doc comments.
+- CLI: `krypto serve --peer-listen <ip[:port]>`; `krypto peer invite [--ttl <secs>] [--addr <host:port>]` (prints the URI,
+  the expiry and the exact `krypto peer join "<uri>"` line); `krypto peer join <uri>`; `krypto peer revoke <machineId|name>`;
+  `krypto machines [--json]` (online, last seen, addr; works without a hub from hub.db, showing peers offline).
+  invite/join/revoke need a running hub.
+
+### Clients (fe-apps)
+- hub-client: `HubState.devices: Device[]`, `HubState.peer?: PeerStatus`; Welcome fields; reducers for `devices`,
+  `machine_removed` (drop from `machines`), `peer_status`. `HubClient.createInvite(opts?: {ttlSecs?, addr?})`,
+  `joinPeer(uri)`, `revokeDevice(deviceId)`. Tests for the reducers.
+- Desktop panel "Machines" view: this machine first, then paired hubs (online dot, OS, last seen, addr), Revoke with an
+  in-app confirm (no browser `confirm()`); "Pair a machine": Create invite -> URI + copy button + expiry countdown +
+  the CLI line, and a Join field (paste a URI). Listener off -> show how to turn it on (`krypto serve --peer-listen
+  <LAN-IP>` or config.toml `[peer] listen`). Friendly text for every error code. Sidebar shows "N machines · M online".
+- VS Code: status-bar tooltip lists machines with online state; command "Krypto: Show Machines" (read-only QuickPick).
+  No pairing UI in VS Code.
+- Remote pets and sessions are not shown yet (step 3).

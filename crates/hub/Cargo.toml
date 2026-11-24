@@ -18,6 +18,7 @@ krypto-protocol = { workspace = true }
 krypto-acp = { workspace = true }
 krypto-discovery = { workspace = true }
 krypto-brain = { workspace = true }
+krypto-peer = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

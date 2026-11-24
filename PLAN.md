@@ -4,7 +4,7 @@ Named dog pets that watch and drive your coding agents over ACP (Agent Client Pr
 
 - Whiteboard: https://claude.ai/artifact/E8zVPktys5q8qKw5AjmjtB
 - Last updated: 2026-11-23
-- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto, step 1 (machine identity). Next: step 2 (pairing + LAN presence).
+- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto, step 1 (machine identity), step 2 (pairing + LAN presence, protocol v3). Next: step 3 (mirror events + visitors).
 
 ## Decisions
 
@@ -233,8 +233,11 @@ Each step can ship and be tested on its own.
    - Seed pet names from `machineId + agentId`.
    - Clients key everything by global id. The pet engine matches pets to sessions by `(machineId, agentId)`. Desktop shows names by default.
    - Test: unit tests, plus the existing desktop and VS Code working against one hub with no visible change except names.
-2. **Pairing + presence over the LAN (no relay).**
+2. ✅ **Pairing + presence over the LAN (no relay).** (done 2026-11-23; protocol v3, new crate `krypto-peer`, dep `crypto_box`)
    - Long-term device keys. `krypto peer invite` prints a one-time URI; `krypto peer join <uri>` on the other hub.
+   - Pairing is pairwise here. Introducing a new device to the whole group roster moves to step 7, when the phone joins.
+   - Hardened after a security review: seq and direction bound into the nonce, `pair_accept` echoes the request seq, wrong codes rate-limited per IP (they do not burn invites), connection caps per IP, peer-reported addrs limited to private/Tailscale/link-local/loopback IPs.
+   - Deferred: `cancel_invite`, a `paired` notice for the inviter, and warning when two paired machines share a name.
    - An opt-in peer listener on the LAN or Tailscale interface carries encrypted `presence` heartbeats both ways.
    - Hubs show `machines` (online, lastSeen) in Welcome, the CLI (`krypto machines`) and the desktop panel.
    - Test: two hubs on one PC (separate data dirs and ports), then the Mac mini and the Windows PC.
