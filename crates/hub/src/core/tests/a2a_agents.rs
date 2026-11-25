@@ -57,6 +57,23 @@ fn artifact(text: &str) -> StreamResponse {
     })
 }
 
+/// A question with a schema picking one of `values`, tagged `id`.
+fn ask_with(text: &str, id: Option<&str>, values: &[&str]) -> StreamResponse {
+    let schema = json!({ "type": "object", "properties": { "pick": { "type": "string", "enum": values } } });
+    let mut sp = Part::data(schema);
+    let meta = match id {
+        Some(i) => json!({ "type": "input_schema", "id": i }),
+        None => json!({ "type": "input_schema" }),
+    };
+    sp.metadata = Some(HashMap::from([(pawl_a2a::STRUCTURED_INPUT_EXT.to_string(), meta)]));
+    StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+        task_id: TASK.into(),
+        context_id: CTX.into(),
+        status: TaskStatus { state: TaskState::InputRequired, message: Some(Message::new(Role::Agent, vec![Part::text(text), sp])), timestamp: None },
+        metadata: None,
+    })
+}
+
 /// "Deploy v2 to production?" with a schema picking approve / deny (input id "q1").
 fn ask_deploy(details_kind: Option<&str>) -> StreamResponse {
     let schema = json!({ "type": "object", "properties": { "decision": { "type": "string", "enum": ["approve", "deny"] } }, "required": ["decision"] });
@@ -127,6 +144,18 @@ impl A2aHandler for Script {
                 *self.tx.lock().unwrap() = Some(tx);
             }
             "wait" => *self.tx.lock().unwrap() = Some(tx),
+            // A hostile agent: question after question, fresh ids and none.
+            "flood" => {
+                let _ = tx.send(ask_with("First?", Some("a1"), &["yes", "no"]));
+                let _ = tx.send(ask_with("Second?", Some("a2"), &["yes", "no"]));
+                let _ = tx.send(ask_with("Third?", None, &["yes", "no"]));
+                *self.tx.lock().unwrap() = Some(tx);
+            }
+            "many" => {
+                let nine = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+                let _ = tx.send(ask_with("Pick one", Some("m1"), &nine));
+                *self.tx.lock().unwrap() = Some(tx);
+            }
             _ => {
                 let _ = tx.send(artifact("Hi there"));
                 let _ = tx.send(status(TaskState::Completed, None));
@@ -368,4 +397,93 @@ async fn agents_are_validated_and_an_unreachable_one_shows_its_error() {
     f.hub.update_settings(&patch(vec![]), &me).await.unwrap();
     f.hub.refresh_a2a_cards().await;
     assert!(!f.hub.agents().iter().any(|a| a.id == "a2a:down"));
+}
+
+
+// ---------------------------------------------------------------- security review fixes
+
+#[tokio::test]
+async fn a_hostile_agent_gets_one_card_per_session_and_few_options() {
+    let o = outside(true).await;
+    let f = agent_fixture(&o, None).await;
+    let s = start_helper(&f, "flood").await;
+    wait_for("the third question as text", || events_of(&f, &s.id).iter().any(|e| e.kind == EventType::AgentMessageChunk && e.payload["text"] == "Third?")).await;
+    let cards: Vec<_> = f.hub.pending_permissions().into_iter().filter(|r| r.session_id == s.id).collect();
+    assert_eq!(cards.len(), 1, "one card at a time per session");
+    assert_eq!(cards[0].tool_call.title.as_deref(), Some("First?"));
+    assert!(events_of(&f, &s.id).iter().any(|e| e.kind == EventType::AgentMessageChunk && e.payload["text"] == "Second?"), "later questions are text");
+    // Too many choices: a question, no card.
+    let s2 = start_helper(&f, "many").await;
+    wait_for("the question", || events_of(&f, &s2.id).iter().any(|e| e.kind == EventType::AgentMessageChunk && e.payload["text"].as_str().unwrap_or("").contains("9 choices"))).await;
+    assert!(!f.hub.pending_permissions().iter().any(|r| r.session_id == s2.id));
+}
+
+#[tokio::test]
+async fn an_agent_that_moves_host_needs_its_token_again() {
+    let f = fixture(None).await;
+    let me = actor();
+    let patch = |url: &str, token: Option<Option<&str>>| HubSettingsPatch {
+        a2a: Some(HubSettingsA2aPatch {
+            agents: Some(vec![A2aAgentPatch { id: "bot".into(), name: None, url: url.into(), token: token.map(|t| t.map(str::to_string)) }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let token = |f: &Fixture| f.hub.config().a2a.agents[0].token.clone();
+    f.hub.update_settings(&patch("https://agent.example/a2a", Some(Some("s3cret"))), &me).await.unwrap();
+    // Same origin, another path: the token stays.
+    f.hub.update_settings(&patch("https://agent.example/v2/", None), &me).await.unwrap();
+    assert_eq!(token(&f).as_deref(), Some("s3cret"));
+    // Another host (or port or scheme) without a new token: refused, nothing changed.
+    for moved in ["https://other.example/a2a", "https://agent.example:8443/a2a"] {
+        let e = format!("{:#}", f.hub.update_settings(&patch(moved, None), &me).await.unwrap_err());
+        assert!(e.starts_with("invalid:a2a.agents[0].token") && e.contains("another host"), "{e}");
+        assert_eq!(f.hub.config().a2a.agents[0].url, "https://agent.example/v2/");
+    }
+    // With a new token, or an explicit clear, it moves.
+    f.hub.update_settings(&patch("https://other.example/a2a", Some(Some("n3w"))), &me).await.unwrap();
+    assert_eq!(token(&f).as_deref(), Some("n3w"));
+    f.hub.update_settings(&patch("https://third.example/", Some(None)), &me).await.unwrap();
+    assert_eq!(token(&f), None);
+    // No token before: moving needs nothing.
+    f.hub.update_settings(&patch("https://fourth.example/", None), &me).await.unwrap();
+}
+
+#[tokio::test]
+async fn settings_are_pushed_after_a_card_fetch() {
+    let o = outside(true).await;
+    let mut f = agent_fixture(&o, None).await;
+    drain(&mut f.rx);
+    f.hub.refresh_a2a_cards().await;
+    let pushed = drain(&mut f.rx).into_iter().find_map(|m| match m {
+        ServerMsg::Settings { settings, .. } => Some(settings),
+        _ => None,
+    });
+    let settings = pushed.expect("a settings message");
+    assert!(settings.a2a.agents[0].card.is_some());
+}
+
+#[tokio::test]
+async fn pawl_added_as_its_own_outside_agent_answers_a_plain_prompt() {
+    let f = fixture(None).await;
+    let me = actor();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let callers = vec![pawl_protocol::A2aCallerPatch { id: "me".into(), name: "Myself".into(), allow_approvals: false }];
+    f.hub.update_settings(&HubSettingsPatch { a2a: Some(HubSettingsA2aPatch { server: Some(true), port: Some(port), callers: Some(callers), agents: None }), ..Default::default() }, &me).await.unwrap();
+    let token = f.hub.a2a_rotate_token("me", &me).await.unwrap()["token"].as_str().unwrap().to_string();
+    let agents = vec![A2aAgentPatch { id: "self".into(), name: None, url: format!("http://127.0.0.1:{port}"), token: Some(Some(token)) }];
+    f.hub.update_settings(&HubSettingsPatch { a2a: Some(HubSettingsA2aPatch { agents: Some(agents), ..Default::default() }), ..Default::default() }, &me).await.unwrap();
+    f.hub.refresh_a2a_cards().await;
+    let v = ack_result(
+        f.hub
+            .handle(ClientMsg::StartSession { id: "s".into(), agent_id: "a2a:self".into(), cwd: String::new(), prompt: Some("What's everyone doing?".into()), machine_id: None, confirmed: None }, &me)
+            .await,
+    );
+    let s: Session = serde_json::from_value(v["session"].clone()).unwrap();
+    wait_for("the answer", || events_of(&f, &s.id).iter().any(|e| e.kind == EventType::Stop)).await;
+    let ev = events_of(&f, &s.id);
+    assert!(ev.iter().any(|e| e.kind == EventType::AgentMessageChunk && e.payload["text"].as_str().unwrap_or("").contains("delegate metadata")), "{ev:?}");
+    assert!(!ev.iter().any(|e| e.kind == EventType::Error), "{ev:?}");
+    assert_eq!(f.hub.a2a_get(&f.hub.tasks().latest_per_context()[0].id, None, &pawl_a2a::Caller::Local).unwrap().status.state, TaskState::Completed);
+    f.hub.stop_a2a_server().await;
 }

@@ -23,6 +23,9 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # types, on the hub's axum (the SDK's server crate is not used: its protobuf build pulls in a vendored
 # protoc and tonic/prost).
 axum = "0.8.9"
+# Our own accept loop (header-read timeout, connection cap); both already in the tree through axum.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "service"] }
 subtle = "2.6.1"
 # `A2aHandler` is an #[async_trait] trait (re-exported for the hub).
 async-trait = "0.1"
@@ -34,3 +37,5 @@ url = "2"
 [dev-dependencies]
 # Drives the server's router without a socket in tests (already in the tree through axum).
 tower = { version = "0.5", features = ["util"] }
+# Paused clocks for the timeout tests.
+tokio = { workspace = true, features = ["test-util"] }

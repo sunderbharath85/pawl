@@ -154,3 +154,67 @@ async fn an_owner_that_does_not_answer_times_out_over_a2a_too() {
     assert_eq!(ack_error(b.handle(start_on_a(&cwd, None, Some(true)), &actor()).await), "timeout");
     assert_eq!(b.store().intent_log(1).unwrap()[0].status, "timeout");
 }
+
+
+// ---------------------------------------------------------------- security review fixes
+
+use crate::core::a2a_peer::STREAMS_PER_PEER;
+
+fn start_rpc(call: &str, method: &str, cwd: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0", "id": call, "method": method,
+        "params": {
+            "message": { "messageId": call, "role": "ROLE_USER", "parts": [{ "text": "go" }],
+                         "metadata": { pawl_a2a::DELEGATE_EXT: { "agentId": "codex", "cwd": cwd } } },
+            "configuration": { "returnImmediately": true }
+        }
+    })
+}
+
+fn starts(fake: &FakeHost) -> usize {
+    fake.calls().iter().filter(|c| c.starts_with("start codex")).count()
+}
+
+#[tokio::test]
+async fn a_repeated_call_id_never_runs_twice_and_streams_stop_when_the_link_is_gone() {
+    let f = fixture(None).await;
+    roster_peer(&f.hub, OTHER).await;
+    start(&f).await; // the folder is known
+    let cwd = f.dir.path().to_string_lossy().into_owned();
+    let before = starts(&f.fake);
+    // A unary start, twice with one id: one start.
+    f.hub.answer_a2a(OTHER, "c1", start_rpc("c1", "SendMessage", &cwd), ClientKind::Desktop, true).await;
+    f.hub.answer_a2a(OTHER, "c1", start_rpc("c1", "SendMessage", &cwd), ClientKind::Desktop, true).await;
+    assert_eq!(starts(&f.fake), before + 1);
+    // A streaming start toward a peer that is not linked: forwarding stops at once (no hang), the
+    // stream slot is given back, and a repeat of the id does not start again.
+    tokio::time::timeout(Duration::from_secs(5), f.hub.answer_a2a(OTHER, "c2", start_rpc("c2", "SendStreamingMessage", &cwd), ClientKind::Desktop, true))
+        .await
+        .expect("stops when the link is gone");
+    assert_eq!(starts(&f.fake), before + 2);
+    assert_eq!(f.hub.a2a_peer_streams(OTHER, None), 0);
+    f.hub.answer_a2a(OTHER, "c2", start_rpc("c2", "SendStreamingMessage", &cwd), ClientKind::Desktop, true).await;
+    assert_eq!(starts(&f.fake), before + 2, "a stream call is remembered too");
+    // A peer with all its stream slots in use is refused.
+    f.hub.a2a_peer_streams(OTHER, Some(STREAMS_PER_PEER));
+    f.hub.answer_a2a(OTHER, "c3", start_rpc("c3", "SendStreamingMessage", &cwd), ClientKind::Desktop, true).await;
+    assert_eq!(starts(&f.fake), before + 2);
+    let owner = &f.hub.store().intent_log(1).unwrap()[0];
+    assert_eq!((owner.intent_id.as_str(), owner.reason.as_deref()), ("c3", Some("rate_limited")));
+}
+
+#[tokio::test]
+async fn a_dropped_call_leaves_no_waiter() {
+    let (a, _a_fake, b, _da, _db, _cwd) = two_hubs().await;
+    a.drop_intents(true);
+    let b2 = b.clone();
+    let call = tokio::spawn(async move { b2.peer_call(MID, "dropped", ClientKind::Desktop, false, "ListTasks", json!({})).await });
+    wait_until("the call waits", || {
+        let b = b.clone();
+        async move { b.a2a_waiting() == 1 }
+    })
+    .await;
+    call.abort();
+    let _ = call.await;
+    assert_eq!(b.a2a_waiting(), 0, "the waiter went with the call");
+}

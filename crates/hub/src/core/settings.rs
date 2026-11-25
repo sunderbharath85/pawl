@@ -373,7 +373,7 @@ impl Hub {
         .context("write config.toml")?
     }
 
-    fn announce_settings(&self) {
+    pub(super) fn announce_settings(&self) {
         self.inner.bus.send_local(ServerMsg::Settings { settings: self.settings(), restart_required: self.restart_required() });
     }
 

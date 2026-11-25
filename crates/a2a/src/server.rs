@@ -17,7 +17,13 @@
 //!   guessing local process), calls per caller too. The caller's id reaches the handler in
 //!   [`CALLER_HEADER`], which the guard always strips from the incoming request first; the
 //!   `Authorization` header is removed before the handler sees the request. Tokens are never logged.
-//! - Bodies over [`BODY_MAX_BYTES`] are refused.
+//! - Bodies over [`BODY_MAX_BYTES`] are refused. A request is authenticated and rate-limited on its
+//!   headers before any body byte is read; the body must arrive within [`BODY_READ_TIMEOUT`] and the
+//!   headers within [`HEADER_READ_TIMEOUT`]; at most [`MAX_CONNECTIONS`] connections are open.
+//! - Every refusal (host, origin, size, token, throttling) is reported to the hub's audit hook
+//!   ([`ServerState::with_audit`]).
+//! - A caller whose token is rotated or removed is *revoked*: [`ServerState::revocation`] tells the
+//!   handler to close that caller's open streams and waits.
 
 pub mod rest;
 pub mod rpc;
@@ -68,6 +74,27 @@ pub trait A2aHandler: Send + Sync + 'static {
 
 /// Interval of SSE keep-alive comments.
 pub const SSE_KEEP_ALIVE: Duration = Duration::from_secs(15);
+/// A request's headers must arrive within this.
+pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// A request's body must arrive within this (after it was authenticated).
+pub const BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Open connections at most (more are closed at once).
+pub const MAX_CONNECTIONS: usize = 64;
+
+/// Where refusals go (the hub's A2A log).
+type AuditHook = Box<dyn Fn(Refusal) + Send + Sync>;
+
+/// A request the guard refused, for the hub's audit log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// The authenticated caller, when the refusal came after authentication (rate limit, body).
+    pub caller: Option<String>,
+    /// "forbidden_host", "forbidden_origin", "too_large", "unauthorized", "throttled", "rate_limited",
+    /// "body_timeout".
+    pub status: &'static str,
+    /// `METHOD /path` (the path only; never a query or a body).
+    pub request: String,
+}
 
 /// The caller id the guard hands to the handler (never trusted from the client).
 pub const CALLER_HEADER: &str = "x-pawl-a2a-caller";
@@ -131,6 +158,9 @@ pub struct ServerState {
     callers: RwLock<Vec<CallerAuth>>,
     limits: Mutex<Limits>,
     card: Box<dyn Fn() -> AgentCard + Send + Sync>,
+    audit: RwLock<Option<AuditHook>>,
+    /// Per caller: a counter bumped when its token changes or it is removed.
+    revocations: Mutex<HashMap<String, tokio::sync::watch::Sender<u64>>>,
 }
 
 /// Why a request was not authenticated.
@@ -149,12 +179,57 @@ impl ServerState {
             callers: RwLock::new(callers),
             limits: Mutex::new(Limits { callers: HashMap::new(), public: Bucket::new(PUBLIC_RATE_PER_SEC * 2.0), failures: (Instant::now(), 0) }),
             card: Box::new(card),
+            audit: RwLock::new(None),
+            revocations: Mutex::new(HashMap::new()),
         })
     }
 
-    /// Replace the accepted callers (a removed or rotated token stops working at once).
+    /// Report every refusal to `audit` (the hub writes it to its A2A log).
+    pub fn with_audit(self: Arc<Self>, audit: impl Fn(Refusal) + Send + Sync + 'static) -> Arc<Self> {
+        *self.audit.write().unwrap_or_else(|p| p.into_inner()) = Some(Box::new(audit));
+        self
+    }
+
+    fn refuse(&self, caller: Option<&str>, status: &'static str, req: &Request) -> Response {
+        if let Some(f) = self.audit.read().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            let path: String = req.uri().path().chars().take(120).collect();
+            f(Refusal { caller: caller.map(str::to_string), status, request: format!("{} {path}", req.method()) });
+        }
+        let (code, text) = match status {
+            "forbidden_host" => (StatusCode::FORBIDDEN, "host not allowed"),
+            "forbidden_origin" => (StatusCode::FORBIDDEN, "origin not allowed"),
+            "too_large" => (StatusCode::PAYLOAD_TOO_LARGE, "request too large"),
+            "throttled" => (StatusCode::TOO_MANY_REQUESTS, "too many failed attempts; wait a minute"),
+            "rate_limited" => (StatusCode::TOO_MANY_REQUESTS, "slow down"),
+            "body_timeout" => (StatusCode::REQUEST_TIMEOUT, "the request body did not arrive in time"),
+            _ => (StatusCode::UNAUTHORIZED, "unauthorized"),
+        };
+        let mut r = plain(code, text);
+        if code == StatusCode::UNAUTHORIZED {
+            r.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer realm=\"pawl\""));
+        }
+        r
+    }
+
+    /// Replace the accepted callers. A removed or rotated token stops working at once, and that
+    /// caller is revoked (its open streams and waits end, see [`Self::revocation`]).
     pub fn set_callers(&self, callers: Vec<CallerAuth>) {
-        *self.callers.write().unwrap_or_else(|p| p.into_inner()) = callers;
+        let old = std::mem::replace(&mut *self.callers.write().unwrap_or_else(|p| p.into_inner()), callers.clone());
+        let revs = self.revocations.lock().unwrap_or_else(|p| p.into_inner());
+        for o in &old {
+            let same = callers.iter().any(|c| c.id == o.id && bool::from(c.token.as_bytes().ct_eq(o.token.as_bytes())));
+            if !same {
+                if let Some(tx) = revs.get(&o.id) {
+                    tx.send_modify(|n| *n += 1);
+                }
+            }
+        }
+    }
+
+    /// Changes when caller `id` is revoked (token rotated or caller removed) from now on.
+    pub fn revocation(&self, id: &str) -> tokio::sync::watch::Receiver<u64> {
+        let mut revs = self.revocations.lock().unwrap_or_else(|p| p.into_inner());
+        revs.entry(id.to_string()).or_insert_with(|| tokio::sync::watch::channel(0).0).subscribe()
     }
 
     pub fn port(&self) -> u16 {
@@ -276,14 +351,13 @@ fn plain(status: StatusCode, text: &'static str) -> Response {
 async fn guard(State(st): State<Arc<ServerState>>, mut req: Request, next: Next) -> Response {
     let port = st.port();
     if !host_ok(req.headers(), port) {
-        return plain(StatusCode::FORBIDDEN, "host not allowed");
+        return st.refuse(None, "forbidden_host", &req);
     }
     if !origin_ok(req.headers(), port) || req.method() == Method::OPTIONS {
-        return plain(StatusCode::FORBIDDEN, "origin not allowed");
+        return st.refuse(None, "forbidden_origin", &req);
     }
     // Only the guard says who is calling.
     req.headers_mut().remove(CALLER_HEADER);
-    // The body cap holds for every route (the SDK routers set a larger one of their own).
     let too_big = req
         .headers()
         .get(header::CONTENT_LENGTH)
@@ -291,42 +365,35 @@ async fn guard(State(st): State<Arc<ServerState>>, mut req: Request, next: Next)
         .and_then(|v| v.parse::<usize>().ok())
         .is_some_and(|n| n > BODY_MAX_BYTES);
     if too_big {
-        return plain(StatusCode::PAYLOAD_TOO_LARGE, "request too large");
+        return st.refuse(None, "too_large", &req);
     }
-    let (parts, body) = req.into_parts();
-    let bytes = match axum::body::to_bytes(body, BODY_MAX_BYTES).await {
-        Ok(b) => b,
-        Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "request too large"),
-    };
-    let mut req = Request::from_parts(parts, axum::body::Body::from(bytes));
     if req.method() == Method::GET && req.uri().path() == WELL_KNOWN_CARD {
         if !st.public_ok() {
-            return plain(StatusCode::TOO_MANY_REQUESTS, "slow down");
+            return st.refuse(None, "rate_limited", &req);
         }
         req.headers_mut().remove(header::AUTHORIZATION);
         return next.run(req).await;
     }
-    match st.authenticate(req.headers()) {
-        Ok(id) => {
-            if !st.caller_ok(&id) {
-                return plain(StatusCode::TOO_MANY_REQUESTS, "slow down");
-            }
-            req.headers_mut().remove(header::AUTHORIZATION);
-            match HeaderValue::from_str(&id) {
-                Ok(v) => {
-                    req.headers_mut().insert(CALLER_HEADER, v);
-                }
-                Err(_) => return plain(StatusCode::UNAUTHORIZED, "unauthorized"),
-            }
-            next.run(req).await
-        }
-        Err(AuthFail::Throttled) => plain(StatusCode::TOO_MANY_REQUESTS, "too many failed attempts; wait a minute"),
-        Err(AuthFail::Missing | AuthFail::Wrong) => {
-            let mut r = plain(StatusCode::UNAUTHORIZED, "unauthorized");
-            r.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer realm=\"pawl\""));
-            r
-        }
+    // Who is calling, from the headers alone: nothing of the body is read for a stranger.
+    let id = match st.authenticate(req.headers()) {
+        Ok(id) => id,
+        Err(AuthFail::Throttled) => return st.refuse(None, "throttled", &req),
+        Err(AuthFail::Missing | AuthFail::Wrong) => return st.refuse(None, "unauthorized", &req),
+    };
+    if !st.caller_ok(&id) {
+        return st.refuse(Some(&id), "rate_limited", &req);
     }
+    req.headers_mut().remove(header::AUTHORIZATION);
+    let Ok(v) = HeaderValue::from_str(&id) else { return st.refuse(None, "unauthorized", &req) };
+    req.headers_mut().insert(CALLER_HEADER, v);
+    // The body: capped for every route, and it must arrive in time.
+    let (parts, body) = req.into_parts();
+    let bytes = match tokio::time::timeout(BODY_READ_TIMEOUT, axum::body::to_bytes(body, BODY_MAX_BYTES)).await {
+        Ok(Ok(b)) => b,
+        Ok(Err(_)) => return st.refuse(Some(&id), "too_large", &Request::from_parts(parts, axum::body::Body::empty())),
+        Err(_) => return st.refuse(Some(&id), "body_timeout", &Request::from_parts(parts, axum::body::Body::empty())),
+    };
+    next.run(Request::from_parts(parts, axum::body::Body::from(bytes))).await
 }
 
 /// FNV-1a of `bytes` as an ETag.
@@ -414,15 +481,42 @@ pub async fn serve<H: A2aHandler>(handler: Arc<H>, state: Arc<ServerState>, port
     state.port.store(addr.port(), Ordering::SeqCst);
     let app = router(handler, state);
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let task = tokio::spawn(async move {
-        let shutdown = async move {
-            let _ = rx.await;
-        };
-        if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown).await {
-            tracing::warn!("A2A server stopped: {e}");
-        }
-    });
+    let task = tokio::spawn(accept_loop(listener, app, rx));
     Ok(RunningServer { addr, shutdown: Some(tx), task })
+}
+
+/// HTTP/1.1 connections with a header-read timeout, at most [`MAX_CONNECTIONS`] at once. On shutdown
+/// open requests get a moment, then every connection (SSE streams too) is dropped.
+async fn accept_loop(listener: tokio::net::TcpListener, app: Router, mut shutdown: tokio::sync::oneshot::Receiver<()>) {
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    let mut conns = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            Some(_) = conns.join_next(), if !conns.is_empty() => {}
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else { continue };
+                let Ok(slot) = slots.clone().try_acquire_owned() else {
+                    tracing::warn!("A2A server: {MAX_CONNECTIONS} connections open, closing a new one");
+                    continue;
+                };
+                let service = hyper_util::service::TowerToHyperService::new(app.clone());
+                conns.spawn(async move {
+                    let _slot = slot;
+                    let mut http = hyper::server::conn::http1::Builder::new();
+                    http.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(HEADER_READ_TIMEOUT);
+                    if let Err(e) = http.serve_connection(hyper_util::rt::TokioIo::new(stream), service).await {
+                        tracing::debug!("A2A connection: {e}");
+                    }
+                });
+            }
+        }
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while conns.join_next().await.is_some() {}
+    })
+    .await;
+    conns.abort_all();
 }
 
 /// Tests: a router whose Host / Origin checks expect `port` (no socket).

@@ -368,3 +368,75 @@ fn caller_auth_debug_hides_the_token() {
     let c = CallerAuth { id: "ci".into(), token: TOKEN.into() };
     assert!(!format!("{c:?}").contains(TOKEN));
 }
+
+
+/// A body that never arrives.
+fn stalled_body() -> Body {
+    Body::from_stream(futures::stream::pending::<Result<axum::body::Bytes, std::io::Error>>())
+}
+
+#[tokio::test]
+async fn strangers_are_refused_on_their_headers_before_any_body_is_read() {
+    let (app, fake, _) = app();
+    // With a body that never comes, a wrong or missing token is answered at once.
+    let r = req("POST", "/").header("authorization", "Bearer guess").body(stalled_body()).unwrap();
+    let (status, _, _) = tokio::time::timeout(std::time::Duration::from_secs(5), send(&app, r)).await.expect("answered without the body");
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let r = req("POST", "/").body(stalled_body()).unwrap();
+    assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(5), send(&app, r)).await.unwrap().0, StatusCode::UNAUTHORIZED);
+    assert!(fake.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_authenticated_body_must_arrive_in_time() {
+    let (app, fake, _) = app();
+    let r = authed(req("POST", "/").header("a2a-version", "1.0")).body(stalled_body()).unwrap();
+    let (status, _, _) = send(&app, r).await;
+    assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+    assert!(fake.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn every_refusal_reaches_the_audit_hook() {
+    let fake = Arc::new(Fake::default());
+    let seen = Arc::new(Mutex::new(Vec::<Refusal>::new()));
+    let s2 = seen.clone();
+    let state = ServerState::new(vec![CallerAuth { id: "ci".into(), token: TOKEN.into() }], || card::pawl_card(&info(), false)).with_audit(move |r| s2.lock().unwrap().push(r));
+    let app = router_for_port(fake, state, PORT);
+    let cases = [
+        HttpRequest::builder().method("POST").uri("/").header("host", "evil.example:1").body(Body::empty()).unwrap(),
+        req("POST", "/").header("origin", "https://evil.example").body(Body::empty()).unwrap(),
+        req("POST", "/?secret=1").header("authorization", "Bearer nope").body(Body::empty()).unwrap(),
+        authed(req("POST", "/")).header("content-length", (BODY_MAX_BYTES + 1).to_string()).body(Body::empty()).unwrap(),
+    ];
+    for r in cases {
+        send(&app, r).await;
+    }
+    let got = seen.lock().unwrap().clone();
+    let statuses: Vec<&str> = got.iter().map(|r| r.status).collect();
+    assert_eq!(statuses, vec!["forbidden_host", "forbidden_origin", "unauthorized", "too_large"]);
+    assert_eq!(got[2].request, "POST /", "never the query");
+    assert!(got.iter().all(|r| r.caller.is_none()));
+    // A caller over its rate is named.
+    for _ in 0..(CALLER_RATE_PER_SEC as usize * 3) {
+        send(&app, authed(req("POST", "/").header("a2a-version", "1.0")).body(rpc("GetTask", json!({ "id": "m:t1" }))).unwrap()).await;
+    }
+    assert!(seen.lock().unwrap().iter().any(|r| r.status == "rate_limited" && r.caller.as_deref() == Some("ci")));
+}
+
+#[tokio::test]
+async fn a_rotated_or_removed_token_revokes_its_caller() {
+    let state = ServerState::new(vec![CallerAuth { id: "ci".into(), token: "one".into() }, CallerAuth { id: "ops".into(), token: "two".into() }], || card::pawl_card(&info(), false));
+    let mut ci = state.revocation("ci");
+    let ops = state.revocation("ops");
+    // The same tokens again: nobody is revoked.
+    state.set_callers(vec![CallerAuth { id: "ci".into(), token: "one".into() }, CallerAuth { id: "ops".into(), token: "two".into() }]);
+    assert!(!ci.has_changed().unwrap() && !ops.has_changed().unwrap());
+    // ci rotated, ops removed.
+    state.set_callers(vec![CallerAuth { id: "ci".into(), token: "three".into() }]);
+    assert!(ci.has_changed().unwrap());
+    assert!(ops.has_changed().unwrap());
+    ci.mark_unchanged();
+    state.set_callers(vec![CallerAuth { id: "ci".into(), token: "three".into() }]);
+    assert!(!ci.has_changed().unwrap());
+}

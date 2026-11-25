@@ -11,7 +11,8 @@
 //!   Redirects are never followed (same reason).
 //! - Size caps: the card [`CARD_MAX_BYTES`], a unary answer [`RESPONSE_MAX_BYTES`], one stream event
 //!   [`EVENT_MAX_BYTES`], a whole stream [`STREAM_MAX_BYTES`]. Timeouts: connect [`CONNECT_TIMEOUT`],
-//!   unary calls [`CALL_TIMEOUT`], a stream that sends nothing for [`STREAM_IDLE`].
+//!   unary calls [`CALL_TIMEOUT`], a stream that sends nothing for [`STREAM_IDLE`], a stream that
+//!   runs longer than [`STREAM_MAX_TIME`].
 //! - The bearer token is never logged (`Endpoint`'s Debug hides it).
 //! - Everything the agent sends is data: callers treat its text as untrusted.
 
@@ -35,6 +36,7 @@ pub const STREAM_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 pub const STREAM_IDLE: Duration = Duration::from_secs(600);
+pub const STREAM_MAX_TIME: Duration = Duration::from_secs(2 * 3600);
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ClientError {
@@ -119,6 +121,14 @@ pub fn card_url(url: &str) -> Result<Url, ClientError> {
     }
     let base = u.as_str().trim_end_matches('/').to_string();
     Url::parse(&format!("{base}/.well-known/agent-card.json")).map_err(|_| ClientError::BadUrl("bad URL".into()))
+}
+
+/// Do two agent URLs share scheme, host and port? (False when either is not a valid agent URL.)
+pub fn same_origin_urls(a: &str, b: &str) -> bool {
+    match (check_agent_url(a), check_agent_url(b)) {
+        (Ok(a), Ok(b)) => same_origin(&a, &b),
+        _ => false,
+    }
 }
 
 fn same_origin(a: &Url, b: &Url) -> bool {
@@ -296,21 +306,37 @@ impl Endpoint {
 /// Split SSE text into events' `data` (joined lines), per the SSE format: events end with a blank line.
 struct SseParser {
     buf: Vec<u8>,
+    /// Bytes of `buf` already searched for an event boundary (each byte is looked at about once).
+    scanned: usize,
 }
 
 impl SseParser {
+    fn new() -> Self {
+        Self { buf: Vec::new(), scanned: 0 }
+    }
+
     fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, ClientError> {
         self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
+        let mut start = 0;
         loop {
-            let end = find_blank_line(&self.buf);
-            let Some((at, len)) = end else { break };
-            let block: Vec<u8> = self.buf.drain(..at + len).collect();
-            let text = String::from_utf8_lossy(&block[..at]).into_owned();
+            // A boundary may straddle the previous chunk's end: look back three bytes.
+            let from = self.scanned.saturating_sub(3).max(start);
+            let Some((at, len)) = find_blank_line(&self.buf, from) else {
+                self.scanned = self.buf.len();
+                break;
+            };
+            let text = String::from_utf8_lossy(&self.buf[start..at]).into_owned();
             let data: Vec<&str> = text.lines().filter_map(|l| l.strip_prefix("data:")).map(|d| d.strip_prefix(' ').unwrap_or(d)).collect();
             if !data.is_empty() {
                 out.push(data.join("\n"));
             }
+            start = at + len;
+            self.scanned = start;
+        }
+        if start > 0 {
+            self.buf.drain(..start);
+            self.scanned -= start;
         }
         if self.buf.len() > EVENT_MAX_BYTES {
             return Err(ClientError::TooLarge);
@@ -319,8 +345,9 @@ impl SseParser {
     }
 }
 
-fn find_blank_line(b: &[u8]) -> Option<(usize, usize)> {
-    let mut i = 0;
+/// The first blank line (`\n\n` or `\r\n\r\n`) at or after `from`: (its index, its length).
+fn find_blank_line(b: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut i = from;
     while i + 1 < b.len() {
         if b[i] == b'\n' && b[i + 1] == b'\n' {
             return Some((i, 2));
@@ -353,8 +380,9 @@ fn sse_events(resp: reqwest::Response, wire: Wire) -> BoxStream<'static, Result<
         pending: std::collections::VecDeque<String>,
         total: usize,
         done: bool,
+        started: std::time::Instant,
     }
-    let st = St { resp, parser: SseParser { buf: Vec::new() }, pending: Default::default(), total: 0, done: false };
+    let st = St { resp, parser: SseParser::new(), pending: Default::default(), total: 0, done: false, started: std::time::Instant::now() };
     futures::stream::unfold(st, move |mut st| async move {
         loop {
             if let Some(d) = st.pending.pop_front() {
@@ -367,7 +395,8 @@ fn sse_events(resp: reqwest::Response, wire: Wire) -> BoxStream<'static, Result<
             if st.done {
                 return None;
             }
-            match tokio::time::timeout(STREAM_IDLE, st.resp.chunk()).await {
+            let left = STREAM_MAX_TIME.saturating_sub(st.started.elapsed());
+            match tokio::time::timeout(STREAM_IDLE.min(left), st.resp.chunk()).await {
                 Err(_) => {
                     st.done = true;
                     return Some((Err(ClientError::Timeout), st));

@@ -373,6 +373,10 @@ struct Inner {
     /// The localhost A2A server (`core/a2a_server.rs`) and its live state for the settings view.
     a2a_runtime: tokio::sync::Mutex<a2a_server::A2aRuntime>,
     a2a_status: Mutex<a2a_server::A2aStatus>,
+    /// Outside callers' generations and open streams / waits (`core/a2a_server.rs`).
+    a2a_callers: Mutex<a2a_server::A2aCallerBook>,
+    #[cfg(test)]
+    a2a_test_state: Mutex<Option<Arc<pawl_a2a::server::ServerState>>>,
     /// Outside A2A agents' sessions (`core/a2a_agents.rs`); they report like the ACP host.
     remote: Arc<a2a_agents::RemoteAgents>,
     /// A2A calls over the peer link (`core/a2a_peer.rs`): waiting (origin) and answered (owner).
@@ -609,6 +613,9 @@ impl Hub {
                 tasks,
                 a2a_runtime: tokio::sync::Mutex::new(a2a_server::A2aRuntime::default()),
                 a2a_status: Mutex::new(a2a_server::A2aStatus::default()),
+                a2a_callers: Mutex::new(a2a_server::A2aCallerBook::default()),
+                #[cfg(test)]
+                a2a_test_state: Mutex::new(None),
                 remote,
                 a2a_peer: Mutex::new(a2a_peer::A2aPeerState::default()),
             }),

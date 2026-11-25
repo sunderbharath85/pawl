@@ -705,7 +705,9 @@ fn check_a2a_callers(list: &[A2aCallerPatch], cur: &[A2aCaller]) -> Result<Vec<A
 }
 
 /// The outside agents of a patch: ids unique and valid, URLs https (or http to this machine), names
-/// printable, tokens header-safe. A token absent from the patch is kept while the id stays.
+/// printable, tokens header-safe. A token absent from the patch is kept while the id stays **and the
+/// URL keeps its origin** (scheme, host, port): the UI never sends write-only tokens back, and an old
+/// secret must never reach a new host, so a moved agent needs its token again (or an explicit clear).
 fn check_a2a_agents(list: &[A2aAgentPatch], cur: &[A2aAgentConfig]) -> Result<Vec<A2aAgentConfig>, InvalidSetting> {
     if list.len() > MAX_A2A_AGENTS {
         return Err(invalid(A2A_AGENTS, format!("at most {MAX_A2A_AGENTS} agents")));
@@ -740,7 +742,16 @@ fn check_a2a_agents(list: &[A2aAgentPatch], cur: &[A2aAgentConfig]) -> Result<Ve
                 Some(t.to_string())
             }
             Some(None) => None,
-            None => cur.iter().find(|x| x.id == id).and_then(|x| x.token.clone()),
+            None => match cur.iter().find(|x| x.id == id) {
+                Some(old) if old.token.is_some() && !pawl_a2a::client::same_origin_urls(&old.url, url) => {
+                    return Err(invalid(
+                        format!("{A2A_AGENTS}[{i}].token"),
+                        "the agent's URL moved to another host, so its old token is not sent there: enter the token for the new address (or clear it)",
+                    ));
+                }
+                Some(old) => old.token.clone(),
+                None => None,
+            },
         };
         out.push(A2aAgentConfig { id: id.to_string(), name, url: url.to_string(), token });
     }

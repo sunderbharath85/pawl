@@ -44,8 +44,13 @@ const CALL_TIMEOUT: Duration = Duration::from_millis(pawl_protocol::INTENT_TIMEO
 #[cfg(test)]
 const CALL_TIMEOUT: std::time::Duration = super::intents::INTENT_TIMEOUT;
 
-/// Answers kept per peer for repeated call ids (newest first out).
-const ANSWERED_KEEP: usize = 1000;
+/// Replies up to this size are kept for repeated call ids; larger ones only as a marker.
+pub(crate) const ANSWER_KEEP_MAX_BYTES: usize = 4 * 1024;
+/// Remembered call ids per peer (oldest dropped first), and their bytes.
+pub(crate) const ANSWERS_PER_PEER: usize = 256;
+pub(crate) const ANSWER_BYTES_PER_PEER: usize = 256 * 1024;
+/// Open streams one peer may have here at once.
+pub(crate) const STREAMS_PER_PEER: usize = 4;
 
 /// The ErrorInfo metadata key with the intent reason of a refusal.
 pub const PAWL_REASON: &str = "pawlReason";
@@ -54,10 +59,61 @@ pub const PAWL_REASON: &str = "pawlReason";
 pub(crate) struct A2aPeerState {
     /// Origin: calls waiting for their answer: call id -> (owner, answer).
     waiting: HashMap<String, (String, oneshot::Sender<Value>)>,
-    /// Owner: answers by (peer, call id), and the calls being handled.
-    answered: HashMap<(String, String), Value>,
-    order: VecDeque<(String, String)>,
+    /// Owner: what each peer's calls were answered (per peer, so one peer cannot evict another's).
+    answers: HashMap<String, PeerAnswers>,
+    /// Owner: calls being handled.
     in_flight: HashSet<(String, String)>,
+    /// Owner: open streams per peer.
+    streams: HashMap<String, usize>,
+}
+
+/// What a call was answered.
+#[derive(Clone)]
+enum Answer {
+    /// The reply itself (small).
+    Reply(Value),
+    /// Answered, the reply was too large to keep; or (`stream`) a stream was started.
+    Marker(&'static str),
+}
+
+#[derive(Default)]
+struct PeerAnswers {
+    map: HashMap<String, (Answer, usize)>,
+    order: VecDeque<String>,
+    bytes: usize,
+}
+
+impl PeerAnswers {
+    fn remember(&mut self, call_id: &str, answer: Answer) {
+        let size = match &answer {
+            Answer::Reply(v) => serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0) + call_id.len(),
+            Answer::Marker(_) => 16 + call_id.len(),
+        };
+        if let Some((_, old)) = self.map.insert(call_id.to_string(), (answer, size)) {
+            self.bytes -= old;
+        } else {
+            self.order.push_back(call_id.to_string());
+        }
+        self.bytes += size;
+        while self.order.len() > ANSWERS_PER_PEER || self.bytes > ANSWER_BYTES_PER_PEER {
+            let Some(old) = self.order.pop_front() else { break };
+            if let Some((_, n)) = self.map.remove(&old) {
+                self.bytes -= n;
+            }
+        }
+    }
+}
+
+/// Drops the origin's waiter for a call however `peer_call` ends (also when its future is dropped).
+struct Waiter<'a> {
+    hub: &'a Hub,
+    call_id: &'a str,
+}
+
+impl Drop for Waiter<'_> {
+    fn drop(&mut self) {
+        self.hub.a2a_peer().waiting.remove(self.call_id);
+    }
 }
 
 /// An A2A error that carries an intent reason.
@@ -101,10 +157,11 @@ impl Hub {
 
     /// One A2A call to the owner `target`: its JSON-RPC response, or why there is none
     /// (`offline`, `timeout`, `invalid` when the frame could not be sent).
-    async fn peer_call(&self, target: &str, call_id: &str, client: ClientKind, confirmed: bool, method: &str, params: Value) -> std::result::Result<Value, AckCode> {
+    pub(super) async fn peer_call(&self, target: &str, call_id: &str, client: ClientKind, confirmed: bool, method: &str, params: Value) -> std::result::Result<Value, AckCode> {
         let rpc = json!({ "jsonrpc": "2.0", "id": call_id, "method": method, "params": params });
         let (tx, rx) = oneshot::channel();
         self.a2a_peer().waiting.insert(call_id.to_string(), (target.to_string(), tx));
+        let _waiter = Waiter { hub: self, call_id };
         let body = PeerBody::A2a { call_id: call_id.to_string(), frame: A2aPeerFrame::Request { rpc, client, confirmed } };
         let outcome = match self.inner.peer.send(target, body) {
             Err(SendError::NotLinked) | Err(SendError::Backpressure) => Err(AckCode::Offline),
@@ -117,7 +174,6 @@ impl Hub {
                 _ => Err(AckCode::Timeout),
             },
         };
-        self.a2a_peer().waiting.remove(call_id);
         outcome
     }
 
@@ -268,39 +324,60 @@ impl Hub {
         }
     }
 
-    fn send_frame(&self, to: &str, call_id: &str, frame: A2aPeerFrame) {
-        if let Err(e) = self.inner.peer.send(to, PeerBody::A2a { call_id: call_id.to_string(), frame }) {
+    fn send_frame(&self, to: &str, call_id: &str, frame: A2aPeerFrame) -> std::result::Result<(), SendError> {
+        let r = self.inner.peer.send(to, PeerBody::A2a { call_id: call_id.to_string(), frame });
+        if let Err(e) = &r {
             tracing::warn!(device = %to, call = %call_id, "A2A answer not sent: {e}");
         }
+        r
+    }
+
+    fn remember_answer(&self, from: &str, call_id: &str, answer: Answer) {
+        self.a2a_peer().answers.entry(from.to_string()).or_default().remember(call_id, answer);
     }
 
     // ------------------------------------------------------------ owner
 
     /// Answer one A2A call: dedupe, `forbidden`, rate limit, the dispatcher with the peer policy, log.
-    async fn answer_a2a(&self, from: &str, call_id: &str, rpc: Value, client: ClientKind, confirmed: bool) {
+    pub(super) async fn answer_a2a(&self, from: &str, call_id: &str, rpc: Value, client: ClientKind, confirmed: bool) {
         let key = (from.to_string(), call_id.to_string());
+        let id = rpc.get("id").cloned().unwrap_or(Value::Null);
+        let error_reply = |e: A2AError| json!({ "jsonrpc": "2.0", "id": id, "error": e.to_jsonrpc_error() });
         {
             let mut s = self.a2a_peer();
-            if let Some(v) = s.answered.get(&key).cloned() {
-                drop(s);
-                return self.send_frame(from, call_id, A2aPeerFrame::Response { rpc: v });
+            let seen = s.answers.get(from).and_then(|a| a.map.get(call_id)).map(|(a, _)| a.clone());
+            match seen {
+                Some(Answer::Reply(v)) => {
+                    drop(s);
+                    let _ = self.send_frame(from, call_id, A2aPeerFrame::Response { rpc: v });
+                    return;
+                }
+                Some(Answer::Marker(what)) => {
+                    drop(s);
+                    let e = refusal(IntentRejectReason::Invalid, format!("this call was already {what}"));
+                    let _ = self.send_frame(from, call_id, A2aPeerFrame::Response { rpc: error_reply(e) });
+                    return;
+                }
+                None => {}
             }
             if !s.in_flight.insert(key.clone()) {
                 return; // a repeat of a call still being handled
             }
         }
-        let id = rpc.get("id").cloned().unwrap_or(Value::Null);
         let method = rpc.get("method").and_then(Value::as_str).unwrap_or_default().to_string();
+        let streaming = pawl_a2a::spec::jsonrpc::methods::is_streaming(&method);
         let refused = if !self.cfg().peer.accept_intents {
             Some(refusal(IntentRejectReason::Forbidden, "this machine does not accept remote control"))
         } else if !self.intent_rate_ok(from) {
             Some(refusal(IntentRejectReason::RateLimited, "too many requests"))
+        } else if streaming && self.a2a_peer().streams.get(from).copied().unwrap_or(0) >= STREAMS_PER_PEER {
+            Some(refusal(IntentRejectReason::RateLimited, format!("at most {STREAMS_PER_PEER} open streams per machine")))
         } else {
             None
         };
         let kind = Self::call_kind(&method, &rpc);
         let reply = match refused {
-            Some(e) => RpcReply::Unary(json!({ "jsonrpc": "2.0", "id": id, "error": e.to_jsonrpc_error() })),
+            Some(e) => RpcReply::Unary(error_reply(e)),
             None => {
                 let handler = PeerHandler { hub: self.clone(), from: from.to_string(), client, confirmed };
                 let body = serde_json::to_vec(&rpc).unwrap_or_default();
@@ -314,33 +391,37 @@ impl Hub {
             },
             RpcReply::Stream(_) => ("applied".to_string(), None),
         };
+        tracing::info!(call = %call_id, kind = %kind, device = %from, status = %status, reason = ?reason, "A2A call handled");
+        let mut stream = None;
         match reply {
             RpcReply::Unary(v) => {
+                // An answer the link cannot carry becomes a small error, so the origin is not left waiting.
+                let size = serde_json::to_vec(&v).map(|b| b.len()).unwrap_or(0);
+                let v = if size > pawl_protocol::MIRROR_FRAME_MAX_BYTES {
+                    error_reply(refusal(IntentRejectReason::Invalid, "the answer is too large for the link"))
+                } else {
+                    v
+                };
+                self.a2a_peer().in_flight.remove(&key);
+                // A rate-limited call may be retried with the same id; small replies are kept, larger
+                // ones only as "answered".
+                if reason.as_deref() != Some("rate_limited") {
+                    let answer = if size <= ANSWER_KEEP_MAX_BYTES { Answer::Reply(v.clone()) } else { Answer::Marker("answered") };
+                    self.remember_answer(from, call_id, answer);
+                }
+                let _ = self.send_frame(from, call_id, A2aPeerFrame::Response { rpc: v });
+            }
+            RpcReply::Stream(st) => {
                 {
                     let mut s = self.a2a_peer();
                     s.in_flight.remove(&key);
-                    // A rate-limited call may be retried with the same id.
-                    if reason.as_deref() != Some("rate_limited") {
-                        s.answered.insert(key.clone(), v.clone());
-                        s.order.push_back(key.clone());
-                        while s.order.len() > ANSWERED_KEEP {
-                            if let Some(old) = s.order.pop_front() {
-                                s.answered.remove(&old);
-                            }
-                        }
-                    }
+                    *s.streams.entry(from.to_string()).or_default() += 1;
                 }
-                self.send_frame(from, call_id, A2aPeerFrame::Response { rpc: v });
-            }
-            RpcReply::Stream(mut st) => {
-                self.a2a_peer().in_flight.remove(&key);
-                while let Some(v) = st.next().await {
-                    self.send_frame(from, call_id, A2aPeerFrame::Event { rpc: v });
-                }
-                self.send_frame(from, call_id, A2aPeerFrame::End);
+                // A repeat of this call id must not start it again.
+                self.remember_answer(from, call_id, Answer::Marker("accepted"));
+                stream = Some(st);
             }
         }
-        tracing::info!(call = %call_id, kind = %kind, device = %from, status = %status, reason = ?reason, "A2A call handled");
         let target = rpc.get("params").and_then(|p| {
             p.get("message").and_then(|m| m.get("contextId").or_else(|| m.get("metadata").and_then(|x| x.get(DELEGATE_EXT)).and_then(|d| d.get("agentId")))).or_else(|| p.get("id")).or_else(|| p.get("contextId"))
         });
@@ -360,6 +441,26 @@ impl Hub {
             repeats: 0,
         })
         .await;
+        if let Some(mut st) = stream {
+            // Forward until the stream ends or the link is gone.
+            let mut linked = true;
+            while let Some(v) = st.next().await {
+                if let Err(SendError::NotLinked | SendError::Backpressure) = self.send_frame(from, call_id, A2aPeerFrame::Event { rpc: v }) {
+                    linked = false;
+                    break;
+                }
+            }
+            if linked {
+                let _ = self.send_frame(from, call_id, A2aPeerFrame::End);
+            }
+            let mut s = self.a2a_peer();
+            if let Some(n) = s.streams.get_mut(from) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    s.streams.remove(from);
+                }
+            }
+        }
     }
 
     /// The intent-log kind of a call: start / prompt / cancel, else the method.
@@ -461,7 +562,7 @@ impl A2aHandler for PeerHandler {
     async fn send_streaming_message(&self, _p: &ServiceParams, req: SendMessageRequest) -> Result<EventStream, A2AError> {
         match self.send(req).await? {
             SendMessageResponse::Message(m) => Ok(futures::stream::iter(vec![Ok(pawl_a2a::spec::StreamResponse::Message(m))]).boxed()),
-            SendMessageResponse::Task(t) => Ok(HubHandler::follow(self.hub.clone(), self.caller(), t.id)),
+            SendMessageResponse::Task(t) => Ok(HubHandler::follow(self.hub.clone(), self.caller(), t.id, None, None)),
         }
     }
 
@@ -496,7 +597,7 @@ impl A2aHandler for PeerHandler {
         if t.status.state.is_terminal() {
             return Err(A2AError::unsupported_operation("the task has finished"));
         }
-        Ok(HubHandler::follow(self.hub.clone(), self.caller(), t.id))
+        Ok(HubHandler::follow(self.hub.clone(), self.caller(), t.id, None, None))
     }
 
     async fn get_extended_agent_card(&self, _p: &ServiceParams, _r: GetExtendedAgentCardRequest) -> Result<AgentCard, A2AError> {
@@ -509,5 +610,50 @@ impl A2aHandler for PeerHandler {
         }
         card.supported_interfaces.truncate(1);
         Ok(card)
+    }
+}
+
+#[cfg(test)]
+impl Hub {
+    /// Tests: calls waiting for an answer (origin).
+    pub(super) fn a2a_waiting(&self) -> usize {
+        self.a2a_peer().waiting.len()
+    }
+
+    /// Tests: open streams of `peer` (owner); `set` replaces the count.
+    pub(super) fn a2a_peer_streams(&self, peer: &str, set: Option<usize>) -> usize {
+        let mut s = self.a2a_peer();
+        if let Some(n) = set {
+            s.streams.insert(peer.to_string(), n);
+        }
+        s.streams.get(peer).copied().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remembered_answers_are_bounded_per_peer_by_count_and_bytes() {
+        let mut a = PeerAnswers::default();
+        for i in 0..(ANSWERS_PER_PEER + 10) {
+            a.remember(&format!("c{i}"), Answer::Marker("answered"));
+        }
+        assert_eq!(a.map.len(), ANSWERS_PER_PEER);
+        assert!(!a.map.contains_key("c0"), "oldest out first");
+        let mut b = PeerAnswers::default();
+        let big = json!({ "result": "x".repeat(ANSWER_KEEP_MAX_BYTES - 100) });
+        for i in 0..100 {
+            b.remember(&format!("c{i}"), Answer::Reply(big.clone()));
+        }
+        assert!(b.bytes <= ANSWER_BYTES_PER_PEER);
+        assert!(b.map.len() < 100);
+        // Re-remembering a call replaces it without double counting.
+        let mut c = PeerAnswers::default();
+        c.remember("x", Answer::Reply(json!(1)));
+        let once = c.bytes;
+        c.remember("x", Answer::Reply(json!(1)));
+        assert_eq!((c.bytes, c.order.len()), (once, 1));
     }
 }

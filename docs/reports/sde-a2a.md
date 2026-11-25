@@ -441,6 +441,36 @@ Docs read before coding (2026-11-24):
   larger than a link frame would be dropped with a warning.
 - Phones keep using intents (they do not speak A2A).
 
+## Security review fixes (t13's review of A1-A4 + fe-settings notes) (done)
+
+Every finding fixed, each with tests. No wire change (protocol stays v9).
+
+| # | Finding | Fix | Tests |
+|---|---|---|---|
+| M1 | An outside agent kept its token when its URL changed (`settings.rs` `check_a2a_agents`) | The token is kept only while the URL keeps its origin (scheme, host, port; `pawl_a2a::client::same_origin_urls`). A move to another origin without a new token is `invalid:a2a.agents[i].token: the agent's URL moved to another host, so its old token is not sent there: enter the token for the new address (or clear it)`; a new token or an explicit `null` moves it | `an_agent_that_moves_host_needs_its_token_again` (same-origin path change keeps it; other host / other port refused, nothing changed; new token; clear; no token before) |
+| M2 | `a2a_log` fields unbounded; guard refusals not audited | Caller / method / target / status / detail cut to 128 characters. The guard reports every refusal (forbidden host / origin, too large, unauthorized, throttled, per-caller rate limit, body timeout) through `ServerState::with_audit`; the hub writes `a2a:unknown` or `a2a:<id>` rows, at most 30 a minute (the rest counted in the next row's detail). A removed caller's call is logged `caller_removed` | `a2a_log_fields_are_cut_and_guard_refusals_are_logged`, `a_removed_caller_is_logged_and_refused`, `every_refusal_reaches_the_audit_hook` |
+| M3 | Peer reply cache global, count-bounded only | Per peer (one peer cannot evict another's ids): at most 256 ids and 256 KiB; replies over 4 KiB are kept only as an "answered" marker (a repeat gets a small error, never a re-run); an answer too large for a link frame is replaced by a small error so the origin is not left waiting | `remembered_answers_are_bounded_per_peer_by_count_and_bytes` (unit), the repeat case below |
+| M4 | Stream calls not deduped; forwarding outlived the link | A stream call is remembered as "accepted" (a repeated id never starts again); at most 4 open streams per peer (`rate_limited`); forwarding stops on `NotLinked` / backpressure; the intent-log row is written before streaming | `a_repeated_call_id_never_runs_twice_and_streams_stop_when_the_link_is_gone` |
+| M5 | A hostile outside agent could create unlimited approval cards | One card per session at a time (a later INPUT_REQUIRED, with a fresh id or none, is shown as the agent's text); at most 32 pending cards from outside agents in all (more become questions); at most 8 options per card (more become a question) | `a_hostile_agent_gets_one_card_per_session_and_few_options` |
+| M6 | The guard buffered up to 1 MiB before authenticating, with no timeouts | Host / Origin / size / token / rate limit are checked on the headers; only then is the body read, within 10 s (`408` + audit). Pawl's own accept loop (hyper http1, both crates already in the tree through axum) sets a 10 s header-read timeout and at most 64 open connections | `strangers_are_refused_on_their_headers_before_any_body_is_read` (a body that never arrives still gets 401 at once), `an_authenticated_body_must_arrive_in_time` (paused clock), `serve_binds_loopback_only_and_stops` |
+| a | `Answers::Limited` floor was a denylist | Allowlist (`limited_may_allow`): a caller with `allowApprovals` may allow once only `read`, `search`, `think`, `edit`; `other`, `move`, `switch_mode`, unknown kinds and execute / delete / fetch need a person; never "always"; reject is always fine | `limited_approvals_are_an_allowlist` |
+| b | Rotating / removing a token left open streams and waits | `ServerState::set_callers` revokes a caller whose token changed or who was removed (`ServerState::revocation`, a watch per caller); its open streams end and its blocking waits return at once | `a_rotated_or_removed_token_revokes_its_caller` (unit), `rotating_a_token_ends_the_callers_streams_and_waits` |
+| c | No per-caller caps | At most 4 open streams (more: `UnsupportedOperation`), 4 blocking waits (more answer at once, as with `returnImmediately`) and 8 open sessions per caller | `callers_have_caps_on_streams_and_sessions` |
+| d | Quadratic SSE parsing; no overall stream limit | The parser remembers how far it searched (each byte looked at about once; boundaries split across chunks handled); a stream ends after 2 h in all (`STREAM_MAX_TIME`) besides the 10 min idle limit | `the_sse_parser_handles_crlf_multiline_data_comments_and_caps` (byte-by-byte boundaries; 900 KB event in 900 chunks under 2 s) |
+| e | `peer_call` leaked its waiter when the future was dropped | A drop guard removes the waiter however the call ends | `a_dropped_call_leaves_no_waiter` |
+| f | Outside callers saw inner error text | `to_a2a` keeps Pawl's own sentences only (the facade's A2A errors, the outermost text of a refusal); anything else is `the request could not be done here`, detail in the hub log | `outside_callers_get_generic_errors` (an ended session's error shows no path, id or hint) |
+| g | A caller re-added under the same id regained the old contexts | Task owners are `Caller::Outside("<id>~<random generation>")`; the generation is new when a caller is added; labels still show `a2a:<id>` | `a_caller_added_again_under_the_same_id_is_a_new_caller`, task-registry unit test |
+| h | No settings push after a card fetch (fe-settings) | `refresh_a2a_cards` announces `settings` when it is done | `settings_are_pushed_after_a_card_fetch` |
+| i | Pawl's own server refused a plain prompt (fe-settings self-loop) | A message with no context and no delegate metadata gets a short agent message saying how to delegate (no error); an outside session talking to Pawl ends its turn normally | `pawl_added_as_its_own_outside_agent_answers_a_plain_prompt` (Pawl's server added as Pawl's own outside agent, over loopback) |
+
+- Files: `crates/a2a/{Cargo.toml,src/server.rs,src/server/tests.rs,src/client.rs,src/client/tests.rs,src/tasks.rs,src/tasks/tests.rs}`,
+  `crates/hub/src/{settings.rs,core.rs}`, `crates/hub/src/core/{a2a.rs,a2a_server.rs,a2a_agents.rs,a2a_peer.rs,settings.rs}`,
+  `crates/hub/src/core/tests/{a2a_server.rs,a2a_agents.rs,a2a_peer.rs}`, `Cargo.lock` (two dependency lines: `hyper`,
+  `hyper-util` for pawl-a2a; no new package). Dev-dependency `tokio` gains `test-util` in pawl-a2a (paused clocks).
+- Commands: `cargo test --workspace --no-fail-fast` exit 0 (pawl-a2a 71, pawl-acp 25, pawl-brain 111, pawl-discovery
+  39, pawl-hub 254, pawl-peer 105 + 1 ignored, pawl-protocol 4); `cargo clippy --workspace --all-targets -- -D warnings`
+  clean. No TypeScript touched.
+
 ## Open items for t13
 
 - PLAN.md / CONTRACTS.md (yours) do not yet describe the A2A wire additions above (A2, A3, A4 sections list them).

@@ -1685,6 +1685,8 @@ dependencies = [
  "axum",
  "chrono",
  "futures",
+ "hyper",
+ "hyper-util",
  "pawl-protocol",
  "reqwest",
  "serde",

@@ -87,9 +87,15 @@ pub enum Answers {
     Never,
     /// Any option (this machine's own clients).
     Any,
-    /// Allow once or reject, never on `execute` / `delete` / `fetch` (hard floor: a person on a
-    /// Pawl client approves those) and never "always" (an outside caller the user allowed).
+    /// Reject anything; allow once only `read`, `search`, `think` and `edit` requests ([`limited_may_allow`],
+    /// an allowlist: execute / delete / fetch, move, switch_mode, other and unknown kinds need a person
+    /// on a Pawl client); never "always" (an outside caller the user allowed).
     Limited,
+}
+
+/// May an outside caller with approval rights allow (once) a request of this tool kind?
+pub fn limited_may_allow(kind: Option<ToolKind>) -> bool {
+    matches!(kind, Some(ToolKind::Read | ToolKind::Search | ToolKind::Think | ToolKind::Edit))
 }
 
 impl Hub {
@@ -256,16 +262,17 @@ impl Hub {
         };
         if answers == Answers::Limited {
             let kind = req.options.iter().find(|o| o.option_id == option).map(|o| o.kind);
-            let floor = matches!(req.tool_call.kind, Some(ToolKind::Execute | ToolKind::Delete | ToolKind::Fetch));
             match kind {
+                Some(PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways) => {}
                 Some(PermissionOptionKind::AllowAlways) => {
                     return Err(anyhow::Error::new(AckCode::Forbidden).context("\"always allow\" is chosen on a Pawl client only"));
                 }
-                Some(PermissionOptionKind::AllowOnce) if floor => {
+                // An allowlist, not a denylist: only these tool kinds may be allowed once by a program.
+                Some(PermissionOptionKind::AllowOnce) if limited_may_allow(req.tool_call.kind) => {}
+                _ => {
                     return Err(anyhow::Error::new(AckCode::Forbidden)
-                        .context("execute, delete and fetch requests are approved by a person on a Pawl client"));
+                        .context("only read, search, think and edit requests may be allowed by an A2A caller; a person approves the rest on a Pawl client"));
                 }
-                _ => {}
             }
         }
         self.resolve_permission(&req.request_id, Some(option), ResolvedBy::User, actor).await?;

@@ -85,7 +85,8 @@ async fn an_outside_caller_delegates_a_task_bound_to_itself_and_audited() {
     let app = test_router(&f.hub, PORT);
     let (task, ctx) = outside_start(&f, &app, CI).await;
     assert!(task.starts_with(&format!("{MID}:")));
-    assert_eq!(f.hub.tasks().owner_of(&ctx), Caller::Outside("ci".into()));
+    assert_eq!(f.hub.tasks().owner_of(&ctx).label(), "a2a:ci");
+    assert!(matches!(f.hub.tasks().owner_of(&ctx), Caller::Outside(k) if k.starts_with("ci~")), "the owner carries the caller's generation");
     assert!(f.hub.st().remote_driven.contains(&ctx), "rules never auto-approve its requests");
     assert!(f.fake.calls().iter().any(|c| c == &format!("prompt {ctx} run the tests")), "{:?}", f.fake.calls());
     // Its own task: visible. The other caller: not.
@@ -128,8 +129,11 @@ async fn outside_callers_start_only_installed_agents_in_known_folders() {
     p["message"]["metadata"][pawl_a2a::DELEGATE_EXT]["agentId"] = json!("goose");
     let v = call(&app, CI, Some("1.0"), "SendMessage", p).await;
     assert_eq!(v["error"]["code"], -32602, "{v}");
+    // A plain message starts nothing: the answer says how to delegate (another Pawl's first prompt).
     let v = call(&app, CI, Some("1.0"), "SendMessage", json!({ "message": { "messageId": "m", "role": "ROLE_USER", "parts": [{ "text": "x" }] } })).await;
-    assert_eq!(v["error"]["code"], -32602, "a start needs delegate metadata: {v}");
+    let text = v["result"]["message"]["parts"][0]["text"].as_str().unwrap_or_default().to_string();
+    assert!(text.contains("delegate metadata"), "{v}");
+    assert_eq!(v["result"]["message"]["role"], "ROLE_AGENT");
     assert!(!f.fake.calls().iter().any(|c| c.starts_with("start")), "nothing started");
     // A local session is not theirs to prompt.
     let local = start(&f).await;
@@ -208,7 +212,7 @@ async fn send_message_blocks_until_the_task_finishes_or_asks() {
         // Wait for the delegated session's task, then end its turn.
         for _ in 0..100 {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            let mine = hub.tasks().latest_per_context().into_iter().find(|t| hub.tasks().owner_of(&t.context_id) == Caller::Outside("ci".into()));
+            let mine = hub.tasks().latest_per_context().into_iter().find(|t| hub.tasks().owner_of(&t.context_id).label() == "a2a:ci");
             if let Some(t) = mine {
                 hub.on_host_event(HostEvent::Event { session_id: t.context_id.clone(), kind: EventType::AgentMessageChunk, payload: json!({ "text": "Done." }) }).await;
                 hub.on_host_event(HostEvent::Event { session_id: t.context_id, kind: EventType::Stop, payload: json!({ "stopReason": "end_turn" }) }).await;
@@ -232,7 +236,7 @@ async fn a_stream_follows_the_task_until_it_ends() {
     let driver = tokio::spawn(async move {
         for _ in 0..100 {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            let mine = hub.tasks().latest_per_context().into_iter().find(|t| hub.tasks().owner_of(&t.context_id) == Caller::Outside("ci".into()));
+            let mine = hub.tasks().latest_per_context().into_iter().find(|t| hub.tasks().owner_of(&t.context_id).label() == "a2a:ci");
             if let Some(t) = mine {
                 tokio::time::sleep(Duration::from_millis(50)).await; // the stream is subscribed by now
                 let ev = |kind, payload| HostEvent::Event { session_id: t.context_id.clone(), kind, payload };
@@ -380,4 +384,190 @@ async fn list_tasks_shows_every_delegation_with_its_caller() {
     assert_eq!(v["tasks"].as_array().unwrap().len(), 1);
     let v = ack_result(f.hub.handle(ClientMsg::A2aRotateToken { id: "r".into(), caller_id: "ci".into() }, &actor()).await);
     assert_eq!(v["token"].as_str().unwrap().len(), 64);
+}
+
+
+// ---------------------------------------------------------------- security review fixes
+
+use crate::core::a2a_server::{test_state, LOG_FIELD_CHARS, REFUSALS_LOGGED_PER_MIN, SESSIONS_PER_CALLER, STREAMS_PER_CALLER};
+use pawl_a2a::server::CallerAuth;
+
+async fn raw_call(app: &axum::Router, auth: Option<&str>, body: String) -> StatusCode {
+    let mut b = HttpRequest::builder().method("POST").uri("/").header("host", format!("127.0.0.1:{PORT}")).header("a2a-version", "1.0");
+    if let Some(t) = auth {
+        b = b.header("authorization", format!("Bearer {t}"));
+    }
+    app.clone().oneshot(b.body(Body::from(body)).unwrap()).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn a2a_log_fields_are_cut_and_guard_refusals_are_logged() {
+    let f = a2a_fixture().await;
+    let app = test_router(&f.hub, PORT);
+    // A huge task id is cut in the log.
+    let id = "x".repeat(200_000);
+    call(&app, CI, Some("1.0"), "GetTask", json!({ "id": id })).await;
+    let log = f.hub.store().a2a_log(1).unwrap();
+    assert!(log[0].target.as_deref().unwrap().chars().count() <= LOG_FIELD_CHARS);
+    // A wrong token: a row for a2a:unknown.
+    assert_eq!(raw_call(&app, Some("wrong"), "{}".into()).await, StatusCode::UNAUTHORIZED);
+    wait_until("the refusal row", || {
+        let f = f.hub.clone();
+        async move { f.store().a2a_log(5).unwrap().iter().any(|e| e.caller == "a2a:unknown" && e.status == "unauthorized") }
+    })
+    .await;
+    // A flood is counted, not written row by row.
+    for _ in 0..(REFUSALS_LOGGED_PER_MIN + 20) {
+        raw_call(&app, None, "{}".into()).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let rows = f.hub.store().a2a_log(500).unwrap().iter().filter(|e| e.caller == "a2a:unknown").count();
+    assert!(rows <= REFUSALS_LOGGED_PER_MIN as usize, "{rows} rows");
+}
+
+#[tokio::test]
+async fn a_removed_caller_is_logged_and_refused() {
+    let f = a2a_fixture().await;
+    let app = test_router(&f.hub, PORT);
+    let me = actor();
+    // Remove ci from the settings while the router still knows its token.
+    let keep = vec![A2aCallerPatch { id: "ops".into(), name: "Ops".into(), allow_approvals: true }];
+    f.hub.update_settings(&a2a_patch(HubSettingsA2aPatch { callers: Some(keep), ..Default::default() }), &me).await.unwrap();
+    let v = call(&app, CI, Some("1.0"), "ListTasks", json!({})).await;
+    assert_eq!(v["error"]["code"], -32600, "{v}");
+    wait_until("the caller_removed row", || {
+        let f = f.hub.clone();
+        async move { f.store().a2a_log(5).unwrap().iter().any(|e| e.caller == "a2a:ci" && e.status == "caller_removed") }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn limited_approvals_are_an_allowlist() {
+    let f = a2a_fixture().await;
+    let app = test_router(&f.hub, PORT);
+    let (task, ctx) = outside_start(&f, &app, OPS).await;
+    for (kind, allowed) in [
+        (Some(ToolKind::Edit), true),
+        (Some(ToolKind::Search), true),
+        (Some(ToolKind::Other), false),
+        (Some(ToolKind::Move), false),
+        (Some(ToolKind::SwitchMode), false),
+        (None, false),
+    ] {
+        let mut req = permission(&ctx, ToolKind::Read);
+        req.tool_call.kind = kind;
+        f.hub.on_host_event(HostEvent::PermissionRequest(req.clone())).await;
+        let v = call(&app, OPS, Some("1.0"), "SendMessage", answer_params(&task, &req.request_id, "allow")).await;
+        if allowed {
+            assert!(v.get("result").is_some(), "{kind:?}: {v}");
+        } else {
+            assert_eq!(v["error"]["code"], -32004, "{kind:?}: {v}");
+            // Deny still works.
+            let v = call(&app, OPS, Some("1.0"), "SendMessage", answer_params(&task, &req.request_id, "reject")).await;
+            assert!(v.get("result").is_some(), "{v}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn rotating_a_token_ends_the_callers_streams_and_waits() {
+    let f = a2a_fixture().await;
+    let app = test_router(&f.hub, PORT);
+    start(&f).await;
+    let cwd = f.dir.path().to_string_lossy().into_owned();
+    let hub = f.hub.clone();
+    let rotate = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        test_state(&hub).set_callers(vec![CallerAuth { id: "ci".into(), token: "new".into() }, CallerAuth { id: "ops".into(), token: OPS.into() }]);
+    });
+    // A stream of a task that never ends returns once ci is revoked.
+    let started = std::time::Instant::now();
+    let events = tokio::time::timeout(Duration::from_secs(10), call(&app, CI, Some("1.0"), "SendStreamingMessage", start_params(&cwd, "go", false))).await.expect("the stream ended");
+    assert!(events.as_array().is_some_and(|e| !e.is_empty()), "{events}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    rotate.await.unwrap();
+    // A blocking wait ends the same way.
+    let hub = f.hub.clone();
+    let rotate = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        test_state(&hub).set_callers(vec![CallerAuth { id: "ops".into(), token: "newer".into() }]);
+    });
+    let started = std::time::Instant::now();
+    let v = call(&app, OPS, Some("1.0"), "SendMessage", start_params(&cwd, "go", false)).await;
+    assert!(started.elapsed() < Duration::from_secs(20), "returned before BLOCKING_WAIT");
+    assert_eq!(v["result"]["task"]["status"]["state"], "TASK_STATE_SUBMITTED", "{v}");
+    rotate.await.unwrap();
+}
+
+#[tokio::test]
+async fn callers_have_caps_on_streams_and_sessions() {
+    let f = a2a_fixture().await;
+    let app = test_router(&f.hub, PORT);
+    start(&f).await;
+    let cwd = f.dir.path().to_string_lossy().into_owned();
+    // STREAMS_PER_CALLER streams that stay open...
+    let mut open = Vec::new();
+    for _ in 0..STREAMS_PER_CALLER {
+        let (app, cwd) = (app.clone(), cwd.clone());
+        open.push(tokio::spawn(async move { call(&app, CI, Some("1.0"), "SendStreamingMessage", start_params(&cwd, "go", false)).await }));
+    }
+    wait_until("the streams are open", || {
+        let f = f.hub.clone();
+        async move { f.tasks().latest_per_context().iter().filter(|t| f.tasks().owner_of(&t.context_id).label() == "a2a:ci").count() == STREAMS_PER_CALLER }
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // ...and one more is refused.
+    let v = call(&app, CI, Some("1.0"), "SendStreamingMessage", start_params(&cwd, "go", false)).await;
+    assert_eq!(v["error"]["code"], -32004, "{v}");
+    for h in open {
+        h.abort();
+    }
+    // Open sessions: at most SESSIONS_PER_CALLER per caller (the 5 above are open).
+    for _ in 5..SESSIONS_PER_CALLER {
+        let v = call(&app, CI, Some("1.0"), "SendMessage", start_params(&cwd, "go", true)).await;
+        assert!(v.get("result").is_some(), "{v}");
+    }
+    let v = call(&app, CI, Some("1.0"), "SendMessage", start_params(&cwd, "go", true)).await;
+    assert_eq!(v["error"]["code"], -32004, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("open sessions"));
+    // Another caller is not affected.
+    let v = call(&app, OPS, Some("1.0"), "SendMessage", start_params(&cwd, "go", true)).await;
+    assert!(v.get("result").is_some(), "{v}");
+}
+
+#[tokio::test]
+async fn outside_callers_get_generic_errors() {
+    let f = a2a_fixture().await;
+    let app = test_router(&f.hub, PORT);
+    let (_task, ctx) = outside_start(&f, &app, CI).await;
+    f.hub.close_session(&ctx).await.unwrap();
+    let v = call(&app, CI, Some("1.0"), "SendMessage", json!({ "message": { "messageId": "m", "role": "ROLE_USER", "contextId": ctx, "parts": [{ "text": "more" }] } })).await;
+    let msg = v["error"]["message"].as_str().unwrap();
+    assert_eq!(msg, "the request could not be done here", "{v}");
+    assert!(!msg.contains("resume") && !msg.contains(&ctx));
+}
+
+#[tokio::test]
+async fn a_caller_added_again_under_the_same_id_is_a_new_caller() {
+    let f = a2a_fixture().await;
+    let app = test_router(&f.hub, PORT);
+    let (task, _ctx) = outside_start(&f, &app, CI).await;
+    let me = actor();
+    let both = |with_ci: bool| {
+        let mut v = vec![A2aCallerPatch { id: "ops".into(), name: "Ops".into(), allow_approvals: true }];
+        if with_ci {
+            v.push(A2aCallerPatch { id: "ci".into(), name: "CI bot".into(), allow_approvals: false });
+        }
+        a2a_patch(HubSettingsA2aPatch { callers: Some(v), ..Default::default() })
+    };
+    f.hub.update_settings(&both(false), &me).await.unwrap();
+    f.hub.update_settings(&both(true), &me).await.unwrap();
+    let token = f.hub.a2a_rotate_token("ci", &me).await.unwrap()["token"].as_str().unwrap().to_string();
+    let app = test_router(&f.hub, PORT);
+    let v = call(&app, &token, Some("1.0"), "GetTask", json!({ "id": task })).await;
+    assert_eq!(v["error"]["code"], -32001, "the old ci's task is not the new ci's: {v}");
+    let v = call(&app, &token, Some("1.0"), "ListTasks", json!({})).await;
+    assert_eq!(v["result"]["tasks"].as_array().map_or(0, Vec::len), 0, "{v}");
 }

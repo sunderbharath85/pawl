@@ -191,6 +191,12 @@ fn outside_callers_see_only_their_own_contexts() {
     reg.bind_context("abcdef012345:theirs", Caller::Local);
     assert_eq!(reg.owner_of("abcdef012345:theirs"), mine);
     assert_eq!(mine.label(), "a2a:ci-bot");
+    assert_eq!(reg.contexts_owned_by(&mine), vec!["abcdef012345:theirs".to_string()]);
+    // A new generation of the same caller id is someone else.
+    let again = Caller::Outside("ci-bot~2".into());
+    assert_eq!(again.label(), "a2a:ci-bot");
+    assert!(!reg.can_access(&again, "abcdef012345:theirs"));
+    assert!(reg.contexts_owned_by(&again).is_empty());
 }
 
 #[test]

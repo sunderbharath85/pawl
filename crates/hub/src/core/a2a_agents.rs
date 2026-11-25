@@ -37,6 +37,10 @@ use super::Hub;
 const TITLE_CHARS: usize = 200;
 /// Longest agent text taken from one event.
 const TEXT_CHARS: usize = 64 * 1024;
+/// Approval cards from outside agents pending at once, all sessions together; more become questions.
+pub(crate) const MAX_PENDING_CARDS: usize = 32;
+/// Options on one approval card; a schema with more choices becomes a question.
+pub(crate) const MAX_CARD_OPTIONS: usize = 8;
 
 /// A fetched card.
 #[derive(Clone)]
@@ -459,9 +463,30 @@ impl RemoteAgents {
             let q = format!("{text}\n\n(The agent wants structured input Pawl cannot fill in: {title}. Cancel the session or answer in words.)");
             return self.question(session_id, q.trim());
         };
-        let already = self.st().requests.values().any(|r| r.session_id == session_id && r.input_id == input_id && input_id.is_some());
-        if already {
+        if values.len() > MAX_CARD_OPTIONS {
+            let q = format!("{text}\n\n(The agent offers {} choices; Pawl shows at most {MAX_CARD_OPTIONS} as buttons. Answer in words or cancel.)", values.len());
+            return self.question(session_id, q.trim());
+        }
+        // One card per session at a time, and a bound on all of them: a hostile agent cannot flood the
+        // user with cards (fresh or missing input ids).
+        let (same, other_here, total) = {
+            let st = self.st();
+            let here: Vec<&PendingInput> = st.requests.values().filter(|r| r.session_id == session_id).collect();
+            let same = input_id.is_some() && here.iter().any(|r| r.input_id == input_id);
+            (same, !here.is_empty(), st.requests.len())
+        };
+        if same {
             return; // the same request again (validation loop)
+        }
+        if other_here {
+            // A card is already waiting here: the new question is only text.
+            if !text.trim().is_empty() {
+                self.event(session_id, EventType::AgentMessageChunk, json!({ "text": text }));
+            }
+            return;
+        }
+        if total >= MAX_PENDING_CARDS {
+            return self.question(session_id, text);
         }
         let details = details_of(msg);
         let tool = details.and_then(|d| d.get("toolCall")).cloned().unwrap_or(Value::Null);
@@ -688,6 +713,8 @@ impl Hub {
             self.remote().refresh_card(&a.id, &a.url, a.token.as_deref()).await;
         }
         self.merge_a2a_agents().await;
+        // Settings show each agent's card and last error: tell the clients they changed.
+        self.announce_settings();
     }
 
     /// Replace the outside agents in the agent list (persisted, announced, pets ensured).

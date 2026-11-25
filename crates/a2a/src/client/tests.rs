@@ -203,10 +203,25 @@ fn agent_urls_are_https_or_loopback_http() {
 
 #[test]
 fn the_sse_parser_handles_crlf_multiline_data_comments_and_caps() {
-    let mut p = SseParser { buf: Vec::new() };
+    let mut p = SseParser::new();
     assert!(p.push(b": keep-alive\n\n").unwrap().is_empty());
     assert_eq!(p.push(b"id: 1\ndata: {\"a\":\ndata: 1}\n\nda").unwrap(), vec!["{\"a\":\n1}".to_string()]);
     assert_eq!(p.push(b"ta: x\r\n\r\n").unwrap(), vec!["x".to_string()]);
-    let mut p = SseParser { buf: Vec::new() };
+    let mut p = SseParser::new();
     assert_eq!(p.push(&vec![b'a'; EVENT_MAX_BYTES + 1]).unwrap_err(), ClientError::TooLarge);
+    // A boundary split across chunks, byte by byte; a big event in many chunks stays linear.
+    let mut p = SseParser::new();
+    let mut got = vec![];
+    for b in b"data: one\r\n\r\ndata: two\n\n" {
+        got.extend(p.push(&[*b]).unwrap());
+    }
+    assert_eq!(got, vec!["one".to_string(), "two".to_string()]);
+    let mut p = SseParser::new();
+    let line = format!("data: {}\n", "x".repeat(1000));
+    let started = std::time::Instant::now();
+    for _ in 0..900 {
+        assert!(p.push(line.as_bytes()).unwrap().is_empty());
+    }
+    assert_eq!(p.push(b"\n").unwrap().len(), 1);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "incremental, not quadratic");
 }

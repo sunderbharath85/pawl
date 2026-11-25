@@ -55,7 +55,10 @@ pub enum Caller {
     Local,
     /// A paired hub acting for the user (the step-4 owner rules apply on top): every context.
     Peer(String),
-    /// An outside A2A client of the localhost A2A server, by caller id: its own contexts only.
+    /// An outside A2A client of the localhost A2A server: its own contexts only. The string is the
+    /// caller id, optionally `~<generation>`: the hub gives every caller a fresh random generation when
+    /// it is added, so a caller removed and added again under the same id does not regain the old
+    /// caller's contexts. Labels show the id only.
     Outside(String),
 }
 
@@ -70,7 +73,7 @@ impl Caller {
         match self {
             Caller::Local => "local".into(),
             Caller::Peer(m) => format!("peer:{m}"),
-            Caller::Outside(c) => format!("a2a:{c}"),
+            Caller::Outside(c) => format!("a2a:{}", c.split('~').next().unwrap_or(c)),
         }
     }
 }
@@ -270,6 +273,11 @@ impl TaskRegistry {
     /// Who created `context_id` (contexts nobody bound belong to this machine's own clients).
     pub fn owner_of(&self, context_id: &str) -> Caller {
         self.st().contexts.get(context_id).and_then(|c| c.owner.clone()).unwrap_or(Caller::Local)
+    }
+
+    /// The contexts `owner` created.
+    pub fn contexts_owned_by(&self, owner: &Caller) -> Vec<String> {
+        self.st().contexts.iter().filter(|(_, c)| c.owner.as_ref() == Some(owner)).map(|(id, _)| id.clone()).collect()
     }
 
     /// May `caller` see and act on `context_id`?
