@@ -67,10 +67,26 @@ describe("one hub", () => {
     expect(await answerOf(sessionId)).toBe("reject");
   });
 
-  test("the default rules allow a read inside the repo without asking", async () => {
-    const session = await hub.client.startSession({ agentId: DEMO_AGENT_ID, cwd: repo, prompt: "read the README" });
-    expect(await answerOf(session.id)).toBe("allow");
-    expect(Object.values(hub.state.pending).some((p) => p.sessionId === session.id)).toBe(false);
+  test("the default rules ask before a read inside the repo", async () => {
+    const { sessionId, request } = await startAndWaitForRequest("read the README");
+    expect(request.toolCall.kind).toBe("read");
+    await hub.client.approve(request.requestId);
+    expect(await answerOf(sessionId)).toBe("allow");
+  });
+
+  test("a rule the user adds can allow reads inside the repo without asking", async () => {
+    const before: Rule[] = hub.state.rules;
+    try {
+      await hub.client.setRules([
+        { id: "e2e-reads", match: { toolKind: "read", path: "{cwd}/**" }, action: "auto_allow" },
+        ...before,
+      ]);
+      const session = await hub.client.startSession({ agentId: DEMO_AGENT_ID, cwd: repo, prompt: "read the README" });
+      expect(await answerOf(session.id)).toBe("allow");
+      expect(Object.values(hub.state.pending).some((p) => p.sessionId === session.id)).toBe(false);
+    } finally {
+      await hub.client.setRules(before);
+    }
   });
 
   test("an edit asks, and cancelling the session withdraws the request", async () => {
