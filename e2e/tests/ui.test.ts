@@ -1,11 +1,12 @@
-// The desktop UI end to end: the real panel and pet strip (a production `vite build` of apps/desktop, served
-// locally) in Chromium, talking to a real hub, with the scripted agent behind it.
+// The desktop UI end to end: the real panel and the pet window (a production `vite build` of apps/desktop, served
+// locally) in Chromium, talking to a real hub, with the scripted agent behind it. One pet on screen: the default pet
+// (it orchestrates every session); agents' pets are renamed under Settings > Pets (advanced).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Server } from "bun";
 import { type Browser, type Page, chromium } from "playwright";
-import { REPO, tempRoot, transcript } from "../lib/env";
+import { REPO, tempRoot, transcript, waitFor } from "../lib/env";
 import { DEMO_AGENT_ID, TestHub } from "../lib/hub";
 
 const tmp = tempRoot("ui");
@@ -28,6 +29,12 @@ async function openPage(page: "panel.html" | "index.html", viewport: { width: nu
   await p.addInitScript((token) => localStorage.setItem("pawl.devToken", token), hub.token);
   await p.goto(appUrl(page));
   return p;
+}
+
+/** The panel's Settings view (from the sidebar). */
+async function openSettings(): Promise<void> {
+  await panel.locator(".nav-item", { hasText: "Settings" }).click();
+  await panel.locator("#settings-pet").waitFor({ state: "visible", timeout: 15_000 });
 }
 
 function answerOf(sessionId: string): Promise<string> {
@@ -91,24 +98,49 @@ describe("desktop UI", () => {
     expect(await answerOf(session.id)).toBe("allow");
   }, 60_000);
 
-  test("renaming a pet in the Pets view saves it on the hub", async () => {
-    await panel.getByRole("button", { name: /^Pets/ }).first().click();
-    const card = panel.locator("article.pet-card", { hasText: "Watches Demo Agent" });
-    const name = card.getByLabel("Pet name");
-    await name.fill("Pixelpaw");
-    await card.getByRole("button", { name: "Save" }).click();
+  test("Settings > Pets (advanced) renames an agent's pet on the hub", async () => {
+    await openSettings();
+    const row = panel.locator("#settings-pets form.agent-pet", { hasText: "Demo Agent" });
+    await row.scrollIntoViewIfNeeded();
+    await row.getByLabel("Name of Demo Agent's pet").fill("Pixelpaw");
+    await row.getByRole("button", { name: "Save" }).click();
     const pet = await hub.waitState((s) => Object.values(s.pets).find((p) => p.agentId === DEMO_AGENT_ID && p.name === "Pixelpaw"), "the new pet name");
     expect(pet.name).toBe("Pixelpaw");
   }, 30_000);
 
-  test("the pet strip shows a bubble, and Approve answers the agent", async () => {
-    const strip = await openPage("index.html", { width: 1280, height: 280 });
-    const session = await hub.client.startSession({ agentId: DEMO_AGENT_ID, cwd: repo, prompt: "run the strip tests" });
+  test("the default pet's name is the hub's bot.petName: renamed in Settings > Pet on screen", async () => {
+    await openSettings();
+    const field = panel.locator("#default-pet-name");
+    await field.scrollIntoViewIfNeeded();
+    await expect(field.inputValue()).resolves.not.toBe("Pawl");
+    await field.fill("Biscotti");
+    await panel.locator("form", { has: field }).getByRole("button", { name: "Rename" }).click();
+    await waitFor(async () => (await hub.client.getSettings()).settings.bot.petName === "Biscotti", "bot.petName saved on the hub", 15_000);
+    expect((await hub.client.getSettings()).settings.bot.petName).toBe("Biscotti");
+  }, 30_000);
+
+  test("the pet window: one pet; a click opens its bubble; Approve answers the agent; a session adds no pet", async () => {
+    const pet = await openPage("index.html", { width: 520, height: 760 });
+    const pets = pet.locator(".pet-box");
+    await pets.first().waitFor({ state: "visible", timeout: 20_000 });
+    expect(await pets.count()).toBe(1);
+    // Its own name (the hub's bot.petName, renamed above), once the hub's settings arrive.
+    await waitFor(async () => (await pet.locator(".pet-name").first().innerText()) === "Biscotti", "the pet's name tag", 15_000);
+
+    await pets.first().click();
+    await pet.locator(".pet-bubble").waitFor({ state: "visible", timeout: 10_000 });
+
+    const session = await hub.client.startSession({ agentId: DEMO_AGENT_ID, cwd: repo, prompt: "run the pet window tests" });
     await hub.waitState((s) => Object.values(s.pending).some((p) => p.sessionId === session.id), "the request");
-    const approve = strip.getByRole("button", { name: "Approve" }).first();
+    const approve = pet.locator(".pb-approval").getByRole("button", { name: "Approve", exact: true }).first();
     await approve.waitFor({ state: "visible", timeout: 20_000 });
+    // The running session gets no pet of its own: it shows in the bubble's session switcher instead.
+    expect(await pets.count()).toBe(1);
+    await pet.locator(".pb-switch-chip", { hasText: "Pixelpaw" }).first().waitFor({ state: "visible", timeout: 10_000 });
+
     await approve.click();
     expect(await answerOf(session.id)).toBe("allow");
-    await strip.close();
+    expect(await pets.count()).toBe(1);
+    await pet.close();
   }, 60_000);
 });
