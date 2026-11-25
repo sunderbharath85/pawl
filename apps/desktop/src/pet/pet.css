@@ -443,6 +443,50 @@ body.pet-body,
 .pb-msg.is-user {
   align-self: flex-end;
 }
+/* The markdown subset in agent and pet messages (lib/miniMarkdown.tsx). */
+.pb-msg-text .md {
+  white-space: normal;
+}
+.md > * {
+  margin: 0;
+}
+.md > * + * {
+  margin-top: 6px;
+}
+.md ul,
+.md ol {
+  padding-left: 18px;
+}
+.md li + li {
+  margin-top: 2px;
+}
+.md-code,
+.md-pre {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+.md-code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ink) 9%, transparent);
+}
+.md-pre {
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--ink) 6%, var(--card));
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.md-quote {
+  padding-left: 8px;
+  border-left: 3px solid var(--line-strong);
+  color: var(--ink-2);
+}
+.reaction-line .reaction-text {
+  flex: 1;
+}
+
 .pb-msg.is-user .pb-msg-text {
   background: var(--accent);
   color: var(--on-accent);

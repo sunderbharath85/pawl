@@ -113,3 +113,36 @@ Screenshots in `docs/screenshots/`:
 
 - **Merge:** this branch started from main before the one-pet hotfix (a6077bf). I kept the voice code in new files, and `PetApp.tsx` / `Bubble.tsx` have small additions (hook call, hold timer, props). The merge should be small: the hold gesture goes in the default pet's handlers, and the bubble's `voice` prop goes on `DefaultBubble`.
 - **Queued after the merge:** render a light, safe markdown subset in the pet bubble.
+
+## Merge of main (the one-pet hotfix) into feat/voice
+
+Both sides are kept in all 7 conflicted files:
+
+- one pet only, plus the bubble's session switcher (from main);
+- the voice UI (from feat/voice).
+
+One join between them: a voice turn switches the bubble to Pawl-wide, because transcripts go to the orchestrator chat.
+
+**Gates:** desktop 3 tsc configs, 133 pass, vite build ok; hub-client 337. On the merged tree, the switcher check had no failures and the voice check passed 26 of 26.
+
+## Follow-up: markdown in the pet bubble
+
+**Problem.** Agent messages in the bubble showed raw markdown (`**greet**`, backticks, `- ` bullets).
+
+**Fix.** `lib/miniMarkdown.tsx` is a small parser with no dependencies.
+
+- **Rendered:** **bold**, *italic*, `inline code`, fenced code blocks (monospace and wrapped, no highlighting), bullet and numbered lists (wrapped items, start numbers), line breaks and paragraphs.
+- **Light emphasis:** headings and quotes; rules disappear.
+- **Safe by construction:** everything is built as React elements, with no `innerHTML`.
+  - Links become their text only: no `<a>`, no address, so `javascript:` URLs are inert too.
+  - Images become their alt text.
+  - HTML shows as text.
+- **Robust:** `snake_case` and a lone `*` stay as text, and an unclosed code block (a clipped message) stays code.
+- **Where it is used:** a session's agent messages in the bubble (clipped at 600 characters instead of 280) and the pet's own replies (`PetReplyText markdown`, next to the reaction icon). The panel is unchanged.
+- **Bundle:** the pet entry's chunks contain no Streamdown or shiki (checked in `dist`).
+
+**Tests:** 5, in `lib/miniMarkdown.test.ts`: inline marks, lists and breaks, code blocks, safety, headings, quotes and rules.
+
+**Screenshots:** `docs/screenshots/pet-markdown-{light,dark}.png` show a session's agent message with bold code, a list and paragraphs.
+
+**Gates:** desktop 3 tsc configs, 138 pass, vite build ok.

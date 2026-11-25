@@ -23,6 +23,7 @@ import type { HubEvent, PermissionRequest, Session } from "@pawl/protocol";
 import type { ConnectionMeta } from "../lib/connection";
 import { agentName, clockTime, errorText, sessionTitle } from "../lib/format";
 import { draftFor, DEFAULT_TARGET, exampleChips, isNotSureReply, type Draft } from "../lib/bubble";
+import { MiniMarkdown } from "../lib/miniMarkdown";
 import { PetReplyText } from "../lib/ReactionIcon";
 import type { RenameResult } from "../lib/usePetName";
 import type { ListenPhase, MicMarker as Marker } from "../lib/voice";
@@ -53,6 +54,8 @@ const EMPTY_EVENTS: HubEvent[] = [];
 const CHAT_SHOWN = 6;
 const FEED_SHOWN = 4;
 const LINE_MAX = 280;
+/** An agent's message in a session's pane (rendered as the markdown subset; code needs a little more room). */
+const AGENT_LINE_MAX = 600;
 
 function clip(text: string, max = LINE_MAX): string {
   const t = text.trim();
@@ -553,7 +556,7 @@ export function DefaultBubble({
             ) : (
               <div key={m.id} className="pb-msg is-pet">
                 <div className="pb-msg-text">
-                  <PetReplyText text={m.text} />
+                  <PetReplyText text={m.text} markdown />
                 </div>
                 <ChatProposalsView message={m} env={proposalEnv} />
                 <time className="pb-time">{clockTime(m.ts)}</time>
@@ -631,7 +634,7 @@ function SessionPane({ env, chip, pending }: { env: BubbleEnv; chip: SessionChip
         <div className="pb-chat">
           {lines.map((l) => (
             <div key={l.key} className={`pb-msg ${l.role === "user" ? "is-user" : "is-pet"}`}>
-              <div className="pb-msg-text">{clip(l.text)}</div>
+              <div className="pb-msg-text">{l.role === "user" ? clip(l.text) : <MiniMarkdown text={clip(l.text, AGENT_LINE_MAX)} />}</div>
             </div>
           ))}
         </div>
