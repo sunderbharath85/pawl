@@ -9,6 +9,7 @@ import { AgentsSection } from "./settings/AgentsSection";
 import { AppSection, MachineSection, NotificationsSection, PetSection } from "./settings/AppSections";
 import { PairingSection } from "./settings/PairingSection";
 import { VoiceSection } from "./settings/VoiceSection";
+import { BrowserSection } from "./settings/BrowserSection";
 import { PetsSection } from "./settings/PetsSection";
 import { BotSection, HubSection, NudgesSection, RelaySection, RemoteSection, ReposSection } from "./settings/sections";
 import { useHubSettings, useRestartHub, type HubSettingsView } from "./settings/shared";
@@ -22,6 +23,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{ id: string; label: string; hub: 
   { id: "agents", label: "Agents & hooks", hub: true },
   { id: "a2a", label: "A2A", hub: true },
   { id: "bot", label: "Bot", hub: true },
+  { id: "browser", label: "Browser", hub: true },
   { id: "nudges", label: "Nudges & reports", hub: true },
   { id: "notifications", label: "Notifications", hub: false },
   { id: "relay", label: "Relay", hub: true },
@@ -81,6 +83,7 @@ export function SettingsView({ section }: { section?: string | undefined }) {
               <AgentsSection {...props} />
               <A2aSection {...props} />
               <BotSection {...props} />
+              <BrowserSection {...props} />
               <NudgesSection {...props} />
             </>
           )}

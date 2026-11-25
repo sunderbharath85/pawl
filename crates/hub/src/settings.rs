@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use pawl_discovery::CustomAgent;
 use pawl_protocol::{
-    A2aAgentPatch, A2aAgentSetting, A2aCallerPatch, A2aCallerSetting, BotProvider, BotStyle, CustomAgentSetting, HubSettings, HubSettingsA2a, HubSettingsBot, HubSettingsHub,
+    A2aAgentPatch, A2aAgentSetting, A2aCallerPatch, A2aCallerSetting, BotProvider, BotStyle, CustomAgentSetting, HubSettings, HubSettingsA2a, HubSettingsBot, HubSettingsBrowser, HubSettingsHub,
     HubSettingsPatch, HubSettingsPeer, HubSettingsRelay, HubSettingsRepos, HubSettingsWatchdog,
 };
 use toml_edit::{DocumentMut, Item, TableLike, Value as TVal};
@@ -65,6 +65,8 @@ pub const A2A_TOKENS: &str = "a2a.callerTokens";
 pub const A2A_AGENTS: &str = "a2a.agents";
 /// The outside agents' tokens (write-only, set through `a2a.agents[i].token`).
 pub const A2A_AGENT_TOKENS: &str = "a2a.agentTokens";
+pub const BROWSER_ENABLED: &str = "browser.enabled";
+pub const BROWSER_SITES: &str = "browser.allowSites";
 
 /// Every settable key, in the order changes are reported.
 pub const ALL_KEYS: &[&str] = &[
@@ -106,6 +108,8 @@ pub const ALL_KEYS: &[&str] = &[
     A2A_TOKENS,
     A2A_AGENTS,
     A2A_AGENT_TOKENS,
+    BROWSER_ENABLED,
+    BROWSER_SITES,
 ];
 
 /// Keys holding secrets: reported as changed, never with a value.
@@ -142,6 +146,7 @@ pub const RESTART_KEYS: &[&str] = &[HUB_PORT];
 pub const MAX_CUSTOM_AGENTS: usize = 16;
 pub const MAX_A2A_CALLERS: usize = 32;
 pub const MAX_A2A_AGENTS: usize = 16;
+pub const MAX_ALLOW_SITES: usize = 100;
 pub const MAX_A2A_CALLER_NAME_CHARS: usize = 60;
 pub const MAX_START_ROOTS: usize = 64;
 pub const MAX_REPO_PATHS: usize = 200;
@@ -324,6 +329,7 @@ pub fn to_settings(cfg: &HubConfig, overrides: &Overrides) -> HubSettings {
                 })
                 .collect(),
         }),
+        browser: Box::new(HubSettingsBrowser { enabled: cfg.browser.enabled, allow_sites: cfg.browser.allow_sites.clone() }),
     }
 }
 
@@ -377,6 +383,8 @@ pub fn changed_keys(a: &HubConfig, b: &HubConfig) -> Vec<&'static str> {
                 let tokens = |c: &HubConfig| c.a2a.agents.iter().map(|x| (x.id.clone(), nonblank(&x.token))).collect::<Vec<_>>();
                 tokens(a) != tokens(b)
             }
+            BROWSER_ENABLED => x.browser.enabled != y.browser.enabled,
+            BROWSER_SITES => x.browser.allow_sites != y.browser.allow_sites,
             _ => false,
         }
     };
@@ -760,6 +768,27 @@ fn check_a2a_agents(list: &[A2aAgentPatch], cur: &[A2aAgentConfig]) -> Result<Ve
 
 /// The peer listener address: an IP literal with an optional port (default 47801), port
 /// 1024-65535, never the hub's own API port on loopback / every interface.
+/// One `browser.allowSites` entry as an origin (see [`crate::sites`]): `github.com` is stored as
+/// `https://github.com`, `github.com:8443` as `https://github.com:8443`; `http://` must be written out.
+pub fn check_site(v: &str) -> Result<String, String> {
+    crate::sites::normalize_site(v)
+}
+
+/// `browser.allowSites`: valid sites stored as origins (see [`check_site`]), duplicates dropped, at most [`MAX_ALLOW_SITES`].
+fn check_allow_sites(list: &[String]) -> Result<Vec<String>, InvalidSetting> {
+    if list.len() > MAX_ALLOW_SITES {
+        return Err(invalid(BROWSER_SITES, format!("at most {MAX_ALLOW_SITES} sites")));
+    }
+    let mut out: Vec<String> = Vec::new();
+    for (i, v) in list.iter().enumerate() {
+        let h = check_site(v).map_err(|r| invalid(format!("{BROWSER_SITES}[{i}]"), r))?;
+        if !out.contains(&h) {
+            out.push(h);
+        }
+    }
+    Ok(out)
+}
+
 fn check_listen(v: &str, hub_port: u16) -> Result<Option<String>, InvalidSetting> {
     let v = v.trim();
     if v.is_empty() {
@@ -929,6 +958,14 @@ pub fn apply_patch(cur: &HubConfig, patch: &HubSettingsPatch, reserved: &[String
         }
         if let Some(list) = &a.agents {
             next.a2a.agents = check_a2a_agents(list, &cur.a2a.agents)?;
+        }
+    }
+    if let Some(b) = &patch.browser {
+        if let Some(on) = b.enabled {
+            next.browser.enabled = on;
+        }
+        if let Some(sites) = &b.allow_sites {
+            next.browser.allow_sites = check_allow_sites(sites)?;
         }
     }
     // The A2A server, the API and the peer listener never share a port on loopback.
@@ -1197,6 +1234,8 @@ pub fn edit_config(old: Option<&str>, next: &HubConfig, changed: &[&str]) -> Res
             A2A_PORT => set_value(section(&mut doc, "a2a")?, "port", i64::from(next.a2a.port)),
             A2A_CALLERS | A2A_TOKENS => write_a2a_callers(&mut doc, &next.a2a.callers)?,
             A2A_AGENTS | A2A_AGENT_TOKENS => write_a2a_agents(&mut doc, &next.a2a.agents)?,
+            BROWSER_ENABLED => set_value(section(&mut doc, "browser")?, "enabled", next.browser.enabled),
+            BROWSER_SITES => set_value(section(&mut doc, "browser")?, "allow_sites", string_array(&next.browser.allow_sites)),
             other => bail!("unknown setting {other:?}"),
         }
     }
@@ -1297,6 +1336,9 @@ pub fn masked_lines(s: &HubSettings, restart_required: &[String]) -> Vec<String>
     for a in &s.a2a.agents {
         v.push(format!("agent  {:<18} {} {} (token {})", a.id, a.name, a.url, set(a.token_set)));
     }
+    v.push("[browser]".to_string());
+    v.push(format!("enabled                   {}", s.browser.enabled));
+    v.push(format!("allow sites               {}", list(&s.browser.allow_sites)));
     v.push("[custom agents]".to_string());
     if s.custom_agents.is_empty() {
         v.push("(none)".into());

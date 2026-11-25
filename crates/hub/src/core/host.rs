@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use pawl_acp::{AcpHost, HostEvent};
-use pawl_protocol::{Agent, HistorySession, MachineId, Session, SessionId};
+use pawl_protocol::{Agent, ChatImage, HistorySession, MachineId, Session, SessionId};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Clone)]
@@ -58,6 +58,42 @@ impl Host {
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// A prompt with pictures (ACP image blocks); the host refuses it unless the agent takes images.
+    pub(crate) async fn prompt_with_images(&self, id: &str, text: String, images: Vec<ChatImage>) -> Result<()> {
+        match self {
+            Host::Acp(h) => h.prompt_with_images(id, text, images).await,
+            #[cfg(test)]
+            Host::Fake(f) => {
+                if !f.images_ok.load(std::sync::atomic::Ordering::SeqCst) {
+                    anyhow::bail!("this agent does not accept pictures (it does not advertise promptCapabilities.image)");
+                }
+                // The calls log never holds a picture, only how many came and their type.
+                let kinds: Vec<&str> = images.iter().map(|i| i.media_type.as_str()).collect();
+                f.record(format!("prompt {id} {text} [images: {}]", kinds.join(",")))?;
+                f.image_bytes.lock().unwrap().extend(images.iter().map(|i| i.data.len()));
+                Ok(())
+            }
+        }
+    }
+
+    /// Page element `uid` of the latest snapshot this session's tools returned (untrusted page text).
+    pub(crate) fn element_description(&self, id: &str, uid: &str) -> Option<String> {
+        match self {
+            Host::Acp(h) => h.element_description(id, uid),
+            #[cfg(test)]
+            Host::Fake(f) => f.elements.lock().unwrap().get(&(id.to_string(), uid.to_string())).cloned(),
+        }
+    }
+
+    /// True when the agent of this open session advertised `promptCapabilities.image`.
+    pub(crate) fn accepts_images(&self, id: &str) -> bool {
+        match self {
+            Host::Acp(h) => h.accepts_images(id),
+            #[cfg(test)]
+            Host::Fake(f) => f.images_ok.load(std::sync::atomic::Ordering::SeqCst),
         }
     }
 
@@ -138,6 +174,12 @@ pub(crate) mod fake {
         pub started: Arc<Mutex<Vec<Agent>>>,
         /// The start options of every `start_session_with`.
         pub options: Arc<Mutex<Vec<pawl_acp::StartOptions>>>,
+        /// The agent advertises `promptCapabilities.image` (tests turn it on).
+        pub images_ok: Arc<std::sync::atomic::AtomicBool>,
+        /// The base64 length of every picture a prompt carried (never the picture).
+        pub image_bytes: Arc<Mutex<Vec<usize>>>,
+        /// (session, uid) -> element description, as the latest snapshot would give it.
+        pub elements: Arc<Mutex<std::collections::HashMap<(String, String), String>>>,
     }
 
     impl FakeHost {
@@ -169,6 +211,7 @@ pub(crate) mod fake {
                 started_at: now,
                 last_event_at: now,
                 ended_at: None,
+                purpose: None,
             })
         }
     }

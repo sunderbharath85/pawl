@@ -20,6 +20,8 @@ export function proposalExpired(message: Pick<ChatMessage, "ts">, now: number): 
  */
 export function proposalProblem(p: ChatProposal): string | null {
   if (!MACHINE_ID_RE.test(p.machineId ?? "")) return "it names no valid machine";
+  // A browser task (v0.2 item 5) runs on this machine's hub, in the user's own Chrome: it needs only the task.
+  if (p.kind === "browse") return p.text?.trim() ? null : "it has no task";
   if (!p.agentId) return "it names no agent";
   if (p.kind === "start") {
     return p.cwd?.trim() ? null : "it names no folder";
@@ -30,7 +32,7 @@ export function proposalProblem(p: ChatProposal): string | null {
     const owner = parseGlobalId(p.sessionId)?.machineId;
     return owner === p.machineId ? null : "its session belongs to another machine";
   }
-  return "it is not a start or a prompt";
+  return "it is not a start, a prompt or a browser task";
 }
 
 /** Folder key for comparing paths: no trailing separators; case-insensitive on Windows and macOS. */
@@ -51,14 +53,27 @@ function proposalMachineName(state: Pick<HubState, "machine" | "machines">, p: C
   return state.machines[p.machineId] ? machineDisplayName(state.machines[p.machineId]) : "that machine";
 }
 
+/** The button's text: "Start browser task: <task>" for a browser task, else the hub's summary. */
+export function proposalLabel(p: ChatProposal): string {
+  return p.kind === "browse" ? `Start browser task: ${p.text.trim()}` : p.summary;
+}
+
 /** Confirm-step wording: machine name first, one go-ahead button. */
 export function proposalConfirmText(state: Pick<HubState, "machine" | "machines">, p: ChatProposal): { title: string; detail: string; button: string } {
+  if (p.kind === "browse") {
+    return {
+      title: "Start a browser task?",
+      detail: `${p.text.trim()}. Your pet uses your Chrome: Chrome asks you to Allow it, and every click or typing asks you here first.`,
+      button: "Start browser task",
+    };
+  }
   const name = proposalMachineName(state, p);
   return { title: `Run on ${name}?`, detail: p.summary, button: `Run on ${name}` };
 }
 
 /** Text for a proposal that went through. */
 export function proposalDoneText(state: Pick<HubState, "machine" | "machines">, p: ChatProposal): string {
+  if (p.kind === "browse") return "Browser task started.";
   const name = proposalMachineName(state, p);
   return p.kind === "start" ? `Started on ${name}.` : `Sent to ${name}.`;
 }

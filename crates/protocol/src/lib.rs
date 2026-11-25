@@ -217,6 +217,41 @@ pub struct ChatProposal {
 pub enum ChatProposalKind {
     Start,
     Prompt,
+    /// Start a browser task (v0.2 item 5).
+    Browse,
+}
+
+/// A screen capture the user approved for one message (v0.2 item 4): PNG or JPEG, at most 4 MiB decoded, used once,
+/// never stored or mirrored. `data` is base64.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatImage {
+    pub media_type: String,
+    pub data: String,
+}
+
+impl std::fmt::Debug for ChatImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatImage").field("media_type", &self.media_type).field("data_len", &self.data.len()).finish()
+    }
+}
+
+/// Browser use settings (v0.2 item 5). Off by default.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsBrowser {
+    pub enabled: bool,
+    #[serde(default)]
+    pub allow_sites: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsBrowserPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_sites: Option<Vec<String>>,
 }
 
 /// Heartbeat a hub sends each paired hub every PRESENCE_INTERVAL_MS and on change.
@@ -535,6 +570,9 @@ pub struct Session {
     pub last_event_at: UnixMs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<UnixMs>,
+    /// Some("browser") = a browser task the default pet started (v0.2 item 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -895,6 +933,9 @@ pub struct ChatMessage {
     /// Commands the bot understood for another machine; several = it is asking which one was meant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proposals: Vec<ChatProposal>,
+    /// A picture came with this message (never stored or mirrored itself).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub image: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1254,6 +1295,9 @@ pub struct HubSettings {
     /// The localhost A2A server and its callers (A2A phase A2). Boxed: keeps `ServerMsg` small.
     #[serde(default)]
     pub a2a: Box<HubSettingsA2a>,
+    /// Browser use (v0.2 item 5). Boxed: keeps `ServerMsg` small.
+    #[serde(default)]
+    pub browser: Box<HubSettingsBrowser>,
 }
 
 /// `Some(None)` = explicit null (clear), `None` = key absent (unchanged).
@@ -1424,6 +1468,8 @@ pub struct HubSettingsPatch {
     pub custom_agents: Option<Vec<CustomAgentSetting>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a2a: Option<HubSettingsA2aPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<HubSettingsBrowserPatch>,
 }
 
 /// Agent hooks the hub can install (same targets as `pawl install-hooks`). copilot-vscode is per repo.
@@ -1520,7 +1566,15 @@ pub enum ClientMsg {
         #[serde(default)]
         confirmed: Option<bool>,
     },
-    Prompt { id: String, session_id: SessionId, text: String },
+    Prompt {
+        id: String,
+        session_id: SessionId,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ChatImage>,
+    },
+    /// Start a browser task (v0.2 item 5); `confirmed` must be true.
+    StartBrowserTask { id: String, task: String, #[serde(default)] confirmed: bool },
     Cancel { id: String, session_id: SessionId },
     /// For another machine's request the hub forwards an intent; an allow option then needs `confirmed: Some(true)`.
     /// Remote errors: already_decided, not_found, unconfirmed, forbidden, invalid, rate_limited, offline, timeout.
@@ -1541,6 +1595,9 @@ pub enum ClientMsg {
         /// Some("voice") = a speech transcript (v0.2).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via: Option<String>,
+        /// At most one screen capture the user approved for this message (v0.2 item 4).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ChatImage>,
     },
     UpdatePet { id: String, pet_id: PetId, patch: PetPatch },
     SetRules { id: String, rules: Vec<Rule> },
@@ -1632,6 +1689,7 @@ impl ClientMsg {
             | ClientMsg::RestartHub { id }
             | ClientMsg::A2aRotateToken { id, .. }
             | ClientMsg::ListTasks { id, .. } => id,
+            ClientMsg::StartBrowserTask { id, .. } => id,
         }
     }
 }

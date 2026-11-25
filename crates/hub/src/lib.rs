@@ -10,6 +10,7 @@ pub mod restart;
 pub mod notify;
 pub mod server;
 pub mod settings;
+pub mod sites;
 pub mod store;
 pub mod titles;
 

@@ -26,9 +26,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
-use pawl_protocol::BotProvider;
+use pawl_protocol::{BotProvider, ChatImage};
 use serde_json::{json, Value};
 
+use super::vision;
 use super::{BrainConfig, DEFAULT_GEMINI_MODEL, DEFAULT_MODEL, DEFAULT_OPENAI_MODEL};
 use crate::util::truncate;
 
@@ -40,6 +41,9 @@ const CLOUD_TIMEOUT: Duration = Duration::from_secs(30);
 const OLLAMA_TIMEOUT: Duration = Duration::from_secs(60);
 /// One turn of the hub's warm agent session (an agent is slower than a plain API call).
 const ACP_TIMEOUT: Duration = Duration::from_secs(45);
+/// A turn with a picture: the upload and the model's look take longer.
+const VISION_TIMEOUT: Duration = Duration::from_secs(60);
+const ACP_VISION_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_REPLY_CHARS: usize = 700;
 /// Name of the structured output (OpenAI requires one).
 const SCHEMA_NAME: &str = "pet_intent";
@@ -100,6 +104,15 @@ pub trait ModelSession: Send + Sync {
     fn label(&self) -> String;
     /// One turn: instructions, then the message; plain text back, or an error after `timeout`.
     fn complete<'a>(&'a self, system: &'a str, user: &'a str, timeout: Duration) -> ModelFuture<'a>;
+    /// Does the session's agent take pictures (ACP `promptCapabilities.image`)? Default: no.
+    fn sees_images(&self) -> bool {
+        false
+    }
+    /// One turn with a picture (an ACP image block before the text). The picture is used for this turn
+    /// only. Default: refused.
+    fn complete_with_image<'a>(&'a self, _system: &'a str, _user: &'a str, _image: &'a ChatImage, _timeout: Duration) -> ModelFuture<'a> {
+        Box::pin(async { Err(anyhow!("this model session takes no pictures")) })
+    }
 }
 
 #[derive(Clone)]
@@ -245,6 +258,40 @@ impl Llm {
         Ok(t)
     }
 
+    /// Can this provider see pictures? By model name (Anthropic, OpenAI), always (Gemini), the server's
+    /// answer (Ollama `/api/show` capabilities), or the agent's (ACP `promptCapabilities.image`).
+    pub async fn sees_images(&self) -> bool {
+        match &self.provider {
+            Provider::Anthropic { model, .. } => vision::anthropic_sees(model),
+            Provider::OpenAi { model, .. } => vision::openai_sees(model),
+            Provider::Gemini { model, .. } => path_safe(model),
+            Provider::Ollama { url, model } => {
+                let show = self.http.post(vision::ollama_show_url(url)).json(&json!({ "model": model })).timeout(Duration::from_secs(10)).send().await;
+                let body = match show {
+                    Ok(r) if r.status().is_success() => read_capped(r, "ollama").await.ok(),
+                    _ => None,
+                };
+                body.and_then(|b| serde_json::from_str::<Value>(&b).ok()).is_some_and(|v| vision::ollama_shows_vision(&v))
+            }
+            Provider::Acp(s) => s.sees_images(),
+        }
+    }
+
+    /// A reply about one picture (used for this call only: never stored or logged). Check
+    /// [`Self::sees_images`] first.
+    pub async fn look(&self, system: &str, user: &str, image: &ChatImage, max_tokens: u32) -> anyhow::Result<String> {
+        let raw = match &self.provider {
+            Provider::Acp(s) => s.complete_with_image(system, user, image, ACP_VISION_TIMEOUT).await,
+            _ => self.call_with(system, user, max_tokens, None, Some(image)).await,
+        }
+        .inspect_err(|e| tracing::warn!(provider = %self.describe(), error = %e, "brain: LLM call with a picture failed"))?;
+        let t = clean_output(&raw);
+        if t.is_empty() {
+            bail!("{} returned an empty reply", self.describe());
+        }
+        Ok(t)
+    }
+
     /// One JSON object shaped by `schema` (the provider's structured output). The caller validates
     /// every field: the schema only shapes the answer.
     pub async fn complete_json(&self, system: &str, user: &str, schema: &Value, max_tokens: u32) -> anyhow::Result<Value> {
@@ -255,6 +302,10 @@ impl Llm {
     }
 
     async fn call(&self, system: &str, user: &str, max_tokens: u32, schema: Option<&Value>) -> anyhow::Result<String> {
+        self.call_with(system, user, max_tokens, schema, None).await
+    }
+
+    async fn call_with(&self, system: &str, user: &str, max_tokens: u32, schema: Option<&Value>, image: Option<&ChatImage>) -> anyhow::Result<String> {
         let p = &self.provider;
         if let Provider::Acp(s) = p {
             // No structured output over ACP: the schema goes into the instructions.
@@ -266,15 +317,19 @@ impl Llm {
             };
             return s.complete(&system, user, p.timeout()).await;
         }
+        let body = |b: Value| match image {
+            Some(img) => with_image(p, b, img),
+            None => b,
+        };
         let req = match p {
             Provider::Anthropic { api_key, model, url } => self
                 .http
                 .post(url)
                 .header("x-api-key", api_key)
                 .header("anthropic-version", ANTHROPIC_VERSION)
-                .json(&anthropic_body(model, system, user, max_tokens, schema)),
+                .json(&body(anthropic_body(model, system, user, max_tokens, schema))),
             Provider::OpenAi { api_key, model, url } => {
-                self.http.post(url).bearer_auth(api_key).json(&openai_body(model, system, user, max_tokens, schema))
+                self.http.post(url).bearer_auth(api_key).json(&body(openai_body(model, system, user, max_tokens, schema)))
             }
             Provider::Gemini { api_key, model, base } => {
                 if !path_safe(model) {
@@ -283,13 +338,14 @@ impl Llm {
                 self.http
                     .post(format!("{}/{model}:generateContent", base.trim_end_matches('/')))
                     .header("x-goog-api-key", api_key)
-                    .json(&gemini_body(model, system, user, max_tokens, schema))
+                    .json(&body(gemini_body(model, system, user, max_tokens, schema)))
             }
-            Provider::Ollama { url, model } => self.http.post(url).json(&ollama_body(model, system, user, max_tokens, schema)),
+            Provider::Ollama { url, model } => self.http.post(url).json(&body(ollama_body(model, system, user, max_tokens, schema))),
             Provider::Acp(_) => unreachable!("answered above"),
         };
         let name = p.label();
-        let resp = req.timeout(p.timeout()).send().await.with_context(|| format!("{name} request failed"))?;
+        let timeout = if image.is_some() { VISION_TIMEOUT.max(p.timeout()) } else { p.timeout() };
+        let resp = req.timeout(timeout).send().await.with_context(|| format!("{name} request failed"))?;
         let status = resp.status();
         let text = read_capped(resp, &name).await?;
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -304,6 +360,35 @@ impl Llm {
             Provider::Acp(_) => unreachable!("answered above"),
         }
     }
+}
+
+/// `body` (a provider's text request) with `image` added to its user message, the way each API takes
+/// pictures (see [`vision`]). The user's text stays, after the picture (Anthropic, Gemini) or with it.
+pub(crate) fn with_image(p: &Provider, mut body: Value, image: &ChatImage) -> Value {
+    let (mt, data) = (image.media_type.as_str(), image.data.as_str());
+    match p {
+        Provider::Anthropic { .. } => {
+            let text = body["messages"][0]["content"].clone();
+            body["messages"][0]["content"] = json!([
+                { "type": "image", "source": { "type": "base64", "media_type": mt, "data": data } },
+                { "type": "text", "text": text },
+            ]);
+        }
+        Provider::OpenAi { .. } => {
+            let text = body["messages"][1]["content"].clone();
+            body["messages"][1]["content"] = json!([
+                { "type": "text", "text": text },
+                { "type": "image_url", "image_url": { "url": format!("data:{mt};base64,{data}") } },
+            ]);
+        }
+        Provider::Gemini { .. } => {
+            let text = body["contents"][0]["parts"][0]["text"].clone();
+            body["contents"][0]["parts"] = json!([{ "inline_data": { "mime_type": mt, "data": data } }, { "text": text }]);
+        }
+        Provider::Ollama { .. } => body["messages"][1]["images"] = json!([data]),
+        Provider::Acp(_) => {}
+    }
+    body
 }
 
 fn api_error(v: &Value, body: &str) -> String {

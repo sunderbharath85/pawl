@@ -2,6 +2,7 @@
 // and VS Code. Field errors, client-side checks that mirror the hub's validation, patch diffing, the wording of
 // in-app confirms for risky changes, and hook labels. No DOM, Node or React imports here.
 import { a2aRiskyChanges } from "./a2a";
+import { browserRiskyChanges } from "./browser";
 import type { Agent, AgentId, BotProvider, BotStyle, CustomAgentSetting, HookStatus, HookTargetName, HubSettings, HubSettingsPatch, MachineId, PanelView } from "@pawl/protocol";
 
 /** The first protocol version with `get_settings` / `update_settings` / `hook_status` / `install_hooks` / `open_panel`. */
@@ -119,6 +120,8 @@ export const SETTINGS_FIELD_LABELS: Record<string, string> = {
   "a2a.port": "A2A port",
   "a2a.callers": "A2A callers",
   "a2a.agents": "Outside A2A agents",
+  "browser.enabled": "Browser tasks",
+  "browser.allowSites": "Sites opened without asking",
 };
 
 /** "Hub port", "Start folders (item 3)", or the raw path for an unknown field. */
@@ -901,6 +904,8 @@ export function riskyChanges(base: HubSettings, patch: HubSettingsPatch, ctx: Ri
   }
   // Settings > A2A: the localhost server on, a caller answering approvals, an outside agent off this PC.
   out.push(...a2aRiskyChanges(base, patch));
+  // Settings > Browser: turning it on, and sites opened without asking.
+  out.push(...browserRiskyChanges(base, patch));
   return out;
 }
 

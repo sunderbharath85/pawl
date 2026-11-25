@@ -75,6 +75,7 @@ export function ChatView() {
               <div className="msg-bubble">
                 {voiceIds.has(m.id) ? <span className="msg-via">You (voice): </span> : null}
                 {m.text}
+                {m.image ? <span className="shot-chip">screenshot</span> : null}
               </div>
               <time>{clockTime(m.ts)}</time>
             </div>

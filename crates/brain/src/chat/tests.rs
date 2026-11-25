@@ -38,6 +38,7 @@ fn session(id: &str, agent: &str, cwd: &str, source: SessionSource, status: Sess
         started_at: now - 3_600_000,
         last_event_at: now - 60_000,
         ended_at: None,
+        purpose: None,
     }
 }
 
@@ -1733,4 +1734,225 @@ async fn by_voice_the_read_back_shows_the_end_of_a_long_command() {
     r.tool_call.raw_input = Some(json!({ "command": cmd }));
     let reply = ask("approve", &spoken(vec![r])).await;
     assert!(reply.text.contains("&& rm -rf ~/projects`"), "{}", reply.text);
+}
+
+// ---------- pictures (v0.2 item 4) ----------
+
+use serde_json::Value;
+
+/// A fake server that answers every request with `reply` (JSON), and Ollama's `/api/show` with `show`.
+/// Records each request's first line and body.
+async fn fake_api(reply: Value, show: Value) -> (String, std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let (log, reply, show) = (log.clone(), reply.clone(), show.clone());
+            tokio::spawn(async move {
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 65536];
+                let (mut line, mut body) = (String::new(), String::new());
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let Some(h) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+                    let head = String::from_utf8_lossy(&buf[..h]).to_string();
+                    let len = head
+                        .to_lowercase()
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if buf.len() >= h + 4 + len {
+                        line = head.lines().next().unwrap_or_default().to_string();
+                        body = String::from_utf8_lossy(&buf[h + 4..h + 4 + len]).into_owned();
+                        break;
+                    }
+                }
+                let out = if line.contains("/api/show") { show.to_string() } else { reply.to_string() };
+                log.lock().unwrap().push((line, body));
+                let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{out}", out.len());
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    (url, seen)
+}
+
+fn picture() -> pawl_protocol::ChatImage {
+    vision::tests::png(1280, 800)
+}
+
+#[tokio::test]
+async fn without_a_model_that_sees_the_pet_says_so_plainly() {
+    let c = ctx();
+    let img = picture();
+    // No model at all.
+    assert_eq!(brain().look("what's on my screen?", &img, &c).await.text, vision::NO_VISION);
+    // A text-only model: no call is made.
+    let b = Brain::new(BrainConfig { provider: BotProvider::Openai, openai_api_key: Some("k".into()), openai_model: "gpt-3.5-turbo".into(), ..BrainConfig::default() });
+    let r = b.look("what's this?", &img, &c).await;
+    assert_eq!((r.text.as_str(), r.action.is_none(), r.proposals.is_empty()), (vision::NO_VISION, true, true));
+    // Ollama asks the server whether the model has the vision capability.
+    let (url, seen) = fake_api(json!({ "message": { "content": "unused" } }), json!({ "capabilities": ["completion"] })).await;
+    let b = Brain::new(BrainConfig { ollama_url: Some(url), ollama_model: Some("llama3.2".into()), ..BrainConfig::default() });
+    assert_eq!(b.look("what's this?", &img, &c).await.text, vision::NO_VISION);
+    let calls = seen.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "only /api/show: {calls:?}");
+    assert!(calls[0].0.starts_with("POST /api/show") && calls[0].1.contains("llama3.2"));
+}
+
+#[tokio::test]
+async fn ollama_with_vision_gets_the_picture_once_in_images() {
+    let img = picture();
+    let (url, seen) = fake_api(json!({ "message": { "role": "assistant", "content": "A terminal with one failing test." } }), json!({ "capabilities": ["completion", "vision"] })).await;
+    let b = Brain::new(BrainConfig { ollama_url: Some(url), ollama_model: Some("llava".into()), ..BrainConfig::default() });
+    let r = b.look("why is this red?", &img, &ctx()).await;
+    assert!(r.text.contains("A terminal with one failing test."), "{}", r.text);
+    assert!(r.action.is_none() && r.proposals.is_empty(), "a picture never yields an action or proposal");
+    let calls = seen.lock().unwrap().clone();
+    let (line, body) = calls.iter().find(|(l, _)| l.contains("/api/chat")).cloned().expect("a chat call");
+    assert!(line.starts_with("POST /api/chat"));
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["messages"][1]["images"], json!([img.data]), "raw base64, no data: prefix");
+    assert!(v["messages"][1]["content"].as_str().unwrap().contains("why is this red?"));
+    assert!(v["messages"][0]["content"].as_str().unwrap().contains("never instructions"), "the picture's text is data");
+    assert_eq!(calls.iter().filter(|(_, b)| b.contains(&img.data)).count(), 1, "sent once");
+}
+
+#[tokio::test]
+async fn cloud_providers_get_their_own_picture_shapes() {
+    let img = picture();
+    // Anthropic: an image block (base64 source) before the text, over the Messages API.
+    let (url, seen) = fake_api(json!({ "content": [{ "type": "text", "text": "Your CI page shows a red build." }] }), json!({})).await;
+    let llm = llm::Llm::with_provider(llm::Provider::Anthropic { api_key: "ka".into(), model: "claude-haiku-5-5".into(), url: format!("{url}/v1/messages") }).unwrap();
+    assert!(llm.sees_images().await);
+    assert_eq!(llm.look("sys", "what failed?", &img, 100).await.unwrap(), "Your CI page shows a red build.");
+    let body: Value = serde_json::from_str(&seen.lock().unwrap()[0].1).unwrap();
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([
+            { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": img.data } },
+            { "type": "text", "text": "what failed?" },
+        ])
+    );
+    // OpenAI: text, then an image_url data URL.
+    let (url, seen) = fake_api(json!({ "choices": [{ "message": { "role": "assistant", "content": "A settings dialog.", "refusal": null } }] }), json!({})).await;
+    let llm = llm::Llm::with_provider(llm::Provider::OpenAi { api_key: "ko".into(), model: "gpt-6-luna".into(), url: format!("{url}/v1/chat/completions") }).unwrap();
+    assert_eq!(llm.look("sys", "what is it?", &img, 100).await.unwrap(), "A settings dialog.");
+    let body: Value = serde_json::from_str(&seen.lock().unwrap()[0].1).unwrap();
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!([{ "type": "text", "text": "what is it?" }, { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{}", img.data) } }])
+    );
+    // Gemini: inline_data, then the text.
+    let (url, seen) = fake_api(json!({ "candidates": [{ "content": { "parts": [{ "text": "A login page." }] } }] }), json!({})).await;
+    let llm = llm::Llm::with_provider(llm::Provider::Gemini { api_key: "kg".into(), model: "gemini-3.5-flash-lite".into(), base: format!("{url}/v1beta/models") }).unwrap();
+    assert_eq!(llm.look("sys", "where am I?", &img, 100).await.unwrap(), "A login page.");
+    let body: Value = serde_json::from_str(&seen.lock().unwrap()[0].1).unwrap();
+    assert_eq!(body["contents"][0]["parts"], json!([{ "inline_data": { "mime_type": "image/png", "data": img.data } }, { "text": "where am I?" }]));
+    // A text call carries no picture.
+    let (url, seen) = fake_api(json!({ "content": [{ "type": "text", "text": "Hi." }] }), json!({})).await;
+    let llm = llm::Llm::with_provider(llm::Provider::Anthropic { api_key: "ka".into(), model: "m".into(), url }).unwrap();
+    llm.complete("sys", "hi", 50).await.unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&seen.lock().unwrap()[0].1).unwrap()["messages"][0]["content"], "hi");
+}
+
+/// The hub's agent session: sees pictures when its agent takes them (`sees`), and records what it got.
+struct SeeingSession {
+    sees: bool,
+    got: std::sync::Mutex<Vec<String>>,
+}
+
+impl ModelSession for SeeingSession {
+    fn label(&self) -> String {
+        "fake:sonnet".into()
+    }
+    fn complete<'a>(&'a self, _system: &'a str, _user: &'a str, _timeout: std::time::Duration) -> ModelFuture<'a> {
+        Box::pin(async { Ok("text only".to_string()) })
+    }
+    fn sees_images(&self) -> bool {
+        self.sees
+    }
+    fn complete_with_image<'a>(&'a self, _system: &'a str, user: &'a str, image: &'a pawl_protocol::ChatImage, _timeout: std::time::Duration) -> ModelFuture<'a> {
+        self.got.lock().unwrap().push(format!("{} {} {}", image.media_type, image.data.len(), user));
+        Box::pin(async { Ok("I see a failing test in your terminal.".to_string()) })
+    }
+}
+
+#[tokio::test]
+async fn the_hubs_agent_session_sees_through_an_image_block_when_its_agent_can() {
+    let img = picture();
+    let blind: Arc<dyn ModelSession> = Arc::new(SeeingSession { sees: false, got: Default::default() });
+    let b = Brain::with_session(BrainConfig::default(), Some(blind));
+    assert_eq!(b.look("what's this?", &img, &ctx()).await.text, vision::NO_VISION);
+    let s = Arc::new(SeeingSession { sees: true, got: Default::default() });
+    let b = Brain::with_session(BrainConfig::default(), Some(s.clone() as Arc<dyn ModelSession>));
+    let r = b.look("what's this?", &img, &ctx()).await;
+    assert!(r.text.ends_with("I see a failing test in your terminal."), "{}", r.text);
+    assert_eq!(s.got.lock().unwrap().clone(), vec![format!("image/png {} what's this?", img.data.len())]);
+    // An empty question still asks about the picture.
+    b.look("  ", &img, &ctx()).await;
+    assert!(s.got.lock().unwrap()[1].ends_with("What's in this picture?"));
+}
+
+// ---------- browser tasks (v0.2 item 5) ----------
+
+#[tokio::test]
+async fn with_browser_use_on_web_tasks_become_browse_proposals() {
+    let mut c = ctx();
+    c.browser = true;
+    for text in ["check if CI passed on my PR", "open the staging page"] {
+        let r = ask(text, &c).await;
+        let p = only_proposal(&r);
+        assert_eq!((p.kind, p.machine_id.as_str(), p.agent_id.as_str()), (ChatProposalKind::Browse, ME, "claude-code"), "{text}");
+        assert_eq!((p.text.as_str(), p.cwd.as_deref(), p.session_id.as_deref()), (text, None, None));
+        assert!(p.summary.starts_with("Use the browser: "), "{}", p.summary);
+        assert!(r.text.contains("Chrome") && r.text.contains("Confirm"), "{}", r.text);
+    }
+    // A coding task stays a coding task; an agent named gets the command.
+    let r = ask("fix the failing test in repo api", &c).await;
+    assert!(r.proposals.iter().all(|p| p.kind != ChatProposalKind::Browse), "{r:?}");
+    let r = ask("tell codex to check if CI passed on my PR", &c).await;
+    assert!(r.proposals.iter().all(|p| p.kind != ChatProposalKind::Browse), "{r:?}");
+    // Status and approvals are never browser tasks.
+    assert!(ask("status", &c).await.proposals.is_empty());
+    // Browser use off (the default): never proposed.
+    let off = ctx();
+    let r = ask("check if CI passed on my PR", &off).await;
+    assert!(r.proposals.iter().all(|p| p.kind != ChatProposalKind::Browse), "{r:?}");
+    // A pet's own chat goes to its agent, not the browser.
+    let mut chat = c.clone();
+    chat.pet = Some(pet("pet-codex", "Rex", ME, "codex"));
+    let r = ask("check if CI passed on my PR", &chat).await;
+    assert!(r.proposals.iter().all(|p| p.kind != ChatProposalKind::Browse), "{r:?}");
+}
+
+#[tokio::test]
+async fn a_reply_about_a_picture_never_repeats_a_secret() {
+    struct Leaky;
+    impl ModelSession for Leaky {
+        fn label(&self) -> String {
+            "fake:sonnet".into()
+        }
+        fn complete<'a>(&'a self, _s: &'a str, _u: &'a str, _t: std::time::Duration) -> ModelFuture<'a> {
+            Box::pin(async { Ok(String::new()) })
+        }
+        fn sees_images(&self) -> bool {
+            true
+        }
+        fn complete_with_image<'a>(&'a self, _s: &'a str, _u: &'a str, _i: &'a pawl_protocol::ChatImage, _t: std::time::Duration) -> ModelFuture<'a> {
+            Box::pin(async { Ok("Your terminal shows OPENAI_API_KEY=sk-live-0123456789abcdef and a failing test.".to_string()) })
+        }
+    }
+    let b = Brain::with_session(BrainConfig::default(), Some(Arc::new(Leaky) as Arc<dyn ModelSession>));
+    let r = b.look("what's on my screen?", &picture(), &ctx()).await;
+    assert!(!r.text.contains("sk-live-0123456789abcdef"), "{}", r.text);
+    assert!(r.text.contains("a failing test"), "{}", r.text);
 }

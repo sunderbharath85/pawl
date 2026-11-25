@@ -363,3 +363,267 @@ Checked: the build took the sherpa-onnx archive from the pinned folder. The buil
 - Tauri deb/rpm `depends`: https://v2.tauri.app/reference/config/ (`DebConfig`, `RpmConfig`); Ubuntu's
   `libasound2` virtual package: https://packages.ubuntu.com/noble/libasound2
 - Tauri app events (`RunEvent::Exit`): https://docs.rs/tauri/2.12.7/tauri/enum.RunEvent.html
+
+# v0.2 item 4: screen capture engine (branch feat/screen-browser)
+
+## Summary
+
+- **Commands** (`apps/desktop/src-tauri/src/screen/`), as in docs/CONTRACTS.md "v0.2 Screen and Browser":
+  - `screen_sources() -> { id, kind: "screen" | "window", title, app, thumb }[]`
+  - `screen_capture(id) -> { mediaType, data, width, height }`
+- **Pictures live in memory only:** never written to disk, never logged (no logger is installed), and not kept
+  after the command returns.
+- **Files:**
+  - `src/screen/mod.rs`: the commands, the "offered ids" check, and keeping Pawl's windows out of screen captures.
+  - `src/screen/sources.rs`: listing, filtering and capturing by id (xcap).
+  - `src/screen/encode.rs`: scaling, JPEG/PNG choice, the 4 MiB limit, thumbnails, base64.
+  - `src/screen/permission.rs`: the macOS Screen Recording permission.
+  - Glue in `lib.rs`; `Cargo.toml` / `Cargo.lock`.
+- **Outside src-tauri** (Linux build packages, needed for the Linux compile; please check):
+  - `.github/workflows/release.yml` (apt packages)
+  - `tauri.conf.json` deb/rpm `depends`
+  - one README requirements line
+- **Dependencies:**
+  - `xcap = { version = "0.9.10", features = ["wgc"] }`
+  - `image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }` (already in the tree
+    through tauri, same 0.25.10)
+  - base64 is a small built-in encoder, not a new crate.
+
+## Behaviour
+
+- **`screen_sources`:**
+  - Lists every screen (the main one first: "Screen 1 (DELL ...)"), then up to 40 windows of other apps, front to
+    back. Each has a thumbnail: PNG, long side at most 240 px, base64.
+  - Left out:
+    - Pawl's own windows (same process)
+    - minimized windows
+    - windows with no title (taskbar, tool windows)
+    - windows smaller than 64 px
+    - on macOS, the system's own surfaces (Dock, Window Server, Control Center, ...)
+  - xcap already skips invisible and cloaked windows, which includes windows on other virtual desktops.
+  - A window whose thumbnail can't be taken is left out, because it couldn't be captured either.
+- **`screen_capture(id)`:**
+  - Accepts only an id from the latest `screen_sources` list, at most 10 minutes old; otherwise it says "Pick the
+    screen or window again." It is not a security boundary, but a capture always follows the picker.
+  - A window is checked again (still open, not minimized, not Pawl's).
+  - It is then captured, scaled so the long side is at most 2048 px (bilinear), and encoded as JPEG at quality 85,
+    or PNG if that is smaller.
+  - Over 4 MiB: JPEG at 75/65/50, then 3/4 the size each step, down to 256 px; otherwise an error. It never loops
+    endlessly.
+- **Pawl's bubble is kept out of screen captures.**
+  - While a screen is captured (and while the picker's screen thumbnails are taken), every Pawl window gets Tauri's
+    content protection: `WDA_EXCLUDEFROMCAPTURE` on Windows, `NSWindowSharingNone` on macOS. It is restored right
+    after.
+  - The windows stay visible on the monitor. Without this, every full-screen capture would contain the picker
+    itself.
+  - It is applied on the main thread, and the capture waits for that. Linux has no such switch.
+- **Alpha:**
+  - Windows (WGC) and macOS give premultiplied alpha (rounded corners, transparent windows, the macOS shadow). It is
+    laid over white, so those parts don't turn black.
+  - Linux alpha is ignored.
+- **macOS Screen Recording permission:**
+  - Checked with `CGPreflightScreenCaptureAccess` before listing or capturing.
+  - If it is missing, Pawl calls `CGRequestScreenCaptureAccess` and returns: "Pawl needs permission to see your
+    screen. Turn on Pawl in System Settings > Privacy & Security > Screen & System Audio Recording (Screen
+    Recording on macOS 14), then quit and reopen Pawl."
+  - What the user sees: the first time, the system alert "Pawl would like to record this computer's screen and
+    audio" (Open System Settings / Deny). After turning Pawl on there, macOS offers "Quit & Reopen"; the grant only
+    takes effect after a restart.
+  - On macOS 15, the system also asks again from time to time (monthly): "... is requesting to bypass the system
+    private window picker and directly access your screen and audio" (Allow For One Month).
+  - No Info.plist key or entitlement is needed (Pawl is not sandboxed), so none was added.
+
+## Decision: Windows Graphics Capture (`wgc`), not GDI
+
+I measured this with a temporary probe on this machine (Windows 11 build 26300). It printed only app names, sizes
+and pixel statistics, and was removed afterwards.
+
+- **GDI's PrintWindow** (xcap's default) returned GPU-drawn windows black: Task Manager was 98% black with alpha 0.
+  It also cropped windows by 8 px.
+- **With `wgc`,** Task Manager is correct and windows come out at full size.
+- **Edge and VS Code** were dark either way. That fits Chromium pausing painting while its window is covered, which
+  no capture API can work around.
+- **Yellow border:** none was seen. I sampled the top screen edge with GDI 316 times during 31 WGC captures of the
+  front window. xcap asks for no border (`IsBorderRequired = false`). Microsoft documents that a border may still
+  show without the user's consent (always on Windows 10), so a yellow frame may flash around the window during a
+  capture on some machines.
+- **Exclusion check:** a magenta test window with `WDA_EXCLUDEFROMCAPTURE` is absent from both a GDI and a WGC
+  screen grab within 5 ms of the call, and present again right after resetting. So the exclusion works and needs no
+  long wait (20 ms margin).
+
+## Tests and gates
+
+- **Unit tests:**
+  - scaling (aspect ratio, no upscaling, no 0 px, no overflow)
+  - alpha (ignored / over white)
+  - scaling to 2048
+  - PNG for flat UI, JPEG for photo-like images, always the smaller of the two
+  - the 4 MiB logic (lower quality, then smaller, then an error for the impossible case)
+  - thumbnails
+  - base64 against the RFC 4648 vectors
+  - source ids (round trip, junk rejected)
+  - the window filter
+  - screen titles
+  - serialization of the commands' JSON
+  - the offered-ids window
+- **Gated real capture:** `PAWL_SCREEN_TEST=1`, in memory only; it prints only sizes and timings. Release build,
+  1920x1080 screen:
+  - 8 sources listed (with thumbnails) in 0.38 s with GDI, 0.57 s with WGC
+  - screen: grab 40-60 ms, encode 0.17-0.19 s (PNG, 363 KiB)
+  - window: 340x566 grab 23-51 ms
+  - Debug builds are about 10x slower to encode.
+- **Gates:**
+  - `cargo test`: **101 passed** (98 lib + 3), with `PAWL_SCREEN_TEST=1` and the voice models.
+  - `cargo clippy --all-targets -- -D warnings`: clean.
+  - `bunx tauri build --debug --no-bundle`: OK. The debug exe is 62.3 MB, up from 60.5 MB.
+  - `scripts/check-no-models.sh`: ok.
+
+## Linux and macOS (compiled only by CI; nothing run here)
+
+- **Linux build** (xcap README): `pkg-config libclang-dev libxcb1-dev libxrandr-dev libdbus-1-dev
+  libpipewire-0.3-dev libwayland-dev libegl-dev`. These are now in `release.yml`'s apt step and the README.
+- **Linux runtime:** `libpipewire-0.3-0`, `libxcb1` and `libxcb-randr0` were added to the deb depends, and
+  `pipewire-libs` / `libxcb` to the rpm depends. On Ubuntu 24.04, `libpipewire-0.3-0t64` provides the first. I
+  haven't confirmed which libraries the binary really links without a Linux build.
+- **Wayland:** xcap captures through the desktop portal (it may show a system dialog), and window lists may be
+  empty. Untested.
+- **macOS:** `permission.rs` is a two-function CoreGraphics FFI, like `voice/lock.rs`. Everything else goes through
+  xcap. Not compiled here.
+
+## Known risks
+
+- **Possible crash instead of an error:** xcap's WGC code creates its D3D11 device in a `LazyLock` with
+  `expect(...)`, using the hardware driver type only. With the release profile's `panic = "abort"`, a machine with
+  no D3D11 device at all would close Pawl on the first capture instead of showing an error. Normal Windows 10/11 has
+  at least the Basic Render Driver, so this is rare. **Resolved:** t13 chose `panic = "unwind"`, and capture code
+  now runs under `catch_unwind` (see "Follow-up: unwind + Linux deps").
+- **macOS 15+:** `NSWindowSharingNone` may not hide Pawl from every capture path. Unverified.
+- **Picker speed:** each window thumbnail is a full capture (WGC about 50-130 ms each, serialized inside xcap).
+  With many windows the picker takes 1-3 s (40 at most).
+
+## Documentation used (screen)
+
+- xcap 0.9.10: https://docs.rs/xcap/0.9.10/xcap/ and https://github.com/nashaofu/xcap (README: Linux
+  requirements). I also read the source of `src/windows/{impl_window,capture,gdi,wgc}.rs` and
+  `src/macos/{impl_window,capture}.rs`.
+- image 0.25.10: https://docs.rs/image/0.25.10/image/ (`codecs::jpeg::JpegEncoder::new_with_quality`,
+  `codecs::png::PngEncoder::new_with_quality`, `imageops::{resize, thumbnail}`).
+- SetWindowDisplayAffinity / `WDA_EXCLUDEFROMCAPTURE`:
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity
+- WGC border: https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.graphicscapturesession.isborderrequired
+- Tauri content protection: https://docs.rs/tauri/2.12.7/tauri/webview/struct.WebviewWindow.html#method.set_content_protected
+  (tao 0.37.3: `SetWindowDisplayAffinity` on Windows, `setSharingType` on macOS).
+- macOS permission: https://developer.apple.com/documentation/coregraphics/cgrequestscreencaptureaccess() and
+  https://developer.apple.com/documentation/coregraphics/cgpreflightscreencaptureaccess(); no entitlement needed:
+  https://developer.apple.com/forums/thread/683860; Sequoia's monthly prompt:
+  https://9to5mac.com/2024/08/14/macos-sequoia-screen-recording-prompt-monthly/
+
+## Follow-up: unwind + Linux deps (t13's decisions)
+
+1. **The release profile now unwinds.**
+   - `apps/desktop/src-tauri/Cargo.toml` `[profile.release]` now has `panic = "unwind"` (was `"abort"`), with a
+     comment explaining why.
+   - New `src/panics.rs`: `guarded(what, user_message, f)` runs `f` under `catch_unwind`. On a panic it logs
+     `[pawl] <what> failed: <panic message>` (only the message, shortened to 300 chars, never image data) and
+     returns `Err(user_message)`.
+   - **Screen:** every xcap call goes through it on the blocking worker thread: the listing (screens, windows,
+     thumbnails), the capture, and the encoding. A panic becomes "Screen capture isn't available on this PC."
+     Pawl's windows still get their capture exclusion removed: the guard sits inside it, so cleanup runs normally.
+     The `busy` lock is never poisoned, because the panic is caught before it reaches the lock guard.
+   - **Voice:** with unwinding, a panic on the voice worker would end only that thread. That would leave a stale
+     status ("listening", mic shown as live). So the worker now runs under `catch_unwind` too (`spawn_worker`):
+     - Unwinding drops the engine, which closes the mic and frees the models.
+     - The status becomes `error` with "Voice stopped after an internal error. Restart Pawl to use it again.", and
+       the mic is shown closed in the status and the tray.
+     - A `state` and an `error` event go to both windows, and the panic message is logged.
+   - **FFI audit:** `catch_unwind` does not cross FFI. Since Rust 1.81, a panic leaving an `extern "C"` function
+     aborts the process (defined behaviour, not UB); we build with 1.95.
+     - Our only Rust code that C calls is cpal's input data and error callbacks. On macOS CoreAudio calls them from
+       C. They only downmix (iterators, no indexing) and `try_send`, so they cannot panic.
+     - sherpa-onnx's `extern "C"` callbacks are only in its TTS module, which we don't use. Our sherpa paths are the
+       ones already guarded against panics in round 1: NUL checks before its `CString::new(..).unwrap()`.
+     - The screen-lock FFI (`voice/lock.rs`) and `screen/permission.rs` are plain calls without callbacks.
+     - Main-thread handlers (tray, menus, the global shortcut) are called from tao's window procedure on Windows.
+       tao catches panics there and re-raises them outside the FFI frames.
+   - **Tests:**
+     - `panics::tests`: a panic becomes the user message; `&str`, `String` and other payloads are read; long
+       messages are shortened.
+     - `screen::tests::a_panicking_capture_is_an_error`
+     - `voice::tests::a_panicking_engine_reports_an_error_instead_of_a_stale_state`: a pretend mic that panics when
+       opened takes the real worker down. The status turns to `error` with the message, the mic shows as closed,
+       commands fail fast, and shutdown still joins.
+2. **Linux build bits** (now mine for this):
+   - **`release.yml`:** the apt step has xcap's packages (`pkg-config libclang-dev libxcb1-dev libxrandr-dev
+     libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev`).
+   - **`tauri.conf.json`:** deb `depends` has `libpipewire-0.3-0`, `libxcb1`, `libxcb-randr0`; rpm has
+     `pipewire-libs`, `libxcb` (CRLF kept).
+   - **README:** the requirements line lists the same packages.
+   - **`e2e.yml` is unchanged, on purpose.** It builds only `pawl-hub` (`cargo build -p pawl-hub`); the desktop
+     crate is excluded from the root workspace, and the e2e tests drive the web UI in Playwright's Chromium. xcap is
+     never compiled there, so the packages would only slow the job down. If e2e ever builds `src-tauri`, it needs
+     the same apt line as `release.yml`.
+3. **Exe size** (Windows x64, `cargo build --release` in src-tauri, same code, only the panic strategy changed):
+
+   | Build | `pawl-desktop.exe` |
+   |---|---|
+   | `panic = "abort"` (forced with `--config 'profile.release.panic="abort"'`) | 27,283,456 B (26.0 MiB) |
+   | `panic = "unwind"` (now) | 32,036,352 B (30.6 MiB) |
+   | **Change** | **+4,752,896 B (+4.5 MiB, +17.4%)**: unwind tables and landing pads |
+
+   - Each LTO build takes about 5.5 min.
+   - A plain `cargo build` does not embed the web UI (no `custom-protocol`), so these totals are smaller than a
+     `tauri build` exe. The change from the panic strategy is the same.
+4. **Gates:**
+   - `cargo test`: **105 passed** (102 lib + 3), with `PAWL_SCREEN_TEST=1` and the voice models.
+   - `cargo clippy --all-targets -- -D warnings`: clean.
+   - `bunx tauri build --debug --no-bundle`: OK.
+   - Release builds with both panic strategies: OK.
+
+## Screen review fixes (t13's review)
+
+1. **(a) Hiding Pawl's windows now fails closed.**
+   - `HideOwnWindows::new` returns a `Result`. The exclusion must be posted to the main thread, applied there to
+     every Pawl window (each `set_content_protected(true)` must succeed), and confirmed within 2 s.
+   - Otherwise the screen capture, or the listing with its screen thumbnails, is aborted with "Couldn't hide Pawl's
+     windows; try again." and nothing is captured.
+   - After a failure every window is restored. If the main thread runs the apply late, the restore sits behind it in
+     the same event queue, so no window stays protected.
+   - Window captures don't need the exclusion, since they show only that window.
+   - Linux has no such switch and still captures with the pet possibly visible (as documented before).
+   - Tests:
+     - `nothing_is_listed_or_captured_when_pawl_cannot_be_hidden`: the list and capture closures are never called.
+     - `the_exclusion_must_be_confirmed_in_time`: not posted, timeout, disconnected, or a window refusing all fail.
+2. **(b) `Debug` never shows picture data.**
+   - `Capture` has a hand-written `Debug` (media type, `data_len`, width, height), like `ChatImage`.
+   - `Source` shows id, kind, app, `title_len` and `thumb_len`. The window title is left out too, because it can
+     name a private document.
+   - The internal `WindowInfo` no longer derives `Debug`. `Encoded` never had it.
+   - Tests check that the base64 and the title don't appear.
+3. **(c) Picker handshake + rate limits** (`src/screen/gate.rs`). The commands are now:
+
+   | Command | Returns | Notes |
+   |---|---|---|
+   | `screen_begin()` | `string` (nonce, 32 hex chars) | Call when the picker opens. Valid 2 minutes, for the calling webview only; a new one replaces the old. Refused unless the calling window is visible. At most once a second and 20 times in 10 minutes. |
+   | `screen_sources({ nonce })` | `ScreenSource[]` | As before. At most every 2 s, 5 times per picker session. |
+   | `screen_capture({ nonce, id })` | `ScreenCapture` | `id` must be from this session's latest `screen_sources` list. At most every second, 3 times per session. |
+   | `screen_end({ nonce })` | nothing | Call when the picker closes (sent or cancelled); the nonce stops working. |
+
+   - Errors: "Open the screen picker again." (no, wrong, expired or ended nonce, or another webview), "Pick the
+     screen or window again." (id not in this session's list), "Too many screen pictures in a short time. Wait a
+     moment, then try again."
+   - The nonce comes from std's randomly keyed SipHash (`RandomState`), over a counter and the time. It is compared
+     without an early exit. It is not a secret from the page itself; it ties every listing and capture to an open
+     picker, and the limits bound what a misbehaving page could do.
+   - **The UI must update.** `apps/desktop/src/lib/screen.ts` (fe-settings) still calls `screen_sources()` and
+     `screen_capture({ id })` without a nonce. Those calls now fail with "Open the screen picker again." until it
+     calls `screen_begin` first.
+   - Tests:
+     - `gate.rs`: nothing without an open picker; wrong nonce or another webview; ids only from the session's own
+       list; expiry, end and replacement; every rate limit, including the 10-minute window; exact comparison.
+     - Flows: the nonce and its list are required; a panic inside a capture gives the user message and leaves the
+       lock usable.
+     - The gated real capture now runs through the same flows as the commands.
+4. **Gates:**
+   - `cargo test`: **113 passed** (110 lib + 3), with `PAWL_SCREEN_TEST=1` and the voice models.
+   - `cargo clippy --all-targets -- -D warnings`: clean.
+   - `bunx tauri build --debug --no-bundle`: OK.

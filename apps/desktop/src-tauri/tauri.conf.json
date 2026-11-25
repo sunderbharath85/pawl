@@ -62,12 +62,17 @@
     "linux": {
       "deb": {
         "depends": [
-          "libasound2"
+          "libasound2",
+          "libpipewire-0.3-0",
+          "libxcb1",
+          "libxcb-randr0"
         ]
       },
       "rpm": {
         "depends": [
-          "alsa-lib"
+          "alsa-lib",
+          "pipewire-libs",
+          "libxcb"
         ]
       }
     },

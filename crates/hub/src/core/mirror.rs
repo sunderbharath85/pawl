@@ -157,6 +157,8 @@ fn clamp_session(mut s: Session, now: UnixMs) -> Session {
     s.started_at = clamp_ts(s.started_at, now);
     s.last_event_at = clamp_ts(s.last_event_at, now);
     s.ended_at = s.ended_at.map(|t| clamp_ts(t, now));
+    // Only a known purpose is kept.
+    s.purpose = s.purpose.filter(|p| p == super::browser::PURPOSE);
     s
 }
 
@@ -1030,6 +1032,7 @@ mod tests {
             started_at: 1,
             last_event_at: 1,
             ended_at: None,
+            purpose: None,
         }
     }
 

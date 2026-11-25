@@ -269,6 +269,7 @@ mod tests {
             started_at: 0,
             last_event_at: last,
             ended_at: None,
+            purpose: None,
         }
     }
 

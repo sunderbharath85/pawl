@@ -8,7 +8,7 @@
 // Settings > Voice's wake-word test borrows the engine for a moment: then nothing here reacts.
 import { useCallback, useEffect, useRef } from "react";
 import type { HubClient, HubState } from "@pawl/hub-client";
-import { approvalReadBack, isLocal, machineDisplayName } from "@pawl/hub-client";
+import { approvalReadBack, isLocal, isLookRequest, lookQuestion, machineDisplayName } from "@pawl/hub-client";
 import { agentName, errorText } from "../lib/format";
 import { notifiesHere } from "../lib/where";
 import { setSpeechPause, speak, speechBusy, stopSpeaking } from "../lib/speech";
@@ -87,6 +87,8 @@ export interface VoiceTalkInput {
   openBubble(): void;
   say(text: string): void;
   chatSent(messageId: string): void;
+  /** "Look at this" said aloud: open the screen picker with this question (undefined: no screen access here). */
+  look?: ((question: string) => void) | undefined;
   speech: { voiceURI: string; rate: number };
 }
 
@@ -110,6 +112,8 @@ export function useVoiceTalk(input: VoiceTalkInput): VoiceTalk {
       openBubble();
     } else if (r.kind === "say") {
       say(r.text);
+    } else if (r.kind === "send" && latest.current.look && isLookRequest(r.text)) {
+      latest.current.look(lookQuestion(r.text));
     } else if (r.kind === "send") {
       // An ordinary chat message: the same parser and proposals as typed text; it never approves anything by itself.
       client.chat(r.text, undefined, { via: "voice" }).then(

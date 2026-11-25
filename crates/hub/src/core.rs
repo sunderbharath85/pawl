@@ -6,6 +6,7 @@ pub(crate) mod a2a_agents;
 pub(crate) mod a2a_peer;
 pub(crate) mod a2a_server;
 mod brain_session;
+pub(crate) mod browser;
 mod host;
 mod intents;
 mod mirror;
@@ -26,7 +27,7 @@ use pawl_brain::chat::{Brain, BrainAction, BrainContext, BrainReply};
 use pawl_brain::watchdog::Watchdog;
 use pawl_peer::PeerNode;
 use pawl_protocol::{
-    global_id, is_valid_machine_id, parse_global_id, Agent, AgentCapabilities, AgentId, AgentSource, ChatMessage,
+    global_id, is_valid_machine_id, parse_global_id, Agent, AgentCapabilities, AgentId, AgentSource, ChatImage, ChatMessage,
     ChatRole, ClientKind, ClientMsg, ErrorPayload, EventType, HistorySession, HookSource, HubEvent, HubNotification,
     Machine, MachineId, NotificationLevel, PermissionOptionKind, PermissionOutcome, PermissionRequest,
     PermissionResolvedPayload, Pet, PetId, PetPatch, RequestId, ResolvedBy, Rule, RuleAction, ServerMsg, Session,
@@ -384,6 +385,8 @@ struct Inner {
     a2a_peer: Mutex<a2a_peer::A2aPeerState>,
     /// Approvals by voice: read-backs per chat and wrong codes (`core/voice.rs`).
     voice: Mutex<voice::VoiceState>,
+    /// Running browser tasks' turn clocks (core/browser.rs).
+    browser: Mutex<browser::BrowserState>,
 }
 
 /// The hub. Cheap to clone; all clones share state.
@@ -622,12 +625,16 @@ impl Hub {
                 remote,
                 a2a_peer: Mutex::new(a2a_peer::A2aPeerState::default()),
                 voice: Mutex::new(voice::VoiceState::default()),
+                browser: Mutex::new(browser::BrowserState::default()),
             }),
         };
         hub.set_mirror(mirror_sessions, mirror_pets, mirror_pending);
         // Now that the hub exists the brain can hold the "acp" provider's session handle.
         hub.rebuild_brain();
         tokio::spawn(hub.clone().brain_session_loop());
+        // Browser tasks end with the run that started them: their folders go, and running ones are timed.
+        hub.sweep_browser_dirs();
+        tokio::spawn(hub.clone().browser_loop());
         hub.rebuild_repo_index().await;
         tokio::spawn(hub.clone().repo_index_loop());
         let tap = hub.inner.bus.tap();
@@ -962,6 +969,17 @@ impl Hub {
                     }
                 }
             }
+            // A picture never leaves this machine: a prompt with one goes to a local ACP agent that takes images.
+            ClientMsg::Prompt { session_id, text, images, .. } if !images.is_empty() => match self.foreign_owner(&session_id) {
+                Some(_) => {
+                    return Err(anyhow::Error::new(AckCode::Invalid)
+                        .context("a picture is never sent to another machine: attach it to a session on this machine"))
+                }
+                None => {
+                    self.prompt_with_images(&session_id, text, images).await?;
+                    json!({})
+                }
+            },
             ClientMsg::Prompt { session_id, text, .. } => match self.foreign_owner(&session_id) {
                 Some(m) => self.forward(&m, actor, false, pawl_protocol::Intent::Prompt { session_id, text }).await?,
                 None => {
@@ -969,6 +987,7 @@ impl Hub {
                     json!({})
                 }
             },
+            ClientMsg::StartBrowserTask { task, confirmed, .. } => self.start_browser_task(&task, confirmed).await?,
             ClientMsg::Cancel { session_id, .. } => match self.foreign_owner(&session_id) {
                 Some(m) => self.forward(&m, actor, false, pawl_protocol::Intent::Cancel { session_id }).await?,
                 None => {
@@ -989,14 +1008,15 @@ impl Hub {
             ClientMsg::ResumeSession { agent_id, acp_session_id, cwd, .. } => {
                 json!({ "session": self.resume_session(&agent_id, acp_session_id, &cwd).await? })
             }
-            ClientMsg::Chat { pet_id, text, via, .. } => {
+            ClientMsg::Chat { pet_id, text, via, images, .. } => {
                 // `via: "voice"`: a speech transcript (approvals follow the voice rules, see core/voice.rs).
                 let spoken = match via.as_deref() {
                     None => false,
                     Some(voice::VOICE) => true,
                     Some(_) => return Err(anyhow::Error::new(AckCode::Invalid).context("chat via must be \"voice\" or absent")),
                 };
-                json!({ "message": self.chat_as(pet_id, text, spoken, actor).await? })
+                let image = one_image(images)?;
+                json!({ "message": self.chat_with(pet_id, text, spoken, image, actor).await? })
             }
             ClientMsg::UpdatePet { pet_id, patch, .. } => json!({ "pet": self.update_pet(&pet_id, patch).await? }),
             ClientMsg::SetRules { rules, .. } => json!({ "rules": self.set_rules(rules).await? }),
@@ -1133,6 +1153,29 @@ impl Hub {
     pub async fn prompt(&self, session_id: &str, text: String) -> Result<()> {
         let req = a2a::prompt_request(session_id, &text);
         self.a2a_send(req, &pawl_a2a::Caller::Local, &Actor::internal("orchestrator"), a2a::Answers::Any).await.map(|_| ())
+    }
+
+    /// Prompt one of this machine's owned sessions with a picture (v0.2 item 4): only an ACP agent that
+    /// advertises `promptCapabilities.image`; never an outside A2A agent (the picture would leave the
+    /// machine). The picture is sent once and never stored (the `user_message` event says `image: true`).
+    pub async fn prompt_with_images(&self, session_id: &str, text: String, images: Vec<ChatImage>) -> Result<()> {
+        let image = one_image(images)?.ok_or_else(|| anyhow::Error::new(AckCode::Invalid).context("no picture"))?;
+        let s = self.owned_open_session(session_id)?;
+        if self.inner.remote.owns_session(session_id) || s.agent_id.starts_with(pawl_protocol::A2A_AGENT_PREFIX) {
+            return Err(anyhow::Error::new(AckCode::Invalid)
+                .context("pictures go only to this machine's own agents, never to an outside A2A agent"));
+        }
+        // A session another machine or an outside A2A caller drives could hand the picture on.
+        let driven = self.st().remote_driven.contains(session_id);
+        if driven || self.tasks().owner_of(session_id) != pawl_a2a::Caller::Local {
+            return Err(anyhow::Error::new(AckCode::Invalid)
+                .context("pictures go only to sessions this machine's own clients drive; this one is driven from another machine or an A2A caller"));
+        }
+        if !self.inner.host.accepts_images(session_id) {
+            let name = self.st().agent_name(&s.agent_id);
+            return Err(anyhow::Error::new(AckCode::Invalid).context(format!("{name} does not take pictures")));
+        }
+        self.a2a_prompt_with(session_id, text, vec![image], &pawl_a2a::Caller::Local).await.map(|_| ())
     }
 
     /// Stop the running turn of an owned session (A2A `CancelTask` on its task, `core/a2a.rs`).
@@ -1501,6 +1544,10 @@ impl Hub {
             if let Some(prev) = st.sessions.get(&m.id) {
                 m.started_at = m.started_at.min(prev.started_at);
                 m.last_event_at = m.last_event_at.max(prev.last_event_at);
+                // The host's snapshots do not know what a session is for (a browser task): kept from the start.
+                if m.purpose.is_none() {
+                    m.purpose = prev.purpose.clone();
+                }
             }
             // The agent's title (its first prompt, or one it set) when it is real text; else what we had,
             // else "<agent> in <folder>" until a real prompt arrives (see `retitle_from_prompt`).
@@ -1515,6 +1562,9 @@ impl Hub {
         };
         if merged.ended_at.is_some() {
             self.inner.tasks.on_session_ended(&merged.id);
+            if merged.purpose.as_deref() == Some(browser::PURPOSE) && merged.machine_id == self.inner.machine_id {
+                self.on_browser_session_ended(&merged);
+            }
         }
         self.persist_and_broadcast_session(&merged).await;
         self.ensure_pet(&merged.agent_id).await;
@@ -1618,6 +1668,11 @@ impl Hub {
             }
         }
         let event = self.record_event(session_id, kind, payload).await?;
+        // A browser task ends with its answer: the session is closed once its turn stops.
+        if kind == EventType::Stop && self.is_browser_session(session_id) {
+            let (hub, id) = (self.clone(), session_id.to_string());
+            tokio::spawn(async move { hub.end_browser_session(&id, "answered").await });
+        }
         let Some(session) = self.session(session_id) else { return Ok(()) };
         let agent_name = self.st().agent_name(&session.agent_id);
         let note = match kind {
@@ -1711,11 +1766,20 @@ impl Hub {
             }
             st.rules.clone()
         };
-        let action = self.rule_action(&rules, &req);
+        let mut action = self.rule_action(&rules, &req);
+        let mut actor = Actor::rule(action);
+        let mut req = req;
+        // A browser task's step: its own approval kinds (core/browser.rs), never a rule's auto-allow.
+        if self.is_browser_session(&req.session_id) {
+            let (card, verdict) = self.browser_verdict(req, action);
+            req = card;
+            action = verdict.action;
+            actor = Self::browser_actor(&verdict);
+        }
         if action != RuleAction::Ask {
             if let Some(opt) = auto_option(&req, action) {
                 self.insert_pending(req.clone());
-                match self.resolve_permission(&req.request_id, opt, ResolvedBy::Rule, &Actor::rule(action)).await {
+                match self.resolve_permission(&req.request_id, opt, ResolvedBy::Rule, &actor).await {
                     Ok(()) => return,
                     Err(e) => tracing::warn!("rule {action:?} could not resolve {}: {e:#}; asking instead", req.request_id),
                 }
@@ -1993,6 +2057,10 @@ impl Hub {
         if n.cwd.as_deref().is_some_and(|c| brain_session::in_brain_dir(&self.inner.paths.data_dir, c)) {
             return Ok(());
         }
+        // A browser task is an owned session already (hooks are off in its folder too).
+        if n.cwd.as_deref().is_some_and(|c| browser::in_browser_dir(&self.inner.paths.data_dir, c)) {
+            return Ok(());
+        }
         let now = pawl_protocol::now_ms();
         let session = {
             let mut st = self.st();
@@ -2011,6 +2079,7 @@ impl Hub {
                 started_at: now,
                 last_event_at: now,
                 ended_at: None,
+                purpose: None,
             });
             if let Some(status) = n.status {
                 s.status = status;
@@ -2078,8 +2147,15 @@ impl Hub {
 
     /// [`Hub::chat`]; `spoken`: the text is a speech transcript (`via: "voice"`).
     pub async fn chat_as(&self, pet_id: Option<PetId>, text: String, spoken: bool, actor: &Actor) -> Result<ChatMessage> {
+        self.chat_with(pet_id, text, spoken, None, actor).await
+    }
+
+    /// [`Hub::chat_as`] with at most one picture (checked by the caller, [`one_image`]). The picture is used
+    /// for the reply only: never stored (the message says `image: true`), mirrored or logged. With a picture
+    /// the text may be empty.
+    pub async fn chat_with(&self, pet_id: Option<PetId>, text: String, spoken: bool, image: Option<ChatImage>, actor: &Actor) -> Result<ChatMessage> {
         let text = text.trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && image.is_none() {
             bail!("chat text is empty");
         }
         if text.chars().count() > MAX_CHAT_CHARS {
@@ -2102,13 +2178,14 @@ impl Hub {
             ts: pawl_protocol::now_ms(),
             session_id: None,
             proposals: Vec::new(),
+            image: image.is_some(),
         };
         let m2 = msg.clone();
         self.inner.store.run(move |s| s.insert_chat(&m2)).await?;
         self.inner.bus.send(ServerMsg::Chat { message: msg.clone() });
         let hub = self.clone();
         let (m3, actor) = (msg.clone(), actor.clone());
-        tokio::spawn(async move { hub.chat_reply(m3, pet, actor, spoken).await });
+        tokio::spawn(async move { hub.chat_reply(m3, pet, actor, spoken, image).await });
         Ok(msg)
     }
 
@@ -2206,13 +2283,22 @@ impl Hub {
             spoken: false,
             read_back: None,
             voice_locked: false,
+            browser: self.browser_ready(),
         }
     }
 
-    async fn chat_reply(&self, user: ChatMessage, pet: Option<Pet>, actor: Actor, spoken: bool) {
+    async fn chat_reply(&self, user: ChatMessage, pet: Option<Pet>, actor: Actor, spoken: bool, image: Option<ChatImage>) {
         let (brain, pending) = self.ready_brain().await;
         let mut ctx = self.brain_context(pet.clone()).await;
         ctx.model_pending = pending;
+        if let Some(image) = image {
+            // A question about a picture: answered by a model that can see, never an action. The picture is
+            // dropped when this returns.
+            let reply = brain.look(&user.text, &image, &ctx).await;
+            drop(image);
+            self.deliver_reply(pet, reply, &actor, None).await;
+            return;
+        }
         // A read-back is good for the chat's next message only, and only a spoken one uses it.
         let now = pawl_protocol::now_ms();
         let pet_id = pet.as_ref().map(|p| p.id.clone());
@@ -2261,6 +2347,7 @@ impl Hub {
             ts: pawl_protocol::now_ms(),
             session_id,
             proposals,
+            image: false,
         };
         let m2 = msg.clone();
         if let Err(e) = self.inner.store.run(move |s| s.insert_chat(&m2)).await {
@@ -2472,6 +2559,7 @@ impl Hub {
             ts: pawl_protocol::now_ms(),
             session_id: None,
             proposals: Vec::new(),
+            image: false,
         };
         let m2 = msg.clone();
         if let Err(e) = self.inner.store.run(move |s| s.insert_chat(&m2)).await {
@@ -2482,6 +2570,18 @@ impl Hub {
 }
 
 /// Rule decision → option to send. None = no suitable option (fall back to asking).
+/// At most one picture per message, checked ([`pawl_brain::chat::vision::check_image`]): PNG or JPEG, at most
+/// 4 MiB and 2048 px on its long side. Errors never quote the picture.
+pub(crate) fn one_image(images: Vec<ChatImage>) -> Result<Option<ChatImage>> {
+    use pawl_brain::chat::vision;
+    if images.len() > vision::MAX_IMAGES {
+        return Err(anyhow::Error::new(AckCode::Invalid).context("at most one picture per message"));
+    }
+    let Some(image) = images.into_iter().next() else { return Ok(None) };
+    vision::check_image(&image).map_err(|e| anyhow::Error::new(AckCode::Invalid).context(e))?;
+    Ok(Some(image))
+}
+
 fn auto_option(req: &PermissionRequest, action: RuleAction) -> Option<Option<String>> {
     match (action, pawl_brain::rules::pick_option(req, action)) {
         (RuleAction::Ask, _) => None,

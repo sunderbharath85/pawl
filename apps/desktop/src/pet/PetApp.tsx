@@ -27,7 +27,8 @@ import { useVoiceTalk } from "./useVoiceTalk";
 import { MicMarker } from "./VoiceBits";
 import { useNow } from "../lib/useNow";
 import { notifiesHere } from "../lib/where";
-import { DefaultBubble, SayBubble, SleepyBubble, type BubbleEnv } from "./Bubble";
+import { DefaultBubble, SayBubble, SleepyBubble, type BubbleEnv, type LookRequest } from "./Bubble";
+import { screenBackend } from "../lib/screen";
 import { startHitRectReporter } from "./hitRects";
 
 const NOTE_MS = 4500;
@@ -84,6 +85,8 @@ export function PetApp() {
   const pending = useMemo(() => main.pending.filter((p) => !dismissed.has(p.requestId)), [main.pending, dismissed]);
   // The session the bubble talks to (null: Pawl-wide, the orchestrator chat), and the sessions it can switch to.
   const [focusId, setFocusId] = useState<string | null>(null);
+  /** "Show my screen" in progress (the button, or "look at this" typed or said). */
+  const [look, setLook] = useState<LookRequest | null>(null);
   const switcher = useMemo(() => (connected ? switcherSessions(state, now, { focus: focusId }) : { chips: [], more: [] }), [connected, state, now, focusId]);
   const focus = focusId ? (switcher.chips.find((c) => c.sessionId === focusId) ?? null) : null;
   // A session that ended or went out of reach: back to Pawl-wide.
@@ -126,6 +129,10 @@ export function PetApp() {
   useEffect(() => {
     if (open?.target !== DEFAULT || !connected) setRenaming(false);
   }, [open?.target, connected]);
+  // A capture never outlives its bubble: closing it (or switching away from its session) drops it.
+  useEffect(() => {
+    if (!open || !connected || (look && look.target !== "chat" && look.target !== focusId)) setLook(null);
+  }, [open, connected, look, focusId]);
 
   useEffect(() => {
     if (!note) return;
@@ -215,6 +222,14 @@ export function PetApp() {
       setFocusId(null);
       setOpen((o) => (o?.target === DEFAULT ? o : { target: DEFAULT, by: "auto" }));
     },
+    // "Look at this" said aloud: the same flow as the bubble's "Show my screen" (pick, preview, Send).
+    look: screenBackend()
+      ? (question: string) => {
+          setFocusId(null);
+          setOpen((o) => (o?.target === DEFAULT ? o : { target: DEFAULT, by: "click" }));
+          setLook({ target: "chat", question });
+        }
+      : undefined,
     say,
     chatSent,
     speech: { voiceURI: settings.speechVoice, rate: settings.speechRate },
@@ -334,6 +349,8 @@ export function PetApp() {
         renaming={renaming}
         onRename={rename}
         onRenameDone={() => setRenaming(false)}
+        look={look}
+        onLook={setLook}
         voice={{
           marker: voice.marker,
           phase: voice.phase,

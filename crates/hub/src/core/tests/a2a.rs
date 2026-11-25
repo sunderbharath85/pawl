@@ -62,7 +62,7 @@ async fn a_start_with_a_prompt_is_one_task_in_the_sessions_context() {
     assert_eq!(done.status.state, TaskState::Completed);
     assert_eq!(done.status.message.unwrap().text(), Some("All tests pass."));
     // Each prompt is a new task in the same context.
-    ack_result(f.hub.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "and lint".into() }, &actor()).await);
+    ack_result(f.hub.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "and lint".into(), images: Vec::new() }, &actor()).await);
     let tasks = f.hub.a2a_list(&list_all(), &Caller::Local).unwrap().tasks;
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[0].context_id, s.id);
@@ -89,13 +89,13 @@ async fn a_start_without_a_prompt_answers_with_a_message_and_no_task() {
 async fn a_prompt_the_agent_refuses_fails_as_before_and_leaves_no_task() {
     let f = fixture(None).await;
     let (s, first) = turn(&f).await;
-    let e = ack_error(f.hub.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "fail".into() }, &actor()).await);
+    let e = ack_error(f.hub.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "fail".into(), images: Vec::new() }, &actor()).await);
     assert!(e.contains("refused"), "{e}");
     let tasks = f.hub.a2a_list(&list_all(), &Caller::Local).unwrap().tasks;
     assert_eq!(tasks.len(), 1);
     assert_eq!(f.hub.tasks().active_task(&s.id).unwrap().id, first.id);
     // Unknown and foreign sessions keep their ack codes.
-    assert_eq!(ack_error(f.hub.handle(ClientMsg::Prompt { id: "q".into(), session_id: global_id(MID, "nope"), text: "x".into() }, &actor()).await), "not_found");
+    assert_eq!(ack_error(f.hub.handle(ClientMsg::Prompt { id: "q".into(), session_id: global_id(MID, "nope"), text: "x".into(), images: Vec::new() }, &actor()).await), "not_found");
 }
 
 #[tokio::test]

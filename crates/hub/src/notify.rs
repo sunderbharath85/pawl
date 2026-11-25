@@ -106,6 +106,7 @@ mod tests {
             started_at: 0,
             last_event_at: 0,
             ended_at: None,
+            purpose: None,
         };
         assert_eq!(session_label(&s), "my-repo");
         s.title = Some("Fix the tests".into());

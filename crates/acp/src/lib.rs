@@ -124,7 +124,26 @@ impl AcpHost {
 
     /// Starts a turn; returns once sent. Turn end arrives as Event{kind: Stop} + Session upsert.
     pub async fn prompt(&self, hub_session_id: &str, text: String) -> anyhow::Result<()> {
-        self.inner.prompt(hub_session_id, text).await
+        self.inner.prompt(hub_session_id, text, Vec::new()).await
+    }
+
+    /// [`Self::prompt`] with pictures: ACP image content blocks before the text. Refused unless the agent
+    /// advertised `promptCapabilities.image`. The pictures are sent once: never kept, never in an event
+    /// (the `user_message` event has the text only).
+    pub async fn prompt_with_images(&self, hub_session_id: &str, text: String, images: Vec<pawl_protocol::ChatImage>) -> anyhow::Result<()> {
+        self.inner.prompt(hub_session_id, text, images).await
+    }
+
+    /// The description of page element `uid` in the latest snapshot a tool of this session returned
+    /// (`uid=<id> <role> "<name>" …` lines, as the Chrome DevTools MCP server prints them). Page text:
+    /// untrusted, shown to the user only.
+    pub fn element_description(&self, hub_session_id: &str, uid: &str) -> Option<String> {
+        self.inner.element_description(hub_session_id, uid)
+    }
+
+    /// True when the agent of this open session advertised `promptCapabilities.image`.
+    pub fn accepts_images(&self, hub_session_id: &str) -> bool {
+        self.inner.accepts_images(hub_session_id)
     }
 
     /// `session/cancel` for the running turn; pending permission requests are answered `cancelled`.

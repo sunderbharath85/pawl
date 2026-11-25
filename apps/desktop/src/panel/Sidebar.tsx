@@ -7,6 +7,7 @@ import {
   machineSummary,
   machinesLine,
   type MachineGroup,
+  isBrowserSession,
 } from "@pawl/hub-client";
 import type { Session } from "@pawl/protocol";
 import { STATUS_META, SOURCE_LABEL, agentName, isActive, sessionTitle, timeAgo } from "../lib/format";
@@ -155,7 +156,14 @@ Rename it in Settings`}
       >
         <span className={`dot tone-${meta.tone}`} title={meta.label} />
         <span className="session-row-main">
-          <span className="session-row-title">{title}</span>
+          <span className="session-row-title">
+            {isBrowserSession(s) && (
+              <span className="chip chip-browser" title="A browser task: the pet drives your Chrome">
+                <I.Globe size={11} /> Browser
+              </span>
+            )}
+            {title}
+          </span>
           <span className="session-row-sub">
             {agentName(state.agents, s.agentId, s.machineId)} · {SOURCE_LABEL[s.source]} · {timeAgo(s.lastEventAt, now)}
           </span>

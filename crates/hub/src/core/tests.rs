@@ -178,7 +178,7 @@ async fn start_prompt_events_and_ack_shapes() {
     assert!(f.fake.calls().iter().any(|c| c.starts_with("start codex")));
     assert!(f.fake.calls().iter().any(|c| c == &format!("prompt {} run the tests", s.id)));
 
-    let v = ack_result(f.hub.handle(ClientMsg::Prompt { id: "2".into(), session_id: s.id.clone(), text: "again".into() }, &actor()).await);
+    let v = ack_result(f.hub.handle(ClientMsg::Prompt { id: "2".into(), session_id: s.id.clone(), text: "again".into(), images: Vec::new() }, &actor()).await);
     assert_eq!(v, json!({}));
     // The real host emits one user_message per prompt; the hub must not add its own copy.
     for text in ["run the tests", "again"] {
@@ -212,10 +212,10 @@ async fn start_prompt_events_and_ack_shapes() {
     assert!(msgs.iter().any(|m| matches!(m, ServerMsg::Pet { pet } if pet.agent_id == "codex" && pet.species == Species::Dog)));
     assert!(msgs.iter().any(|m| matches!(m, ServerMsg::Session { .. })));
 
-    let err = ack_error(f.hub.handle(ClientMsg::Prompt { id: "6".into(), session_id: "nope".into(), text: "x".into() }, &actor()).await);
+    let err = ack_error(f.hub.handle(ClientMsg::Prompt { id: "6".into(), session_id: "nope".into(), text: "x".into(), images: Vec::new() }, &actor()).await);
     assert_eq!(err, "not_found");
     let err = ack_error(
-        f.hub.handle(ClientMsg::Prompt { id: "6b".into(), session_id: global_id(MID, "nope"), text: "x".into() }, &actor()).await,
+        f.hub.handle(ClientMsg::Prompt { id: "6b".into(), session_id: global_id(MID, "nope"), text: "x".into(), images: Vec::new() }, &actor()).await,
     );
     assert_eq!(err, "not_found");
     let err = ack_error(
@@ -436,7 +436,7 @@ async fn cancel_and_session_end_clear_pending() {
     ended.ended_at = Some(pawl_protocol::now_ms());
     f.hub.on_host_event(HostEvent::Session(ended)).await;
     assert!(f.hub.pending_permissions().is_empty());
-    let err = ack_error(f.hub.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "x".into() }, &actor()).await);
+    let err = ack_error(f.hub.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "x".into(), images: Vec::new() }, &actor()).await);
     assert!(err.contains("ended"));
 }
 
@@ -543,12 +543,12 @@ async fn update_pet_validates_and_broadcasts() {
 async fn chat_ack_is_the_stored_user_message() {
     let f = fixture(None).await;
     start(&f).await;
-    let v = ack_result(f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: " hi doggo ".into(), via: None }, &actor()).await);
+    let v = ack_result(f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: " hi doggo ".into(), via: None, images: Vec::new() }, &actor()).await);
     let m: ChatMessage = serde_json::from_value(v["message"].clone()).unwrap();
     assert_eq!(m.role, ChatRole::User);
     assert_eq!(m.text, "hi doggo");
     assert_eq!(m.pet_id, None, "no pet attached: the default pet's chat");
-    assert!(ack_error(f.hub.handle(ClientMsg::Chat { id: "c2".into(), pet_id: None, text: "  ".into(), via: None }, &actor()).await).contains("empty"));
+    assert!(ack_error(f.hub.handle(ClientMsg::Chat { id: "c2".into(), pet_id: None, text: "  ".into(), via: None, images: Vec::new() }, &actor()).await).contains("empty"));
 }
 
 #[tokio::test]
@@ -615,7 +615,7 @@ async fn ids_on_the_wire_are_global() {
     assert_eq!(codex.id, global_id(MID, "pet-codex"));
     assert_eq!(codex.machine_id, MID);
 
-    let v = ack_result(f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: Some(codex.id.clone()), text: "hi".into(), via: None }, &actor()).await);
+    let v = ack_result(f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: Some(codex.id.clone()), text: "hi".into(), via: None, images: Vec::new() }, &actor()).await);
     let m: ChatMessage = serde_json::from_value(v["message"].clone()).unwrap();
     assert_eq!(m.machine_id, MID);
     assert_eq!(parse_global_id(&m.id).map(|(m, _)| m), Some(MID));
@@ -660,8 +660,8 @@ async fn foreign_and_legacy_ids_are_refused() {
     let theirs = global_id(OTHER, &local);
     let cases: Vec<(ClientMsg, &str)> = vec![
         // Actions on an unpaired machine's ids: nowhere to forward them (step 4).
-        (ClientMsg::Prompt { id: "1".into(), session_id: theirs.clone(), text: "x".into() }, "not_found"),
-        (ClientMsg::Prompt { id: "2".into(), session_id: local.clone(), text: "x".into() }, "not_found"),
+        (ClientMsg::Prompt { id: "1".into(), session_id: theirs.clone(), text: "x".into(), images: Vec::new() }, "not_found"),
+        (ClientMsg::Prompt { id: "2".into(), session_id: local.clone(), text: "x".into(), images: Vec::new() }, "not_found"),
         (ClientMsg::Cancel { id: "3".into(), session_id: theirs.clone() }, "not_found"),
         (ClientMsg::Cancel { id: "4".into(), session_id: local.clone() }, "not_found"),
         (ClientMsg::GetEvents { id: "5".into(), session_id: theirs.clone(), since_seq: None, limit: None }, "not_owner"),
@@ -671,8 +671,8 @@ async fn foreign_and_legacy_ids_are_refused() {
         (ClientMsg::ResolvePermission { confirmed: None, id: "8".into(), request_id: "r".into(), option_id: None }, "not_found"),
         (ClientMsg::UpdatePet { id: "9".into(), pet_id: global_id(OTHER, "pet-codex"), patch: PetPatch::default() }, "not_owner"),
         (ClientMsg::UpdatePet { id: "10".into(), pet_id: "pet-codex".into(), patch: PetPatch::default() }, "not_found"),
-        (ClientMsg::Chat { id: "11".into(), pet_id: Some(global_id(OTHER, "pet-codex")), text: "hi".into(), via: None }, "not_owner"),
-        (ClientMsg::Chat { id: "12".into(), pet_id: Some("pet-codex".into()), text: "hi".into(), via: None }, "not_found"),
+        (ClientMsg::Chat { id: "11".into(), pet_id: Some(global_id(OTHER, "pet-codex")), text: "hi".into(), via: None, images: Vec::new() }, "not_owner"),
+        (ClientMsg::Chat { id: "12".into(), pet_id: Some("pet-codex".into()), text: "hi".into(), via: None, images: Vec::new() }, "not_found"),
         (ClientMsg::UpdateMachine { id: "13".into(), machine_id: OTHER.into(), name: "Mac mini".into() }, "not_owner"),
         (ClientMsg::UpdateMachine { id: "14".into(), machine_id: "nope".into(), name: "Mac mini".into() }, "invalid"),
         (ClientMsg::UpdateMachine { id: "15".into(), machine_id: "ABCDEF012345".into(), name: "Mac mini".into() }, "invalid"),
@@ -685,7 +685,7 @@ async fn foreign_and_legacy_ids_are_refused() {
         assert_eq!(got, want, "message {id}");
     }
     // our own prefix still works
-    ack_result(f.hub.handle(ClientMsg::Prompt { id: "ok".into(), session_id: s.id.clone(), text: "x".into() }, &actor()).await);
+    ack_result(f.hub.handle(ClientMsg::Prompt { id: "ok".into(), session_id: s.id.clone(), text: "x".into(), images: Vec::new() }, &actor()).await);
     assert!(f.hub.store().audit_log(10).unwrap().is_empty(), "refused requests decide nothing");
 }
 
@@ -1194,6 +1194,7 @@ fn remote_session(mid: &str, local: &str) -> Session {
         started_at: now,
         last_event_at: now,
         ended_at: None,
+        purpose: None,
     }
 }
 
@@ -1407,12 +1408,12 @@ async fn mirrored_items_are_read_only_and_revoke_deletes_them() {
     assert!(!f.fake.calls().iter().any(|c| c.starts_with("resolve")), "rules never run on mirrored requests");
     assert!(f.hub.pending_permissions().is_empty());
     for (msg, want) in [
-        (ClientMsg::Prompt { id: "p".into(), session_id: sid.clone(), text: "x".into() }, "offline"),
+        (ClientMsg::Prompt { id: "p".into(), session_id: sid.clone(), text: "x".into(), images: Vec::new() }, "offline"),
         (ClientMsg::Cancel { id: "c".into(), session_id: sid.clone() }, "offline"),
         (ClientMsg::ResolvePermission { confirmed: Some(true), id: "r".into(), request_id: rid.clone(), option_id: Some("allow".into()) }, "offline"),
         (ClientMsg::ResolvePermission { confirmed: None, id: "r2".into(), request_id: rid.clone(), option_id: Some("allow".into()) }, "unconfirmed"),
         (ClientMsg::UpdatePet { id: "u".into(), pet_id: pet.id.clone(), patch: PetPatch { name: Some("Rex".into()), ..Default::default() } }, "not_owner"),
-        (ClientMsg::Chat { id: "h".into(), pet_id: Some(pet.id.clone()), text: "hi".into(), via: None }, "not_owner"),
+        (ClientMsg::Chat { id: "h".into(), pet_id: Some(pet.id.clone()), text: "hi".into(), via: None, images: Vec::new() }, "not_owner"),
     ] {
         assert_eq!(ack_error(f.hub.handle(msg.clone(), &actor()).await), want, "{msg:?}");
     }
@@ -1541,7 +1542,7 @@ async fn two_hubs_mirror_live_resync_and_revoke() {
     assert!(b_events.iter().any(|e| e.payload["truncated"] == true), "the oversize payload arrived truncated");
     assert!(a.events(&s.id, None, None).await.unwrap().iter().all(|e| e.payload.get("truncated").is_none()), "the owner keeps it whole");
     // Step 4: B can act on A's session; the prompt is forwarded and applied on A.
-    ack_result(b.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "x".into() }, &actor()).await);
+    ack_result(b.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "x".into(), images: Vec::new() }, &actor()).await);
 
     // Resolved on A: gone on B.
     ack_result(a.handle(ClientMsg::ResolvePermission { confirmed: None, id: "r".into(), request_id: req.request_id.clone(), option_id: Some("allow".into()) }, &actor()).await);
@@ -2304,7 +2305,7 @@ async fn the_origin_checks_before_sending() {
         (resolve("e", Some("reject"), None), "offline"), // deny: no confirmation needed
         (start_on(OTHER, Some(true)), "offline"),
         (start_on(THIRD, Some(true)), "not_found"),
-        (ClientMsg::Prompt { id: "p".into(), session_id: global_id(THIRD, "s"), text: "hi".into() }, "not_found"),
+        (ClientMsg::Prompt { id: "p".into(), session_id: global_id(THIRD, "s"), text: "hi".into(), images: Vec::new() }, "not_found"),
     ] {
         assert_eq!(ack_error(f.hub.handle(msg.clone(), &actor()).await), want, "{msg:?}");
     }
@@ -2381,7 +2382,7 @@ async fn two_hubs_approve_start_and_time_out() {
     // A stops answering: B's client gets timeout.
     a.drop_intents(true);
     let started = std::time::Instant::now();
-    let err = ack_error(b.handle(ClientMsg::Prompt { id: "p".into(), session_id: remote.id.clone(), text: "hi".into() }, &actor()).await);
+    let err = ack_error(b.handle(ClientMsg::Prompt { id: "p".into(), session_id: remote.id.clone(), text: "hi".into(), images: Vec::new() }, &actor()).await);
     assert_eq!(err, "timeout");
     assert!(started.elapsed() >= INTENT_TIMEOUT);
     assert_eq!(b.store().intent_log(1).unwrap()[0].status, "timeout");
@@ -2562,7 +2563,7 @@ async fn a_chat_on_one_hub_proposes_a_command_on_the_other() {
     .await;
     let ask = |b: Hub| async move {
         let mut brx = b.subscribe();
-        ack_result(b.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: "tell Desk's codex to run the tests in repo api".into(), via: None }, &actor()).await);
+        ack_result(b.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: "tell Desk's codex to run the tests in repo api".into(), via: None, images: Vec::new() }, &actor()).await);
         match wait_for(&mut brx, "the pet's reply", |m| matches!(m, ServerMsg::Chat { message } if message.role == ChatRole::Pet)).await {
             ServerMsg::Chat { message } => message,
             _ => unreachable!(),
@@ -2610,7 +2611,7 @@ async fn the_default_pet_hands_agentless_work_to_the_default_agent() {
     start(&f).await;
     drain(&mut f.rx);
     let v = ack_result(
-        f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: "fix the failing test in repo api".into(), via: None }, &actor()).await,
+        f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: "fix the failing test in repo api".into(), via: None, images: Vec::new() }, &actor()).await,
     );
     let user: ChatMessage = serde_json::from_value(v["message"].clone()).unwrap();
     assert_eq!(user.pet_id, None);
@@ -2728,6 +2729,7 @@ async fn stored_injected_titles_are_cleaned_at_start() {
         started_at: 1_000,
         last_event_at: 2_000,
         ended_at: Some(2_000),
+        purpose: None,
     };
     store.upsert_session(&old("a", "<task-notification> <task-id>bt7…")).unwrap();
     store.upsert_session(&old("b", "[Image #40] fix the waveform view")).unwrap();
@@ -2752,6 +2754,7 @@ mod a2a_agents;
 mod a2a_peer;
 mod a2a_server;
 mod phones;
+mod screen_browser;
 mod voice;
 
 // ---------- the "acp" bot provider: a hidden, tool-less agent session ----------
@@ -2826,7 +2829,7 @@ async fn the_acp_brain_session_is_locked_down_and_never_a_session() {
     .await;
     let id = brain_prompt(&f).await;
     assert_ne!(id, first);
-    f.hub.on_host_event(HostEvent::Session(Session { id: id.clone(), machine_id: MID.into(), agent_id: "claude-code".into(), acp_session_id: None, external_id: None, cwd: "x".into(), title: None, source: SessionSource::Owned, status: SessionStatus::Thinking, started_at: 1, last_event_at: 1, ended_at: None })).await;
+    f.hub.on_host_event(HostEvent::Session(Session { id: id.clone(), machine_id: MID.into(), agent_id: "claude-code".into(), acp_session_id: None, external_id: None, cwd: "x".into(), title: None, source: SessionSource::Owned, status: SessionStatus::Thinking, started_at: 1, last_event_at: 1, ended_at: None, purpose: None })).await;
     f.hub.on_host_event(chunk(&id, "Woof! ")).await;
     f.hub.on_host_event(chunk(&id, "All quiet.")).await;
     f.hub.on_host_event(stop(&id)).await;
@@ -2923,7 +2926,7 @@ async fn the_default_pet_reads_free_form_messages_through_the_agent_session() {
         }))
         .await;
     drain(&mut f.rx);
-    ack_result(f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: "ya go for it buddy, ship that".into(), via: None }, &actor()).await);
+    ack_result(f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: "ya go for it buddy, ship that".into(), via: None, images: Vec::new() }, &actor()).await);
     let id = brain_prompt(&f).await;
     let prompt = f.fake.calls().into_iter().find(|c| c.starts_with(&format!("prompt {id}"))).unwrap();
     assert!(prompt.contains("JSON schema") && prompt.contains("<context>") && prompt.contains("R1: Codex"), "{prompt}");
@@ -2951,7 +2954,7 @@ async fn a_chat_during_startup_discovery_waits_for_the_agent_model() {
     f.hub.rebuild_brain();
     assert!(!f.hub.brain().has_llm() && f.hub.pet_model_pending());
     drain(&mut f.rx);
-    ack_result(f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: "zxq frobnicate the thing".into(), via: None }, &actor()).await);
+    ack_result(f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: "zxq frobnicate the thing".into(), via: None, images: Vec::new() }, &actor()).await);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
         !drain(&mut f.rx).iter().any(|m| matches!(m, ServerMsg::Chat { message } if message.role == ChatRole::Pet)),

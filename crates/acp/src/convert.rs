@@ -165,6 +165,29 @@ pub(crate) fn agent_capabilities(c: &acp::AgentCapabilities) -> pp::AgentCapabil
     }
 }
 
+/// Most elements kept from one snapshot, and the longest description kept.
+const MAX_ELEMENTS: usize = 5_000;
+const MAX_ELEMENT_CHARS: usize = 300;
+
+/// The page elements in a tool result: every text line `uid=<id> <description>` (leading indentation
+/// allowed). Empty when the result lists none.
+pub(crate) fn snapshot_elements(content: &[acp::ToolCallContent]) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for c in content {
+        let acp::ToolCallContent::Content(c) = c else { continue };
+        let acp::ContentBlock::Text(t) = &c.content else { continue };
+        for line in t.text.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("uid=") else { continue };
+            let (uid, desc) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            if uid.is_empty() || uid.len() > 64 || out.len() >= MAX_ELEMENTS {
+                continue;
+            }
+            out.insert(uid.to_string(), desc.trim().chars().take(MAX_ELEMENT_CHARS).collect());
+        }
+    }
+    out
+}
+
 /// Parse an ISO 8601 / RFC 3339 timestamp into unix milliseconds.
 pub(crate) fn parse_timestamp_ms(s: &str) -> Option<pp::UnixMs> {
     chrono::DateTime::parse_from_rfc3339(s.trim()).ok().map(|d| d.timestamp_millis())

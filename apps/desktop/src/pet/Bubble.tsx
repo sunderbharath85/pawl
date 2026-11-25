@@ -6,6 +6,12 @@
 // There is deliberately no "open the panel" button: the panel opens from the pet's right-click menu or the tray.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
+  agentPictureDestination,
+  imageAttachProblem,
+  isLookRequest,
+  LOOK_DEFAULT_QUESTION,
+  lookQuestion,
+  pictureDestination,
   requestCommandText,
   intentErrorText,
   isAlreadyDecided,
@@ -25,6 +31,8 @@ import { agentName, clockTime, errorText, sessionTitle } from "../lib/format";
 import { draftFor, DEFAULT_TARGET, exampleChips, isNotSureReply, type Draft } from "../lib/bubble";
 import { MiniMarkdown } from "../lib/miniMarkdown";
 import { PetReplyText } from "../lib/ReactionIcon";
+import { screenBackend } from "../lib/screen";
+import { ScreenLook } from "./ScreenLook";
 import type { RenameResult } from "../lib/usePetName";
 import type { ListenPhase, MicMarker as Marker } from "../lib/voice";
 import { useVoiceSentIds } from "../lib/voiceShared";
@@ -299,7 +307,35 @@ export interface DefaultBubbleProps {
   onRenameDone?(): void;
   /** Voice (Settings > Voice): the mic marker, the listening panel and the mic button. */
   voice?: BubbleVoice;
+  /** "Show my screen" in progress (v0.2 item 4): for the orchestrator chat or one session, with its question. */
+  look?: LookRequest | null;
+  onLook?(req: LookRequest | null): void;
   onClose(): void;
+}
+
+/** What "Show my screen" is for: the default pet's chat, or a prompt to one session (its id). */
+export interface LookRequest {
+  target: "chat" | string;
+  question: string;
+}
+
+/** A small screen icon (static). */
+function ScreenIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden focusable="false">
+      <rect x="1.5" y="2.5" width="13" height="8.5" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M6 14h4M8 11v3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** "Show my screen" / "Add a picture": a round icon button beside the text box. */
+function ScreenButton({ label, disabledReason, onClick }: { label: string; disabledReason: string | null; onClick(): void }) {
+  return (
+    <button type="button" className="pb-mic pb-screen" aria-label={label} title={disabledReason ?? label} disabled={!!disabledReason} onClick={onClick}>
+      <ScreenIcon />
+    </button>
+  );
 }
 
 export interface BubbleVoice {
@@ -401,10 +437,11 @@ export function SessionSwitcher({ switcher, focus, onFocus }: { switcher: Defaul
             role="tab"
             aria-selected={active}
             className={`pb-switch-chip${active ? " is-active" : ""}${c.needsYou ? " needs-you" : ""}`}
-            title={`${c.label}${c.needsYou ? " (needs you)" : c.running ? " (working)" : ""}`}
+            title={`${c.browser ? "Browser task: " : ""}${c.label}${c.needsYou ? " (needs you)" : c.running ? " (working)" : ""}`}
             onClick={() => onFocus(c.sessionId)}
           >
             {c.needsYou && <span className="pb-switch-dot" aria-label="needs you" />}
+            {c.browser && <span className="pb-switch-browser">Browser</span>}
             <span className="pb-switch-name">{c.name}</span>
             <span className="pb-switch-repo">{c.repo}</span>
             {c.pending.length > 0 && <span className="pb-switch-count">{c.pending.length}</span>}
@@ -457,16 +494,21 @@ export function DefaultBubble({
   onRename,
   onRenameDone,
   voice,
+  look,
+  onLook,
   onClose,
 }: DefaultBubbleProps) {
+  const screenOn = !!screenBackend() && !!onLook;
   const voiceIds = useVoiceSentIds();
   const { client, state, now, connected } = env;
   const chat = useMemo(() => state.chat.filter((m) => !m.petId).slice(-CHAT_SHOWN), [state.chat]);
   const last = chat[chat.length - 1];
   const waitingReply = !!last && last.role === "user" && now - last.ts < 30_000;
   const proposalEnv: ProposalEnv = { client, state, now, connected };
-  const send = (t: string) =>
-    client.chat(t).then(
+  const send = (t: string): Promise<unknown> =>
+    screenOn && isLookRequest(t)
+      ? Promise.resolve(onLook!({ target: "chat", question: lookQuestion(t) }))
+      : client.chat(t).then(
       (m) => {
         env.chatSent(m.id);
         return m;
@@ -513,8 +555,14 @@ export function DefaultBubble({
       note={note}
       onClose={onClose}
       footer={
-        focus ? (
-          <SessionComposer key={focus.sessionId} env={env} chip={focus} autoFocus={focusInput && focusPending.length === 0 && !renaming && !voice?.phase} />
+        look ? null : focus ? (
+          <SessionComposer
+            key={focus.sessionId}
+            env={env}
+            chip={focus}
+            autoFocus={focusInput && focusPending.length === 0 && !renaming && !voice?.phase}
+            onLook={screenOn ? () => onLook!({ target: focus.sessionId, question: "" }) : undefined}
+          />
         ) : (
           <Composer
             target={DEFAULT_TARGET}
@@ -523,7 +571,18 @@ export function DefaultBubble({
             autoFocus={focusInput && pending.length === 0 && !renaming && !voice?.phase}
             onSend={send}
             extra={
-              voice?.enabled ? <MicButton listening={voice.phase === "listening"} disabledReason={connected ? voice.unavailable : "The hub is not connected."} onClick={voice.onMic} /> : null
+              <>
+                {screenOn && (
+                  <ScreenButton
+                    label="Show my screen"
+                    disabledReason={connected ? null : "The hub is not connected."}
+                    onClick={() => onLook!({ target: "chat", question: LOOK_DEFAULT_QUESTION })}
+                  />
+                )}
+                {voice?.enabled ? (
+                  <MicButton listening={voice.phase === "listening"} disabledReason={connected ? voice.unavailable : "The hub is not connected."} onClick={voice.onMic} />
+                ) : null}
+              </>
             }
           />
         )
@@ -532,7 +591,27 @@ export function DefaultBubble({
       {voice?.phase ? <ListeningPanel phase={voice.phase} level={voice.level} onStop={voice.onMic} onCancel={voice.onCancel} /> : null}
       <SessionSwitcher switcher={switcher} focus={focus} onFocus={onFocus} />
       {renaming && onRename && onRenameDone ? <RenameField name={name} onRename={onRename} onDone={onRenameDone} /> : null}
-      {focus ? (
+      {look && onLook ? (
+        <ScreenLook
+          key={look.target}
+          title={look.target === "chat" ? "Show my screen" : `Add a picture for ${focus?.name ?? "the agent"}`}
+          question={look.question || (look.target === "chat" ? LOOK_DEFAULT_QUESTION : "Look at this.")}
+          destination={
+            look.target === "chat"
+              ? pictureDestination(state.settings?.bot ?? {}, state.agents, state.machine?.id)
+              : agentPictureDestination(
+                  state.sessions[look.target]?.agentId ?? "",
+                  agentName(state.agents, state.sessions[look.target]?.agentId ?? "", state.sessions[look.target]?.machineId ?? ""),
+                )
+          }
+          onSend={(image, question) =>
+            look.target === "chat"
+              ? client.chat(question, undefined, { images: [image] }).then((m) => env.chatSent(m.id))
+              : client.prompt(look.target, question, { images: [image] }).then(() => env.promptSent(look.target, Date.now()))
+          }
+          onClose={() => onLook(null)}
+        />
+      ) : focus ? (
         <SessionPane key={focus.sessionId} env={env} chip={focus} pending={focusPending} />
       ) : (
         <>
@@ -555,6 +634,7 @@ export function DefaultBubble({
                 <div className="pb-msg-text">
                   {voiceIds.has(m.id) ? <span className="pb-msg-via">You (voice): </span> : null}
                   {m.text}
+                  {m.image ? <span className="pb-shot-chip">screenshot</span> : null}
                 </div>
               </div>
             ) : (
@@ -649,7 +729,7 @@ function SessionPane({ env, chip, pending }: { env: BubbleEnv; chip: SessionChip
 }
 
 /** The prompt box for the session the bubble talks to (only Pawl's own sessions take prompts from here). */
-function SessionComposer({ env, chip, autoFocus }: { env: BubbleEnv; chip: SessionChip; autoFocus: boolean }) {
+function SessionComposer({ env, chip, autoFocus, onLook }: { env: BubbleEnv; chip: SessionChip; autoFocus: boolean; onLook?: (() => void) | undefined }) {
   const { client, state, connected } = env;
   const session = state.sessions[chip.sessionId];
   const remoteName = chip.remote ? ownerName(state, chip.machineId) : null;
@@ -665,6 +745,15 @@ function SessionComposer({ env, chip, autoFocus }: { env: BubbleEnv; chip: Sessi
       placeholder={`Tell ${chip.name} (${chip.repo}) what to do next…`}
       disabledReason={disabledReason}
       autoFocus={autoFocus}
+      extra={
+        onLook && session ? (
+          <ScreenButton
+            label="Add a picture of your screen"
+            disabledReason={disabledReason ?? imageAttachProblem(session, state.agents, isLocal(state, chip.machineId))}
+            onClick={onLook}
+          />
+        ) : null
+      }
       onSend={(t) => {
         const at = Date.now();
         return client.prompt(chip.sessionId, t).then(

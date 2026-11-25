@@ -37,6 +37,7 @@ const MIGRATIONS: &[Migration] =
         Migration::Sql(SCHEMA_V8),
         Migration::Sql(SCHEMA_V9),
         Migration::Sql(SCHEMA_V10),
+        Migration::Sql(SCHEMA_V11),
     ];
 
 const SCHEMA_V1: &str = r#"
@@ -262,6 +263,12 @@ ALTER TABLE audit_log ADD COLUMN via TEXT;
 ALTER TABLE audit_log ADD COLUMN transcript TEXT;
 ALTER TABLE intent_log ADD COLUMN via TEXT;
 ALTER TABLE intent_log ADD COLUMN transcript TEXT;
+"#;
+
+/// v11 (screen, v0.2 item 4): a chat message that came with a picture says so (`image = 1`). The picture
+/// itself is never stored.
+const SCHEMA_V11: &str = r#"
+ALTER TABLE chat ADD COLUMN image INTEGER NOT NULL DEFAULT 0;
 "#;
 
 /// a2a_log rows kept (oldest pruned first).
@@ -886,8 +893,8 @@ impl Store {
 
     pub fn insert_chat(&self, m: &ChatMessage) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO chat (id, machine_id, pet_id, role, text, ts, session_id, proposals)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO chat (id, machine_id, pet_id, role, text, ts, session_id, proposals, image)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 m.id,
                 m.machine_id,
@@ -896,7 +903,8 @@ impl Store {
                 m.text,
                 m.ts,
                 m.session_id,
-                if m.proposals.is_empty() { None } else { Some(json(&m.proposals)?) }
+                if m.proposals.is_empty() { None } else { Some(json(&m.proposals)?) },
+                m.image
             ],
         )?;
         Ok(())
@@ -906,7 +914,7 @@ impl Store {
     pub fn recent_chat(&self, limit: u32) -> Result<Vec<ChatMessage>> {
         let c = self.conn();
         let mut st =
-            c.prepare("SELECT id, machine_id, pet_id, role, text, ts, session_id, proposals FROM chat ORDER BY seq DESC LIMIT ?1")?;
+            c.prepare("SELECT id, machine_id, pet_id, role, text, ts, session_id, proposals, image FROM chat ORDER BY seq DESC LIMIT ?1")?;
         let rows = st.query_map([limit], |r| {
             let role: String = r.get(3)?;
             Ok(ChatMessage {
@@ -921,6 +929,7 @@ impl Store {
                     .get::<_, Option<String>>(7)?
                     .and_then(|j| serde_json::from_str(&j).ok())
                     .unwrap_or_default(),
+                image: r.get(8)?,
             })
         })?;
         let mut v: Vec<ChatMessage> = rows.filter_map(|r| r.ok()).collect();
@@ -2264,6 +2273,7 @@ mod tests {
             started_at: 1,
             last_event_at: last,
             ended_at: None,
+            purpose: None,
         }
     }
 
@@ -2487,6 +2497,7 @@ mod tests {
                 text: "run the tests".into(),
                 summary: "Start Codex on Mac mini in api: run the tests".into(),
             }],
+            image: false,
         };
         s.insert_chat(&m).unwrap();
         let plain = ChatMessage { id: gid("c2"), proposals: Vec::new(), ..m.clone() };

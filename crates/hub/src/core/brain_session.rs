@@ -14,7 +14,8 @@
 //!   hook reports from its folder are dropped;
 //! - one turn at a time, a per-turn timeout, restarted after an error, closed when idle.
 //!
-//! The brain only sees [`AcpModel`] through `pawl_brain::chat::ModelSession` (text in, text out).
+//! The brain only sees [`AcpModel`] through `pawl_brain::chat::ModelSession` (text in, text out; a turn
+//! may carry one picture as an ACP image block when the agent advertises `promptCapabilities.image`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Weak;
@@ -22,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use pawl_brain::chat::{ModelFuture, ModelSession};
-use pawl_protocol::{global_id, parse_global_id, Agent, EventType, PermissionOptionKind, PermissionRequest, SessionId};
+use pawl_protocol::{global_id, parse_global_id, Agent, ChatImage, EventType, PermissionOptionKind, PermissionRequest, SessionId};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
@@ -48,20 +49,29 @@ pub(crate) const IDLE_CLOSE: Duration = Duration::from_secs(10 * 60);
 
 /// Every tool denied (the settings reference: `"*"` denies every tool, `"mcp__*"` every MCP tool; the
 /// built-ins are listed too in case a version reads the glob differently).
-const DENIED_TOOLS: &[&str] = &[
+pub(crate) const DENIED_TOOLS: &[&str] = &[
     "*", "mcp__*", "Bash", "BashOutput", "KillShell", "KillBash", "PowerShell", "Edit", "MultiEdit", "Write", "Read", "Glob",
     "Grep", "LS", "WebFetch", "WebSearch", "Task", "TaskOutput", "TaskStop", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
     "Agent", "NotebookEdit", "NotebookRead", "TodoWrite", "SlashCommand", "Skill", "ExitPlanMode", "EnterPlanMode",
     "AskUserQuestion", "ToolSearch", "ListMcpResourcesTool", "ReadMcpResourceTool", "Monitor", "EnterWorktree", "ExitWorktree",
-    "CronCreate", "CronDelete", "CronList", "SendMessage", "LSP",
+    "CronCreate", "CronDelete", "CronList", "SendMessage", "LSP", "mcp__acp__*",
 ];
 
 /// `session/new` `_meta` for claude-agent-acp: Claude Agent SDK options with no tools at all and no MCP
 /// servers but the (empty) ones given (`tools: []`, `strictMcpConfig`, `mcpServers: {}`), plus every tool
-/// name disallowed (merged with the adapter's own list).
+/// name disallowed (merged with the adapter's own list). Only the folder's own settings load
+/// (`settingSources: ["project"]`: the user's and local settings, and their allow rules, never do; the
+/// login is not a setting and stays), and no transcript is written to disk (`persistSession: false`).
 pub(crate) fn no_tools_meta() -> Value {
     let disallowed: Vec<&str> = DENIED_TOOLS.iter().copied().filter(|t| *t != "*").collect();
-    json!({ "claudeCode": { "options": { "tools": [], "strictMcpConfig": true, "mcpServers": {}, "disallowedTools": disallowed } } })
+    json!({ "claudeCode": { "options": {
+        "tools": [],
+        "strictMcpConfig": true,
+        "mcpServers": {},
+        "disallowedTools": disallowed,
+        "settingSources": ["project"],
+        "persistSession": false,
+    } } })
 }
 
 /// The project settings written into the brain session's folder.
@@ -123,7 +133,25 @@ impl ModelSession for AcpModel {
         Box::pin(async move {
             let inner = self.hub.upgrade().ok_or_else(|| anyhow!("the hub is shutting down"))?;
             let hub = Hub { inner };
-            hub.brain_turn(&self.agent_id, &self.model, system, user, timeout).await
+            hub.brain_turn(&self.agent_id, &self.model, system, user, None, timeout).await
+        })
+    }
+
+    /// The agent's `promptCapabilities.image`; before its first start (unknown) the turn is tried, and the
+    /// ACP host refuses it if the agent turns out not to take pictures.
+    fn sees_images(&self) -> bool {
+        let Some(inner) = self.hub.upgrade() else { return false };
+        let hub = Hub { inner };
+        let st = hub.st();
+        let agent = st.agents.iter().find(|a| a.id == self.agent_id && a.installed);
+        agent.is_some_and(|a| a.capabilities.as_ref().is_none_or(|c| c.prompt_image))
+    }
+
+    fn complete_with_image<'a>(&'a self, system: &'a str, user: &'a str, image: &'a ChatImage, timeout: Duration) -> ModelFuture<'a> {
+        Box::pin(async move {
+            let inner = self.hub.upgrade().ok_or_else(|| anyhow!("the hub is shutting down"))?;
+            let hub = Hub { inner };
+            hub.brain_turn(&self.agent_id, &self.model, system, user, Some(image), timeout).await
         })
     }
 }
@@ -184,9 +212,22 @@ impl Hub {
     }
 
     /// One turn of the brain session: started (or restarted) as needed, one at a time, within `timeout`.
-    pub(crate) async fn brain_turn(&self, agent_id: &str, model: &str, system: &str, user: &str, timeout: Duration) -> Result<String> {
+    pub(crate) async fn brain_turn(
+        &self,
+        agent_id: &str,
+        model: &str,
+        system: &str,
+        user: &str,
+        image: Option<&ChatImage>,
+        timeout: Duration,
+    ) -> Result<String> {
         let _one = self.inner.brain_turn.lock().await;
-        match tokio::time::timeout(timeout, self.brain_turn_inner(agent_id, model, system, user)).await {
+        match tokio::time::timeout(timeout, self.brain_turn_inner(agent_id, model, system, user, image)).await {
+            // A picture never stays in the session's context: the next turn starts a fresh session.
+            Ok(Ok(text)) if image.is_some() => {
+                self.reset_brain_session("a picture was shown").await;
+                Ok(text)
+            }
             Ok(Ok(text)) => Ok(text),
             Ok(Err(e)) => {
                 self.reset_brain_session("error").await;
@@ -199,7 +240,7 @@ impl Hub {
         }
     }
 
-    async fn brain_turn_inner(&self, agent_id: &str, model: &str, system: &str, user: &str) -> Result<String> {
+    async fn brain_turn_inner(&self, agent_id: &str, model: &str, system: &str, user: &str, image: Option<&ChatImage>) -> Result<String> {
         let stale = {
             let st = self.inner.brain_session.lock().unwrap_or_else(|p| p.into_inner());
             st.live.as_ref().is_some_and(|l| l.turns >= MAX_TURNS)
@@ -226,7 +267,12 @@ impl Hub {
         let (tx, rx) = oneshot::channel();
         self.inner.brain_session.lock().unwrap_or_else(|p| p.into_inner()).turn = Some(Turn { session_id: id.clone(), text: String::new(), done: tx });
         let text = format!("{system}\n\n---\n\n{user}");
-        self.inner.host.prompt(&id, text).await.context("prompt the brain session")?;
+        match image {
+            // The picture goes as an ACP image block for this turn only (the host refuses it unless the agent
+            // advertises promptCapabilities.image).
+            Some(img) => self.inner.host.prompt_with_images(&id, text, vec![img.clone()]).await.context("prompt the brain session")?,
+            None => self.inner.host.prompt(&id, text).await.context("prompt the brain session")?,
+        }
         let out = rx.await.map_err(|_| anyhow!("the brain session went away"))??;
         if let Some(l) = self.inner.brain_session.lock().unwrap_or_else(|p| p.into_inner()).live.as_mut() {
             l.turns += 1;
@@ -387,6 +433,9 @@ mod tests {
         let o = &meta["claudeCode"]["options"];
         assert_eq!((o["tools"].clone(), o["strictMcpConfig"].clone(), o["mcpServers"].clone()), (json!([]), json!(true), json!({})));
         assert!(o["disallowedTools"].as_array().unwrap().iter().any(|t| t == "Bash"));
+        assert!(o["disallowedTools"].as_array().unwrap().iter().any(|t| t == "mcp__acp__*"), "the adapter's own tools too");
+        // Only the folder's settings load (no user or local allow rules), and no transcript is written.
+        assert_eq!((o["settingSources"].clone(), o["persistSession"].clone()), (json!(["project"]), json!(false)));
     }
 
     #[test]

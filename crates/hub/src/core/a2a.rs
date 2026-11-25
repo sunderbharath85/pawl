@@ -168,19 +168,31 @@ impl Hub {
     /// A new turn (task) in the context `session_id` for `caller`. The checks are the hub's prompt
     /// checks; the agent's refusal leaves no task behind.
     pub(crate) async fn a2a_prompt(&self, session_id: &str, text: String, caller: &Caller) -> Result<Task> {
+        self.a2a_prompt_with(session_id, text, Vec::new(), caller).await
+    }
+
+    /// [`Self::a2a_prompt`] with pictures (this machine's own clients only; see `Hub::prompt_with_images`).
+    pub(crate) async fn a2a_prompt_with(&self, session_id: &str, text: String, images: Vec<pawl_protocol::ChatImage>, caller: &Caller) -> Result<Task> {
         if !self.tasks().can_access(caller, session_id) {
             return Err(AckCode::NotFound.into());
         }
         self.owned_open_session(session_id)?;
         intents::validate_prompt(&text)?;
+        // A browser task drives this machine's Chrome: only this machine's own clients prompt it.
+        if *caller != Caller::Local && self.is_browser_session(session_id) {
+            return Err(anyhow::Error::new(AckCode::Forbidden).context("a browser task takes prompts from this machine only"));
+        }
         if *caller != Caller::Local {
             self.mark_remote_driven(session_id).await;
         }
         let task = self.tasks().begin(session_id, &text, caller);
         // The ACP host emits the `user_message` event for every prompt it sends; recording it here
         // too would log (and print) the prompt twice.
-        match self.exec_prompt(session_id, text).await {
+        match self.exec_prompt_with(session_id, text, images).await {
             Ok(()) => {
+                if self.is_browser_session(session_id) {
+                    self.browser_turn_started(session_id);
+                }
                 self.tasks().commit(&task.id);
                 Ok(self.tasks().get(&task.id, None).unwrap_or(task))
             }

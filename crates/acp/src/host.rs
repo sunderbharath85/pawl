@@ -149,6 +149,9 @@ struct SessionState {
     /// While `Some`, events are held back (session/load replays history before
     /// the hub has seen the session upsert).
     buffer: Option<Vec<HostEvent>>,
+    /// The elements of the latest page snapshot a tool returned (`uid=<id> <description>` lines, as the
+    /// Chrome DevTools MCP server prints them): uid -> description (page text, untrusted).
+    elements: HashMap<String, String>,
 }
 
 struct PendingPermission {
@@ -369,6 +372,7 @@ impl Inner {
                     started_at: now,
                     last_event_at: now,
                     ended_at: None,
+                    purpose: None,
                 },
                 turn_active: false,
                 ended: false,
@@ -376,6 +380,7 @@ impl Inner {
                 tools: HashMap::new(),
                 running: HashSet::new(),
                 buffer: buffering.then(Vec::new),
+                elements: HashMap::new(),
             }),
         });
         let mut sessions = lock(&self.sessions);
@@ -551,6 +556,13 @@ impl Inner {
                 self.apply(&entry, Some((E::ToolCall, to_json(&payload))), change);
             }
             U::ToolCallUpdate(u) => {
+                // A tool result that lists page elements (a snapshot) replaces the session's element list.
+                if let Some(content) = &u.fields.content {
+                    let found = convert::snapshot_elements(content);
+                    if !found.is_empty() {
+                        lock(&entry.st).elements = found;
+                    }
+                }
                 let partial = convert::tool_update_payload(u);
                 let merged = {
                     let st = lock(&entry.st);
@@ -986,7 +998,7 @@ impl Inner {
         let entry = self.register_session(&conn, &agent.id, hub_id, resp.session_id.to_string(), &cwd_abs, root, false)?;
         self.emit(HostEvent::Session(Self::snapshot(&entry)));
         if let Some(text) = prompt.filter(|p| !p.trim().is_empty()) {
-            if let Err(e) = self.prompt(&entry.hub_id, text).await {
+            if let Err(e) = self.prompt(&entry.hub_id, text, Vec::new()).await {
                 tracing::warn!(session = %entry.hub_id, error = %e, "initial prompt failed");
                 self.apply(
                     &entry,
@@ -998,13 +1010,24 @@ impl Inner {
         Ok(Self::snapshot(&entry))
     }
 
-    pub(crate) async fn prompt(self: &Arc<Self>, hub_id: &str, text: String) -> anyhow::Result<()> {
+    pub(crate) fn element_description(&self, hub_id: &str, uid: &str) -> Option<String> {
+        self.session(hub_id).ok().and_then(|e| lock(&e.st).elements.get(uid).cloned())
+    }
+
+    pub(crate) fn accepts_images(&self, hub_id: &str) -> bool {
+        self.session(hub_id).is_ok_and(|e| e.conn.caps.prompt_image)
+    }
+
+    pub(crate) async fn prompt(self: &Arc<Self>, hub_id: &str, text: String, images: Vec<pp::ChatImage>) -> anyhow::Result<()> {
         let entry = self.session(hub_id)?;
         if !entry.conn.shared.alive.load(Ordering::SeqCst) {
             bail!("agent process for session `{hub_id}` is not running");
         }
         if text.trim().is_empty() {
             bail!("prompt is empty");
+        }
+        if !images.is_empty() && !entry.conn.caps.prompt_image {
+            bail!("this agent does not accept pictures (it does not advertise promptCapabilities.image)");
         }
         {
             let mut st = lock(&entry.st);
@@ -1022,13 +1045,21 @@ impl Inner {
                 st.dirty = true;
             }
         }
-        let req = acp::PromptRequest::new(entry.acp_id.clone(), vec![acp::ContentBlock::Text(acp::TextContent::new(text.clone()))]);
+        // Pictures first, then the text (one turn; the pictures are not kept).
+        let had_images = !images.is_empty();
+        let mut blocks: Vec<acp::ContentBlock> =
+            images.into_iter().map(|i| acp::ContentBlock::Image(acp::ImageContent::new(i.data, i.media_type))).collect();
+        blocks.push(acp::ContentBlock::Text(acp::TextContent::new(text.clone())));
+        let req = acp::PromptRequest::new(entry.acp_id.clone(), blocks);
         let response = entry.conn.cx.send_request(req).block_task();
-        self.apply(
-            &entry,
-            Some((pp::EventType::UserMessage, to_json(&pp::TextPayload { text }))),
-            StatusChange::Force(pp::SessionStatus::Thinking),
-        );
+        // The event keeps the text and, for a prompt with pictures, only `image: true` (never the picture).
+        let mut payload = to_json(&pp::TextPayload { text });
+        if had_images {
+            if let serde_json::Value::Object(m) = &mut payload {
+                m.insert("image".into(), serde_json::Value::Bool(true));
+            }
+        }
+        self.apply(&entry, Some((pp::EventType::UserMessage, payload)), StatusChange::Force(pp::SessionStatus::Thinking));
         // Weak refs: a dropped host must not be kept alive by an unanswered turn.
         let (weak, weak_entry) = (Arc::downgrade(self), Arc::downgrade(&entry));
         drop(entry);

@@ -4,7 +4,7 @@
 import { useEffect, useState } from "react";
 import type { HubEvent } from "@pawl/protocol";
 import { SOURCE_LABEL, STATUS_META, agentName, errorText, isActive, sessionTitle, timeAgo } from "../../lib/format";
-import { folderName, intentErrorText, isA2aAgentId, isLocal, machineDisplayName, offlineReason, sessionBackfill } from "@pawl/hub-client";
+import { folderName, intentErrorText, isBrowserSession, isA2aAgentId, isLocal, machineDisplayName, offlineReason, sessionBackfill } from "@pawl/hub-client";
 import { a2aTaskChip } from "../../lib/a2aUi";
 import { useA2aTasks } from "../useA2aTasks";
 import { usePanel } from "../context";
@@ -74,6 +74,11 @@ export function SessionView({ sessionId }: { sessionId: string }) {
             <span className={`status-pill tone-${status.tone}`}>
               <span className={`dot tone-${status.tone}`} /> {status.label}
             </span>
+            {isBrowserSession(session) && (
+              <span className="chip chip-browser" title="A browser task: the pet drives your Chrome. Chrome shows a banner while it does.">
+                <I.Globe size={13} /> Browser
+              </span>
+            )}
             <span className="chip">{agentName(state.agents, session.agentId, session.machineId)}</span>
             {remote && (
               <span className={`chip chip-machine${offline ? " is-offline" : ""}`} title={`Runs on ${machineName}`}>

@@ -118,6 +118,8 @@ export interface Session {
   startedAt: UnixMs;
   lastEventAt: UnixMs;
   endedAt?: UnixMs;
+  /** "browser" = a browser task the default pet started (v0.2 item 5); absent for ordinary sessions. */
+  purpose?: "browser";
 }
 
 /** Past session from ACP `session/list`. */
@@ -315,6 +317,19 @@ export interface ChatMessage {
   sessionId?: SessionId;
   /** Commands the bot understood for another machine; several = it is asking which one was meant. */
   proposals?: ChatProposal[];
+  /** A picture (screen capture) came with this message. The picture itself is never stored or mirrored. */
+  image?: boolean;
+}
+
+/**
+ * A screen capture the user approved for one message (v0.2 item 4). At most one per message; PNG or JPEG, at most
+ * 4 MiB decoded and 2048 px on the long side. Used once and dropped: never stored in events or chat history, never sent
+ * to another machine.
+ */
+export interface ChatImage {
+  mediaType: "image/png" | "image/jpeg";
+  /** base64 */
+  data: string;
 }
 
 /**
@@ -324,7 +339,7 @@ export interface ChatMessage {
  */
 export interface ChatProposal {
   id: string;
-  kind: "start" | "prompt";
+  kind: "start" | "prompt" | "browse";
   machineId: MachineId;
   agentId: AgentId;
   /** start: a folder from that machine's repo index. */
@@ -725,6 +740,8 @@ export interface HubSettings {
   overriddenBy: Record<string, string>;
   /** The localhost A2A server and its callers (A2A phase A2). Always sent by hubs that speak A2A. */
   a2a?: A2aSettings;
+  /** Browser use (v0.2 item 5). Off by default. allowSites = hosts the browser task may open without asking. */
+  browser?: { enabled: boolean; allowSites: string[] };
 }
 
 /** Default port of the localhost A2A server (`[a2a] port`; it only ever binds 127.0.0.1). */
@@ -825,6 +842,7 @@ export interface HubSettingsPatch {
   relay?: { url?: string | null; accessKey?: string | null };
   customAgents?: CustomAgentSetting[];
   a2a?: A2aSettingsPatch;
+  browser?: { enabled?: boolean; allowSites?: string[] };
 }
 
 /** Agent hooks the hub can install (same targets as `pawl install-hooks`). copilot-vscode is per repo. */
@@ -862,7 +880,9 @@ export type ClientMsg =
    * intent and needs `confirmed: true` (the user confirmed on this device).
    */
   | { type: "start_session"; id: string; agentId: AgentId; cwd: string; prompt?: string; machineId?: MachineId; confirmed?: boolean }
-  | { type: "prompt"; id: string; sessionId: SessionId; text: string }
+  | { type: "prompt"; id: string; sessionId: SessionId; text: string; images?: ChatImage[] }
+  /** Start a browser task (v0.2 item 5): a Claude Code session that may only drive the user's Chrome. confirmed must be true. */
+  | { type: "start_browser_task"; id: string; task: string; confirmed: boolean }
   | { type: "cancel"; id: string; sessionId: SessionId }
   /**
    * optionId null = cancel/deny without choosing an option. For another machine's request the hub forwards an
@@ -875,7 +895,7 @@ export type ClientMsg =
   | { type: "list_history"; id: string; agentId: AgentId; cwd?: string }
   | { type: "resume_session"; id: string; agentId: AgentId; acpSessionId: string; cwd: string }
   /** `via: "voice"` = the text is a speech transcript (v0.2): voice approvals then need the spoken code for risky requests. */
-  | { type: "chat"; id: string; petId?: PetId; text: string; via?: "voice" }
+  | { type: "chat"; id: string; petId?: PetId; text: string; via?: "voice"; images?: ChatImage[] }
   | { type: "update_pet"; id: string; petId: PetId; patch: Partial<Pick<Pet, "species" | "name" | "skin" | "personality">> }
   | { type: "set_rules"; id: string; rules: Rule[] }
   /** Rename this hub's machine (only the local machine for now). */
@@ -949,6 +969,7 @@ export interface AckResults {
   restart_hub: Record<string, never>;
   a2a_rotate_token: { token: string };
   list_tasks: { tasks: A2aTaskSummary[] };
+  start_browser_task: { sessionId: SessionId };
 }
 
 // ---------- hub -> client ----------

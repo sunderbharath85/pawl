@@ -81,7 +81,7 @@ You need:
 - [bun](https://bun.sh/) 1.4 or later, for the TypeScript packages and apps
 - Node.js, so the hub can run ACP adapters through `npx`
 - An agent that is installed and signed in, for example Claude Code
-- For the desktop app: the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS, and on Linux also `libasound2-dev` (ALSA, for the microphone)
+- For the desktop app: the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS, and on Linux also `libasound2-dev` (ALSA, for the microphone) and, for screen capture, `pkg-config libclang-dev libxcb1-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev`
 - The desktop app runs on macOS 14.2 or later (the minimum of its audio library, cpal 0.18)
 
 Commands below use the Git Bash / macOS / Linux form `./target/debug/pawl`. In PowerShell, use `.\target\debug\pawl.exe`.

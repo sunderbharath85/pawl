@@ -520,6 +520,7 @@ mod tests {
             started_at: now,
             last_event_at: now,
             ended_at: None,
+            purpose: None,
         });
         c.pending.push(PermissionRequest {
             request_id: format!("{ME}:r1"),
@@ -574,6 +575,7 @@ mod tests {
             started_at: now,
             last_event_at: now,
             ended_at: None,
+            purpose: None,
         };
         c.sessions.push(s.clone());
         s.id = format!("{ME}:s2");

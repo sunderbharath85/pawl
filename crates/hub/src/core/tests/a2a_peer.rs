@@ -59,7 +59,7 @@ async fn start_prompt_and_cancel_between_v9_hubs_are_a2a() {
 
     // Prompt from B: a new task on A.
     a.on_host_event(HostEvent::Event { session_id: s.id.clone(), kind: EventType::Stop, payload: json!({ "stopReason": "end_turn" }) }).await;
-    assert_eq!(ack_result(b.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "and lint".into() }, &actor()).await), json!({}));
+    assert_eq!(ack_result(b.handle(ClientMsg::Prompt { id: "p".into(), session_id: s.id.clone(), text: "and lint".into(), images: Vec::new() }, &actor()).await), json!({}));
     assert!(a_fake.calls().contains(&format!("prompt {} and lint", s.id)));
     let second = a.tasks().active_task(&s.id).unwrap();
     assert_ne!(second.id, task.id);
@@ -91,7 +91,7 @@ async fn refusals_keep_the_intent_codes() {
     assert_eq!(ack_error(b.handle(msg, &actor()).await), "invalid");
     // An unknown session: not_found, for prompt and cancel.
     let ghost = global_id(MID, "ghost");
-    assert_eq!(ack_error(b.handle(ClientMsg::Prompt { id: "p".into(), session_id: ghost.clone(), text: "hi".into() }, &actor()).await), "not_found");
+    assert_eq!(ack_error(b.handle(ClientMsg::Prompt { id: "p".into(), session_id: ghost.clone(), text: "hi".into(), images: Vec::new() }, &actor()).await), "not_found");
     assert_eq!(ack_error(b.handle(ClientMsg::Cancel { id: "c".into(), session_id: ghost }, &actor()).await), "not_found");
     assert!(!a_fake.calls().iter().any(|c| c.contains("goose") || c.contains("ghost")));
     // Remote control off on A: forbidden.

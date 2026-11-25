@@ -52,10 +52,24 @@ async fn run_turn(
     outside: PathBuf,
 ) -> Result<(), sdk::Error> {
     let sid = req.session_id.to_string();
-    let text = match req.prompt.first() {
-        Some(acp::ContentBlock::Text(t)) => t.text.clone(),
-        _ => String::new(),
-    };
+    let text = req
+        .prompt
+        .iter()
+        .find_map(|b| match b {
+            acp::ContentBlock::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    // Pictures: "<type> <base64 length>" each, and whether one came before the text.
+    let images: Vec<String> = req
+        .prompt
+        .iter()
+        .filter_map(|b| match b {
+            acp::ContentBlock::Image(i) => Some(format!("{} {}", i.mime_type, i.data.len())),
+            _ => None,
+        })
+        .collect();
+    let image_first = matches!(req.prompt.first(), Some(acp::ContentBlock::Image(_)));
     let notify = |update: Value| cx.send_notification(j::<acp::SessionNotification>(json!({"sessionId": sid, "update": update})));
     let ask = || {
         j::<acp::RequestPermissionRequest>(json!({
@@ -69,6 +83,18 @@ async fn run_turn(
     };
     let file = root.join("note.txt").to_string_lossy().into_owned();
     match text.as_str() {
+        "snap" => {
+            notify(json!({"sessionUpdate": "tool_call", "toolCallId": "s1", "title": "chrome-devtools: take_snapshot", "kind": "other", "status": "in_progress"}))?;
+            let page = "## Latest page snapshot\nuid=1_0 RootWebArea \"PR #12\"\n  uid=1_4 button \"Merge pull request\" focusable\n  uid=1_5 textbox \"Add a comment\"\n";
+            notify(json!({"sessionUpdate": "tool_call_update", "toolCallId": "s1", "status": "completed",
+                          "content": [{"type": "content", "content": {"type": "text", "text": page}}]}))?;
+            responder.respond(j(json!({"stopReason": "end_turn"})))
+        }
+        "look" => {
+            let seen = format!("saw [{}] image_first={image_first}", images.join(", "));
+            notify(json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": seen}}))?;
+            responder.respond(j(json!({"stopReason": "end_turn"})))
+        }
         "work" => {
             notify(json!({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "pondering"}}))?;
             notify(json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Write note", "kind": "edit",
@@ -608,4 +634,41 @@ async fn start_options_meta_reaches_session_new() {
         .expect("start with meta");
     s.host.start_session(&test_agent(), tmp.root(), "meta-2".into(), None).await.expect("plain start");
     assert_eq!(*s.metas.lock().unwrap(), vec![Some(meta), None]);
+}
+
+#[tokio::test]
+async fn a_prompt_with_a_picture_sends_an_image_block_and_the_event_only_says_so() {
+    let tmp = TempDir::new();
+    let Setup { host, mut rx, .. } = setup(&tmp).await;
+    host.start_session(&test_agent(), tmp.root(), "hub-img".into(), None).await.unwrap();
+    assert!(host.accepts_images("hub-img"), "the fake agent advertises promptCapabilities.image");
+    assert!(!host.accepts_images("hub-unknown"));
+    let img = pp::ChatImage { media_type: "image/png".into(), data: "iVBORw0KGgoAAAANSUhEUgAAAAE=".into() };
+    host.prompt_with_images("hub-img", "look".into(), vec![img.clone()]).await.unwrap();
+    let evs = collect_until(&mut rx, |e| is_event(e, pp::EventType::Stop)).await;
+    // The agent got one image block, before the text.
+    let said: Vec<&Value> = events_of(&evs, pp::EventType::AgentMessageChunk);
+    assert_eq!(said, vec![&json!({ "text": format!("saw [image/png {}] image_first=true", img.data.len()) })]);
+    // The event log keeps the text and `image: true`, never the picture.
+    assert_eq!(events_of(&evs, pp::EventType::UserMessage), vec![&json!({ "text": "look", "image": true })]);
+    assert!(!format!("{evs:?}").contains(&img.data), "the picture is in no event");
+    // A prompt without one is unchanged.
+    host.prompt("hub-img", "look".into()).await.unwrap();
+    let evs = collect_until(&mut rx, |e| is_event(e, pp::EventType::Stop)).await;
+    assert_eq!(events_of(&evs, pp::EventType::UserMessage), vec![&json!({ "text": "look" })]);
+    assert_eq!(events_of(&evs, pp::EventType::AgentMessageChunk), vec![&json!({ "text": "saw [] image_first=false" })]);
+}
+
+#[tokio::test]
+async fn the_latest_snapshot_names_page_elements_by_uid() {
+    let tmp = TempDir::new();
+    let Setup { host, mut rx, .. } = setup(&tmp).await;
+    host.start_session(&test_agent(), tmp.root(), "hub-snap".into(), None).await.unwrap();
+    assert_eq!(host.element_description("hub-snap", "1_4"), None, "no snapshot yet");
+    host.prompt("hub-snap", "snap".into()).await.unwrap();
+    collect_until(&mut rx, |e| is_event(e, pp::EventType::Stop)).await;
+    assert_eq!(host.element_description("hub-snap", "1_4").as_deref(), Some("button \"Merge pull request\" focusable"));
+    assert_eq!(host.element_description("hub-snap", "1_5").as_deref(), Some("textbox \"Add a comment\""));
+    assert_eq!(host.element_description("hub-snap", "9_9"), None);
+    assert_eq!(host.element_description("hub-other", "1_4"), None);
 }

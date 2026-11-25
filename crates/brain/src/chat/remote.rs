@@ -263,6 +263,7 @@ pub(super) fn summary(kind: ChatProposalKind, agent: &str, machine: Option<&str>
         (ChatProposalKind::Start, true) => format!("Start {agent}{on} in {repo}"),
         (ChatProposalKind::Start, false) => format!("Start {agent}{on} in {repo}: {task}"),
         (ChatProposalKind::Prompt, _) => format!("Send to {agent}{on} ({repo}): {task}"),
+        (ChatProposalKind::Browse, _) => format!("Use the browser: {task}"),
     }
 }
 

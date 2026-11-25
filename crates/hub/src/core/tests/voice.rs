@@ -5,7 +5,7 @@ use super::*;
 use pawl_brain::chat::spoken::{is_voice_code, spell_code};
 
 fn chat_msg(text: &str, via: Option<&str>) -> ClientMsg {
-    ClientMsg::Chat { id: "v".into(), pet_id: None, text: text.into(), via: via.map(Into::into) }
+    ClientMsg::Chat { id: "v".into(), pet_id: None, text: text.into(), via: via.map(Into::into), images: Vec::new() }
 }
 
 /// Send `text` to the default pet (spoken or typed) and wait for its reply (actions have run by then).

@@ -2,6 +2,7 @@
 // Works with the browser/webview `WebSocket`, Node's global `WebSocket` (Node 22+) and the `ws` package
 // (pass it as `WebSocketImpl`). No DOM, Node or React imports here.
 import type {
+  ChatImage,
   A2aTaskSummary,
   AckResults,
   Agent,
@@ -368,8 +369,20 @@ export class HubClient {
     return res.session;
   }
 
-  async prompt(sessionId: string, text: string): Promise<void> {
-    await this.request<"prompt">({ type: "prompt", sessionId, text }, this.waitFor(sessionId));
+  /** `images`: a screen capture the user approved for this prompt (v0.2; this machine's sessions only). */
+  async prompt(sessionId: string, text: string, opts: { images?: ChatImage[] } = {}): Promise<void> {
+    const msg: DistributiveOmit<Extract<ClientMsg, { type: "prompt" }>, "id"> = { type: "prompt", sessionId, text };
+    if (opts.images?.length) msg.images = opts.images;
+    await this.request<"prompt">(msg, this.waitFor(sessionId));
+  }
+
+  /**
+   * Start a browser task (v0.2 item 5): a session that may only drive the user's own Chrome. Only after the user
+   * confirmed it on this device (the confirm is in the UI; the hub requires `confirmed: true`).
+   */
+  async startBrowserTask(task: string): Promise<{ sessionId: string }> {
+    const res = await this.request<"start_browser_task">({ type: "start_browser_task", task, confirmed: true });
+    return { sessionId: res.sessionId };
   }
 
   async cancel(sessionId: string): Promise<void> {
@@ -426,10 +439,12 @@ export class HubClient {
    * A chat message to a pet (none: the default pet). `via: "voice"` marks a speech transcript: the hub then words its
    * answers for listening and asks for the spoken code before approving risky requests (v0.2).
    */
-  async chat(text: string, petId?: string, opts: { via?: "voice" } = {}): Promise<ChatMessage> {
+  async chat(text: string, petId?: string, opts: { via?: "voice"; images?: ChatImage[] } = {}): Promise<ChatMessage> {
     const msg: DistributiveOmit<Extract<ClientMsg, { type: "chat" }>, "id"> = { type: "chat", text };
     if (petId !== undefined) msg.petId = petId;
     if (opts.via === "voice") msg.via = "voice";
+    // A screen capture the user approved for this one message (v0.2): sent once, never kept here.
+    if (opts.images?.length) msg.images = opts.images;
     const res = await this.request<"chat">(msg);
     return res.message;
   }
@@ -471,12 +486,16 @@ export class HubClient {
    * and starts nothing.
    */
   async executeProposal(p: ChatProposal, opts: { confirmed?: boolean | undefined } = {}): Promise<ProposalResult> {
-    const type = p.kind === "prompt" ? "prompt" : "start_session";
+    const type = p.kind === "prompt" ? "prompt" : p.kind === "browse" ? "start_browser_task" : "start_session";
     if (opts.confirmed !== true) throw new HubRequestError("unconfirmed", type, "a chat proposal runs only after the user confirms it on this device");
     const own = this.state.machine?.id;
     if (p.kind === "start" && !own) throw new HubRequestError("no_machine", type, "the hub has not introduced this machine yet");
     const problem = proposalProblem(p);
     if (problem) throw new HubRequestError("invalid", type, `the proposal cannot run: ${problem}`);
+    if (p.kind === "browse") {
+      const { sessionId } = await this.startBrowserTask(p.text.trim());
+      return { kind: "sent", sessionId };
+    }
     if (p.kind === "start") {
       const cwd = p.cwd!.trim();
       const os = this.state.machines[p.machineId]?.os;

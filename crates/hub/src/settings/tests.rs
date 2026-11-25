@@ -365,6 +365,7 @@ fn patches_build_from_typed_sections_too() {
         relay: Some(HubSettingsRelayPatch { url: Some(None), access_key: None }),
         custom_agents: None,
         a2a: None,
+        browser: None,
     };
     let (next, changed) = apply_patch(&HubConfig::default(), &p, &reserved()).unwrap();
     assert!(next.offline && !next.peer.accept_intents);
@@ -496,4 +497,39 @@ fn the_pet_name_follows_the_pet_name_rules() {
         assert_eq!(err_of(&cur, json!({ "bot": { "petName": bad } })).field, BOT_PET_NAME, "{bad}");
     }
     assert_eq!(to_settings(&cur, &Overrides::default()).bot.pet_name, "", "not picked yet");
+}
+
+#[test]
+fn browser_use_is_off_by_default_and_stores_sites_as_origins() {
+    let cur = HubConfig::default();
+    let view = to_settings(&cur, &Overrides::default());
+    assert!(!view.browser.enabled && view.browser.allow_sites.is_empty(), "off by default");
+    let (next, changed) = apply_patch(
+        &cur,
+        &patch(json!({ "browser": { "enabled": true, "allowSites": [" GitHub.com ", "staging.example.com.", "https://github.com/", "github.com:8443", "http://localhost:3000", "bücher.de"] } })),
+        &reserved(),
+    )
+    .unwrap();
+    assert_eq!(changed, [BROWSER_ENABLED, BROWSER_SITES]);
+    assert!(next.browser.enabled);
+    assert_eq!(
+        next.browser.allow_sites,
+        ["https://github.com", "https://staging.example.com", "https://github.com:8443", "http://localhost:3000", "https://xn--bcher-kva.de"],
+        "a bare host is https on 443; a port or http is written out; duplicates dropped; punycode"
+    );
+    let text = edit_config(Some("[browser]\nenabled = false # keep me\n"), &next, &changed).unwrap();
+    assert!(text.contains("# keep me") && text.contains("\"https://github.com:8443\""), "{text}");
+    let back = HubConfig::parse(&text).unwrap();
+    assert_eq!((back.browser.enabled, back.browser.allow_sites.clone()), (true, next.browser.allow_sites.clone()));
+    assert!(masked_lines(&to_settings(&next, &Overrides::default()), &[]).iter().any(|l| l.starts_with("allow sites") && l.contains("https://github.com")));
+    for (i, bad) in ["ftp://github.com", "github.com/acme", "github.com:0", "*.github.com", "user@github.com", "git hub.com", "-x.com", "", "a..b", "https://x.com/?q"]
+        .iter()
+        .enumerate()
+    {
+        let e = err_of(&cur, json!({ "browser": { "allowSites": ["ok.com", bad] } }));
+        assert_eq!(e.field, format!("{BROWSER_SITES}[1]"), "{i}: {bad}");
+    }
+    let many: Vec<String> = (0..=MAX_ALLOW_SITES).map(|i| format!("s{i}.example.com")).collect();
+    assert_eq!(err_of(&cur, json!({ "browser": { "allowSites": many } })).field, BROWSER_SITES);
+    assert!(HubConfig::parse("[browser]\nenabled = \"yes\"\n").is_err());
 }

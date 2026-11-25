@@ -308,6 +308,45 @@ impl Inner {
     }
 }
 
+/// What the status says after the engine panicked (a bug).
+const ENGINE_CRASHED: &str = "Voice stopped after an internal error. Restart Pawl to use it again.";
+
+/// The worker thread: the engine's loop, with a panic caught. Unwinding drops the engine, which closes the mic and
+/// frees the models; `on_crash` then gets the panic's message (never audio or text the user said).
+fn spawn_worker(
+    make: impl FnOnce() -> Engine + Send + 'static,
+    rx: mpsc::Receiver<Msg>,
+    on_crash: impl FnOnce(String) + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new().name("pawl-voice".into()).spawn(move || {
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| make().run(rx)));
+        if let Err(payload) = run {
+            on_crash(crate::panics::message(&*payload));
+        }
+    })
+}
+
+impl Inner {
+    /// The engine is gone: the status says so instead of a stale state (and the mic is shown closed, which it is).
+    /// Returns (enabled, muted) for the tray.
+    fn mark_crashed(&self) -> (bool, bool) {
+        let mut core = lock(&self.core);
+        core.state = VoiceState::Error;
+        core.trigger = None;
+        core.error = Some(ENGINE_CRASHED.to_string());
+        core.mic_live = false;
+        (core.config.enabled, core.config.muted)
+    }
+}
+
+fn engine_crashed<R: Runtime>(app: &AppHandle<R>, inner: &Inner, what: &str) {
+    eprintln!("[pawl] voice: the engine stopped after an internal error: {what}");
+    let (enabled, muted) = inner.mark_crashed();
+    crate::tray::sync_voice(app, enabled, muted, false);
+    let _ = app.emit(EVENT, VoiceEvent::State { state: VoiceState::Error, trigger: None });
+    let _ = app.emit(EVENT, VoiceEvent::Error { message: ENGINE_CRASHED.to_string() });
+}
+
 fn emit_warnings<R: Runtime>(app: &AppHandle<R>, warnings: Vec<String>) {
     for message in warnings {
         eprintln!("[pawl] voice: {message}");
@@ -328,10 +367,13 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let inner = Arc::new(Inner::new(tx.clone(), config.clone(), config_path, store.clone()));
     let sink = AppSink { app: app.clone(), inner: inner.clone() };
     let engine_config = config.clone();
-    let worker = std::thread::Builder::new()
-        .name("pawl-voice".into())
-        .spawn(move || Engine::new(store, engine_config, Box::new(sink), Box::new(CpalMic), tx, Some(engine::OS_LOCK_PROBE)).run(rx))
-        .map_err(|e| e.to_string())?;
+    let (crash_app, crash_inner) = (app.clone(), inner.clone());
+    let worker = spawn_worker(
+        move || Engine::new(store, engine_config, Box::new(sink), Box::new(CpalMic), tx, Some(engine::OS_LOCK_PROBE)),
+        rx,
+        move |what| engine_crashed(&crash_app, &crash_inner, &what),
+    )
+    .map_err(|e| e.to_string())?;
     *lock(&inner.worker) = Some(worker);
 
     let hk_app = app.clone();
@@ -644,11 +686,63 @@ mod tests {
         let inner = Arc::new(Inner::new(tx.clone(), VoiceConfig::default(), path, store.clone()));
         let mic = FakeMic::default();
         let (sink, m) = (Recorder::default(), mic.clone());
-        let worker = std::thread::spawn(move || {
-            Engine::new(store, VoiceConfig::default(), Box::new(sink), Box::new(m), tx, None).run(rx)
-        });
+        let crashed = inner.clone();
+        let worker = spawn_worker(
+            move || Engine::new(store, VoiceConfig::default(), Box::new(sink), Box::new(m), tx, None),
+            rx,
+            move |_| {
+                crashed.mark_crashed();
+            },
+        )
+        .unwrap();
         *lock(&inner.worker) = Some(worker);
         Running { inner, mic, dir }
+    }
+
+    /// A microphone whose driver code panics (a bug somewhere below the engine).
+    struct PanickingMic;
+
+    impl engine::MicOpener for PanickingMic {
+        fn open(&mut self, _: Option<&str>, _: u64, _: SyncSender<Msg>) -> Result<engine::OpenMic, String> {
+            panic!("driver blew up");
+        }
+    }
+
+    #[test]
+    fn a_panicking_engine_reports_an_error_instead_of_a_stale_state() {
+        let dir = std::env::temp_dir().join(format!("pawl-voice-glue-crash-{}", std::process::id()));
+        let store = ModelStore::new(dir.join("models"));
+        let (tx, rx) = mpsc::sync_channel(QUEUE);
+        let inner = Arc::new(Inner::new(tx.clone(), VoiceConfig::default(), dir.join(config::CONFIG_FILE), store.clone()));
+        let (crash_tx, crash_rx) = mpsc::channel();
+        let crashed = inner.clone();
+        let worker = spawn_worker(
+            move || Engine::new(store, VoiceConfig::default(), Box::new(Recorder::default()), Box::new(PanickingMic), tx, None),
+            rx,
+            move |what| {
+                crashed.mark_crashed();
+                let _ = crash_tx.send(what);
+            },
+        )
+        .unwrap();
+        *lock(&inner.worker) = Some(worker);
+        inner.configure_engine(VoiceConfig { hotkey: None, ..on_with_hotkey() }).unwrap();
+        lock(&inner.core).mic_live = true; // as if the mic had been open
+        assert!(mic_test_raw(&inner).is_err(), "the reply never comes: the engine is gone");
+        let what = crash_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(what, "driver blew up");
+        let status = inner.status();
+        assert_eq!(status.state, VoiceState::Error);
+        assert_eq!(status.error.as_deref(), Some(ENGINE_CRASHED));
+        assert!(!lock(&inner.core).mic_live);
+        assert!(inner.send(Cmd::Downloading(false)).is_err(), "commands now fail fast");
+        inner.shutdown(&Free::default());
+        assert!(lock(&inner.worker).is_none(), "joined");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn mic_test_raw(inner: &Inner) -> Result<Result<(), String>, String> {
+        inner.ask(|r| Cmd::MicTest(true, r))
     }
 
     fn on_with_hotkey() -> VoiceConfig {

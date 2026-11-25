@@ -115,6 +115,8 @@ export interface SessionChip {
   running: boolean;
   remote: boolean;
   lastEventAt: number;
+  /** A browser task (the pet drives the user's Chrome). */
+  browser: boolean;
 }
 
 /** At most this many session chips in the bubble's switcher; the rest go under "more". */
@@ -165,6 +167,7 @@ export function switcherSessions(
         running: RUNNING.has(s.status),
         remote,
         lastEventAt: s.lastEventAt,
+        browser: s.purpose === "browser",
       };
     })
     .sort(chipOrder);

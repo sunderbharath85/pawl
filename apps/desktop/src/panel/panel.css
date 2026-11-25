@@ -2362,3 +2362,29 @@ input[type="range"] {
   color: var(--accent);
   font-weight: 800;
 }
+
+/* Browser tasks: the chip on their sessions (session list, session view). */
+.chip-browser {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sky, var(--accent)) 16%, transparent);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 800;
+  vertical-align: 1px;
+}
+/* A chat message that had a screen capture: a small chip (the picture itself is never shown again). */
+.shot-chip {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--card) 30%, transparent);
+  font-size: 11px;
+  font-weight: 800;
+  vertical-align: 1px;
+}

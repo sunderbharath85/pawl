@@ -329,6 +329,10 @@ impl Hub {
                 self.reset_brain_session("settings changed").await;
             }
         }
+        if has(cfgset::BROWSER_ENABLED) && !next.browser.enabled {
+            // Browser use turned off: running browser tasks end now.
+            self.end_all_browser_sessions("browser use turned off").await;
+        }
         if has(cfgset::WD_NUDGE) || has(cfgset::WD_REPEAT) {
             // New timings, same memory of what was already nudged (no repeat nudges).
             self.inner.watchdog.lock().unwrap_or_else(|p| p.into_inner()).set_config(next.watchdog.to_watchdog_config());

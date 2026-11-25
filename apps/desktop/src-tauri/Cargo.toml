@@ -39,10 +39,19 @@ tar = { version = "0.4", default-features = false }
 # Pure-Rust bzip2 (libbz2-rs-sys, the crate's default backend): no system libbz2.
 bzip2 = "0.6"
 tauri-plugin-global-shortcut = "2"
+# Screen capture (v0.2 "Show my screen", src/screen): screens and windows, in memory only. `wgc` = Windows Graphics
+# Capture: GPU-drawn windows (WinUI, DirectComposition) come out right, where GDI's PrintWindow returns them black.
+# Linux builds need pkg-config libclang-dev libxcb1-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev
+# libwayland-dev libegl-dev.
+xcap = { version = "0.9.10", features = ["wgc"] }
+# Scaling and encoding captures (JPEG / PNG only).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
+# Unwind (not abort): a panic in a library on a worker thread (xcap's graphics setup, say) becomes an error for that
+# feature instead of ending the app (src/panics.rs). Callbacks that C code calls stay panic-free.
+panic = "unwind"
 strip = true

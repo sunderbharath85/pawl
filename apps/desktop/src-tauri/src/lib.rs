@@ -4,7 +4,9 @@
 //! on-device voice engine (wake word + speech to text, `voice/`).
 
 mod hub;
+mod panics;
 mod pet_window;
+mod screen;
 mod tray;
 mod voice;
 
@@ -85,6 +87,7 @@ pub fn run() {
         .manage(PetWindowState::default())
         .manage(PanelFocusState::default())
         .manage(HubProcess::default())
+        .manage(screen::Screen::default())
         .invoke_handler(tauri::generate_handler![
             hub_credentials,
             hub_health,
@@ -110,6 +113,10 @@ pub fn run() {
             voice::voice_listen,
             voice::voice_pause,
             voice::voice_mic_test,
+            screen::screen_begin,
+            screen::screen_end,
+            screen::screen_sources,
+            screen::screen_capture,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]

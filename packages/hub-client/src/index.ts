@@ -18,6 +18,7 @@ export {
   MAX_LEDGER_ENTRIES,
   ProposalLedger,
   proposalConfirmText,
+  proposalLabel,
   proposalDoneText,
   proposalExpired,
   proposalProblem,
@@ -247,6 +248,30 @@ export {
   type ReadBackContext,
 } from "./voice";
 export { recentDecisions, type Decision } from "./decisions";
+export {
+  base64Bytes,
+  CAPTURE_WARNING,
+  IMAGE_MAX_BYTES,
+  agentPictureDestination,
+  imageAttachProblem,
+  isThisPcHost,
+  ollamaHost,
+  isLookRequest,
+  LOOK_DEFAULT_QUESTION,
+  lookQuestion,
+  pictureDestination,
+  type PictureDestination,
+} from "./screen";
+export {
+  ALLOW_SITES_MAX,
+  browserOf,
+  browserPatch,
+  browserRiskyChanges,
+  CHROME_DEBUG_URL,
+  CHROME_MIN_VERSION,
+  isBrowserSession,
+  parseAllowSite,
+} from "./browser";
 export { cleanTitle, folderName, parsePrompt, TITLE_MAX, type ParsedPrompt, type PromptAttachment, type PromptNotice } from "./injected";
 export {
   clipCode,

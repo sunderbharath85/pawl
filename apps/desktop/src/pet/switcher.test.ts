@@ -5,7 +5,7 @@ import type { SessionChip } from "../lib/petScreen";
 import { SessionSwitcher } from "./Bubble";
 
 function chip(id: string, over: Partial<SessionChip> = {}): SessionChip {
-  return { sessionId: id, machineId: "m", name: "Rex", repo: id, label: `Rex · ${id}`, needsYou: false, pending: [], running: true, remote: false, lastEventAt: 0, ...over };
+  return { sessionId: id, machineId: "m", name: "Rex", repo: id, label: `Rex · ${id}`, needsYou: false, pending: [], running: true, remote: false, lastEventAt: 0, browser: false, ...over };
 }
 
 describe("the bubble's session switcher", () => {
@@ -31,5 +31,11 @@ describe("the bubble's session switcher", () => {
     expect(html).toMatch(/aria-selected="false"[^>]*>Pawl-wide/);
     expect(html).toMatch(/aria-selected="true" class="pb-switch-chip is-active"[^>]*title="Rex · web/);
     expect(renderToStaticMarkup(createElement(SessionSwitcher, { switcher: { chips: [], more: [] }, focus: null, onFocus: () => {} }))).toBe("");
+  });
+
+  test("a browser task is marked in the switcher", () => {
+    const html = renderToStaticMarkup(createElement(SessionSwitcher, { switcher: { chips: [chip("web", { browser: true })], more: [] }, focus: null, onFocus: () => {} }));
+    expect(html).toContain('<span class="pb-switch-browser">Browser</span>');
+    expect(html).toContain('title="Browser task: Rex · web');
   });
 });

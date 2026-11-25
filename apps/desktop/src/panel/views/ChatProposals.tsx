@@ -10,6 +10,7 @@ import {
   proposalConfirmText,
   proposalDoneText,
   proposalExpired,
+  proposalLabel,
   proposalRetryable,
 } from "@pawl/hub-client";
 import type { HubClient, HubState } from "@pawl/hub-client";
@@ -64,7 +65,7 @@ export function ChatProposalsView({ message, env }: { message: ChatMessage; env:
       const res = await client.executeProposal(p, { confirmed: true });
       proposalLedger.done(message.id, p.id, proposalDoneText(state, p), res.kind === "started" ? res.session.id : res.sessionId);
     } catch (err) {
-      const text = intentErrorText(err, ownerName(state, p.machineId), p.kind === "start" ? "start" : "prompt");
+      const text = intentErrorText(err, ownerName(state, p.machineId), p.kind === "prompt" ? "prompt" : "start");
       proposalLedger.failed(message.id, p.id, text, proposalRetryable(err));
     }
   };
@@ -98,11 +99,18 @@ export function ChatProposalsView({ message, env }: { message: ChatMessage; env:
             key={p.id}
             className={`proposal${used ? " is-used" : ""}`}
             disabled={!open || !!offline || confirming !== null}
-            title={offline ?? (expired ? "This suggestion expired; ask again." : `Runs on ${ownerName(state, p.machineId)} after you confirm`)}
+            title={
+              offline ??
+              (expired
+                ? "This suggestion expired; ask again."
+                : p.kind === "browse"
+                  ? "Your pet drives your Chrome after you confirm"
+                  : `Runs on ${ownerName(state, p.machineId)} after you confirm`)
+            }
             onClick={() => setConfirming(p.id)}
           >
-            <I.Monitor size={14} />
-            <span>{p.summary}</span>
+            {p.kind === "browse" ? <I.Globe size={14} /> : <I.Monitor size={14} />}
+            <span>{proposalLabel(p)}</span>
           </button>
         );
       })}

@@ -1098,3 +1098,33 @@ and the `com.apple.security.device.audio-input` entitlement.
   `BrainReply.code_miss: bool` (serde-skipped; `BrainReply` derives `Default`); `BrainAction::ResolvePermission` may
   name another machine's request (voice with its code only); `chat::spoken::{spoken_numbers, says_code,
   is_voice_code, spell_code, needs_code}`. pawl-hub: `Hub::chat_as(pet_id, text, spoken, actor)`.
+
+## v0.2 Screen and Browser (items 4 and 5), contract (orchestrator, 2026-11-25)
+
+Protocol (additive, still v9): `ChatImage { mediaType: "image/png" | "image/jpeg"; data: base64 }` (at most one per message,
+4 MiB decoded, 2048 px long side); ClientMsg `chat.images?` and `prompt.images?`; `ChatMessage.image?: boolean`;
+`ChatProposal.kind` gains `"browse"`; ClientMsg `start_browser_task { id, task, confirmed }` -> ack `{ sessionId }`;
+`Session.purpose?: "browser"`; `HubSettings.browser { enabled, allowSites[] }` (+ patch). A picture is used once and
+dropped: never stored in events or chat history (only `image: true`), never mirrored or sent to another machine, never
+logged.
+
+Screen (item 4), desktop Rust (sde-voice): `screen_sources() -> { id, kind: "screen" | "window", title, app, thumb }[]`
+(thumb = small base64 PNG, Pawl's own windows excluded) and `screen_capture(id) -> { mediaType, data, width, height }`
+(scaled to <= 2048 px, JPEG q85 unless PNG is smaller); in memory only. Nothing is captured without the user picking
+a source and pressing Send in that moment. UI (fe-settings): the default pet's bubble has "Show my screen" -> picker
+-> preview -> Send (with a line saying where it goes: "to Claude Code on your plan" / "to OpenAI" ...) or Cancel;
+the session pane can attach a capture to a prompt. Hub (sde-brain): chat with an image answers with a vision-capable
+provider (Anthropic, OpenAI, Gemini, Ollama if the model supports images, or the hidden Claude Code session through an
+ACP image block); none -> a plain "I can't see pictures with the current model" reply. A prompt with an image goes to a
+local ACP session only if its agent advertises `promptCapabilities.image`; never to another machine.
+
+Browser (item 5), hub (sde-brain): off by default (`[browser] enabled`). With it on, the brain may propose `browse` for
+web tasks; on confirm, `start_browser_task` starts a Claude Code session (purpose "browser") in an empty folder under the
+data dir whose only tools are the Chrome DevTools MCP server (`chrome-devtools-mcp` pinned version, run with
+`--autoConnect --no-usage-statistics --no-performance-crux --no-javascript-evaluation --no-file-navigations`, pinned
+to chrome-devtools-mcp@1.14.0, strict MCP config; `navigate_page` init scripts are refused because they would run JavaScript), with `evaluate_script` and every
+built-in tool disallowed. Chrome (144+) asks the user to Allow the connection and shows its "controlled by automated test
+software" banner. Every browser tool call is an approval card by default (user's "Ask by default"); opening a host on
+`allowSites` may go without asking; typing, submitting, uploads and dialogs always ask and show exactly what will be
+typed. Page text is data: the task prompt tells the agent never to follow instructions found on pages and never to type
+passwords or payment details. The task ends when the session ends (the MCP server exits, Chrome's banner goes).

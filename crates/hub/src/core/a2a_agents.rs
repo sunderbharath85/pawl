@@ -764,6 +764,7 @@ impl Hub {
             started_at: now,
             last_event_at: now,
             ended_at: None,
+            purpose: None,
         };
         self.remote().launch(session.clone(), endpoint, card.card.capabilities.streaming.unwrap_or(false));
         // An outside agent's questions are never auto-approved (rules ask instead).
@@ -776,11 +777,19 @@ impl Hub {
     // ---------------------------------------------------------------- the executor switch
 
     /// Send a prompt to the session's agent: ACP, or an outside A2A agent.
-    pub(super) async fn exec_prompt(&self, session_id: &str, text: String) -> Result<()> {
+    pub(super) async fn exec_prompt_with(&self, session_id: &str, text: String, images: Vec<pawl_protocol::ChatImage>) -> Result<()> {
         if self.remote().owns_session(session_id) {
+            // Pictures never go to an outside agent (checked before; this is the last line).
+            if !images.is_empty() {
+                anyhow::bail!("pictures are never sent to an outside A2A agent");
+            }
             return self.remote().prompt(session_id, text).await;
         }
-        self.inner.host.prompt(session_id, text).await
+        if images.is_empty() {
+            self.inner.host.prompt(session_id, text).await
+        } else {
+            self.inner.host.prompt_with_images(session_id, text, images).await
+        }
     }
 
     pub(super) async fn exec_cancel(&self, session_id: &str) -> Result<()> {

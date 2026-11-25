@@ -1304,7 +1304,7 @@ async fn run_chat(paths: &Paths, port_flag: Option<u16>, text: String, pick: Opt
     let me = hub.welcome.machine.id.clone();
     let machines = hub.welcome.machines.clone();
     let mut conn = Conn::Remote(Box::new(hub));
-    let v = conn.request(ClientMsg::Chat { id: rid(), pet_id: None, text, via: None }).await?;
+    let v = conn.request(ClientMsg::Chat { id: rid(), pet_id: None, text, via: None, images: Vec::new() }).await?;
     let sent: ChatMessage = serde_json::from_value(v.get("message").cloned().unwrap_or_default()).context("parse message")?;
     let reply = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
@@ -1346,6 +1346,11 @@ fn check_proposal(p: &ChatProposal, machines: &[Machine]) -> Result<()> {
                 bail!("the prompt proposal's session is not on the machine it names");
             }
         }
+        ChatProposalKind::Browse => {
+            if p.cwd.is_some() || p.session_id.is_some() || p.text.trim().is_empty() {
+                bail!("the browser proposal has no task (or names a folder or session)");
+            }
+        }
     }
     Ok(())
 }
@@ -1357,6 +1362,20 @@ async fn execute_proposal(conn: &mut Conn, p: &ChatProposal, me: &str, machines:
     let remote = p.machine_id != me;
     let where_ = machine_name(machines, &p.machine_id);
     let agent = printable(&p.agent_id);
+    if p.kind == ChatProposalKind::Browse {
+        // A browser task runs here only, and a person confirms it on this terminal first.
+        if remote {
+            bail!("a browser task runs on this machine only");
+        }
+        if !ask_yes_no(format!("Start a browser task in Chrome: {}?", printable(&p.text))).await? {
+            eprintln!("Not run.");
+            return Ok(());
+        }
+        let v = conn.request(ClientMsg::StartBrowserTask { id: rid(), task: p.text.clone(), confirmed: true }).await?;
+        let sid = v.get("sessionId").and_then(Value::as_str).unwrap_or_default();
+        println!("Started the browser task: session {}", printable(&short_id(sid)));
+        return Ok(());
+    }
     if asks_first(remote, false, false) && !ask_yes_no(format!("Run on {where_}: {}?", printable(&p.summary))).await? {
         eprintln!("Not run.");
         return Ok(());
@@ -1381,9 +1400,10 @@ async fn execute_proposal(conn: &mut Conn, p: &ChatProposal, me: &str, machines:
         }
         ChatProposalKind::Prompt => {
             let session_id = p.session_id.clone().context("the proposal has no session")?;
-            intent_request(conn, ClientMsg::Prompt { id: rid(), session_id: session_id.clone(), text: p.text.clone() }, &where_).await?;
+            intent_request(conn, ClientMsg::Prompt { id: rid(), session_id: session_id.clone(), text: p.text.clone(), images: Vec::new() }, &where_).await?;
             println!("Sent to {agent} on {where_} (session {})", printable(&short_id(&session_id)));
         }
+        ChatProposalKind::Browse => unreachable!("handled above"),
     }
     Ok(())
 }
@@ -1688,7 +1708,7 @@ async fn drive_session(conn: &mut Conn, agent: &str, cwd: &str, prompt: Option<S
         if line == "/quit" || line == "/exit" {
             break;
         }
-        if let Err(e) = conn.request(ClientMsg::Prompt { id: rid(), session_id: session.id.clone(), text: line.into() }).await {
+        if let Err(e) = conn.request(ClientMsg::Prompt { id: rid(), session_id: session.id.clone(), text: line.into(), images: Vec::new() }).await {
             eprintln!("[hub] {e:#}");
             continue;
         }

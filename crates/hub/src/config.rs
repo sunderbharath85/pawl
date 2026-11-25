@@ -246,6 +246,16 @@ impl Default for A2aSection {
     }
 }
 
+/// `[browser]` (v0.2 item 5): browser tasks, Claude Code driving the user's Chrome through the Chrome
+/// DevTools MCP server. Off by default.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserSection {
+    pub enabled: bool,
+    /// Host names a browser task may open without asking (exact match, lowercase).
+    pub allow_sites: Vec<String>,
+}
+
 /// An outside A2A agent: its agent id is `a2a:<id>`. The token (sent as `Authorization: Bearer`) is a
 /// secret: write-only in the UI, never logged, never sent to clients.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -422,6 +432,7 @@ pub struct HubConfig {
     pub repos: ReposSection,
     pub relay: RelaySection,
     pub a2a: A2aSection,
+    pub browser: BrowserSection,
 }
 
 impl Default for HubConfig {
@@ -441,6 +452,7 @@ impl Default for HubConfig {
             repos: ReposSection::default(),
             relay: RelaySection::default(),
             a2a: A2aSection::default(),
+            browser: BrowserSection::default(),
         }
     }
 }
@@ -492,6 +504,10 @@ pub(crate) const CONFIG_TEMPLATE: &str = r#"# Pawl hub configuration. Every key 
 # [[a2a.agents]]                   # outside A2A agents Pawl can delegate to (agent id "a2a:<id>")
 # id = "gemini"
 # url = "http://localhost:41242"   # https, or http to this machine; the token is set in Settings
+#
+# [browser]
+# enabled = false                  # browser tasks: Claude Code drives your Chrome (Chrome 144+ asks you to allow it)
+# allow_sites = ["github.com"]     # hosts a browser task may open without asking; every other step asks
 #
 # [watchdog]
 # waiting_nudge_after_ms = 300000
