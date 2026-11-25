@@ -1,0 +1,7 @@
+# The sherpa-onnx-sys build script links a prebuilt native archive. It downloads that archive without a checksum
+# unless SHERPA_ONNX_ARCHIVE_DIR names a directory holding it, so every build here reads it from the directory that
+# scripts/fetch-sherpa.sh fills after checking the pinned SHA-256. First build on a machine:
+#   bash scripts/fetch-sherpa.sh        (from the repo root)
+# An already set SHERPA_ONNX_ARCHIVE_DIR (CI, scripts/release.sh) wins over this default.
+[env]
+SHERPA_ONNX_ARCHIVE_DIR = { value = "target/sherpa-onnx-archives", relative = true }

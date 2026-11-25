@@ -7,6 +7,7 @@ import {
   hotkeyFromKey,
   hotkeyLabel,
   INITIAL_VOICE,
+  levelPercent,
   listenPhase,
   micMarker,
   parseHotkey,
@@ -82,6 +83,15 @@ describe("voice state mapping", () => {
     for (const s of ["off", "missing_models", "downloading", "loading", "hearing", "transcribing", "muted", "error"] as const) {
       expect(canTalk({ ...INITIAL_VOICE, state: s })).toBe(false);
     }
+  });
+
+  test("levels are on a dBFS scale already: they map straight onto a meter", () => {
+    expect(levelPercent(0)).toBe(0);
+    expect(levelPercent(0.62)).toBe(62);
+    expect(levelPercent(1)).toBe(100);
+    expect(levelPercent(1.4)).toBe(100);
+    expect(levelPercent(-0.2)).toBe(0);
+    expect(levelPercent(Number.NaN)).toBe(0);
   });
 
   test("sizes read like people write them", () => {

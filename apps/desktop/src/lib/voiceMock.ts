@@ -43,7 +43,8 @@ export function createVoiceMock(start: "fresh" | "ready" = "fresh"): VoiceMock {
   };
   const levels = (on: boolean) => {
     if (levelTimer) clearInterval(levelTimer);
-    levelTimer = on ? setInterval(() => emit({ type: "level", rms: 0.15 + Math.random() * 0.55 }), 60) : null;
+    // dBFS-scaled like the engine: speech around 0.5-0.85.
+    levelTimer = on ? setInterval(() => emit({ type: "level", rms: 0.5 + Math.random() * 0.35 }), 60) : null;
   };
   st.state = derived();
 

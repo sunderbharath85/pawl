@@ -146,3 +146,13 @@ One join between them: a voice turn switches the bubble to Pawl-wide, because tr
 **Screenshots:** `docs/screenshots/pet-markdown-{light,dark}.png` show a session's agent message with bold code, a list and paragraphs.
 
 **Gates:** desktop 3 tsc configs, 138 pass, vite build ok.
+
+## Follow-up: wake score and microphone level (from sde-voice)
+
+- **No score in the wake test.** The keyword spotter gives no confidence (`wake.score` is always 1), so the "Say it like" Test now says only "Heard it!". The score is kept in the model but never shown.
+- **The level is already on a dBFS scale.** `level.rms` is 0..1, mapped from -60..0 dBFS, so it follows loudness as people hear it.
+  - `levelPercent` puts it straight onto both meters: Settings' mic test and the bubble's "Listening…" bar.
+  - This replaces my earlier ×1.6 boost, which assumed a linear RMS.
+  - The dev mock now sends speech-like dBFS levels (0.5-0.85).
+- **Tests:** `levelPercent` (clamping, NaN).
+- **Gates:** desktop 3 tsc configs, 139 pass, vite build ok; hub-client 337.

@@ -1,6 +1,6 @@
 // Voice in the pet window: the mic marker (on the pet and in its bubble's header), the bubble's listening panel and
 // its mic button. All static: no animation (the pet stays still unless the user talks to it).
-import type { ListenPhase, MicMarker as Marker } from "../lib/voice";
+import { levelPercent, type ListenPhase, type MicMarker as Marker } from "../lib/voice";
 
 /** A small microphone; crossed out when muted. Always shown while the mic is live. */
 export function MicIcon({ muted, size = 14 }: { muted?: boolean; size?: number }) {
@@ -40,7 +40,7 @@ export function ListeningPanel({ phase, level, onStop, onCancel }: { phase: List
         <strong>{phase === "listening" ? "Listening…" : "Transcribing…"}</strong>
         {phase === "listening" ? (
           <span className="pb-voice-level" aria-hidden>
-            <span style={{ width: `${Math.round(Math.min(1, level * 1.6) * 100)}%` }} />
+            <span style={{ width: `${levelPercent(level)}%` }} />
           </span>
         ) : (
           <span className="pb-voice-hint">Turning what you said into text, on this PC.</span>

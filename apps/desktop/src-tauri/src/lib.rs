@@ -1,10 +1,12 @@
 //! Pawl desktop shell (Tauri 2): pet window, panel window, tray, and
 //! the small amount of native glue the React UI needs (hub credentials, health,
-//! spawning `pawl serve`, click-through hit-testing, moving the pet).
+//! spawning `pawl serve`, click-through hit-testing, moving the pet), plus the
+//! on-device voice engine (wake word + speech to text, `voice/`).
 
 mod hub;
 mod pet_window;
 mod tray;
+mod voice;
 
 use hub::{HubCredentials, HubHealth, HubProcess, StartHubResult};
 use pet_window::{PanelFocusState, PetWindowState, PANEL_LABEL, PET_LABEL};
@@ -73,6 +75,13 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        // Push-to-talk (voice): Rust registers the shortcut from the voice settings; the webview gets no
+        // global-shortcut permission.
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| voice::on_hotkey(app, shortcut, event.state))
+                .build(),
+        )
         .manage(PetWindowState::default())
         .manage(PanelFocusState::default())
         .manage(HubProcess::default())
@@ -93,6 +102,13 @@ pub fn run() {
             pet_window::get_pets_paused,
             pet_window::open_panel,
             pet_window::take_panel_focus,
+            voice::voice_status,
+            voice::voice_configure,
+            voice::voice_download,
+            voice::voice_cancel_download,
+            voice::voice_delete_models,
+            voice::voice_listen,
+            voice::voice_mic_test,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -101,6 +117,10 @@ pub fn run() {
             let handle = app.handle();
             pet_window::create(handle)?;
             tray::create(handle)?;
+            // Voice is optional: the app runs without it if it can't start (it reports why in the log).
+            if let Err(err) = voice::init(handle) {
+                eprintln!("[pawl] voice is unavailable: {err}");
+            }
             Ok(())
         })
         .on_window_event(|window, event| match (window.label(), event) {
@@ -113,6 +133,13 @@ pub fn run() {
             (PET_LABEL, WindowEvent::Moved(pos)) => pet_window::on_moved(window.app_handle(), *pos),
             _ => {}
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Pawl desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building Pawl desktop")
+        .run(|app, event| {
+            // Quit (tray, menu, Settings) and the OS ending the app: stop the voice engine first, so the
+            // microphone is closed and the push-to-talk shortcut released.
+            if let tauri::RunEvent::Exit = event {
+                voice::shutdown(app);
+            }
+        });
 }

@@ -81,7 +81,8 @@ You need:
 - [bun](https://bun.sh/) 1.4 or later, for the TypeScript packages and apps
 - Node.js, so the hub can run ACP adapters through `npx`
 - An agent that is installed and signed in, for example Claude Code
-- For the desktop app: the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS
+- For the desktop app: the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS, and on Linux also `libasound2-dev` (ALSA, for the microphone)
+- The desktop app runs on macOS 14.2 or later (the minimum of its audio library, cpal 0.18)
 
 Commands below use the Git Bash / macOS / Linux form `./target/debug/pawl`. In PowerShell, use `.\target\debug\pawl.exe`.
 
@@ -155,8 +156,11 @@ Targets: `claude`, `codex`, `copilot-cli`, `copilot-vscode` (`--repo <dir>` pick
 
 ```sh
 bun install                        # once, at the repository root
+bash scripts/fetch-sherpa.sh       # once: the voice engine's native library, checked against a pinned SHA-256
 cd apps/desktop && bun run tauri:dev
 ```
+
+Voice (wake word and speech to text) is off until you turn it on in Settings > Voice. Its models are not part of the app: Settings downloads them (about 50 MB) from the sherpa-onnx releases on GitHub and checks each one against a pinned SHA-256.
 
 The app reads the hub token from the default data directory (or `PAWL_HUB_TOKEN`). If no hub is running it can start `pawl serve` itself, using the binary on `PATH` or, in a dev build, the one in this repository's `target/` folder, so build the hub first (step 1).
 

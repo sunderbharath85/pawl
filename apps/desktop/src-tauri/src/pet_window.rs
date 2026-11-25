@@ -28,6 +28,8 @@ pub const MENU_RENAME: &str = "pet_rename";
 pub const MENU_RESET: &str = "pet_reset_position";
 pub const MENU_SETTINGS: &str = "pet_settings";
 pub const MENU_QUIT: &str = "pet_quit";
+/// "Mute microphone" / "Unmute microphone" (only when the webview passes `voiceMuted`).
+pub const MENU_VOICE_MUTE: &str = crate::voice::MENU_MUTE;
 
 const POLL_EVERY: Duration = Duration::from_millis(50);
 /// Re-check the monitor setup every N polls (~2 s).
@@ -796,7 +798,12 @@ fn menu_name_label(name: &str) -> Option<String> {
     Some(label.replace('&', "&&"))
 }
 
-fn context_menu<R: Runtime>(app: &AppHandle<R>, name: Option<&str>, can_rename: bool) -> tauri::Result<Menu<R>> {
+fn context_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    name: Option<&str>,
+    can_rename: bool,
+    voice_muted: Option<bool>,
+) -> tauri::Result<Menu<R>> {
     let header = match name.and_then(menu_name_label) {
         Some(label) => Some(MenuItem::new(app, label, false, None::<&str>)?),
         None => None,
@@ -808,10 +815,22 @@ fn context_menu<R: Runtime>(app: &AppHandle<R>, name: Option<&str>, can_rename: 
     let settings = MenuItem::with_id(app, MENU_SETTINGS, "Settings", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, MENU_QUIT, "Quit Pawl", true, None::<&str>)?;
-    match &header {
-        Some(h) => Menu::with_items(app, &[h, &top_sep, &open, &rename, &reset, &settings, &sep, &quit]),
-        None => Menu::with_items(app, &[&open, &rename, &reset, &settings, &sep, &quit]),
+    let mute = match voice_muted {
+        Some(muted) => Some(MenuItem::with_id(app, MENU_VOICE_MUTE, crate::voice::mute_label(muted), true, None::<&str>)?),
+        None => None,
+    };
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<R>> = Vec::new();
+    if let Some(h) = &header {
+        items.push(h);
+        items.push(&top_sep);
     }
+    items.extend([&open as &dyn tauri::menu::IsMenuItem<R>, &rename, &reset, &settings]);
+    if let Some(m) = &mute {
+        items.push(m);
+    }
+    items.push(&sep);
+    items.push(&quit);
+    Menu::with_items(app, &items)
 }
 
 /// "Rename…" in the pet's menu: the pet window opens its bubble with the rename field.
@@ -884,11 +903,18 @@ pub fn pet_start_drag<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 }
 
 /// The pet's right-click menu at the cursor: its name, then Open hub, Rename… (only while the hub can take a new
-/// name), Reset position, Settings, Quit.
+/// name), Reset position, Settings, Mute/Unmute microphone (when the webview passes `voiceMuted`: voice is on),
+/// Quit.
 #[tauri::command]
-pub fn pet_context_menu<R: Runtime>(app: AppHandle<R>, name: Option<String>, can_rename: Option<bool>) -> Result<(), String> {
+pub fn pet_context_menu<R: Runtime>(
+    app: AppHandle<R>,
+    name: Option<String>,
+    can_rename: Option<bool>,
+    voice_muted: Option<bool>,
+) -> Result<(), String> {
     let win = app.get_webview_window(PET_LABEL).ok_or("no pet window")?;
-    let menu = context_menu(&app, name.as_deref(), can_rename.unwrap_or(false)).map_err(|e| e.to_string())?;
+    let menu = context_menu(&app, name.as_deref(), can_rename.unwrap_or(false), voice_muted)
+        .map_err(|e| e.to_string())?;
     win.popup_menu(&menu).map_err(|e| e.to_string())
 }
 

@@ -134,11 +134,15 @@ export interface VoiceModel {
   /** The last full status (null until the first answer). */
   status: VoiceStatus | null;
   state: VoiceState;
-  /** Microphone level 0..1 (while hearing or during a mic test). */
+  /**
+   * Microphone level 0..1 (while hearing or during a mic test), on a dBFS scale: the engine maps -60..0 dBFS to 0..1,
+   * so it already follows loudness as people hear it and goes straight onto a meter (see `levelPercent`).
+   */
   level: number;
   /** When the last level arrived (ms; 0 = never): a level means the mic is open. */
   levelAt: number;
   transcript: { id: string; text: string; at: number } | null;
+  /** The last wake word heard. `score` is always 1 (the keyword spotter gives no confidence): never shown. */
   wake: { keyword: string; score: number; at: number } | null;
   download: { models: VoiceModels; received: number; total: number } | null;
   error: string | null;
@@ -194,6 +198,11 @@ export function voiceReduce(m: VoiceModel, a: VoiceAction): VoiceModel {
     case "error":
       return { ...m, error: a.message };
   }
+}
+
+/** A meter's fill (0-100 %) for a level: the dBFS scale maps linearly (quiet room ~10-30 %, speech ~50-85 %). */
+export function levelPercent(rms: number): number {
+  return Math.round(clamp01(rms) * 100);
 }
 
 /** A level arrived this recently: the mic is open (a mic test does not change the state). */

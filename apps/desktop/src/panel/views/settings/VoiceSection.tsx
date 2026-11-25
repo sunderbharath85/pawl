@@ -11,6 +11,7 @@ import {
   formatBytes,
   hotkeyFromKey,
   hotkeyLabel,
+  levelPercent,
   micMarker,
   MODEL_SIZE_MB,
   useVoice,
@@ -232,8 +233,8 @@ function MicPicker({ voice }: { voice: VoiceView }) {
       </span>
       {testing && (
         <span className="voice-meter-row">
-          <span className="voice-meter" role="meter" aria-label="Microphone level" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(voice.level * 100)}>
-            <span style={{ width: `${Math.round(voice.level * 100)}%` }} />
+          <span className="voice-meter" role="meter" aria-label="Microphone level" aria-valuemin={0} aria-valuemax={100} aria-valuenow={levelPercent(voice.level)}>
+            <span style={{ width: `${levelPercent(voice.level)}%` }} />
           </span>
           <span className="hint">Speak: the bar should move. The microphone is on while this test runs.</span>
         </span>
@@ -246,7 +247,8 @@ function MicPicker({ voice }: { voice: VoiceView }) {
 function WakeWord({ voice, name }: { voice: VoiceView; name: string }) {
   const config = voice.status!.config;
   const [spoken, setSpoken] = useState(config.spokenAs ?? "");
-  const [test, setTest] = useState<{ phase: "waiting" | "heard" | "missed"; score?: number } | null>(null);
+  // The spotter gives no confidence (its score is always 1), so the test only says whether it heard the name.
+  const [test, setTest] = useState<{ phase: "waiting" | "heard" | "missed" } | null>(null);
   useEffect(() => setSpoken(config.spokenAs ?? ""), [config.spokenAs]);
 
   // The test: wait for a wake event; the pet window leaves it alone while the test runs.
@@ -255,7 +257,7 @@ function WakeWord({ voice, name }: { voice: VoiceView; name: string }) {
     if (test?.phase !== "waiting" || !voice.wake || voice.wake.at < started.current) return;
     endWakeTest();
     voice.api?.listen("cancel").catch(() => {});
-    setTest({ phase: "heard", score: voice.wake.score });
+    setTest({ phase: "heard" });
   }, [voice.wake, test?.phase, voice.api]);
   useEffect(() => {
     if (test?.phase !== "waiting") return;
@@ -319,7 +321,7 @@ function WakeWord({ voice, name }: { voice: VoiceView; name: string }) {
             {test?.phase === "waiting"
               ? `Say “${said}” now…`
               : test?.phase === "heard"
-                ? `Heard it${test.score !== undefined ? ` (score ${test.score.toFixed(2)})` : ""}.`
+                ? "Heard it!"
                 : test?.phase === "missed"
                   ? "Didn't hear it. Try a spelling closer to how you say it (“Mo chee” for Mochi), or raise the sensitivity."
                   : "For unusual names: how the name sounds, in plain letters."}

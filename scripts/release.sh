@@ -2,6 +2,8 @@
 # Build a release for this machine (or for TARGET, a Rust target triple): the `pawl` hub/CLI and the desktop
 # installers, with `pawl` bundled next to the desktop app as a Tauri sidecar (the app looks for it there).
 # Output: dist/release/ with the installers, a CLI archive and SHA256SUMS-<triple>.txt.
+# The desktop app links the sherpa-onnx voice engine; its native archive is fetched and checked against a pinned
+# SHA-256 first (scripts/fetch-sherpa.sh). Voice models are never bundled (scripts/check-no-models.sh).
 # Usage: bash scripts/release.sh            (host target)
 #        TARGET=x86_64-apple-darwin bash scripts/release.sh
 # CI runs this on every platform (.github/workflows/release.yml).
@@ -28,7 +30,15 @@ cargo build --release -p pawl-hub ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"}
 mkdir -p apps/desktop/src-tauri/binaries
 cp "$BIN_DIR/pawl$EXE" "apps/desktop/src-tauri/binaries/pawl-$TRIPLE$EXE"
 rm -rf "$BUNDLE_DIR"
+SHERPA_ONNX_ARCHIVE_DIR="$(bash scripts/fetch-sherpa.sh "$TRIPLE")"
+export SHERPA_ONNX_ARCHIVE_DIR
 (cd apps/desktop && bun run tauri build --config src-tauri/tauri.release.json ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"})
+# The bundles, and the folders the Windows installers are built from (NSIS / WiX scripts and staged files).
+CHECK_DIRS=("$BUNDLE_DIR")
+for d in "${BUNDLE_DIR%/bundle}/nsis" "${BUNDLE_DIR%/bundle}/wix"; do
+  if [ -d "$d" ]; then CHECK_DIRS+=("$d"); fi
+done
+bash scripts/check-no-models.sh "${CHECK_DIRS[@]}"
 
 rm -rf "$OUT"
 mkdir -p "$OUT"

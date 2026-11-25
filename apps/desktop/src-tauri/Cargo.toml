@@ -25,6 +25,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Same major as the hub (workspace `dirs = "6"`) so both resolve the identical data dir.
 dirs = "6"
+# Voice (v0.2: wake word + speech to text, src/voice). sherpa-onnx links its prebuilt static libraries; the archive is
+# fetched and checked against a pinned SHA-256 by scripts/fetch-sherpa.sh (see .cargo/config.toml).
+sherpa-onnx = "~2.0.3"
+# The pet's name -> keyword-spotter tokens (sentencepiece BPE), at runtime.
+kitoken = { version = "0.11", default-features = false, features = ["std", "normalization", "convert-sentencepiece"] }
+# Microphone capture. Linux uses ALSA (libasound2-dev at build time); PipeWire and PulseAudio serve ALSA clients.
+cpal = "0.18"
+# Model downloads (HTTPS from GitHub releases), verified before anything is unpacked.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy"] }
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
+# Pure-Rust bzip2 (libbz2-rs-sys, the crate's default backend): no system libbz2.
+bzip2 = "0.6"
+tauri-plugin-global-shortcut = "2"
 
 [profile.release]
 codegen-units = 1
