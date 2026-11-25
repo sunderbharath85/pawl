@@ -12,23 +12,17 @@ import type { Session } from "@pawl/protocol";
 import { STATUS_META, SOURCE_LABEL, agentName, isActive, sessionTitle, timeAgo } from "../lib/format";
 import { usePanel, type Route } from "./context";
 import * as I from "./icons";
-import { ACTIVITY_LABEL, PetAvatar, activityUrgency, safePetLine } from "./PetAvatar";
+import { ACTIVITY_LABEL, PetAvatar } from "./PetAvatar";
+import { useDefaultPet } from "./useDefaultPet";
 
 export function Sidebar() {
-  const { state, views, route, navigate, now, meta } = usePanel();
+  const { state, route, navigate, now, meta } = usePanel();
   const [showEnded, setShowEnded] = useState(false);
-  const [heroIdx, setHeroIdx] = useState(0);
 
   const pendingCount = Object.keys(state.pending).length;
 
-  // The most "urgent" home pet leads (visitors live on other machines); clicking the hero cycles through the pack.
-  const ordered = useMemo(() => {
-    const home = views.filter((v) => !v.visitor && !v.remoteOffline);
-    return [...(home.length > 0 ? home : views)].sort(
-      (a, b) => activityUrgency(b.activity) - activityUrgency(a.activity) || a.name.localeCompare(b.name),
-    );
-  }, [views]);
-  const hero = ordered.length > 0 ? ordered[heroIdx % ordered.length] : undefined;
+  // One pet: the default pet, which orchestrates every session (agents' pets are names on their sessions).
+  const pet = useDefaultPet();
 
   const sessions = useMemo(() => {
     const all = Object.values(state.sessions);
@@ -51,7 +45,6 @@ export function Sidebar() {
     { route: { view: "new" }, label: "New session", icon: <I.Plus /> },
     { route: { view: "chat" }, label: "Chat", icon: <I.Chat /> },
     { route: { view: "approvals" }, label: "Approvals", icon: <I.Bell />, badge: pendingCount },
-    { route: { view: "pets" }, label: "Pets", icon: <I.Bone /> },
     { route: { view: "machines" }, label: "Machines", icon: <I.Machines /> },
     { route: { view: "rules" }, label: "Rules", icon: <I.Shield /> },
     { route: { view: "settings" }, label: "Settings", icon: <I.Gear /> },
@@ -88,26 +81,14 @@ Rename it in Settings`}
         </button>
       )}
 
-      <button
-        className={`hero tone-${hero?.activity ?? "napping"}`}
-        onClick={() => setHeroIdx((i) => i + 1)}
-        title={ordered.length > 1 ? "Next pet" : undefined}
-      >
+      <button className={`hero tone-${pet.activity}`} onClick={() => navigate({ view: "chat" })} title={`Chat with ${pet.name}`}>
         <div className="hero-bed">
-          <PetAvatar species={hero?.species ?? "dog"} activity={hero?.activity ?? "napping"} size={92} />
+          <PetAvatar species={pet.species} activity={pet.activity} size={92} />
         </div>
         <div className="hero-text">
-          <div className="hero-name">
-            {hero?.name ?? "Biscuit"}
-            {ordered.length > 1 && <span className="hero-count">+{ordered.length - 1}</span>}
-          </div>
-          <div className="hero-activity">{ACTIVITY_LABEL[hero?.activity ?? "napping"]}</div>
-          <div className="hero-line">“{safePetLine(hero?.species ?? "dog", hero?.activity ?? "napping", hero ? hero.since : 0)}”</div>
-          {hero && (
-            <div className="mood" title={`Mood ${Math.round(hero.mood)}/100`}>
-              <span style={{ width: `${Math.max(4, Math.min(100, hero.mood))}%` }} />
-            </div>
-          )}
+          <div className="hero-name">{pet.name}</div>
+          <div className="hero-activity">{ACTIVITY_LABEL[pet.activity]}</div>
+          <div className="hero-line">{pet.line}</div>
         </div>
       </button>
 

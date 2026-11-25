@@ -2,19 +2,16 @@ import { useCallback, useEffect, useState } from "react";
 import { DEFAULT_SPECIES, type Species } from "@pawl/protocol";
 import { SPECIES_META } from "@pawl/pet-engine";
 import type { PetAnimationMode } from "./petMotion";
-import type { PetsOnScreen } from "./petScreen";
 
 /** Local, per-machine desktop preferences (localStorage is shared by both windows). */
 export interface DesktopSettings {
   notifyPermissions: boolean;
   notifyTurns: boolean;
   notifyHub: boolean;
-  /** The default pet's size on screen, px (session pets are drawn smaller). */
+  /** The pet's size on screen, px (there is one pet on screen: the default pet). */
   petSize: number;
   /** Name label under each pet on screen (on by default: every pet has a name). */
   showPetNames: boolean;
-  /** "Pets on screen": the default pet only (default), or plus one pet per active session. */
-  petsOnScreen: PetsOnScreen;
   /** "Pet animation": still unless the person chats with the pet (default), or always following the agents. */
   petAnimation: PetAnimationMode;
   /** The default pet's species (its name lives in the hub: `bot.petName`). Local to this machine. */
@@ -44,7 +41,6 @@ export const DEFAULT_SETTINGS: DesktopSettings = {
   notifyHub: true,
   petSize: 112,
   showPetNames: true,
-  petsOnScreen: "default",
   petAnimation: "chat",
   defaultPetSpecies: DEFAULT_SPECIES,
   lastPetName: "",
@@ -66,7 +62,6 @@ export function normalizeSettings(stored: Partial<DesktopSettings> | null | unde
     const v = raw[key];
     if (v !== undefined && typeof v === typeof DEFAULT_SETTINGS[key]) (s as unknown as Record<string, unknown>)[key] = v;
   }
-  if (s.petsOnScreen !== "default" && s.petsOnScreen !== "sessions") s.petsOnScreen = DEFAULT_SETTINGS.petsOnScreen;
   if (s.petAnimation !== "chat" && s.petAnimation !== "always") s.petAnimation = DEFAULT_SETTINGS.petAnimation;
   // An older version's local pet name: kept as legacyPetName until it was offered to the hub.
   const old = raw["defaultPetName"];

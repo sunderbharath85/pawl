@@ -1,31 +1,24 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { isLocal } from "@pawl/hub-client";
 import { SPECIES_META } from "@pawl/pet-engine";
-import { agentName, clockTime, errorText } from "../../lib/format";
-import { petList } from "../../lib/pets";
+import { clockTime, errorText } from "../../lib/format";
 import { usePanel } from "../context";
 import * as I from "../icons";
 import { PetAvatar } from "../PetAvatar";
 import { ChatProposals } from "./ChatProposals";
 import { PetReplyText } from "../../lib/ReactionIcon";
-import { useSettings } from "../../lib/settings";
-import { useDefaultPetName } from "../../lib/usePetName";
+import { useDefaultPet } from "../useDefaultPet";
 
 const SUGGESTIONS = ["What's everyone doing?", "Summarize the last session", "Approve it", "Tell Codex to run the tests"];
 
-export function ChatView({ initialPetId }: { initialPetId?: string }) {
+/** The chat with the default pet: the one pet, which orchestrates every agent (the bubble's "Pawl-wide" chat). */
+export function ChatView() {
   const { client, state, views, toast, meta, navigate } = usePanel();
-  // Chat goes to this machine's hub, so only its own pets answer (paired machines' pets are visitors).
-  const pets = useMemo(() => petList(state).filter((p) => isLocal(state, p.machineId)), [state]);
-  const [petId, setPetId] = useState<string | undefined>(() => initialPetId ?? pets[0]?.id);
-  const pet = pets.find((p) => p.id === petId) ?? pets[0];
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const realPet = pet && state.pets[pet.id] ? pet : undefined;
-  // Replies without a pet id are the default pet's (it orchestrates every agent): its own name, from the hub.
-  const [settings] = useSettings();
-  const { name: defaultName } = useDefaultPetName(client, state, meta.phase === "connected");
+  const pet = useDefaultPet();
+  // Replies from before there was one pet may carry an agent pet's id: they keep that pet's name.
+  const pets = state.pets;
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -37,7 +30,7 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
     if (!t || sending) return;
     setSending(true);
     try {
-      await client.chat(t, realPet?.id);
+      await client.chat(t);
       setText("");
     } catch (err) {
       toast(errorText(err), "error");
@@ -59,35 +52,22 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
           <h1>Chat</h1>
           <p>Ask what your agents are up to, or tell them what to do next.</p>
         </div>
-        {pets.length > 1 && (
-          <div className="pet-chips">
-            {pets.map((p) => (
-              <button key={p.id} className={`pet-chip${p.id === pet?.id ? " is-active" : ""}`} onClick={() => setPetId(p.id)}>
-                <PetAvatar species={p.species} activity={activityOf(p.id)} size={26} />
-                {p.name}
-              </button>
-            ))}
-          </div>
-        )}
       </header>
 
       <div className="chat-log" ref={scrollRef}>
         {state.chat.length === 0 && (
           <div className="empty">
-            <PetAvatar species={pet?.species ?? "dog"} activity="happy" size={110} />
+            <PetAvatar species={pet.species} activity="happy" size={110} />
             <h3>
-              {SPECIES_META[pet?.species ?? "dog"].sound} I'm {realPet?.name ?? defaultName}.
+              {SPECIES_META[pet.species].sound} I'm {pet.name}.
             </h3>
-            <p>
-              {realPet ? `I keep an eye on ${agentName(state.agents, realPet.agentId, realPet.machineId)}.` : "I keep an eye on your agents."} Try one of
-              these:
-            </p>
+            <p>I keep an eye on all your agents, on every machine. Try one of these:</p>
           </div>
         )}
         {state.chat.map((m) => {
-          const from = m.petId ? pets.find((p) => p.id === m.petId) : undefined;
-          const fromName = m.petId ? (from?.name ?? "Pet") : defaultName;
-          const fromSpecies = m.petId ? (from?.species ?? "dog") : settings.defaultPetSpecies;
+          const from = m.petId ? pets[m.petId] : undefined;
+          const fromName = m.petId ? (from?.name ?? "Pet") : pet.name;
+          const fromSpecies = m.petId ? (from?.species ?? "dog") : pet.species;
           return m.role === "user" ? (
             <div key={m.id} className="msg msg-user">
               <div className="msg-bubble">{m.text}</div>
@@ -95,7 +75,7 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
             </div>
           ) : (
             <div key={m.id} className="msg msg-pet">
-              <PetAvatar species={fromSpecies} activity={activityOf(from?.id)} size={36} />
+              <PetAvatar species={fromSpecies} activity={from ? activityOf(from.id) : pet.activity} size={36} />
               <div>
                 <div className="msg-name">{fromName}</div>
                 <div className="msg-bubble">
@@ -116,7 +96,7 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
         })}
         {waitingReply && (
           <div className="msg msg-pet">
-            <PetAvatar species={pet?.species ?? "dog"} activity="thinking" size={36} />
+            <PetAvatar species={pet.species} activity="thinking" size={36} />
             <div className="typing">
               <span />
               <span />
@@ -143,7 +123,7 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
         <textarea
           rows={2}
           value={text}
-          placeholder={`Say something to ${realPet?.name ?? defaultName}…`}
+          placeholder={`Say something to ${pet.name}…`}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {

@@ -15,7 +15,6 @@ import { HomeView } from "./views/HomeView";
 import { NewSessionView } from "./views/NewSessionView";
 import { ChatView } from "./views/ChatView";
 import { ApprovalsView } from "./views/ApprovalsView";
-import { PetsView } from "./views/PetsView";
 import { RulesView } from "./views/RulesView";
 import { SettingsView } from "./views/SettingsView";
 import { MachinesView } from "./views/MachinesView";
@@ -38,7 +37,7 @@ function routeFromFocus(focus: PanelFocus): Route {
     case "chat":
       return { view: "chat", petId: focus.petId };
     case "pets":
-      return { view: "pets", petId: focus.petId };
+      return { view: "settings", section: "pets" };
     case "new":
       return { view: "new" };
     case "rules":
@@ -170,11 +169,9 @@ function renderRoute(route: Route) {
     case "new":
       return <NewSessionView />;
     case "chat":
-      return <ChatView initialPetId={route.petId} />;
+      return <ChatView />;
     case "approvals":
       return <ApprovalsView focusRequestId={route.requestId} />;
-    case "pets":
-      return <PetsView focusPetId={route.petId} />;
     case "rules":
       return <RulesView />;
     case "settings":

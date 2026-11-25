@@ -1,5 +1,6 @@
-// The pet window: one default pet (it orchestrates every agent and mirrors the most important state across all
-// sessions and machines), optionally one pet per active session beside it, and one chat bubble.
+// The pet window: ONE pet, the default pet (it orchestrates every agent and mirrors the most important state across
+// all sessions and machines), and its chat bubble. Sessions never get pets of their own on screen (not this
+// machine's, not a paired machine's): the bubble's switcher talks to one session at a time.
 // - Press and drag a pet to move the window anywhere (Rust saves the spot and keeps it on screen).
 // - Click a pet: toggle its bubble. Esc or clicking elsewhere closes it. A new approval opens it by itself.
 // - Right-click: Open hub, Reset position, Settings, Quit (a native menu). The panel never opens on its own.
@@ -14,8 +15,8 @@ import { isTauri, native, onNative } from "../lib/native";
 import { attachNotifications } from "../lib/notifications";
 import { layoutPetWindow, petFrame, placeBubble, PressTracker, type PetSpace, type Rect } from "../lib/petLayout";
 import { autoOpenBubble, clickBubble, DEFAULT_TARGET as DEFAULT, setupLooksDone, type OpenBubble } from "../lib/bubble";
-import { chatPhase, petPose, sessionPhase } from "../lib/petMotion";
-import { activeSessionPets, defaultPetState, newRequestIds, type SessionPet } from "../lib/petScreen";
+import { chatPhase, petPose, sessionPhase, type ChatPhase } from "../lib/petMotion";
+import { defaultPetState, newRequestIds, switcherSessions } from "../lib/petScreen";
 import { usePetViews } from "../lib/pets";
 import { useSettings } from "../lib/settings";
 import { useSprites } from "../lib/sprites";
@@ -23,7 +24,7 @@ import { useConnection } from "../lib/useConnection";
 import { renameDefaultPet, useDefaultPetName } from "../lib/usePetName";
 import { useNow } from "../lib/useNow";
 import { notifiesHere } from "../lib/where";
-import { DefaultBubble, SayBubble, SessionBubble, SleepyBubble, type BubbleEnv } from "./Bubble";
+import { DefaultBubble, SayBubble, SleepyBubble, type BubbleEnv } from "./Bubble";
 import { startHitRectReporter } from "./hitRects";
 
 const NOTE_MS = 4500;
@@ -78,18 +79,17 @@ export function PetApp() {
 
   const main = useMemo(() => defaultPetState(state, views), [state, views]);
   const pending = useMemo(() => main.pending.filter((p) => !dismissed.has(p.requestId)), [main.pending, dismissed]);
-  const sessionMode = connected && settings.petsOnScreen === "sessions";
-  const sessions = useMemo(() => (sessionMode ? activeSessionPets(state, views) : { pets: [] as SessionPet[], hidden: 0 }), [sessionMode, state, views]);
+  // The session the bubble talks to (null: Pawl-wide, the orchestrator chat), and the sessions it can switch to.
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const switcher = useMemo(() => (connected ? switcherSessions(state, now, { focus: focusId }) : { chips: [], more: [] }), [connected, state, now, focusId]);
+  const focus = focusId ? (switcher.chips.find((c) => c.sessionId === focusId) ?? null) : null;
+  // A session that ended or went out of reach: back to Pawl-wide.
+  useEffect(() => {
+    if (focusId && connected && !focus) setFocusId(null);
+  }, [focusId, connected, focus]);
   const layout = useMemo(
-    () =>
-      layoutPetWindow({
-        petSize: settings.petSize,
-        showNames: settings.showPetNames,
-        sessionCount: sessions.pets.length,
-        more: sessions.hidden > 0,
-        space,
-      }),
-    [settings.petSize, settings.showPetNames, sessions.pets.length, sessions.hidden, space],
+    () => layoutPetWindow({ petSize: settings.petSize, showNames: settings.showPetNames, space }),
+    [settings.petSize, settings.showPetNames, space],
   );
   const frameKey = JSON.stringify(petFrame(layout));
 
@@ -130,18 +130,20 @@ export function PetApp() {
     return () => clearTimeout(t);
   }, [note]);
 
-  // A new approval opens a bubble by itself (where the user is, like notifications): the session pet's when it is
-  // on screen, else the default pet's (which lists every approval). It never replaces an open bubble: the user may
-  // be typing there; the badge on the pet shows the approval instead.
+  // A new approval opens the bubble by itself (where the user is, like notifications), Pawl-wide (it lists every
+  // approval) unless the approval is the focused session's. It never replaces an open bubble: the user may be typing
+  // there; the badge on the pet and the switcher's chip show the approval instead.
   const seen = useRef<Set<string>>(new Set());
+  const openNow = useRef(open);
+  openNow.current = open;
   useEffect(() => {
     const fresh = newRequestIds(seen.current, pending);
     seen.current = new Set(pending.map((p) => p.requestId));
     if (fresh.length === 0 || !notifiesHere(client.getState())) return;
     const req = pending.find((p) => p.requestId === fresh[0]);
-    const target = req && sessions.pets.some((p) => p.sessionId === req.sessionId) ? req.sessionId : DEFAULT;
-    setOpen((o) => autoOpenBubble(o, target));
-  }, [pending, sessions.pets, client]);
+    if (!openNow.current && req?.sessionId !== focusId) setFocusId(null);
+    setOpen((o) => autoOpenBubble(o, DEFAULT));
+  }, [pending, client, focusId]);
 
   // The hub went away (or rejects us): the default pet says so. Back online: that bubble closes.
   useEffect(() => {
@@ -171,11 +173,6 @@ export function PetApp() {
       })
       .catch(() => {});
   }, [connected, settings.setupDone, machineName, sessionCount, client, setSettings]);
-
-  // A session pet's bubble closes when its session is no longer on screen.
-  useEffect(() => {
-    if (open && open.target !== DEFAULT && !sessions.pets.some((p) => p.sessionId === open.target)) setOpen(null);
-  }, [open, sessions.pets]);
 
   // Esc or clicking outside (the window loses focus) closes the bubble.
   useEffect(() => {
@@ -211,7 +208,7 @@ export function PetApp() {
   const rename = useCallback((raw: string) => renameDefaultPet(client, state, raw), [client, state]);
 
   const press = useRef(new PressTracker());
-  const petHandlers = (target: string): PetHandlers => ({
+  const petHandlers = (): PetHandlers => ({
     onPointerDown: (e: PointerEvent<HTMLDivElement>) => {
       if (e.button !== 0) return;
       press.current.down(e.screenX, e.screenY);
@@ -224,7 +221,7 @@ export function PetApp() {
     onClick: (e: MouseEvent<HTMLDivElement>) => {
       // A drag is not a click; the second click of a double-click does nothing (double-click opens nothing).
       if (!press.current.click() || e.detail > 1) return;
-      toggle(target);
+      toggle(DEFAULT);
     },
     onContextMenu: (e: MouseEvent<HTMLDivElement>) => {
       e.preventDefault();
@@ -233,7 +230,7 @@ export function PetApp() {
     onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
-        toggle(target);
+        toggle(DEFAULT);
       } else if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
         e.preventDefault();
         menu();
@@ -244,36 +241,25 @@ export function PetApp() {
   const facing = space && space.right < space.left ? "left" : "right";
   // Still by default: a pet moves only while the person chats with it in its bubble (Settings > Pet animation).
   const defaultChat = useMemo(() => state.chat.filter((m) => !m.petId), [state.chat]);
+  // The pet moves while a conversation is going on: the orchestrator chat, or a session prompted from the bubble.
+  let phase: ChatPhase = chatPhase(defaultChat, sentChat, now);
+  for (const [sessionId, at] of Object.entries(sentPrompts)) {
+    if (phase !== "idle") break;
+    phase = sessionPhase(state.events[sessionId] ?? [], at, now);
+  }
   const mainPose = petPose({
     mode: settings.petAnimation,
     reducedMotion,
     agentActivity: connected ? main.activity : sleepyActivity(meta.phase),
-    phase: chatPhase(defaultChat, sentChat, now),
+    phase,
   });
   const mainActivity = mainPose.activity;
   const needsYou = connected && main.mood === "needs_you";
-  const openPet = open && open.target !== DEFAULT ? sessions.pets.find((p) => p.sessionId === open.target) : undefined;
-  const openIndex = openPet ? sessions.pets.indexOf(openPet) : -1;
-  const targetRect: Rect = openIndex >= 0 ? layout.sessions[openIndex]! : layout.main;
-  const place = placeBubble(layout, targetRect);
+  const place = placeBubble(layout, layout.main);
 
   let bubble = null;
   if (open && !connected && open.target === DEFAULT) {
     bubble = <SleepyBubble meta={meta} place={place} windowHeight={layout.height} name={name} onWake={() => void conn.startHub().catch((err) => setNote(errorText(err)))} onClose={() => setOpen(null)} />;
-  } else if (open && connected && openPet) {
-    bubble = (
-      <SessionBubble
-        key={openPet.sessionId}
-        env={env}
-        place={place}
-        windowHeight={layout.height}
-        pet={openPet}
-        pending={openPet.pending.filter((p) => !dismissed.has(p.requestId))}
-        focusInput={open.by === "click"}
-        note={note}
-        onClose={() => setOpen(null)}
-      />
-    );
   } else if (open && connected && open.target === DEFAULT) {
     bubble = (
       <DefaultBubble
@@ -287,6 +273,9 @@ export function PetApp() {
         setupDone={settings.setupDone}
         focusInput={open.by === "click"}
         note={note}
+        switcher={switcher}
+        focus={focus}
+        onFocus={setFocusId}
         renaming={renaming}
         onRename={rename}
         onRenameDone={() => setRenaming(false)}
@@ -294,7 +283,7 @@ export function PetApp() {
       />
     );
   } else if (note) {
-    bubble = <SayBubble place={placeBubble(layout, layout.main)} windowHeight={layout.height} text={note} onClick={() => setNote(null)} />;
+    bubble = <SayBubble place={place} windowHeight={layout.height} text={note} onClick={() => setNote(null)} />;
   }
 
   const badge = open?.target !== DEFAULT ? pending.length : 0;
@@ -302,7 +291,7 @@ export function PetApp() {
 
   return (
     <div ref={rootRef} className={`pet-root${hover ? " is-hover" : ""}`} style={{ width: layout.width, height: layout.height }}>
-      <ErrorBoundary resetKey={`${name}:${mainActivity}:${sessions.pets.length}`} fallback={<FallbackDog rect={layout.main} name={name} onMenu={menu} />}>
+      <ErrorBoundary resetKey={`${name}:${mainActivity}`} fallback={<FallbackDog rect={layout.main} name={name} onMenu={menu} />}>
         <PetBox
           rect={layout.main}
           label={mainLabel}
@@ -311,53 +300,10 @@ export function PetApp() {
           mark={needsYou && badge === 0}
           still={!mainPose.animate}
           pressed={open?.target === DEFAULT}
-          handlers={petHandlers(DEFAULT)}
+          handlers={petHandlers()}
         >
           <PetSprite species={settings.defaultPetSpecies} activity={mainActivity} size={layout.main.w} facing={facing} sprites={sprites} title={mainLabel} />
         </PetBox>
-        {sessions.pets.map((p, i) => {
-          const rect = layout.sessions[i]!;
-          const label = `${p.label}: ${p.pending.length > 0 ? "needs you" : p.activity}`;
-          const pose = petPose({
-            mode: settings.petAnimation,
-            reducedMotion,
-            agentActivity: p.activity,
-            phase: sessionPhase(state.events[p.sessionId] ?? [], sentPrompts[p.sessionId], now),
-          });
-          const petBadge = open?.target === p.sessionId ? 0 : p.pending.filter((r) => !dismissed.has(r.requestId)).length;
-          return (
-            <PetBox
-              key={p.sessionId}
-              rect={rect}
-              label={label}
-              name={settings.showPetNames ? p.label : null}
-              badge={petBadge}
-              mark={p.activity === "alert" && petBadge === 0}
-              still={!pose.animate}
-              pressed={open?.target === p.sessionId}
-              session
-              handlers={petHandlers(p.sessionId)}
-            >
-              <PetSprite species={p.species} activity={pose.activity} size={rect.w} facing={facing} skin={p.skin} sprites={sprites} title={label} />
-            </PetBox>
-          );
-        })}
-        {layout.more && (
-          <button
-            type="button"
-            className="pet-more"
-            style={{ left: layout.more.x, top: layout.more.y, width: layout.more.w, height: layout.more.h }}
-            data-pet-hit
-            title={`${sessions.hidden} more active session${sessions.hidden === 1 ? "" : "s"}: ask ${name}`}
-            onClick={() => toggle(DEFAULT)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              menu();
-            }}
-          >
-            +{sessions.hidden}
-          </button>
-        )}
       </ErrorBoundary>
       <ErrorBoundary resetKey={`${open?.target ?? ""}:${meta.phase}`} fallback={null}>
         {bubble}
@@ -378,15 +324,14 @@ interface PetBoxProps {
   /** Drawn without any animation. */
   still?: boolean;
   pressed: boolean;
-  session?: boolean;
   handlers: PetHandlers;
   children: ReactNode;
 }
 
-function PetBox({ rect, label, name, badge, mark, still, pressed, session, handlers, children }: PetBoxProps) {
+function PetBox({ rect, label, name, badge, mark, still, pressed, handlers, children }: PetBoxProps) {
   return (
     <div
-      className={`pet-box${session ? " is-session" : ""}${still ? " is-still" : ""}`}
+      className={`pet-box${still ? " is-still" : ""}`}
       style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
       role="button"
       tabIndex={0}

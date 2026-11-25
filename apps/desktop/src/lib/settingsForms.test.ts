@@ -209,6 +209,8 @@ describe("custom agents", () => {
 test("open_panel views map to panel routes", () => {
   expect(routeForView("settings")).toEqual({ view: "settings" });
   expect(routeForView("setup")).toEqual({ view: "setup" });
+  // One pet on screen: agent pets are renamed under Settings > Pets (advanced).
+  expect(routeForView("pets")).toEqual({ view: "settings", section: "pets" });
   expect(routeForView("machines")).toEqual({ view: "machines" });
   expect(routeForView("bogus" as never)).toEqual({ view: "home" });
 });

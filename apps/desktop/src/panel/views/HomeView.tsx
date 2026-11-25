@@ -4,7 +4,8 @@ import type { Session } from "@pawl/protocol";
 import { STATUS_META, SOURCE_LABEL, agentName, isActive, sessionTitle, timeAgo } from "../../lib/format";
 import { usePanel } from "../context";
 import * as I from "../icons";
-import { ACTIVITY_LABEL, PetAvatar, safePetLine } from "../PetAvatar";
+import { PetAvatar } from "../PetAvatar";
+import { useDefaultPet } from "../useDefaultPet";
 
 function greeting(): string {
   const h = new Date().getHours();
@@ -15,7 +16,8 @@ function greeting(): string {
 }
 
 export function HomeView() {
-  const { state, views, navigate, now, meta } = usePanel();
+  const { state, navigate, now, meta } = usePanel();
+  const pet = useDefaultPet();
   const sessions = Object.values(state.sessions);
   const active = useMemo(() => sessions.filter(isActive).sort((a, b) => b.lastEventAt - a.lastEventAt), [sessions]);
   const recent = useMemo(
@@ -24,10 +26,6 @@ export function HomeView() {
   );
   const pendingCount = Object.keys(state.pending).length;
   const notes = state.notifications.slice(-5).reverse();
-  // This machine's pets on the rug (visitors live on their own machines).
-  const homeViews = views.filter((v) => !v.visitor && !v.remoteOffline);
-  const rug = homeViews.length > 0 ? homeViews : views;
-  const lead = rug[0];
   /** " · Mac mini" for another machine's session (greyed when that machine is offline). */
   const where = (s: Session) =>
     isLocal(state, s.machineId) ? null : (
@@ -69,19 +67,11 @@ export function HomeView() {
         </div>
         <div className="home-hero-pets">
           <div className="home-rug" />
-          {rug.slice(0, 4).map((v, i) => (
-            <button
-              key={v.petId}
-              className="home-pet"
-              style={{ zIndex: 10 - i }}
-              onClick={() => navigate(v.sessionId ? { view: "session", sessionId: v.sessionId } : { view: "pets", petId: v.petId })}
-              title={`${v.name}: ${ACTIVITY_LABEL[v.activity]}`}
-            >
-              <PetAvatar species={v.species} activity={v.activity} size={i === 0 ? 150 : 92} facing={i % 2 ? "left" : "right"} />
-              <span className="home-pet-name">{v.name}</span>
-            </button>
-          ))}
-          {lead && <div className="home-speech">“{safePetLine(lead.species, lead.activity, lead.since)}”</div>}
+          <button className="home-pet" onClick={() => navigate({ view: "chat" })} title={`Chat with ${pet.name}`}>
+            <PetAvatar species={pet.species} activity={pet.activity} size={150} />
+            <span className="home-pet-name">{pet.name}</span>
+          </button>
+          <div className="home-speech">“{pet.line}”</div>
         </div>
       </div>
 
