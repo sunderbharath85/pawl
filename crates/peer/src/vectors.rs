@@ -82,7 +82,7 @@ fn phone_machine() -> Machine {
 /// (name, sender, receiver, body, include_pk)
 fn envelope_cases() -> Vec<(&'static str, &'static Party, &'static Party, PeerBody, bool)> {
     let presence = |m: Machine| PeerBody::Presence {
-        presence: Presence { machine: m, agents: vec![], repos: vec![], pets: vec![], user_active_at: None, ts: TS + 2 },
+        presence: Presence { machine: m, agents: vec![], repos: vec![], pets: vec![], user_active_at: None, ts: TS + 2, protocol_version: None },
     };
     vec![
         (

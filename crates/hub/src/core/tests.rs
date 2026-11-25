@@ -2413,6 +2413,7 @@ fn presence_of(peer: &str, agents: Vec<Agent>, repos: Vec<RepoRef>) -> Presence 
         pets: vec![],
         user_active_at: None,
         ts: now,
+        protocol_version: None,
     }
 }
 
@@ -2747,6 +2748,7 @@ async fn stored_injected_titles_are_cleaned_at_start() {
 
 mod a2a;
 mod a2a_agents;
+mod a2a_peer;
 mod a2a_server;
 mod phones;
 

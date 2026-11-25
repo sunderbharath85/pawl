@@ -239,7 +239,7 @@ fn interrupted_or_final(s: &TaskState) -> bool {
 }
 
 /// The server's request handler over the hub (weak: the server never keeps a stopped hub alive).
-struct HubHandler {
+pub(super) struct HubHandler {
     hub: Weak<Inner>,
 }
 
@@ -322,7 +322,7 @@ impl HubHandler {
 
     /// A task's stream: its snapshot, then its updates until it ends (a lagging reader gets a fresh
     /// snapshot instead of the updates it missed).
-    fn follow(hub: Hub, caller: Caller, task_id: String) -> EventStream {
+    pub(super) fn follow(hub: Hub, caller: Caller, task_id: String) -> EventStream {
         let Some((snapshot, rx)) = hub.tasks().subscribe(&task_id) else {
             return futures::stream::iter(vec![Err(A2AError::task_not_found(&task_id))]).boxed();
         };

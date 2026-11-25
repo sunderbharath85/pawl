@@ -3,6 +3,7 @@
 
 pub(crate) mod a2a;
 pub(crate) mod a2a_agents;
+pub(crate) mod a2a_peer;
 pub(crate) mod a2a_server;
 mod brain_session;
 mod host;
@@ -374,6 +375,8 @@ struct Inner {
     a2a_status: Mutex<a2a_server::A2aStatus>,
     /// Outside A2A agents' sessions (`core/a2a_agents.rs`); they report like the ACP host.
     remote: Arc<a2a_agents::RemoteAgents>,
+    /// A2A calls over the peer link (`core/a2a_peer.rs`): waiting (origin) and answered (owner).
+    a2a_peer: Mutex<a2a_peer::A2aPeerState>,
 }
 
 /// The hub. Cheap to clone; all clones share state.
@@ -607,6 +610,7 @@ impl Hub {
                 a2a_runtime: tokio::sync::Mutex::new(a2a_server::A2aRuntime::default()),
                 a2a_status: Mutex::new(a2a_server::A2aStatus::default()),
                 remote,
+                a2a_peer: Mutex::new(a2a_peer::A2aPeerState::default()),
             }),
         };
         hub.set_mirror(mirror_sessions, mirror_pets, mirror_pending);

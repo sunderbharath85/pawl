@@ -355,3 +355,96 @@ Docs read before coding (2026-11-24):
 - Card signatures are shown, not verified (needs an approved JWS library).
 - Cards are cached in memory only (refetched at start).
 - Push notifications from outside agents are not used (streaming or blocking calls only).
+
+## Phase A4 — machine to machine A2A over the encrypted link (done; protocol v9)
+
+### What it does
+
+- A custom A2A binding (spec 5.8 / 12; URI `https://sunderbharath85.github.io/pawl/a2a/binding/peer-link/v1`):
+  A2A 1.0 JSON-RPC inside the end-to-end encrypted peer link, one call = `PeerBody::A2a { callId, frame }`.
+  The origin sends a `request` frame (the JSON-RPC request, the local client that asked, whether the user
+  confirmed); the owner answers with one `response` frame (or `event` frames then `end` for a stream). No LAN
+  port, no TLS trust: the link's NaCl boxes, seq / direction nonces and pairing are the transport security.
+- Version gate: every hub now puts `protocolVersion: 9` in its presence. Between v9 hubs, start / prompt /
+  cancel go as A2A (`Hub::forward` switches by the owner's latest presence); a peer whose presence has no version
+  (v8 or older) keeps getting the intents. Approve / deny stay intents between v9 hubs too (the step-4
+  confirmed / allow-once-only rules and their audit origin, unchanged).
+- Origin (`core/a2a_peer.rs` `forward_a2a`): start = `SendMessage` with delegate metadata `{agentId, cwd,
+  machineId, confirmed}` (`returnImmediately`); the owner's answer carries `{session, warning?}` in the
+  delegate metadata, so the client ack is the same `{session, warning?}` as before. Prompt = `SendMessage` in
+  the session's context. Cancel = `ListTasks{contextId, pageSize 1}`, then `CancelTask` on the running task
+  (none: nothing to cancel; finished meanwhile: fine). Checks before sending are unchanged (`unconfirmed` for an
+  unconfirmed start). Timeouts and link errors give the same `timeout` / `offline`; the call is in the origin's
+  intent log (kind start / prompt / cancel, status, reason, the call id as intent id).
+- Owner: the shared JSON-RPC dispatcher (`pawl_a2a::server::rpc::call`) with a peer policy handler
+  (`Caller::Peer(origin)`): exactly the intent rules. `[peer] accept_intents = false` -> forbidden; the
+  per-peer intent rate limit; repeated call ids get the same answer (rate-limited ones may retry); prompt:
+  this machine's open owned session and the prompt limits; start: confirmed, installed agent, a known folder
+  (repo index or `[peer] start_roots`, UNC / device paths refused); sessions and prompts from a peer are
+  remote-driven (rules never auto-approve); continuations (answers) are refused (approvals use the intents).
+  Refusals carry the intent reason in the JSON-RPC error's ErrorInfo metadata (`pawlReason`), so the origin's
+  client sees the same codes (`forbidden`, `not_found`, `invalid`, `unconfirmed`, `rate_limited`, ...). Every call
+  is in the owner's intent log with the same call id as the origin's. Start / prompt answers leave out the task's
+  history and artifacts (link frames are size-capped). The owner also serves GetTask / ListTasks / streams /
+  the extended card to peers (the origin uses only unary calls).
+
+### Wire changes (protocol v9; t13 told)
+
+- `PROTOCOL_VERSION = 9` (TS and Rust).
+- `Presence.protocolVersion?` (absent = v8 or older); `A2A_PEER_MIN_PROTOCOL = 9`; `A2A_PEER_BINDING`.
+- `PeerBody` `{type: "a2a", callId, frame: A2aPeerFrame}`; `A2aPeerFrame` tagged `kind`: `request {rpc, client,
+  confirmed}` | `response {rpc}` | `event {rpc}` | `end`.
+- Rust `Presence { .. }` literals need `protocol_version` (fixed in hub, peer tests and the peer test vectors;
+  the vectors' JSON is unchanged because the field is skipped when absent).
+
+### Files (A4)
+
+- New: `crates/hub/src/core/a2a_peer.rs`, `crates/hub/src/core/tests/a2a_peer.rs`.
+- Changed: `crates/hub/src/core.rs`, `crates/hub/src/core/{intents.rs,mirror.rs,peers.rs,a2a_server.rs}`,
+  `crates/hub/src/core/tests.rs`, `crates/hub/src/core/tests/phones.rs`, `crates/hub/src/core/settings/tests.rs`
+  (the compile-time peer-surface guard lists `A2a`: it never reaches settings), `crates/peer/src/node.rs` (its
+  fallback presence names the version), `crates/peer/src/{node/tests.rs,vectors.rs}`, `crates/protocol/src/lib.rs`,
+  `packages/protocol/src/index.ts` (CRLF kept).
+- Not mine: the `apps/desktop/*`, `packages/hub-client/src/{index,injected,settings,a2a}.ts` and
+  `packages/hub-client/test/a2a.test.ts` changes now in the worktree belong to another worker (the A2A UI);
+  I did not touch them, and the TS gates below ran with them in place.
+
+### Commands and results (A4)
+
+- `cargo test -p pawl-hub --lib`: 240 passed (+5, two real in-process hubs paired over loopback: start / prompt /
+  cancel over A2A with matching origin and owner log rows, the context bound to the peer, remote-driven, the
+  mirror; refusals keep the intent codes (unconfirmed before sending, forbidden folder, invalid agent, unknown
+  session for prompt and cancel, remote control off); approvals stay intents with their audit origin; v8 /
+  v9 / no-presence detection; a silent owner times out). The existing two-hub test
+  (`two_hubs_approve_start_and_time_out`) now runs its start and its timed-out prompt over A2A and passes
+  unchanged.
+- `cargo test --workspace --no-fail-fast`: exit 0 (pawl-a2a 67, pawl-acp 25, pawl-brain 111, pawl-discovery 39,
+  pawl-hub 240, pawl-peer 105 + 1 ignored, pawl-protocol 4). `cargo clippy --workspace --all-targets -- -D
+  warnings`: clean.
+- TS: `bunx tsc --noEmit` clean in packages/protocol, packages/hub-client, packages/pet-engine, apps/desktop,
+  apps/vscode, apps/mobile; `bun test`: hub-client 350, pet-engine 75, mobile 79 (cross-language vectors
+  included), desktop 117, vscode 23, all passing.
+
+### Decisions (A4)
+
+- Approve / deny stay intents between v9 hubs: the task says start / prompt / cancel are replaced, and the
+  intents already carry the confirmed / allow-once-only rules and the audit origin; an A2A continuation from a
+  peer is refused.
+- Cancel over A2A cancels the session's running task; a session with no running task has nothing to cancel
+  (the old intent called `session/cancel` on an idle agent, which did nothing either).
+- The protocol version travels in presence (not in hello), so old hubs ignore it and a v9 hub learns it before
+  it can act on the peer.
+
+### Known gaps (A4)
+
+- Streams over the link exist on the owner but the origin does not use them yet (unary calls only); an event
+  larger than a link frame would be dropped with a warning.
+- Phones keep using intents (they do not speak A2A).
+
+## Open items for t13
+
+- PLAN.md / CONTRACTS.md (yours) do not yet describe the A2A wire additions above (A2, A3, A4 sections list them).
+- The desktop / VS Code UI for the A2A settings and delegations (hub API complete: `get_settings` /
+  `update_settings` `a2a`, `a2a_rotate_token`, `list_tasks`, agents `a2a:<id>`), and showing
+  `signature: unverified` honestly.
+- A JWS library decision if card signatures should be verified.

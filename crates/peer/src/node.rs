@@ -832,6 +832,7 @@ impl Inner {
             pets: Vec::new(),
             user_active_at: None,
             ts: now,
+            protocol_version: Some(pawl_protocol::PROTOCOL_VERSION),
         });
         p.machine = me;
         p.ts = now;

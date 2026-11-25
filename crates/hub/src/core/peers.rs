@@ -243,6 +243,11 @@ impl Hub {
     }
 
     /// A paired hub's agents from its latest presence (None until one arrived).
+    /// The PROTOCOL_VERSION a paired hub's latest presence named (None: v8 or older, or no presence yet).
+    pub(super) fn peer_protocol(&self, machine_id: &str) -> Option<u32> {
+        self.peers().presence.get(machine_id).and_then(|p| p.protocol_version)
+    }
+
     pub(super) fn presence_agents(&self, machine_id: &str) -> Option<Vec<Agent>> {
         self.peers().presence.get(machine_id).map(|p| p.agents.clone())
     }
@@ -269,7 +274,7 @@ impl Hub {
 
     /// What paired hubs see of this one: the machine, its agents and its own pets.
     /// `repos` stays empty until PLAN step 5.
-    fn presence_snapshot(&self) -> Presence {
+    pub(super) fn presence_snapshot(&self) -> Presence {
         let machine = self.machine();
         let st = self.st();
         let mut pets: Vec<Pet> = st.pets.values().filter(|p| p.machine_id == st.machine_id).cloned().collect();
@@ -281,6 +286,8 @@ impl Hub {
             repos: self.repos(),
             pets,
             ts: pawl_protocol::now_ms(),
+            // v9 peers send start / prompt / cancel here as A2A over the link (`core/a2a_peer.rs`).
+            protocol_version: Some(pawl_protocol::PROTOCOL_VERSION),
         }
     }
 
@@ -657,6 +664,7 @@ mod tests {
             pets: vec![],
             user_active_at: active,
             ts,
+            protocol_version: None,
         }
     }
 

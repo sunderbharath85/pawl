@@ -3,7 +3,7 @@
 // crates/protocol/src/lib.rs and must stay byte-compatible (camelCase fields,
 // snake_case `type` tags). Change both together.
 
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 export const HUB_DEFAULT_PORT = 47800;
 export const HUB_HOST = "127.0.0.1";
 /** Folder name under the OS data dir (Win %APPDATA%, mac ~/Library/Application Support, linux ~/.local/share). */
@@ -421,7 +421,28 @@ export interface Presence {
   /** Last local user input on this machine (step 3 uses it for "runs to you"). */
   userActiveAt?: UnixMs;
   ts: UnixMs;
+  /**
+   * The sender's PROTOCOL_VERSION (v9+; absent = 8 or older). From 9 on, start / prompt / cancel go to it as A2A
+   * JSON-RPC (`a2a` peer bodies) instead of intents.
+   */
+  protocolVersion?: number;
 }
+
+/** The first PROTOCOL_VERSION whose hubs talk A2A to each other over the peer link. */
+export const A2A_PEER_MIN_PROTOCOL = 9;
+/** Custom A2A protocol binding (spec 5.8, 12) of the encrypted peer link. */
+export const A2A_PEER_BINDING = "https://sunderbharath85.github.io/pawl/a2a/binding/peer-link/v1";
+
+/**
+ * One frame of an A2A call over the peer link. `request` (origin -> owner): a JSON-RPC A2A 1.0 request, the local
+ * client that asked and whether the user confirmed (required for a start). `response`: the JSON-RPC response of a
+ * unary method. `event`: one JSON-RPC response of a stream. `end`: the stream is over.
+ */
+export type A2aPeerFrame =
+  | { kind: "request"; rpc: unknown; client: ClientKind; confirmed: boolean }
+  | { kind: "response"; rpc: unknown }
+  | { kind: "event"; rpc: unknown }
+  | { kind: "end" };
 
 export const PEER_PROTOCOL_VERSION = 1;
 export const PEER_DEFAULT_PORT = 47801;
@@ -554,7 +575,12 @@ export type PeerBody =
    * device) and to the new device (the other hubs). Accepted only from a paired hub; never replaces an existing
    * device's key; receivers audit it and tell the user.
    */
-  | { type: "roster_intro"; devices: IntroDevice[] };
+  | { type: "roster_intro"; devices: IntroDevice[] }
+  /**
+   * A2A over the encrypted link (protocol v9, between v9 hubs only): one call `callId` (unique per origin), its request
+   * and its answer frames. Replaces the start / prompt / cancel intents; approve / deny stay intents.
+   */
+  | { type: "a2a"; callId: string; frame: A2aPeerFrame };
 
 export type PeerBodyType = PeerBody["type"];
 

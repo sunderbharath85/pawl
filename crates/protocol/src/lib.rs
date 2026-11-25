@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 pub const HUB_DEFAULT_PORT: u16 = 47800;
 pub const HUB_HOST: &str = "127.0.0.1";
 pub const HUB_DATA_DIR_NAME: &str = "pawl";
@@ -233,6 +233,31 @@ pub struct Presence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_active_at: Option<UnixMs>,
     pub ts: UnixMs,
+    /// The sender's PROTOCOL_VERSION (v9+; absent = 8 or older). From 9 on, start / prompt / cancel go to it
+    /// as A2A JSON-RPC (`PeerBody::A2a`) instead of intents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u32>,
+}
+
+/// The first PROTOCOL_VERSION whose hubs talk A2A to each other over the peer link.
+pub const A2A_PEER_MIN_PROTOCOL: u32 = 9;
+/// Custom A2A protocol binding (spec 5.8, 12) of the encrypted peer link: JSON-RPC 2.0 A2A 1.0 requests
+/// and responses inside `PeerBody::A2a` frames.
+pub const A2A_PEER_BINDING: &str = "https://sunderbharath85.github.io/pawl/a2a/binding/peer-link/v1";
+
+/// One frame of an A2A call over the peer link (`PeerBody::A2a`), tagged `kind`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum A2aPeerFrame {
+    /// Origin -> owner: a JSON-RPC request (A2A 1.0). `client` = the local client that asked; `confirmed` = the
+    /// user confirmed on that device (required for a start, as with intents).
+    Request { rpc: Value, client: ClientKind, confirmed: bool },
+    /// Owner -> origin: the JSON-RPC response of a unary method.
+    Response { rpc: Value },
+    /// Owner -> origin: one JSON-RPC response of a stream (`SendStreamingMessage`, `SubscribeToTask`).
+    Event { rpc: Value },
+    /// Owner -> origin: the stream is over.
+    End,
 }
 
 pub const PEER_PROTOCOL_VERSION: u8 = 1;
@@ -417,6 +442,9 @@ pub enum PeerBody {
     /// Group roster (migration step 7): sent after pairing a new device to every other linked hub (the new device) and
     /// to the new device (the other hubs). Accepted only from a paired hub; never replaces an existing device's key.
     RosterIntro { devices: Vec<IntroDevice> },
+    /// A2A over the encrypted link (protocol v9, between v9 hubs only): one call `call_id` (unique per origin),
+    /// its request and its answer frames. Replaces the start / prompt / cancel intents; approve / deny stay intents.
+    A2a { call_id: String, frame: A2aPeerFrame },
 }
 
 // ---------- agents ----------

@@ -142,7 +142,7 @@ pub(crate) fn is_allow(kind: PermissionOptionKind) -> bool {
     matches!(kind, PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways)
 }
 
-fn kind_name(i: &Intent) -> &'static str {
+pub(super) fn kind_name(i: &Intent) -> &'static str {
     match i {
         Intent::Approve { .. } => "approve",
         Intent::Deny { .. } => "deny",
@@ -153,7 +153,7 @@ fn kind_name(i: &Intent) -> &'static str {
 }
 
 /// What an intent acts on, for the log (never the prompt text).
-fn target_of(i: &Intent) -> (String, Option<String>) {
+pub(super) fn target_of(i: &Intent) -> (String, Option<String>) {
     match i {
         Intent::Approve { request_id, option_id } => (request_id.clone(), Some(option_id.clone())),
         Intent::Deny { request_id, option_id } => (request_id.clone(), option_id.clone()),
@@ -162,12 +162,12 @@ fn target_of(i: &Intent) -> (String, Option<String>) {
     }
 }
 
-fn reason_name(r: IntentRejectReason) -> String {
+pub(super) fn reason_name(r: IntentRejectReason) -> String {
     serde_json::to_value(r).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
 }
 
 /// The client-facing code for an owner's reject reason.
-fn reason_code(r: IntentRejectReason) -> AckCode {
+pub(super) fn reason_code(r: IntentRejectReason) -> AckCode {
     match r {
         IntentRejectReason::AlreadyDecided => AckCode::AlreadyDecided,
         IntentRejectReason::NotFound => AckCode::NotFound,
@@ -180,7 +180,7 @@ fn reason_code(r: IntentRejectReason) -> AckCode {
 }
 
 /// The reject reason for a local error while applying an intent.
-fn reason_of(e: &anyhow::Error) -> IntentRejectReason {
+pub(super) fn reason_of(e: &anyhow::Error) -> IntentRejectReason {
     match AckCode::find(e) {
         Some(AckCode::NotOwner) => IntentRejectReason::NotOwner,
         Some(AckCode::NotFound) => IntentRejectReason::NotFound,
@@ -227,7 +227,7 @@ pub(crate) fn checked_result(kind: &str, target: &str, result: Option<Value>) ->
 }
 
 impl Hub {
-    fn intents(&self) -> MutexGuard<'_, IntentState> {
+    pub(super) fn intents(&self) -> MutexGuard<'_, IntentState> {
         self.inner.intents.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -236,11 +236,11 @@ impl Hub {
         parse_global_id(id).map(|(m, _)| m.to_string()).filter(|m| *m != self.inner.machine_id)
     }
 
-    fn peer_name(&self, machine_id: &str) -> Option<String> {
+    pub(super) fn peer_name(&self, machine_id: &str) -> Option<String> {
         self.devices().into_iter().find(|d| d.id == machine_id).map(|d| d.name)
     }
 
-    async fn log_intent(&self, entry: IntentLogEntry) {
+    pub(super) async fn log_intent(&self, entry: IntentLogEntry) {
         if let Err(e) = self.inner.store.run(move |s| s.insert_intent_log(&entry)).await {
             tracing::error!("intent log write failed: {e:#}");
         }
@@ -296,11 +296,15 @@ impl Hub {
         self.forward(target, actor, true, intent).await
     }
 
-    /// Send `intent` to `target` (the id's owner) and wait for its ack.
+    /// Send `intent` to `target` (the id's owner) and wait for its ack. A v9 owner gets start /
+    /// prompt / cancel as A2A over the link instead (`core/a2a_peer.rs`); approve / deny stay intents.
     pub(super) async fn forward(&self, target: &str, actor: &Actor, confirmed: bool, intent: Intent) -> Result<Value> {
         let paired = self.devices().iter().any(|d| d.id == target && d.kind == DeviceKind::Hub);
         if !paired {
             return Err(AckCode::NotFound.into());
+        }
+        if matches!(intent, Intent::Start { .. } | Intent::Prompt { .. } | Intent::Cancel { .. }) && self.peer_speaks_a2a(target) {
+            return self.forward_a2a(target, actor, confirmed, &intent).await;
         }
         let client = actor.kind.unwrap_or(ClientKind::Cli);
         let (kind, (tgt, option)) = (kind_name(&intent), target_of(&intent));
@@ -407,7 +411,7 @@ impl Hub {
     }
 
     /// More than INTENT_RATE_PER_SEC intents from `from` within one second?
-    fn intent_rate_ok(&self, from: &str) -> bool {
+    pub(super) fn intent_rate_ok(&self, from: &str) -> bool {
         let now = tokio::time::Instant::now();
         let mut s = self.intents();
         let w = s.rate.entry(from.to_string()).or_insert((now, 0));

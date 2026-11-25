@@ -245,6 +245,7 @@ fn presence_body(id: &str, name: &str) -> PeerBody {
             pets: vec![],
             user_active_at: None,
             ts: now_ms(),
+            protocol_version: None,
         },
     }
 }
@@ -412,6 +413,7 @@ async fn pair_two_nodes_link_up_and_presence_both_ways() {
         pets: vec![],
         user_active_at: Some(5),
         ts: 0,
+        protocol_version: None,
     });
     match b.expect("renamed Presence", is_presence_named(A, "Renamed")).await {
         PeerEvent::Presence { presence, .. } => {

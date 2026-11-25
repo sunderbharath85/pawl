@@ -113,6 +113,7 @@ async fn phones_are_devices_never_machines() {
         pets: vec![],
         user_active_at: Some(now),
         ts: now,
+        protocol_version: None,
     };
     f.hub.on_peer_event(PeerEvent::Presence { device_id: PHONE.into(), presence }).await;
     assert_eq!(f.hub.presence_repos(PHONE), None);

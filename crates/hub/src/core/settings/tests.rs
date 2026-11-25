@@ -398,6 +398,9 @@ fn peer_surface_has_no_settings(body: &PeerBody, intent: &Intent) {
         | PeerBody::Mirror { .. }
         | PeerBody::SyncRequest { .. }
         | PeerBody::MirrorSnapshot { .. }
+        // A2A over the link (protocol v9): start / prompt / cancel and task reads only (`core/a2a_peer.rs`);
+        // it never reaches settings.
+        | PeerBody::A2a { .. }
         | PeerBody::MirrorEvents { .. }
         | PeerBody::SyncDone { .. }
         | PeerBody::Intent { .. }
