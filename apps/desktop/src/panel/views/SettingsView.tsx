@@ -4,6 +4,7 @@
 import { useEffect, type ReactNode } from "react";
 import { machineDisplayName, restartText } from "@pawl/hub-client";
 import { usePanel } from "../context";
+import { A2aSection } from "./settings/A2aSection";
 import { AgentsSection } from "./settings/AgentsSection";
 import { AppSection, MachineSection, NotificationsSection, PetSection } from "./settings/AppSections";
 import { PairingSection } from "./settings/PairingSection";
@@ -18,6 +19,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{ id: string; label: string; hub: 
   { id: "remote", label: "Remote control", hub: true },
   { id: "repos", label: "Repos", hub: true },
   { id: "agents", label: "Agents & hooks", hub: true },
+  { id: "a2a", label: "A2A", hub: true },
   { id: "bot", label: "Bot", hub: true },
   { id: "nudges", label: "Nudges & reports", hub: true },
   { id: "notifications", label: "Notifications", hub: false },
@@ -75,6 +77,7 @@ export function SettingsView({ section }: { section?: string | undefined }) {
               <RemoteSection {...props} />
               <ReposSection {...props} />
               <AgentsSection {...props} />
+              <A2aSection {...props} />
               <BotSection {...props} />
               <NudgesSection {...props} />
             </>

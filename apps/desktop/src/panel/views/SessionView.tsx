@@ -4,7 +4,9 @@
 import { useEffect, useState } from "react";
 import type { HubEvent } from "@pawl/protocol";
 import { SOURCE_LABEL, STATUS_META, agentName, errorText, isActive, sessionTitle, timeAgo } from "../../lib/format";
-import { folderName, intentErrorText, isLocal, machineDisplayName, offlineReason, sessionBackfill } from "@pawl/hub-client";
+import { folderName, intentErrorText, isA2aAgentId, isLocal, machineDisplayName, offlineReason, sessionBackfill } from "@pawl/hub-client";
+import { a2aTaskChip } from "../../lib/a2aUi";
+import { useA2aTasks } from "../useA2aTasks";
 import { usePanel } from "../context";
 import * as I from "../icons";
 import { ACTIVITY_LABEL, PetAvatar } from "../PetAvatar";
@@ -21,6 +23,8 @@ export function SessionView({ sessionId }: { sessionId: string }) {
     views.find((v) => v.machineId === session?.machineId && v.agentId === session?.agentId);
   const pending = Object.values(state.pending).filter((p) => p.sessionId === sessionId);
   const [loading, setLoading] = useState(false);
+  // Its A2A tasks: an outside agent's session, or one an outside caller or a paired machine started.
+  const tasks = useA2aTasks(sessionId, session?.status);
 
   // Backfill on open and catch up after every reconnect, using `seq` as the cursor
   // (fetched events are merged into state.events by the client, deduped by global id).
@@ -57,6 +61,8 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const machine = state.machines[session.machineId];
   const machineName = machineDisplayName(machine);
   const offline = offlineReason(state, session.machineId);
+  const outsideAgent = isA2aAgentId(session.agentId);
+  const taskChip = a2aTaskChip(tasks, session, state.settings?.a2a, (id) => (state.machines[id] ? machineDisplayName(state.machines[id]) : undefined));
 
   return (
     <section className={`session-view${offline ? " is-offline" : ""}`}>
@@ -76,9 +82,14 @@ export function SessionView({ sessionId }: { sessionId: string }) {
               </span>
             )}
             <span className="chip chip-soft">{SOURCE_LABEL[session.source]}</span>
-            <span className="chip chip-soft mono" title={session.cwd}>
-              <I.Folder size={13} /> {folderName(session.cwd)}
+            <span className="chip chip-soft mono" title={outsideAgent ? `Runs at ${session.cwd}` : session.cwd}>
+              {outsideAgent ? <I.Machines size={13} /> : <I.Folder size={13} />} {folderName(session.cwd)}
             </span>
+            {taskChip && (
+              <span className={`chip a2a-task-chip tone-${taskChip.tone}`} title={taskChip.title}>
+                {taskChip.label}
+              </span>
+            )}
             <span className="muted">started {timeAgo(session.startedAt, now)}</span>
           </div>
           {pet && (

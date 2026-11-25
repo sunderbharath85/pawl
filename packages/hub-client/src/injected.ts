@@ -150,6 +150,9 @@ export function cleanTitle(text: string | null | undefined, fallback: { agent: s
 
 /** "api" for "E:/work/api/" (the folder a session runs in); "~" when unknown. */
 export function folderName(cwd: string | null | undefined): string {
+  // An outside A2A agent's session works where the agent runs: its "folder" is the agent's URL; show its host.
+  const url = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(cwd ?? "");
+  if (url) return url[1]!;
   const parts = (cwd ?? "").replace(/[\\/]+$/, "").split(/[\\/]/);
   return parts[parts.length - 1] || "~";
 }

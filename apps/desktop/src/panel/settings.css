@@ -704,3 +704,164 @@
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* Settings > A2A */
+.a2a-part {
+  display: grid;
+  gap: 10px;
+}
+.a2a-part + .a2a-part {
+  margin-top: 8px;
+  padding-top: 14px;
+  border-top: 1.5px dashed var(--line);
+}
+.a2a-heading {
+  margin: 0;
+  font-size: 15px;
+}
+.a2a-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+}
+.a2a-row > .input,
+.a2a-row > .field {
+  flex: 1;
+  min-width: 180px;
+}
+.a2a-port {
+  max-width: 120px;
+}
+.a2a-status {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink-2);
+}
+.a2a-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+.a2a-status.is-on .a2a-dot {
+  background: var(--sage);
+}
+.a2a-status.is-error {
+  color: var(--berry);
+}
+.a2a-status.is-error .a2a-dot {
+  background: var(--berry);
+}
+.a2a-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.a2a-item {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+}
+.a2a-item-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+.a2a-item-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.a2a-item-title .mono {
+  font-size: 12px;
+}
+.a2a-url {
+  font-size: 12px;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+.a2a-token {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1.5px solid var(--honey);
+  border-radius: 10px;
+  background: var(--honey-soft);
+  color: var(--ink);
+}
+.a2a-card {
+  display: grid;
+  gap: 6px;
+}
+.a2a-card-desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.a2a-chips,
+.a2a-skills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+.a2a-skill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.a2a-add {
+  display: grid;
+  gap: 6px;
+}
+.field-label-sub {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
+/* The session view's A2A task chip */
+.a2a-task-chip.tone-work {
+  background: var(--sky-soft, var(--paper));
+}
+.a2a-task-chip.tone-ask {
+  background: var(--honey-soft);
+  color: #8a5e0c;
+}
+.a2a-task-chip.tone-done {
+  background: var(--sage-soft);
+  color: #4c7a49;
+}
+.a2a-task-chip.tone-bad {
+  background: color-mix(in srgb, var(--berry) 14%, transparent);
+  color: var(--berry);
+}
+.outside-agent-note {
+  max-width: 62ch;
+}
+@media (prefers-color-scheme: dark) {
+  .a2a-task-chip.tone-ask {
+    color: var(--honey);
+  }
+  .a2a-task-chip.tone-done {
+    color: var(--sage);
+  }
+  .a2a-token {
+    background: color-mix(in srgb, var(--honey) 12%, var(--card));
+  }
+}
