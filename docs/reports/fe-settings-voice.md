@@ -256,3 +256,36 @@ Screenshots: `docs/screenshots/voice-approval-{light,dark}.png`.
 - the trigger on the `hearing` state event (`wake` / `ptt` / `hotkey`).
 
 Today a push-to-talk started with the global hotkey while the pet is speaking is cancelled like an echo, because the UI cannot tell it apart. Pawl's own UI buttons are not affected.
+
+## Follow-up: the engine's pause and utterance triggers wired in
+
+sde-voice added `voice_pause(on)` and a `trigger` (`wake` / `ui` / `hotkey`) on the `hearing` state event (see `docs/CONTRACTS.md` v0.2 Voice).
+
+- **`lib/voice.ts`:**
+  - `VoiceBackend.pause(on)` maps to `voice_pause`.
+  - `VoiceEvent` `state` carries `trigger?: HearingTrigger`.
+- **The dev mock:**
+  - `pause()` is implemented;
+  - `hearWake()` (a wake word plus a wake-started utterance) does nothing while paused, like the engine;
+  - `listen("start")` reports trigger `ui`.
+- **`lib/speech.ts`:** pauses the engine while the pet speaks.
+  - `voicePause(true)` is sent when speech starts and renewed every 20 s (`PAUSE_RENEW_MS`, under the engine's 30 s safety net).
+  - `voicePause(false)` is sent 500 ms after the speech ends, unless the pet speaks again in between.
+  - The pet window registers the pause through `setSpeechPause` while voice is on. If voice is turned off during a pause, the engine is resumed.
+- **Reaction rules (`voiceReaction`, pure):** only the wake word during speech counts as an echo.
+  - A wake event during speech is ignored.
+  - A `hearing` event with trigger `wake` during speech is cancelled (`voice_listen("cancel")`), and its transcript is dropped.
+  - Push-to-talk from Pawl's UI or the hotkey is kept, and the pet stops talking instead.
+- **Workaround removed.** The UI-side workaround that cancelled any non-UI utterance during speech (and so the hotkey) is gone, along with its "manual" timer.
+
+**Tests:**
+
+- During speech: a wake is ignored; a wake-started utterance is cancelled and its transcript dropped.
+- `ui` / `hotkey` utterances during speech are kept and sent.
+- A wake-started utterance when the pet is quiet is normal.
+- The pause: on at the start, renewed, off 500 ms after the end, kept when the pet speaks again, released when voice turns off.
+- The mock: no wake while paused, push-to-talk kept, triggers reported.
+
+**Live check:** 12 of 12 pass. While the pet read an approval back, the engine was paused, a wake word did nothing, and push-to-talk from the bubble's mic button still worked.
+
+**Gates:** desktop 3 tsc configs, 152 pass, vite build ok; hub-client 360.

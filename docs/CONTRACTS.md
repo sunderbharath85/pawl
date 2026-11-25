@@ -1015,6 +1015,10 @@ Tauri commands (camelCase JSON):
 - `voice_listen(action: "start" | "stop" | "cancel") -> ()` (push-to-talk from the pet, the bubble's mic button, or
   the hotkey; "stop" ends the utterance and transcribes, "cancel" drops it)
 - `voice_mic_test(on: bool) -> ()` (level events while on; for the Settings meter)
+- `voice_pause(on: bool) -> ()` (the UI pauses while the pet speaks, so its own voice can't wake it: while paused,
+  keyword spotting is suspended (no `wake` events) and an utterance the wake word started is cancelled; push-to-talk
+  from the UI or the hotkey still works and its utterance is kept. `on` again extends the pause; it ends on `false`,
+  or by itself after 30 s as a safety net. It does not change the state by itself.)
 
 ```ts
 type VoiceState = "off" | "missing_models" | "downloading" | "loading" | "idle" | "wake_listening" | "hearing"
@@ -1039,7 +1043,8 @@ interface VoiceStatus {
 ```
 
 Events (`voice` channel), throttled:
-- `{ type: "state", state }`
+- `{ type: "state", state, trigger? }` (`trigger` only with `state: "hearing"`: `"wake"` (the pet's name), `"ui"`
+  (`voice_listen` from the webview) or `"hotkey"` (the global push-to-talk shortcut))
 - `{ type: "wake", keyword, score }` (the pet perks up and its bubble opens in listening mode)
 - `{ type: "level", rms }` (only while hearing or during a mic test; at most 20/s)
 - `{ type: "transcript", id, text }` (final; `id` is unique per utterance; only the PET window sends it to the default

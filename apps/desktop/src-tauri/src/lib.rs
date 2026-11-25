@@ -108,6 +108,7 @@ pub fn run() {
             voice::voice_cancel_download,
             voice::voice_delete_models,
             voice::voice_listen,
+            voice::voice_pause,
             voice::voice_mic_test,
         ])
         .setup(|app| {

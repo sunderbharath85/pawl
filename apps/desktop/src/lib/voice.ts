@@ -53,8 +53,11 @@ export interface VoiceStatus {
   mics: VoiceMic[];
 }
 
+/** What started an utterance (on `state: "hearing"`): the wake word, Pawl's UI (`voice_listen`) or the global hotkey. */
+export type HearingTrigger = "wake" | "ui" | "hotkey";
+
 export type VoiceEvent =
-  | { type: "state"; state: VoiceState }
+  | { type: "state"; state: VoiceState; trigger?: HearingTrigger }
   | { type: "wake"; keyword: string; score: number }
   | { type: "level"; rms: number }
   | { type: "transcript"; id: string; text: string }
@@ -89,6 +92,11 @@ export interface VoiceBackend {
   deleteModels(models: VoiceModels | "all"): Promise<VoiceStatus>;
   listen(action: ListenAction): Promise<void>;
   micTest(on: boolean): Promise<void>;
+  /**
+   * While the pet speaks: no wake words, wake-started utterances cancelled (push-to-talk from the UI or the hotkey
+   * still works). `true` again extends it; it ends on `false`, or by itself after 30 s.
+   */
+  pause(on: boolean): Promise<void>;
   subscribe(fn: (e: VoiceEvent) => void): () => void;
 }
 
@@ -100,6 +108,7 @@ export const tauriVoice: VoiceBackend = {
   deleteModels: (models) => invoke<VoiceStatus>("voice_delete_models", { models }),
   listen: (action) => invoke<void>("voice_listen", { action }),
   micTest: (on) => invoke<void>("voice_mic_test", { on }),
+  pause: (on) => invoke<void>("voice_pause", { on }),
   subscribe(fn) {
     let unlisten: UnlistenFn | null = null;
     let disposed = false;

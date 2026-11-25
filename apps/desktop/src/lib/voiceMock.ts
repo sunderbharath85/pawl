@@ -11,6 +11,10 @@ const SAMPLE_TRANSCRIPTS = ["What's everyone doing?", "Run the tests in api", ""
 export interface VoiceMock extends VoiceBackend {
   emit(e: VoiceEvent): void;
   current(): VoiceStatus;
+  /** The wake word was heard: a wake event and a wake-started utterance (nothing while paused, like the engine). */
+  hearWake(): void;
+  /** Paused by the UI (the pet is speaking). */
+  paused(): boolean;
 }
 
 export function createVoiceMock(start: "fresh" | "ready" = "fresh"): VoiceMock {
@@ -29,6 +33,13 @@ export function createVoiceMock(start: "fresh" | "ready" = "fresh"): VoiceMock {
   let levelTimer: ReturnType<typeof setInterval> | null = null;
   let downloadTimer: ReturnType<typeof setInterval> | null = null;
   let utterance = 0;
+  let pausedNow = false;
+  const startHearing = (trigger: "wake" | "ui" | "hotkey") => {
+    if (st.state !== "idle" && st.state !== "wake_listening") return;
+    st.state = "hearing";
+    emit({ type: "state", state: "hearing", trigger });
+    levels(true);
+  };
 
   const emit = (e: VoiceEvent) => listeners.forEach((fn) => fn(e));
   const derived = (): VoiceState => {
@@ -86,9 +97,7 @@ export function createVoiceMock(start: "fresh" | "ready" = "fresh"): VoiceMock {
     },
     async listen(action: ListenAction) {
       if (action === "start") {
-        if (st.state !== "idle" && st.state !== "wake_listening") return;
-        setState("hearing");
-        levels(true);
+        startHearing("ui");
       } else if (action === "stop") {
         if (st.state !== "hearing") return;
         levels(false);
@@ -107,6 +116,15 @@ export function createVoiceMock(start: "fresh" | "ready" = "fresh"): VoiceMock {
     async micTest(on: boolean) {
       levels(on);
     },
+    async pause(on: boolean) {
+      pausedNow = on;
+    },
+    hearWake() {
+      if (pausedNow || st.state !== "wake_listening") return;
+      emit({ type: "wake", keyword: st.config.keyword, score: 1 });
+      startHearing("wake");
+    },
+    paused: () => pausedNow,
     subscribe(fn) {
       listeners.add(fn);
       return () => listeners.delete(fn);

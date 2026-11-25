@@ -54,8 +54,13 @@ describe("the contract flow, through the dev mock and the state mapping", () => 
       model = voiceReduce(model, { ...e, at: Date.now() });
       if (e.type === "transcript") transcripts.push(e.id);
     });
+    const triggers: (string | undefined)[] = [];
+    mock.subscribe((e) => {
+      if (e.type === "state" && e.state === "hearing") triggers.push(e.trigger);
+    });
     await mock.listen("start");
     expect(model.state).toBe("hearing");
+    expect(triggers).toEqual(["ui"]);
     await until(() => model.level > 0);
     await mock.listen("stop");
     expect(model.state).toBe("transcribing");
@@ -66,5 +71,20 @@ describe("the contract flow, through the dev mock and the state mapping", () => 
     expect(model.state).toBe("muted");
     await mock.listen("start");
     expect(model.state).toBe("muted");
+  });
+
+  test("paused (the pet is speaking): no wake words; push-to-talk still works", async () => {
+    const mock = createVoiceMock("ready");
+    const seen: string[] = [];
+    mock.subscribe((e) => seen.push(e.type === "state" ? `state:${e.state}:${e.trigger ?? ""}` : e.type));
+    await mock.pause(true);
+    mock.hearWake();
+    expect(seen).toEqual([]);
+    await mock.listen("start");
+    expect(seen).toEqual(["state:hearing:ui"]);
+    await mock.listen("cancel");
+    await mock.pause(false);
+    mock.hearWake();
+    expect(seen.slice(-2)).toEqual(["wake", "state:hearing:wake"]);
   });
 });

@@ -11,8 +11,8 @@ import type { HubClient, HubState } from "@pawl/hub-client";
 import { approvalReadBack, isLocal, machineDisplayName } from "@pawl/hub-client";
 import { agentName, errorText } from "../lib/format";
 import { notifiesHere } from "../lib/where";
-import { speak, speechBusy, stopSpeaking } from "../lib/speech";
-import { canTalk, listenPhase, micMarker, syncKeyword, useVoice, voiceBackend, type ListenPhase, type MicMarker, type VoiceEvent } from "../lib/voice";
+import { setSpeechPause, speak, speechBusy, stopSpeaking } from "../lib/speech";
+import { canTalk, listenPhase, micMarker, syncKeyword, useVoice, voiceBackend, type HearingTrigger, type ListenPhase, type MicMarker, type VoiceEvent } from "../lib/voice";
 import { markVoiceSent, wakeTestRunning } from "../lib/voiceShared";
 
 export const DIDNT_CATCH = "I didn't catch that.";
@@ -29,37 +29,35 @@ export type VoiceReaction = { kind: "none" } | { kind: "open" } | { kind: "send"
 
 /**
  * While the pet talks (and `SPEECH_QUIET_MS` after), the microphone may hear the pet itself. `busy`: that is now.
- * `manual`: the user started this utterance from Pawl's own UI (holding the pet, the mic button), which first
- * stopped the pet's voice: a person, not an echo.
+ * `utterance`: what started the utterance in progress (from its `hearing` event).
  */
 export interface SpeechGuard {
   busy: boolean;
-  manual: boolean;
+  utterance?: HearingTrigger | undefined;
 }
 
-const QUIET: SpeechGuard = { busy: false, manual: false };
+const QUIET: SpeechGuard = { busy: false };
 
 /**
  * A wake word, or any utterance starting (state -> hearing): open the bubble in listening mode. A final transcript:
  * send it to the chat once per id, or say "I didn't catch that" when it is empty. While Settings tests the wake
- * word, nothing. While the pet is talking: wake words are ignored, an utterance that starts is cancelled (unless the
- * user started it from Pawl's UI) and a transcript is dropped, so the pet can never answer, or approve, by hearing
- * itself.
+ * word, nothing.
+ *
+ * While the pet talks, the engine is paused (no wake words; it cancels wake-started utterances itself). As a second
+ * line: a wake word is ignored, an utterance the wake word started is cancelled and its transcript dropped, so the
+ * pet can never answer, or approve, by hearing itself. Push-to-talk from Pawl's UI or the hotkey is the user: it is
+ * kept, and the pet stops talking instead.
  */
 export function voiceReaction(e: VoiceEvent, seen: Set<string>, testing: boolean, guard: SpeechGuard = QUIET): VoiceReaction {
   if (testing) return { kind: "none" };
-  const echo = guard.busy && !guard.manual;
-  if (e.type === "wake") return echo ? { kind: "none" } : { kind: "open" };
-  if (e.type === "state" && e.state === "hearing") return echo ? { kind: "cancel" } : { kind: "open" };
+  if (e.type === "wake") return guard.busy ? { kind: "none" } : { kind: "open" };
+  if (e.type === "state" && e.state === "hearing") return guard.busy && e.trigger === "wake" ? { kind: "cancel" } : { kind: "open" };
   if (e.type !== "transcript" || seen.has(e.id)) return { kind: "none" };
   seen.add(e.id);
-  if (echo) return { kind: "none" };
+  if (guard.busy && guard.utterance === "wake") return { kind: "none" };
   const text = e.text.trim();
   return text ? { kind: "send", text } : { kind: "say", text: DIDNT_CATCH };
 }
-
-/** An utterance the user started from Pawl's UI counts as theirs this long (15 s of speech + transcription). */
-const MANUAL_MS = 20_000;
 
 export interface VoiceTalk {
   /** Voice is available here and turned on. */
@@ -96,16 +94,16 @@ export function useVoiceTalk(input: VoiceTalkInput): VoiceTalk {
   const latest = useRef(input);
   latest.current = input;
   const sent = useRef(new Set<string>());
-  /** When the user last started talking from Pawl's UI (0: not now). */
-  const manualAt = useRef(0);
+  /** What started the utterance in progress (its `hearing` event), until its transcript or the end of it. */
+  const utterance = useRef<HearingTrigger | undefined>(undefined);
 
   const onEvent = useCallback((e: VoiceEvent) => {
     const { client, openBubble, say, chatSent } = latest.current;
-    const now = Date.now();
-    const r = voiceReaction(e, sent.current, wakeTestRunning(), { busy: speechBusy(now), manual: now - manualAt.current < MANUAL_MS });
-    if (e.type === "transcript" || (e.type === "state" && (e.state === "idle" || e.state === "wake_listening"))) manualAt.current = 0;
+    if (e.type === "state" && e.state === "hearing") utterance.current = e.trigger;
+    const r = voiceReaction(e, sent.current, wakeTestRunning(), { busy: speechBusy(), utterance: utterance.current });
+    if (e.type === "transcript" || (e.type === "state" && (e.state === "idle" || e.state === "wake_listening" || e.state === "muted"))) utterance.current = undefined;
     if (r.kind === "cancel") {
-      // Heard while the pet was talking: maybe its own voice. Dropped, never transcribed.
+      // The wake word while the pet was talking: maybe its own voice. Dropped, never transcribed.
       voiceBackend()?.listen("cancel").catch(() => {});
     } else if (r.kind === "open") {
       stopSpeaking();
@@ -176,14 +174,20 @@ export function useVoiceTalk(input: VoiceTalkInput): VoiceTalk {
     if (!input.bubbleOpen) stopSpeaking();
   }, [input.bubbleOpen]);
 
+  // While the pet speaks (and 500 ms after), the engine is paused so its own voice can't wake it (lib/speech.ts).
   const api = voice.api;
+  const voiceOn = !!voice.available && !!config?.enabled;
+  useEffect(() => {
+    if (!api || !voiceOn) return;
+    setSpeechPause((on) => {
+      api.pause(on).catch((err: unknown) => console.warn("[desktop] voice_pause failed", err));
+    });
+    return () => setSpeechPause(null);
+  }, [api, voiceOn]);
+
   const listen = useCallback(
     (action: "start" | "stop" | "cancel") => {
-      if (action === "start") {
-        // The user, from Pawl's UI: this utterance is theirs even right after the pet spoke.
-        manualAt.current = Date.now();
-        stopSpeaking();
-      }
+      if (action === "start") stopSpeaking();
       api?.listen(action).catch((err: unknown) => latest.current.say(errorText(err)));
     },
     [api],

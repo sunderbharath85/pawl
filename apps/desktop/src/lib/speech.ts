@@ -36,15 +36,57 @@ let quietUntil = 0;
 /** The utterance being said: only its own events count (a cancelled one reports its end late). */
 let current: SpeechSynthesisUtterance | null = null;
 
-/** The pet started saying something. */
-export function markSpeechStart(): void {
-  speaking = true;
+/** The engine's own pause ends by itself after 30 s: renewed this often while the pet keeps talking. */
+export const PAUSE_RENEW_MS = 20_000;
+
+let pauseHandler: ((on: boolean) => void) | null = null;
+let paused = false;
+let renewTimer: ReturnType<typeof setInterval> | null = null;
+let resumeTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Who pauses the voice engine while the pet speaks (voice_pause, set by the pet window while voice is on; null: no
+ * engine). Pausing stops wake words and wake-started utterances; push-to-talk keeps working.
+ */
+export function setSpeechPause(fn: ((on: boolean) => void) | null): void {
+  if (!fn && pauseHandler && paused) pauseHandler(false);
+  pauseHandler = fn;
+  paused = false;
+  if (fn && speaking) pauseOn();
 }
 
-/** The pet stopped (finished, was cut off, or failed): quiet for `SPEECH_QUIET_MS` more. */
+function pauseOn(): void {
+  if (resumeTimer) clearTimeout(resumeTimer);
+  resumeTimer = null;
+  if (!pauseHandler) return;
+  pauseHandler(true);
+  paused = true;
+  if (!renewTimer) renewTimer = setInterval(() => pauseHandler?.(true), PAUSE_RENEW_MS);
+}
+
+function resumeLater(): void {
+  if (renewTimer) clearInterval(renewTimer);
+  renewTimer = null;
+  if (resumeTimer) clearTimeout(resumeTimer);
+  resumeTimer = setTimeout(() => {
+    resumeTimer = null;
+    if (speaking || !paused) return;
+    paused = false;
+    pauseHandler?.(false);
+  }, SPEECH_QUIET_MS);
+}
+
+/** The pet started saying something: the engine pauses. */
+export function markSpeechStart(): void {
+  speaking = true;
+  pauseOn();
+}
+
+/** The pet stopped (finished, was cut off, or failed): quiet for `SPEECH_QUIET_MS` more, then the engine resumes. */
 export function markSpeechEnd(at = Date.now()): void {
   speaking = false;
   quietUntil = Math.max(quietUntil, at + SPEECH_QUIET_MS);
+  resumeLater();
 }
 
 /** The pet is talking, or stopped less than `SPEECH_QUIET_MS` ago: anything the mic hears may be its own voice. */

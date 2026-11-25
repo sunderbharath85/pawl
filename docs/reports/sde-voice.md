@@ -272,6 +272,42 @@ Checked: the build took the sherpa-onnx archive from the pinned folder. The buil
    - **README.** The requirements now state macOS 14.2 or later and `libasound2-dev` on Linux. Desktop step 6 now
      includes `bash scripts/fetch-sherpa.sh`, and the README says the models are downloaded from Settings.
 
+## Follow-up: pause + trigger (t13, after round 1)
+
+1. **`trigger` on `hearing`.**
+   - The `state` event for `hearing` now carries `trigger`: `"wake"` (the pet's name), `"ui"` (`voice_listen` from
+     the webview) or `"hotkey"` (the global push-to-talk shortcut). Other states have no `trigger` field.
+   - `Cmd::Listen` now says who asked. The engine's public `Trigger` enum replaces its private Wake/Push.
+   - A change of trigger alone (one utterance dropped and another started between two publishes) still emits a
+     state event.
+   - "Mute microphone" re-emits the state with its trigger (kept in `Core`).
+2. **`voice_pause(on: bool)`** (new command, registered in `lib.rs`):
+   - **On:** keyword spotting is suspended (audio is not fed to the spotter, so no `wake` events). An utterance the
+     wake word started is cancelled, without a transcript. Push-to-talk from the UI or the shortcut still starts
+     while paused, and an utterance it started is kept, also across further pauses.
+   - **The mic stays open while paused.** It is not reopened when the pet stops talking, and the push-to-talk
+     pre-roll stays available. Pausing never opens it.
+   - **Off, or 30 s after the last `on`** (the safety net, checked on the 250 ms tick, also while voice is off):
+     spotting restarts with a fresh stream, because the old one has a gap and may hold half a keyword.
+   - **`on` again** extends the pause to 30 s from then.
+   - **The state is unchanged by pausing itself.** The only change is when a wake utterance is dropped:
+     `hearing` → `wake_listening`.
+3. **Contract:** docs/CONTRACTS.md "v0.2 Voice" now lists `voice_pause` and the `trigger` field (CRLF kept).
+4. **Tests:**
+   - `pause_ends_on_request_or_by_itself_and_keeps_the_state` (no models): a pause extends, ends on request, ends
+     by itself after `PAUSE_MAX`, never changes the state and never opens the mic.
+   - `events_serialize_like_the_contract`: `trigger` for each value, and no field without one.
+   - Real models (`PAWL_VOICE_TEST_MODELS`):
+     - `wake_word_then_transcript_with_real_models` first feeds the clip while paused: no wake, no transcript, mic
+       still open. Unpaused: wake, `hearing` with `trigger: "wake"`, transcript. Then it pauses right after a second
+       wake hit: the state is back to `wake_listening`, with no transcript and no more wakes.
+     - `push_to_talk_with_real_models` checks `trigger: "ui"`. A shortcut press while paused gives
+       `trigger: "hotkey"`, is kept across a second pause, and gives a transcript (fast and accurate models).
+5. **Gates:** `cargo test` **87 passed** (84 lib + 3), run with `PAWL_VOICE_TEST_MODELS` so the real-model tests
+   ran too. `cargo clippy --all-targets -- -D warnings` is clean.
+6. **UI side (not mine):** `apps/desktop/src/lib/voice.ts` needs a `voicePause(on)` call and the optional `trigger`
+   on the state event.
+
 ## Known gaps
 
 - **Not run on macOS or Linux.**

@@ -22,7 +22,7 @@ pub use state::VoiceState;
 
 use capture::MicInfo;
 use download::{CancelFlag, DownloadError};
-use engine::{Cmd, CpalMic, Engine, ListenAction, Msg, Sink, VoiceEvent};
+use engine::{Cmd, CpalMic, Engine, ListenAction, Msg, Sink, Trigger, VoiceEvent};
 use models::{DeleteSet, ModelSet, ModelStore, ModelsStatus};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -60,6 +60,8 @@ pub struct VoiceStatus {
 struct Core {
     config: VoiceConfig,
     state: VoiceState,
+    /// What started the utterance while `hearing`.
+    trigger: Option<Trigger>,
     error: Option<String>,
     mic_live: bool,
 }
@@ -111,10 +113,11 @@ impl<R: Runtime> Sink for AppSink<R> {
         let _ = self.app.emit(EVENT, event);
     }
 
-    fn publish(&self, state: VoiceState, error: Option<String>, mic_live: bool) {
+    fn publish(&self, state: VoiceState, trigger: Option<Trigger>, error: Option<String>, mic_live: bool) {
         let (enabled, muted) = {
             let mut core = lock(&self.inner.core);
             core.state = state;
+            core.trigger = trigger;
             core.error = error;
             core.mic_live = mic_live;
             (core.config.enabled, core.config.muted)
@@ -148,7 +151,7 @@ impl Inner {
     fn new(tx: SyncSender<Msg>, config: VoiceConfig, config_path: PathBuf, store: ModelStore) -> Self {
         Self {
             tx,
-            core: Mutex::new(Core { config, state: VoiceState::Off, error: None, mic_live: false }),
+            core: Mutex::new(Core { config, state: VoiceState::Off, trigger: None, error: None, mic_live: false }),
             warnings: Mutex::new(Warnings::default()),
             config_lock: Mutex::new(()),
             config_path,
@@ -353,7 +356,7 @@ fn start_hotkey_thread(inner: &Arc<Inner>, report: impl Fn(String) + Send + 'sta
     let inner = inner.clone();
     std::thread::Builder::new().name("pawl-voice-hotkey".into()).spawn(move || {
         while let Ok(Some(action)) = rx.recv() {
-            match inner.ask(|r| Cmd::Listen(action, r)) {
+            match inner.ask(|r| Cmd::Listen(action, Trigger::Hotkey, r)) {
                 Ok(Ok(())) => {}
                 Ok(Err(message)) | Err(message) => report(message),
             }
@@ -399,8 +402,11 @@ pub fn toggle_mute<R: Runtime>(app: &AppHandle<R>) {
             Ok(warnings) => {
                 emit_warnings(&app, warnings);
                 // The usual state event, also when the state itself did not change (voice off).
-                let state = lock(&inner.core).state;
-                let _ = app.emit(EVENT, VoiceEvent::State { state });
+                let (state, trigger) = {
+                    let core = lock(&inner.core);
+                    (core.state, core.trigger)
+                };
+                let _ = app.emit(EVENT, VoiceEvent::State { state, trigger });
             }
             Err(message) => {
                 let _ = app.emit(EVENT, VoiceEvent::Error { message });
@@ -553,12 +559,22 @@ pub async fn voice_delete_models(voice: tauri::State<'_, Voice>, models: DeleteS
     .await
 }
 
-/// Push-to-talk from the pet, the bubble's mic button or the hotkey: "start", then "stop" (transcribe now) or
-/// "cancel" (drop it). An utterance also ends by itself on silence or after 15 s.
+/// Push-to-talk from the pet or the bubble's mic button: "start", then "stop" (transcribe now) or "cancel" (drop
+/// it). An utterance also ends by itself on silence or after 15 s. Its `hearing` state event says `trigger: "ui"`
+/// (the global shortcut's say `"hotkey"`, the wake word's `"wake"`).
 #[tauri::command]
 pub async fn voice_listen(voice: tauri::State<'_, Voice>, action: ListenAction) -> Result<(), String> {
     let inner = voice.inner.clone();
-    blocking(move || inner.ask(|r| Cmd::Listen(action, r))?).await
+    blocking(move || inner.ask(|r| Cmd::Listen(action, Trigger::Ui, r))?).await
+}
+
+/// While the pet speaks (so its voice can't wake it): `on` stops keyword spotting (no `wake` events) and drops an
+/// utterance the wake word started; push-to-talk from the UI or the shortcut keeps working. `off` resumes; a pause
+/// nobody ends is over after 30 s. Does not change the state by itself.
+#[tauri::command]
+pub async fn voice_pause(voice: tauri::State<'_, Voice>, on: bool) -> Result<(), String> {
+    let inner = voice.inner.clone();
+    blocking(move || inner.ask(|r| Cmd::Pause(on, r))).await
 }
 
 /// The Settings level meter: `level` events while on. Does not change the state; needs voice on and unmuted.

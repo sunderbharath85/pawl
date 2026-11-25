@@ -48,12 +48,19 @@ const MIC_RETRY: Duration = Duration::from_secs(5);
 const MIC_TEST_MAX: Duration = Duration::from_secs(120);
 const TICK: Duration = Duration::from_millis(250);
 const MAX_TRANSCRIPT_CHARS: usize = 2000;
+/// A pause (`voice_pause`, while the pet speaks) the UI forgot to end ends by itself.
+const PAUSE_MAX: Duration = Duration::from_secs(30);
 
 /// Events on the `voice` channel (docs/CONTRACTS.md "v0.2 Voice").
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum VoiceEvent {
-    State { state: VoiceState },
+    /// `trigger` only with `hearing`: what started the utterance.
+    State {
+        state: VoiceState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        trigger: Option<Trigger>,
+    },
     Wake { keyword: String, score: f32 },
     /// The microphone level, 0..1 (RMS in dBFS mapped from -60..0).
     Level { rms: f32 },
@@ -68,6 +75,16 @@ pub enum ListenAction {
     Start,
     Stop,
     Cancel,
+}
+
+/// What started an utterance: the pet's name, push-to-talk from the webview (`voice_listen`), or the global
+/// push-to-talk shortcut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Trigger {
+    Wake,
+    Ui,
+    Hotkey,
 }
 
 pub type Reply<T> = Option<Sender<T>>;
@@ -85,8 +102,11 @@ pub enum Cmd {
     /// Unload every model (before deleting files); `ModelsChanged` afterwards loads again what is still there.
     ReleaseModels(Reply<()>),
     Downloading(bool),
-    Listen(ListenAction, Reply<Result<(), String>>),
+    /// Push-to-talk, from the webview (`Trigger::Ui`) or the shortcut (`Trigger::Hotkey`).
+    Listen(ListenAction, Trigger, Reply<Result<(), String>>),
     MicTest(bool, Reply<Result<(), String>>),
+    /// The pet is speaking: no wake word, and an utterance the wake word started is dropped (`voice_pause`).
+    Pause(bool, Reply<()>),
     /// App exit: close the mic, free the models, end the thread.
     Shutdown,
 }
@@ -99,8 +119,9 @@ pub enum Msg {
 /// Where the engine reports to (the app: status for `voice_status`, events to both windows, the tray).
 pub trait Sink: Send + 'static {
     fn emit(&self, event: VoiceEvent);
-    /// The current state and error, and whether the mic is open (after every change).
-    fn publish(&self, state: VoiceState, error: Option<String>, mic_live: bool);
+    /// The current state (with its trigger while hearing) and error, and whether the mic is open (after every
+    /// change).
+    fn publish(&self, state: VoiceState, trigger: Option<Trigger>, error: Option<String>, mic_live: bool);
 }
 
 /// An open microphone: its rate, and a handle that closes it when dropped.
@@ -121,12 +142,6 @@ impl MicOpener for CpalMic {
         let cap = capture::open(mic_id, generation, tx)?;
         Ok(OpenMic { sample_rate: cap.sample_rate, _handle: Box::new(cap) })
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Trigger {
-    Wake,
-    Push,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -382,11 +397,14 @@ pub struct Engine {
     phase: Phase,
 
     mic_test_until: Option<Instant>,
+    /// While the pet speaks (`Cmd::Pause`): no keyword spotting; ends at this time at the latest.
+    paused_until: Option<Instant>,
     downloading: bool,
     screen_locked: bool,
     next_lock_check: Instant,
     last_level: Option<Instant>,
-    published: Option<(VoiceState, Option<String>, bool)>,
+    /// What was last published: state, trigger, error, mic live.
+    published: Option<(VoiceState, Option<Trigger>, Option<String>, bool)>,
     reported_errors: Vec<String>,
     transcript_seq: u64,
     session_tag: String,
@@ -440,6 +458,7 @@ impl Engine {
             utt: None,
             phase: Phase::None,
             mic_test_until: None,
+            paused_until: None,
             downloading: false,
             screen_locked: false,
             next_lock_check: Instant::now(),
@@ -457,7 +476,10 @@ impl Engine {
     pub fn run(mut self, rx: Receiver<Msg>) {
         self.reconcile();
         loop {
-            let idle = !self.config.enabled && !self.downloading && self.mic_test_until.is_none();
+            let idle = !self.config.enabled
+                && !self.downloading
+                && self.mic_test_until.is_none()
+                && self.paused_until.is_none();
             let msg = if idle {
                 rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
             } else {
@@ -522,8 +544,8 @@ impl Engine {
                 }
             }
             Cmd::Downloading(on) => self.downloading = on,
-            Cmd::Listen(action, reply) => {
-                let res = self.listen(action);
+            Cmd::Listen(action, by, reply) => {
+                let res = self.listen(action, by);
                 if let Some(r) = reply {
                     let _ = r.send(res);
                 }
@@ -532,6 +554,13 @@ impl Engine {
                 let res = self.mic_test(on);
                 if let Some(r) = reply {
                     let _ = r.send(res);
+                }
+            }
+            Cmd::Pause(on, reply) => {
+                self.pause(on);
+                self.publish();
+                if let Some(r) = reply {
+                    let _ = r.send(());
                 }
             }
             Cmd::Shutdown => self.unload(),
@@ -583,7 +612,8 @@ impl Engine {
         }
     }
 
-    fn listen(&mut self, action: ListenAction) -> Result<(), String> {
+    /// Push-to-talk. A press while an utterance runs (key repeat, or after the wake word) keeps that utterance.
+    fn listen(&mut self, action: ListenAction, by: Trigger) -> Result<(), String> {
         match action {
             ListenAction::Start => {
                 if self.phase != Phase::None {
@@ -604,7 +634,7 @@ impl Engine {
                     .to_string());
                 }
                 let pre = self.ring_tail(PUSH_PRE_ROLL);
-                self.start_utterance(Trigger::Push, &pre);
+                self.start_utterance(by, &pre);
                 // Without the wake word the mic opens now.
                 self.reconcile_without_loading();
                 if self.open_mic.is_none() {
@@ -661,10 +691,34 @@ impl Engine {
         }
     }
 
+    /// `voice_pause`: the UI pauses while the pet speaks, so its voice can't wake it (an echo through the
+    /// speakers). Keyword spotting stops and an utterance the wake word started is dropped; push-to-talk (UI or
+    /// shortcut) keeps working, and its utterance is kept. Pausing again extends it; it ends after `PAUSE_MAX`.
+    fn pause(&mut self, on: bool) {
+        if !on {
+            self.resume();
+            return;
+        }
+        self.paused_until = Some(Instant::now() + PAUSE_MAX);
+        if self.utt.as_ref().is_some_and(|u| u.trigger == Trigger::Wake) {
+            self.cancel_utterance();
+        }
+    }
+
+    fn resume(&mut self) {
+        // Spot afresh: the old stream has a gap (nothing was fed while paused) and may hold half a keyword.
+        if self.paused_until.take().is_some() && self.phase == Phase::None {
+            self.restart_spotting();
+        }
+    }
+
     fn tick(&mut self) {
         let now = Instant::now();
         if self.mic_test_until.is_some_and(|t| now >= t) {
             self.mic_test_until = None;
+        }
+        if self.paused_until.is_some_and(|t| now >= t) {
+            self.resume();
         }
         // While voice could use the mic at all (also push-to-talk only: it can start any moment).
         if self.config.enabled && !self.config.muted && now >= self.next_lock_check {
@@ -828,7 +882,7 @@ impl Engine {
         self.report(&message);
         self.mic_error = Some(message);
         self.mic_retry_at = Some(Instant::now() + MIC_RETRY);
-        if self.utt.as_ref().is_some_and(|u| u.trigger == Trigger::Push) && self.open_mic.is_none() {
+        if self.utt.as_ref().is_some_and(|u| u.trigger != Trigger::Wake) && self.open_mic.is_none() {
             self.cancel_utterance();
         }
     }
@@ -866,21 +920,22 @@ impl Engine {
 
     fn publish(&mut self) {
         let state = self.inputs().state();
+        let trigger = if state == VoiceState::Hearing { self.utt.as_ref().map(|u| u.trigger) } else { None };
         let error = self.load_error.clone().or_else(|| self.mic_error.clone()).or_else(|| self.wake_error.clone());
         let live = self.open_mic.is_some();
-        let next = (state, error.clone(), live);
+        let next = (state, trigger, error.clone(), live);
         if self.published.as_ref() == Some(&next) {
             return;
         }
-        let changed = self.published.as_ref().map(|p| p.0) != Some(state);
+        let changed = self.published.as_ref().map(|p| (p.0, p.1)) != Some((state, trigger));
         self.published = Some(next);
         // Errors that went away can be reported again later.
         if error.is_none() {
             self.reported_errors.clear();
         }
-        self.sink.publish(state, error, live);
+        self.sink.publish(state, trigger, error, live);
         if changed {
-            self.sink.emit(VoiceEvent::State { state });
+            self.sink.emit(VoiceEvent::State { state, trigger });
         }
     }
 
@@ -906,7 +961,8 @@ impl Engine {
             }
         }
 
-        if self.phase == Phase::None {
+        // No keyword spotting while paused (the pet is speaking).
+        if self.phase == Phase::None && self.paused_until.is_none() {
             if let (Some(spotter), Some(stream)) = (&self.spotter, &self.kws_stream) {
                 stream.accept_waveform(SAMPLE_RATE as i32, pcm);
                 let mut hit = None;
@@ -1033,7 +1089,7 @@ pub(super) mod testing {
         fn emit(&self, event: VoiceEvent) {
             self.events.lock().unwrap().push(event);
         }
-        fn publish(&self, state: VoiceState, error: Option<String>, mic_live: bool) {
+        fn publish(&self, state: VoiceState, _: Option<Trigger>, error: Option<String>, mic_live: bool) {
             *self.status.lock().unwrap() = Some((state, error, mic_live));
         }
     }
@@ -1046,10 +1102,23 @@ pub(super) mod testing {
             self.events()
                 .into_iter()
                 .filter_map(|e| match e {
-                    VoiceEvent::State { state } => Some(state),
+                    VoiceEvent::State { state, .. } => Some(state),
                     _ => None,
                 })
                 .collect()
+        }
+        /// The trigger of every `hearing` state event, in order.
+        pub fn hearing_triggers(&self) -> Vec<Option<Trigger>> {
+            self.events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    VoiceEvent::State { state: VoiceState::Hearing, trigger } => Some(trigger),
+                    _ => None,
+                })
+                .collect()
+        }
+        pub fn wakes(&self) -> usize {
+            self.events().iter().filter(|e| matches!(e, VoiceEvent::Wake { .. })).count()
         }
         pub fn transcripts(&self) -> Vec<(String, String)> {
             self.events()
@@ -1142,9 +1211,19 @@ mod tests {
     }
 
     fn listen(e: &mut Engine, a: ListenAction) -> Result<(), String> {
+        listen_by(e, a, Trigger::Ui)
+    }
+
+    fn listen_by(e: &mut Engine, a: ListenAction, by: Trigger) -> Result<(), String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        e.handle(Msg::Cmd(Cmd::Listen(a, Some(tx))));
+        e.handle(Msg::Cmd(Cmd::Listen(a, by, Some(tx))));
         rx.recv().unwrap()
+    }
+
+    fn pause(e: &mut Engine, on: bool) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        e.handle(Msg::Cmd(Cmd::Pause(on, Some(tx))));
+        rx.recv().unwrap();
     }
 
     fn mic_test(e: &mut Engine, on: bool) -> Result<(), String> {
@@ -1227,6 +1306,29 @@ mod tests {
     }
 
     #[test]
+    fn pause_ends_on_request_or_by_itself_and_keeps_the_state() {
+        let (mut e, rec, mic) = engine(empty_store("pause"), cfg(true));
+        e.reconcile();
+        pause(&mut e, true);
+        let until = e.paused_until.expect("paused");
+        assert!(until > Instant::now() + PAUSE_MAX - Duration::from_secs(2));
+        // Pausing again (the pet's next sentence) extends it.
+        e.paused_until = Some(Instant::now() + Duration::from_secs(1));
+        pause(&mut e, true);
+        assert!(e.paused_until.unwrap() > Instant::now() + Duration::from_secs(5));
+        pause(&mut e, false);
+        assert!(e.paused_until.is_none());
+        pause(&mut e, false); // harmless when not paused
+        // The safety net: a pause nobody ends is over after PAUSE_MAX.
+        pause(&mut e, true);
+        e.paused_until = Some(Instant::now());
+        e.tick();
+        assert!(e.paused_until.is_none(), "ended by itself");
+        assert_eq!(rec.states(), vec![VoiceState::MissingModels], "pausing does not change the state");
+        assert_eq!(mic.opens(), 0, "pausing never opens the mic");
+    }
+
+    #[test]
     fn missing_models_state_and_push_to_talk_refused() {
         let (mut e, rec, mic) = engine(empty_store("missing"), cfg(true));
         e.reconcile();
@@ -1276,7 +1378,16 @@ mod tests {
     #[test]
     fn events_serialize_like_the_contract() {
         let j = |e: VoiceEvent| serde_json::to_value(e).unwrap();
-        assert_eq!(j(VoiceEvent::State { state: VoiceState::WakeListening }), serde_json::json!({"type":"state","state":"wake_listening"}));
+        assert_eq!(
+            j(VoiceEvent::State { state: VoiceState::WakeListening, trigger: None }),
+            serde_json::json!({"type":"state","state":"wake_listening"})
+        );
+        for (trigger, name) in [(Trigger::Wake, "wake"), (Trigger::Ui, "ui"), (Trigger::Hotkey, "hotkey")] {
+            assert_eq!(
+                j(VoiceEvent::State { state: VoiceState::Hearing, trigger: Some(trigger) }),
+                serde_json::json!({"type":"state","state":"hearing","trigger":name})
+            );
+        }
         assert_eq!(j(VoiceEvent::Wake { keyword: "Rex".into(), score: 1.0 }), serde_json::json!({"type":"wake","keyword":"Rex","score":1.0}));
         assert_eq!(j(VoiceEvent::Level { rms: 0.5 }), serde_json::json!({"type":"level","rms":0.5}));
         assert_eq!(j(VoiceEvent::Transcript { id: "v1-1".into(), text: "hi".into() }), serde_json::json!({"type":"transcript","id":"v1-1","text":"hi"}));
@@ -1359,6 +1470,16 @@ mod tests {
         let mut pcm = vec![0.0; SR / 2];
         pcm.extend_from_slice(&wav);
         pcm.extend(std::iter::repeat_n(0.0, 2 * SR));
+
+        // Paused (the pet is speaking): the name does not wake it.
+        pause(&mut e, true);
+        feed_in_blocks(&mut e, &pcm, rate);
+        assert_eq!(rec.wakes(), 0, "no wake word while paused");
+        assert!(rec.transcripts().is_empty());
+        assert_eq!(rec.state(), VoiceState::WakeListening);
+        assert!(mic.is_open(), "the mic stays open while paused");
+        pause(&mut e, false);
+
         let t1 = Instant::now();
         feed_in_blocks(&mut e, &pcm, rate);
         eprintln!("processed {:.1} s of audio in {:?}", pcm.len() as f32 / SR as f32, t1.elapsed());
@@ -1368,6 +1489,7 @@ mod tests {
         let i = states.iter().position(|s| *s == VoiceState::Hearing).expect("hearing");
         assert_eq!(states[i + 1], VoiceState::Transcribing);
         assert_eq!(*states.last().unwrap(), VoiceState::WakeListening);
+        assert_eq!(rec.hearing_triggers(), vec![Some(Trigger::Wake)]);
         let ts = rec.transcripts();
         assert_eq!(ts.len(), 1, "{ts:?}");
         let text = ts[0].1.to_lowercase();
@@ -1375,6 +1497,26 @@ mod tests {
         assert!(text.contains("here and there"), "{text:?}");
         assert!(!text.starts_with("light up"), "the wake word is not part of the message: {text:?}");
         assert!(mic.is_open(), "still listening for the name");
+
+        // The pet starts speaking right after its name was heard: that utterance is dropped (it would be the
+        // pet's own voice), and nothing wakes it until the pause ends.
+        let blocks: Vec<&[f32]> = pcm.chunks(SR / 100).collect();
+        let mut k = 0;
+        while rec.wakes() == 1 && k < blocks.len() {
+            e.feed(blocks[k].to_vec());
+            k += 1;
+        }
+        assert_eq!(rec.wakes(), 2, "woke again");
+        assert_eq!(rec.state(), VoiceState::Hearing);
+        pause(&mut e, true);
+        assert_eq!(rec.state(), VoiceState::WakeListening, "the wake word's utterance is dropped");
+        for b in &blocks[k..] {
+            e.feed(b.to_vec());
+        }
+        e.reconcile();
+        assert_eq!(rec.transcripts().len(), 1, "no transcript of a dropped utterance");
+        assert_eq!(rec.wakes(), 2);
+        pause(&mut e, false);
 
         // Muting releases the mic; turning voice off unloads.
         let c = e.config.clone();
@@ -1413,6 +1555,7 @@ mod tests {
             listen(&mut e, ListenAction::Start).unwrap();
             assert!(mic.is_open());
             assert_eq!(rec.state(), VoiceState::Hearing);
+            assert_eq!(rec.hearing_triggers(), vec![Some(Trigger::Ui)]);
             listen(&mut e, ListenAction::Start).unwrap(); // a repeated press (key repeat) is harmless
             // Hold for the clip, release (stop) before the VAD would end it.
             let pcm: Vec<f32> = wav[..wav.len().min(12 * r)].to_vec();
@@ -1440,6 +1583,25 @@ mod tests {
             e.reconcile();
             let last = rec.transcripts().last().cloned().unwrap();
             assert_eq!(last.1, "", "{last:?}");
+
+            // The shortcut while the pet speaks (paused): its utterance is kept, also across another pause, and
+            // transcribed.
+            let before = rec.transcripts().len();
+            pause(&mut e, true);
+            listen_by(&mut e, ListenAction::Start, Trigger::Hotkey).unwrap();
+            assert_eq!(rec.state(), VoiceState::Hearing);
+            assert_eq!(rec.hearing_triggers().last(), Some(&Some(Trigger::Hotkey)));
+            pause(&mut e, true); // the pet's next sentence
+            assert_eq!(rec.state(), VoiceState::Hearing, "push-to-talk survives a pause");
+            feed_in_blocks(&mut e, &pcm, rate);
+            listen_by(&mut e, ListenAction::Stop, Trigger::Hotkey).unwrap();
+            pause(&mut e, false);
+            e.reconcile();
+            let ts = rec.transcripts();
+            assert_eq!(ts.len(), before + 1, "{ts:?}");
+            assert!(!ts[before].1.is_empty(), "{ts:?}");
+            assert!(!mic.is_open());
+
             let ids: std::collections::HashSet<_> = rec.transcripts().into_iter().map(|t| t.0).collect();
             assert_eq!(ids.len(), rec.transcripts().len(), "unique ids");
             let _ = std::fs::remove_dir_all(store.root());

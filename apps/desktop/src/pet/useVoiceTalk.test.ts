@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { markSpeechEnd, markSpeechStart, SPEECH_QUIET_MS, speechBusy } from "../lib/speech";
+import { markSpeechEnd, markSpeechStart, PAUSE_RENEW_MS, setSpeechPause, SPEECH_QUIET_MS, speechBusy } from "../lib/speech";
 import { DIDNT_CATCH, voiceReaction } from "./useVoiceTalk";
 
 describe("what the pet window does with voice events", () => {
@@ -26,28 +26,60 @@ describe("what the pet window does with voice events", () => {
 });
 
 describe("the pet never answers itself", () => {
-  const talking = { busy: true, manual: false };
-  test("while the pet speaks: wake words are ignored, an utterance that starts is cancelled, a transcript is dropped", () => {
+  const talking = { busy: true };
+  test("while the pet speaks: a wake word is ignored; an utterance the wake word started is cancelled and its transcript dropped", () => {
     const seen = new Set<string>();
     expect(voiceReaction({ type: "wake", keyword: "Mochi", score: 1 }, seen, false, talking)).toEqual({ kind: "none" });
-    expect(voiceReaction({ type: "state", state: "hearing" }, seen, false, talking)).toEqual({ kind: "cancel" });
-    expect(voiceReaction({ type: "transcript", id: "u5", text: "approve" }, seen, false, talking)).toEqual({ kind: "none" });
+    expect(voiceReaction({ type: "state", state: "hearing", trigger: "wake" }, seen, false, talking)).toEqual({ kind: "cancel" });
+    expect(voiceReaction({ type: "transcript", id: "u5", text: "approve" }, seen, false, { busy: true, utterance: "wake" })).toEqual({ kind: "none" });
     // Dropped for good: it is not sent later either.
     expect(voiceReaction({ type: "transcript", id: "u5", text: "approve" }, seen, false)).toEqual({ kind: "none" });
   });
 
-  test("the user talking from Pawl's UI (holding the pet, the mic button) still works right after the pet spoke", () => {
-    const user = { busy: true, manual: true };
-    expect(voiceReaction({ type: "state", state: "hearing" }, new Set(), false, user)).toEqual({ kind: "open" });
-    expect(voiceReaction({ type: "transcript", id: "u6", text: "what's up" }, new Set(), false, user)).toEqual({ kind: "send", text: "what's up" });
+  test("push-to-talk from Pawl's UI or the hotkey during speech is the user: kept (the pet stops talking instead)", () => {
+    for (const trigger of ["ui", "hotkey"] as const) {
+      expect(voiceReaction({ type: "state", state: "hearing", trigger }, new Set(), false, talking)).toEqual({ kind: "open" });
+      expect(voiceReaction({ type: "transcript", id: `u-${trigger}`, text: "what's up" }, new Set(), false, { busy: true, utterance: trigger })).toEqual({
+        kind: "send",
+        text: "what's up",
+      });
+    }
   });
 
-  test("busy while speaking and for 500 ms after it ends", () => {
+  test("when the pet is quiet, a wake-started utterance is normal", () => {
+    expect(voiceReaction({ type: "state", state: "hearing", trigger: "wake" }, new Set(), false)).toEqual({ kind: "open" });
+    expect(voiceReaction({ type: "transcript", id: "u7", text: "hi" }, new Set(), false, { busy: false, utterance: "wake" })).toEqual({ kind: "send", text: "hi" });
+  });
+});
+
+describe("the voice engine is paused while the pet speaks", () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  test("paused at the start, resumed 500 ms after the end; speaking again before that keeps it paused", async () => {
+    const calls: boolean[] = [];
+    setSpeechPause((on) => calls.push(on));
     markSpeechStart();
-    expect(speechBusy(Date.now() + 10_000)).toBe(true);
-    const end = Date.now();
-    markSpeechEnd(end);
-    expect(speechBusy(end + SPEECH_QUIET_MS - 1)).toBe(true);
-    expect(speechBusy(end + SPEECH_QUIET_MS + 1)).toBe(false);
+    expect(calls).toEqual([true]);
+    expect(speechBusy()).toBe(true);
+    markSpeechEnd();
+    await sleep(200);
+    markSpeechStart();
+    markSpeechEnd();
+    await sleep(SPEECH_QUIET_MS - 100);
+    expect(calls).toEqual([true, true]);
+    await sleep(250);
+    expect(calls).toEqual([true, true, false]);
+    expect(speechBusy()).toBe(false);
+    setSpeechPause(null);
+  });
+
+  test("voice turned off while paused: the engine is resumed; the pause is renewed before the engine's 30 s safety net", () => {
+    const calls: boolean[] = [];
+    setSpeechPause((on) => calls.push(on));
+    markSpeechStart();
+    setSpeechPause(null);
+    expect(calls).toEqual([true, false]);
+    markSpeechEnd();
+    expect(PAUSE_RENEW_MS).toBeLessThan(30_000);
   });
 });
