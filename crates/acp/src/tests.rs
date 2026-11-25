@@ -107,7 +107,13 @@ async fn run_turn(
 
 /// A scripted ACP agent. Prompt "work" runs a tool with a permission request and fs
 /// calls; "wait" blocks on a permission until cancelled; anything else is refused.
-async fn fake_agent(transport: Channel, root: PathBuf, outside: PathBuf, closed: Arc<std::sync::Mutex<Vec<String>>>) -> Result<(), sdk::Error> {
+async fn fake_agent(
+    transport: Channel,
+    root: PathBuf,
+    outside: PathBuf,
+    closed: Arc<std::sync::Mutex<Vec<String>>>,
+    metas: Arc<std::sync::Mutex<Vec<Option<serde_json::Value>>>>,
+) -> Result<(), sdk::Error> {
     let counter = Arc::new(AtomicU32::new(0));
     let root_list = root.clone();
     AgentRole
@@ -127,7 +133,8 @@ async fn fake_agent(transport: Channel, root: PathBuf, outside: PathBuf, closed:
             sdk::on_receive_request!(),
         )
         .on_receive_request(
-            async move |_req: acp::NewSessionRequest, responder: Responder<acp::NewSessionResponse>, _cx: ConnectionTo<Client>| {
+            async move |req: acp::NewSessionRequest, responder: Responder<acp::NewSessionResponse>, _cx: ConnectionTo<Client>| {
+                metas.lock().unwrap().push(req.meta.map(serde_json::Value::Object));
                 let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
                 responder.respond(j(json!({"sessionId": format!("sess-{n}")})))
             },
@@ -175,6 +182,8 @@ struct Setup {
     agent: tokio::task::JoinHandle<Result<(), sdk::Error>>,
     /// ACP session ids the fake agent received `session/close` for.
     closed: Arc<std::sync::Mutex<Vec<String>>>,
+    /// The `_meta` of every `session/new` the fake agent received.
+    metas: Arc<std::sync::Mutex<Vec<Option<serde_json::Value>>>>,
 }
 
 async fn setup(tmp: &TempDir) -> Setup {
@@ -182,9 +191,10 @@ async fn setup(tmp: &TempDir) -> Setup {
     let host = AcpHost::new(ME.into(), tx);
     let (client_side, agent_side) = Channel::duplex();
     let closed = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let agent = tokio::spawn(fake_agent(agent_side, tmp.root(), tmp.0.join("outside.txt"), closed.clone()));
+    let metas = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let agent = tokio::spawn(fake_agent(agent_side, tmp.root(), tmp.0.join("outside.txt"), closed.clone(), metas.clone()));
     host.inner.attach_for_test(&test_agent(), &tmp.root(), client_side).await.expect("attach");
-    Setup { host, rx, agent, closed }
+    Setup { host, rx, agent, closed, metas }
 }
 
 async fn collect_until(rx: &mut UnboundedReceiver<HostEvent>, mut done: impl FnMut(&HostEvent) -> bool) -> Vec<HostEvent> {
@@ -501,7 +511,7 @@ async fn non_acp_program_fails_initialize() {
 #[tokio::test]
 async fn close_session_cancels_and_stops_process_with_last_session() {
     let tmp = TempDir::new();
-    let Setup { host, mut rx, agent, closed } = setup(&tmp).await;
+    let Setup { host, mut rx, agent, closed, .. } = setup(&tmp).await;
     collect_until(&mut rx, |e| matches!(e, HostEvent::AgentCapabilities { .. })).await;
     host.start_session(&test_agent(), tmp.root(), "hub-1".into(), None).await.unwrap();
     host.start_session(&test_agent(), tmp.root(), "hub-2".into(), None).await.unwrap();
@@ -584,4 +594,18 @@ async fn closing_last_session_kills_process_tree() {
     }
     assert!(dead, "agent's child process {pid} survived closing the last session");
     host.shutdown().await;
+}
+
+/// `start_session_with` sends its `_meta` in `session/new`; `start_session` sends none.
+#[tokio::test]
+async fn start_options_meta_reaches_session_new() {
+    let tmp = TempDir::new();
+    let s = setup(&tmp).await;
+    let meta = json!({ "claudeCode": { "options": { "tools": [], "strictMcpConfig": true, "mcpServers": {} } } });
+    s.host
+        .start_session_with(&test_agent(), tmp.root(), "meta-1".into(), None, crate::StartOptions { meta: Some(meta.clone()), clean_env: false })
+        .await
+        .expect("start with meta");
+    s.host.start_session(&test_agent(), tmp.root(), "meta-2".into(), None).await.expect("plain start");
+    assert_eq!(*s.metas.lock().unwrap(), vec![Some(meta), None]);
 }

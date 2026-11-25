@@ -73,11 +73,66 @@ struct HealthBody {
     machine_id: Option<String>,
 }
 
-/// The `pawl serve` child we launched (if any). The hub is a background daemon:
-/// it keeps running after the desktop app quits, so we never kill it.
+/// The `pawl serve` child we launched (if any). Quitting the app stops it ("Quit Pawl"), but only that one: a hub
+/// the user runs themselves (`pawl serve`), or one this app found already running, keeps running.
 #[derive(Default)]
 pub struct HubProcess {
     child: Mutex<Option<Child>>,
+}
+
+/// How long a stopped hub may take to exit before it is ended forcefully (Unix; Windows ends it at once).
+const STOP_GRACE: Duration = Duration::from_secs(3);
+
+impl HubProcess {
+    /// Stop the hub this app started, with the agents it runs, if it is still running. Returns its pid when it
+    /// stopped one. On Unix the hub gets SIGTERM (it shuts down cleanly: peers told, agents stopped), then SIGKILL
+    /// after STOP_GRACE. On Windows a windowless process cannot be asked to close, so its process tree is ended
+    /// (`taskkill /T /F`).
+    pub fn stop_owned(&self) -> Option<u32> {
+        let mut guard = self.child.lock().ok()?;
+        let child = guard.as_mut()?;
+        if !matches!(child.try_wait(), Ok(None)) {
+            // It already exited (crashed, or restarted itself: the replacement is not a child of ours).
+            *guard = None;
+            return None;
+        }
+        let pid = child.id();
+        stop_tree(pid);
+        let deadline = Instant::now() + STOP_GRACE;
+        while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if matches!(child.try_wait(), Ok(None)) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        *guard = None;
+        Some(pid)
+    }
+}
+
+#[cfg(windows)]
+fn stop_tree(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+}
+
+#[cfg(unix)]
+fn stop_tree(pid: u32) {
+    // The hub runs in its own process group (see start_hub_blocking): signal the group, agents included.
+    let _ = Command::new("kill")
+        .args(["-TERM", &format!("-{pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 pub fn data_dir() -> Option<PathBuf> {
@@ -394,8 +449,7 @@ fn split_response(buf: &[u8]) -> Option<(u16, String, &[u8])> {
 
 fn decode_chunked(mut data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
-    loop {
-        let Some(line_end) = data.windows(2).position(|w| w == b"\r\n") else { break };
+    while let Some(line_end) = data.windows(2).position(|w| w == b"\r\n") {
         let size_str = String::from_utf8_lossy(&data[..line_end]);
         let size = usize::from_str_radix(size_str.split(';').next().unwrap_or("").trim(), 16).unwrap_or(0);
         data = &data[line_end + 2..];
@@ -578,6 +632,51 @@ pub fn start_hub_blocking(proc_state: &HubProcess) -> Result<StartHubResult, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A long-running stand-in for `pawl serve` (it sleeps; the test stops it).
+    fn long_running() -> Child {
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = Command::new("ping");
+            c.args(["-n", "60", "127.0.0.1"]);
+            c
+        };
+        #[cfg(unix)]
+        let mut cmd = {
+            let mut c = Command::new("sleep");
+            c.arg("60");
+            use std::os::unix::process::CommandExt;
+            c.process_group(0);
+            c
+        };
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn")
+    }
+
+    #[test]
+    fn quitting_stops_only_the_hub_this_app_started() {
+        // Nothing started: nothing to stop (a hub the user runs is never a child of ours).
+        assert_eq!(HubProcess::default().stop_owned(), None);
+
+        let hub = HubProcess::default();
+        let child = long_running();
+        let pid = child.id();
+        *hub.child.lock().unwrap() = Some(child);
+        assert_eq!(hub.stop_owned(), Some(pid));
+        assert!(hub.child.lock().unwrap().is_none());
+        // Stopping again does nothing.
+        assert_eq!(hub.stop_owned(), None);
+    }
+
+    #[test]
+    fn a_hub_that_already_exited_is_forgotten() {
+        let hub = HubProcess::default();
+        let mut child = long_running();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        *hub.child.lock().unwrap() = Some(child);
+        assert_eq!(hub.stop_owned(), None);
+        assert!(hub.child.lock().unwrap().is_none());
+    }
 
     #[test]
     fn normalizes_urls() {

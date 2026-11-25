@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use pawl_discovery::{CustomAgent, DiscoveryConfig};
-use pawl_protocol::{Rule, HUB_DEFAULT_PORT, HUB_HOST, HUB_TOKEN_FILE, PEER_DEFAULT_PORT};
+use pawl_protocol::{BotProvider, BotStyle, Rule, HUB_DEFAULT_PORT, HUB_HOST, HUB_TOKEN_FILE, PEER_DEFAULT_PORT};
 use serde::{Deserialize, Serialize};
 
 /// Env var: overrides the token (hub and clients).
@@ -18,6 +18,10 @@ pub const ENV_URL: &str = "PAWL_HUB_URL";
 pub const ENV_DATA_DIR: &str = "PAWL_HUB_DATA_DIR";
 /// Env var: Anthropic key for the pet brain (used when `brain.anthropic_api_key` is not set).
 pub const ENV_ANTHROPIC_KEY: &str = "ANTHROPIC_API_KEY";
+/// Env var: OpenAI key for the pet brain (used when `brain.openai_api_key` is not set).
+pub const ENV_OPENAI_KEY: &str = "OPENAI_API_KEY";
+/// Env var: Gemini key for the pet brain (used when `brain.gemini_api_key` is not set).
+pub const ENV_GEMINI_KEY: &str = "GEMINI_API_KEY";
 
 pub const CONFIG_FILE: &str = "config.toml";
 pub const DB_FILE: &str = "hub.db";
@@ -92,23 +96,95 @@ pub struct BrainSection {
     pub ollama_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ollama_model: Option<String>,
+    /// The agent the default pet hands work to when the user names none (`bot.defaultAgent`);
+    /// unset = automatic (the most recent session's agent, else the first installed one).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_agent: Option<String>,
+    /// `bot.provider`: auto (first configured: anthropic, openai, gemini, ollama, acp) or one of them.
+    pub provider: BotProvider,
+    /// Prefer the `OPENAI_API_KEY` env var over writing the key here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai_api_key: Option<String>,
+    /// Unset = [`pawl_brain::chat::DEFAULT_OPENAI_MODEL`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai_model: Option<String>,
+    /// Prefer the `GEMINI_API_KEY` env var over writing the key here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini_api_key: Option<String>,
+    /// Unset = [`pawl_brain::chat::DEFAULT_GEMINI_MODEL`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini_model: Option<String>,
+    /// The installed agent the "acp" provider runs (on the user's own login); unset = claude-code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acp_agent: Option<String>,
+    /// Its model (the agent's own model alias); unset = sonnet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acp_model: Option<String>,
+    /// Let the model turn free-form messages into intents (answers and proposals only).
+    pub understand: bool,
+    /// `bot.style`: plain (default: direct sentences, one leading emoji) or playful (the pet's voice).
+    pub style: BotStyle,
+    /// `bot.petName`: the default (orchestrator) pet's name; picked once by the hub when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pet_name: Option<String>,
 }
+
+/// The "acp" provider's agent and model when unset.
+pub const DEFAULT_ACP_AGENT: &str = "claude-code";
+pub const DEFAULT_ACP_MODEL: &str = "sonnet";
 
 impl Default for BrainSection {
     fn default() -> Self {
-        Self { anthropic_api_key: None, model: "claude-haiku-5-5".into(), ollama_url: None, ollama_model: None }
+        Self {
+            anthropic_api_key: None,
+            model: "claude-haiku-5-5".into(),
+            ollama_url: None,
+            ollama_model: None,
+            default_agent: None,
+            provider: BotProvider::Auto,
+            openai_api_key: None,
+            openai_model: None,
+            gemini_api_key: None,
+            gemini_model: None,
+            acp_agent: None,
+            acp_model: None,
+            understand: true,
+            style: BotStyle::Plain,
+            pet_name: None,
+        }
     }
 }
 
 impl fmt::Debug for BrainSection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let redacted = |k: &Option<String>| k.as_ref().map(|_| "<redacted>");
         f.debug_struct("BrainSection")
-            .field("anthropic_api_key", &self.anthropic_api_key.as_ref().map(|_| "<redacted>"))
+            .field("anthropic_api_key", &redacted(&self.anthropic_api_key))
             .field("model", &self.model)
             .field("ollama_url", &self.ollama_url)
             .field("ollama_model", &self.ollama_model)
+            .field("default_agent", &self.default_agent)
+            .field("provider", &self.provider)
+            .field("openai_api_key", &redacted(&self.openai_api_key))
+            .field("openai_model", &self.openai_model)
+            .field("gemini_api_key", &redacted(&self.gemini_api_key))
+            .field("gemini_model", &self.gemini_model)
+            .field("acp_agent", &self.acp_agent)
+            .field("acp_model", &self.acp_model)
+            .field("understand", &self.understand)
+            .field("style", &self.style)
+            .field("pet_name", &self.pet_name)
             .finish()
     }
+}
+
+fn set(o: &Option<String>) -> Option<String> {
+    o.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// A key from config.toml, else from the env var (blank counts as unset).
+fn key_or_env(o: &Option<String>, var: &str) -> Option<String> {
+    set(o).or_else(|| std::env::var(var).ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty()))
 }
 
 impl BrainSection {
@@ -117,18 +193,36 @@ impl BrainSection {
         if self.model.trim().is_empty() { BrainSection::default().model } else { self.model.trim().to_string() }
     }
 
-    /// Config key, else `ANTHROPIC_API_KEY`.
+    pub fn effective_openai_model(&self) -> String {
+        set(&self.openai_model).unwrap_or_else(|| pawl_brain::chat::DEFAULT_OPENAI_MODEL.into())
+    }
+
+    pub fn effective_gemini_model(&self) -> String {
+        set(&self.gemini_model).unwrap_or_else(|| pawl_brain::chat::DEFAULT_GEMINI_MODEL.into())
+    }
+
+    pub fn effective_acp_agent(&self) -> String {
+        set(&self.acp_agent).unwrap_or_else(|| DEFAULT_ACP_AGENT.into())
+    }
+
+    pub fn effective_acp_model(&self) -> String {
+        set(&self.acp_model).unwrap_or_else(|| DEFAULT_ACP_MODEL.into())
+    }
+
+    /// Config keys, else `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`.
     pub fn to_brain_config(&self) -> pawl_brain::chat::BrainConfig {
-        let key = self
-            .anthropic_api_key
-            .clone()
-            .filter(|k| !k.trim().is_empty())
-            .or_else(|| std::env::var(ENV_ANTHROPIC_KEY).ok().filter(|k| !k.trim().is_empty()));
         pawl_brain::chat::BrainConfig {
-            anthropic_api_key: key,
+            anthropic_api_key: key_or_env(&self.anthropic_api_key, ENV_ANTHROPIC_KEY),
             model: self.effective_model(),
-            ollama_url: self.ollama_url.clone().filter(|s| !s.trim().is_empty()),
-            ollama_model: self.ollama_model.clone().filter(|s| !s.trim().is_empty()),
+            ollama_url: set(&self.ollama_url),
+            ollama_model: set(&self.ollama_model),
+            provider: self.provider,
+            openai_api_key: key_or_env(&self.openai_api_key, ENV_OPENAI_KEY),
+            openai_model: self.effective_openai_model(),
+            gemini_api_key: key_or_env(&self.gemini_api_key, ENV_GEMINI_KEY),
+            gemini_model: self.effective_gemini_model(),
+            understand: self.understand,
+            style: self.style,
         }
     }
 }
@@ -297,6 +391,15 @@ pub(crate) const CONFIG_TEMPLATE: &str = r#"# Pawl hub configuration. Every key 
 # model = "claude-haiku-5-5"   # key comes from the ANTHROPIC_API_KEY env var
 # ollama_url = "http://127.0.0.1:11434"
 # ollama_model = "llama3.2"
+# default_agent = "codex"      # who the default pet hands work to when you name no agent; unset = automatic
+# provider = "auto"           # auto | anthropic | openai | gemini | ollama | acp (first configured)
+# openai_model = "gpt-6-luna"  # key comes from the OPENAI_API_KEY env var
+# gemini_model = "gemini-3.5-flash-lite"   # key comes from the GEMINI_API_KEY env var
+# acp_agent = "claude-code"    # acp: an installed agent on your own login (uses your plan), no tools
+# acp_model = "sonnet"
+# understand = true            # let the model read free-form messages (answers and proposals only)
+# style = "plain"              # plain: direct sentences, one emoji; playful: the pet's voice (*wags tail*)
+# pet_name = "Mochi"           # the default pet's name (picked for you on first start)
 #
 # [peer]
 # listen = "192.168.1.20:47801"   # hub-to-hub listener (off by default; needed to create invites)

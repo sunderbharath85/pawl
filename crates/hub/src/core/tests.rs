@@ -546,7 +546,7 @@ async fn chat_ack_is_the_stored_user_message() {
     let m: ChatMessage = serde_json::from_value(v["message"].clone()).unwrap();
     assert_eq!(m.role, ChatRole::User);
     assert_eq!(m.text, "hi doggo");
-    assert!(m.pet_id.is_some());
+    assert_eq!(m.pet_id, None, "no pet attached: the default pet's chat");
     assert!(ack_error(f.hub.handle(ClientMsg::Chat { id: "c2".into(), pet_id: None, text: "  ".into() }, &actor()).await).contains("empty"));
 }
 
@@ -2589,4 +2589,463 @@ async fn a_chat_on_one_hub_proposes_a_command_on_the_other() {
     assert!(!a_fake.calls().iter().any(|c| c.starts_with("prompt")), "nor prompted anything");
 }
 
+/// The chat with no pet attached is the default pet: its messages carry no pet id, and a command that
+/// names no agent goes to the `bot.defaultAgent` agent (Claude Code here, though Codex had the last
+/// session). It never runs by itself: the reply is a proposal for this machine, and the client's
+/// confirmed start_session starts it.
+#[tokio::test]
+async fn the_default_pet_hands_agentless_work_to_the_default_agent() {
+    let repo_dir = tempfile::tempdir().unwrap();
+    let api = repo_dir.path().join("api");
+    std::fs::create_dir_all(&api).unwrap();
+    let api_path = api.to_string_lossy().into_owned();
+    let mut f = fixture_config(|c| {
+        c.brain.default_agent = Some("claude-code".into());
+        c.repos.paths = vec![api_path];
+    })
+    .await;
+    f.hub.rebuild_repo_index().await;
+    start(&f).await;
+    drain(&mut f.rx);
+    let v = ack_result(
+        f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: "fix the failing test in repo api".into() }, &actor()).await,
+    );
+    let user: ChatMessage = serde_json::from_value(v["message"].clone()).unwrap();
+    assert_eq!(user.pet_id, None);
+    let reply = match wait_for(&mut f.rx, "the default pet's reply", |m| matches!(m, ServerMsg::Chat { message } if message.role == ChatRole::Pet)).await {
+        ServerMsg::Chat { message } => message,
+        _ => unreachable!(),
+    };
+    assert_eq!(reply.pet_id, None, "{reply:?}");
+    assert!(reply.text.contains("I picked Claude Code (your default agent)"), "{}", reply.text);
+    assert_eq!((reply.session_id.as_ref(), reply.proposals.len()), (None, 1), "{reply:?}");
+    let p = &reply.proposals[0];
+    assert_eq!((p.kind, p.machine_id.as_str(), p.agent_id.as_str()), (ChatProposalKind::Start, MID, "claude-code"));
+    assert_eq!(f.hub.store().recent_chat(1).unwrap().last().unwrap().proposals, reply.proposals, "stored with the reply");
+    assert!(!f.fake.calls().iter().any(|c| c.starts_with("start claude-code")), "nothing ran: {:?}", f.fake.calls());
+    // The user confirms: the client sends the ordinary start_session for this machine.
+    let (cwd, text) = (p.cwd.clone().unwrap(), p.text.clone());
+    ack_result(
+        f.hub
+            .handle(
+                ClientMsg::StartSession { id: "ok".into(), agent_id: p.agent_id.clone(), cwd, prompt: Some(text), machine_id: Some(MID.into()), confirmed: Some(true) },
+                &actor(),
+            )
+            .await,
+    );
+    let calls = f.fake.calls();
+    assert!(calls.iter().any(|c| c == "start claude-code "), "{calls:?}");
+    assert!(calls.last().is_some_and(|c| c.starts_with("prompt ") && c.ends_with(" fix the failing test")), "{calls:?}");
+}
+
+/// Hook sessions: a prompt that is only injected text (a task notification, an image placeholder, a
+/// message from another terminal) never becomes the title; until a real prompt arrives the title is
+/// "<agent> in <folder>"; a later real prompt replaces it and the update is broadcast.
+#[tokio::test]
+async fn hook_session_titles_skip_injected_text() {
+    let mut f = fixture(None).await;
+    let title = |f: &Fixture| f.hub.st().sessions.values().find(|s| s.external_id.as_deref() == Some("ext-t")).and_then(|s| s.title.clone());
+    let prompt = |text: &str| json!({ "hook_event_name": "UserPromptSubmit", "session_id": "ext-t", "cwd": "/w/tiny-whisper", "prompt": text });
+    for injected in [
+        "<task-notification> <task-id>bt7xilh3z</task-id> <status>completed</status> </task-notification>",
+        "[Image #40]",
+        "<hc from=\"t13\">t13: accepted, thanks.</hc>",
+    ] {
+        f.hub.ingest_hook(HookSource::Claude, prompt(injected)).await.unwrap();
+        assert_eq!(title(&f).as_deref(), Some("Claude Code in tiny-whisper"), "{injected}");
+    }
+    let paste = "<pasted_content id=\"66d5\">\n<hc from=\"t13\">do the task</hc>\n</pasted_content id=\"66d5\">";
+    f.hub.ingest_hook(HookSource::Claude, prompt(paste)).await.unwrap();
+    assert_eq!(title(&f).as_deref(), Some("Pasted text"));
+    drain(&mut f.rx);
+    f.hub.ingest_hook(HookSource::Claude, prompt("[Image #2] fix the waveform view")).await.unwrap();
+    assert_eq!(title(&f).as_deref(), Some("fix the waveform view"));
+    let broadcast = drain(&mut f.rx).into_iter().any(|m| matches!(m, ServerMsg::Session { session } if session.title.as_deref() == Some("fix the waveform view")));
+    assert!(broadcast, "the new title is broadcast");
+    // Injected-only prompts and tool hooks keep it.
+    f.hub.ingest_hook(HookSource::Claude, prompt("<system-reminder>be terse</system-reminder>")).await.unwrap();
+    f.hub
+        .ingest_hook(HookSource::Claude, json!({ "hook_event_name": "PreToolUse", "session_id": "ext-t", "tool_name": "Bash", "tool_input": { "command": "ls" } }))
+        .await
+        .unwrap();
+    assert_eq!(title(&f).as_deref(), Some("fix the waveform view"));
+    // The full prompt is used when the hook's clipped title is all injected text.
+    let long = format!("<task-notification>{}</task-notification> then run the tests", "x".repeat(300));
+    f.hub.ingest_hook(HookSource::Claude, prompt(&long)).await.unwrap();
+    assert_eq!(title(&f).as_deref(), Some("then run the tests"));
+}
+
+/// Owned sessions: the agent's raw title is cleaned the same way; a placeholder title takes the next
+/// real prompt (broadcast), and a real title is not replaced by injected text.
+#[tokio::test]
+async fn owned_session_titles_skip_injected_text() {
+    let mut f = fixture(None).await;
+    let s = start(&f).await;
+    let folder = f.dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let fallback = format!("Codex in {folder}");
+    let title = |f: &Fixture| f.hub.session(&s.id).and_then(|s| s.title);
+    assert_eq!(title(&f), Some(fallback.clone()), "no real prompt seen yet");
+    let mut raw = f.hub.session(&s.id).unwrap();
+    raw.title = Some("[Image #1]".into());
+    f.hub.on_host_event(HostEvent::Session(raw.clone())).await;
+    assert_eq!(title(&f), Some(fallback.clone()));
+    let said = |text: &str| HostEvent::Event { session_id: s.id.clone(), kind: EventType::UserMessage, payload: json!({ "text": text }) };
+    f.hub.on_host_event(said("<task-notification><task-id>b1</task-id></task-notification>")).await;
+    assert_eq!(title(&f), Some(fallback.clone()));
+    drain(&mut f.rx);
+    f.hub.on_host_event(said("fix the build")).await;
+    assert_eq!(title(&f).as_deref(), Some("fix the build"));
+    assert!(drain(&mut f.rx).into_iter().any(|m| matches!(m, ServerMsg::Session { session } if session.title.as_deref() == Some("fix the build"))));
+    // The host still reports its raw first-prompt title: the real one stays.
+    f.hub.on_host_event(HostEvent::Session(raw.clone())).await;
+    f.hub.on_host_event(said("and lint")).await;
+    assert_eq!(title(&f).as_deref(), Some("fix the build"));
+    // A real title from the agent is followed.
+    raw.title = Some("Refactor the parser".into());
+    f.hub.on_host_event(HostEvent::Session(raw)).await;
+    assert_eq!(title(&f).as_deref(), Some("Refactor the parser"));
+}
+
+/// At start, stored titles that hold injected text are cleaned once (recent or not).
+#[tokio::test]
+async fn stored_injected_titles_are_cleaned_at_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::in_dir(dir.path());
+    let store = Store::open(&paths.db, MID).unwrap();
+    store.replace_agents(&[agent("codex"), agent("claude-code")]).unwrap();
+    let old = |id: &str, title: &str| Session {
+        id: global_id(MID, id),
+        machine_id: MID.into(),
+        agent_id: "claude-code".into(),
+        acp_session_id: None,
+        external_id: Some(id.into()),
+        cwd: "/w/tiny-whisper".into(),
+        title: Some(title.into()),
+        source: SessionSource::CliHook,
+        status: SessionStatus::Done,
+        started_at: 1_000,
+        last_event_at: 2_000,
+        ended_at: Some(2_000),
+    };
+    store.upsert_session(&old("a", "<task-notification> <task-id>bt7…")).unwrap();
+    store.upsert_session(&old("b", "[Image #40] fix the waveform view")).unwrap();
+    store.upsert_session(&old("c", "<\\pasted_content id=x>secret<\\/pasted_content>")).unwrap();
+    store.upsert_session(&old("d", "Fix login")).unwrap();
+    let hub = Hub::build(
+        HubOptions { paths, config: HubConfig { offline: true, ..Default::default() }, token: "t".repeat(64), machine: ident(), background: false },
+        store,
+        Host::Fake(FakeHost::default()),
+    )
+    .await
+    .unwrap();
+    let stored = |id: &str| hub.store().session(&global_id(MID, id)).unwrap().unwrap().title;
+    assert_eq!(stored("a").as_deref(), Some("Claude Code in tiny-whisper"));
+    assert_eq!(stored("b").as_deref(), Some("fix the waveform view"));
+    assert_eq!(stored("c").as_deref(), Some("Pasted text"));
+    assert_eq!(stored("d").as_deref(), Some("Fix login"), "clean titles are left alone");
+}
+
 mod phones;
+
+// ---------- the "acp" bot provider: a hidden, tool-less agent session ----------
+
+/// The brain session's id once the fake host saw its prompt.
+async fn brain_prompt(f: &Fixture) -> String {
+    wait_until("the brain session's prompt", || {
+        let fake = f.fake.clone();
+        async move { fake.calls().iter().any(|c| c.starts_with("prompt ") && c.contains(":brain-")) }
+    })
+    .await;
+    let calls = f.fake.calls();
+    let line = calls.iter().rev().find(|c| c.starts_with("prompt ") && c.contains(":brain-")).unwrap();
+    line.split_whitespace().nth(1).unwrap().to_string()
+}
+
+fn chunk(id: &str, text: &str) -> HostEvent {
+    HostEvent::Event { session_id: id.into(), kind: EventType::AgentMessageChunk, payload: json!({ "text": text }) }
+}
+
+fn stop(id: &str) -> HostEvent {
+    HostEvent::Event { session_id: id.into(), kind: EventType::Stop, payload: json!({ "stopReason": "end_turn" }) }
+}
+
+#[tokio::test]
+async fn the_acp_brain_session_is_locked_down_and_never_a_session() {
+    let mut f = fixture(None).await;
+    let model = f.hub.acp_model().expect("claude-code is installed: the acp provider exists");
+    assert_eq!(model.label(), "claude-code:sonnet");
+    drain(&mut f.rx);
+    let m = model.clone();
+    let turn = tokio::spawn(async move { m.complete("You are a pet.", "hi", Duration::from_secs(10)).await });
+    let id = brain_prompt(&f).await;
+    // Started on the user's own agent, in the locked folder, with the model and no thinking set by env.
+    let started = f.fake.started.lock().unwrap().last().cloned().unwrap();
+    let env = started.env.clone().unwrap_or_default();
+    assert_eq!((started.id.as_str(), env.get("ANTHROPIC_MODEL").map(String::as_str), env.get("MAX_THINKING_TOKENS").map(String::as_str)), ("claude-code", Some("sonnet"), Some("0")));
+    let settings: Value = serde_json::from_str(&std::fs::read_to_string(f.hub.paths().data_dir.join("brain-session/.claude/settings.json")).unwrap()).unwrap();
+    assert!(settings["permissions"]["deny"].as_array().unwrap().iter().any(|d| d == "*"));
+    assert_eq!(settings["disableAllHooks"], true);
+    // Started with no tools at all (SDK options in session/new _meta) and a clean environment.
+    let opts = f.fake.options.lock().unwrap().last().cloned().unwrap();
+    assert!(opts.clean_env);
+    let o = opts.meta.as_ref().unwrap()["claudeCode"]["options"].clone();
+    assert_eq!((o["tools"].clone(), o["strictMcpConfig"].clone(), o["mcpServers"].clone()), (json!([]), json!(true), json!({})));
+    assert_eq!(env.get("OPENAI_API_KEY").map(String::as_str), Some(""), "other credentials blanked too");
+    // A permission request is rejected, never shown, and ends the turn: its answer is not used.
+    let opt = |id: &str, kind| pawl_protocol::PermissionOption { option_id: id.into(), name: id.into(), kind };
+    let req = PermissionRequest {
+        request_id: global_id(MID, "brain-req"),
+        machine_id: MID.into(),
+        session_id: id.clone(),
+        agent_id: "claude-code".into(),
+        tool_call: ToolCallPayload { tool_call_id: "t".into(), title: Some("Bash: rm -rf ~".into()), kind: Some(ToolKind::Execute), ..Default::default() },
+        options: vec![opt("allow-once", PermissionOptionKind::AllowOnce), opt("reject-once", PermissionOptionKind::RejectOnce)],
+        created_at: 1,
+    };
+    f.hub.on_host_event(chunk(&id, "Sure, let me just")).await;
+    f.hub.on_host_event(HostEvent::PermissionRequest(req)).await;
+    assert!(f.fake.calls().iter().any(|c| c == &format!("resolve {} reject-once", global_id(MID, "brain-req"))), "{:?}", f.fake.calls());
+    assert!(turn.await.unwrap().is_err(), "the answer of a turn that asked for a tool is discarded");
+    assert!(f.fake.calls().iter().any(|c| c == &format!("close {id}")), "and the session is restarted");
+    // The next turn runs in a fresh session and answers.
+    let first = id;
+    let m = model.clone();
+    let turn = tokio::spawn(async move { m.complete("You are a pet.", "hi again", Duration::from_secs(10)).await });
+    wait_until("the second prompt", || {
+        let fake = f.fake.clone();
+        async move { fake.calls().iter().filter(|c| c.starts_with("prompt ") && c.contains(":brain-")).count() == 2 }
+    })
+    .await;
+    let id = brain_prompt(&f).await;
+    assert_ne!(id, first);
+    f.hub.on_host_event(HostEvent::Session(Session { id: id.clone(), machine_id: MID.into(), agent_id: "claude-code".into(), acp_session_id: None, external_id: None, cwd: "x".into(), title: None, source: SessionSource::Owned, status: SessionStatus::Thinking, started_at: 1, last_event_at: 1, ended_at: None })).await;
+    f.hub.on_host_event(chunk(&id, "Woof! ")).await;
+    f.hub.on_host_event(chunk(&id, "All quiet.")).await;
+    f.hub.on_host_event(stop(&id)).await;
+    assert_eq!(turn.await.unwrap().unwrap(), "Woof! All quiet.");
+    // Nothing of it reached the hub: no session, no pending request, no event, no broadcast.
+    assert!(f.hub.session(&id).is_none() && f.hub.store().session(&id).unwrap().is_none());
+    assert!(f.hub.st().pending.is_empty());
+    let msgs = drain(&mut f.rx);
+    assert!(!msgs.iter().any(|m| serde_json::to_string(m).unwrap().contains(":brain-")), "{msgs:?}");
+    // The warm session is reused for the next turn.
+    let m = model.clone();
+    let turn = tokio::spawn(async move { m.complete("sys", "again", Duration::from_secs(10)).await });
+    wait_until("the third prompt", || {
+        let fake = f.fake.clone();
+        async move { fake.calls().iter().filter(|c| c.starts_with("prompt ") && c.contains(":brain-")).count() == 3 }
+    })
+    .await;
+    assert_eq!(f.fake.calls().iter().filter(|c| c.starts_with("start claude-code")).count(), 2, "warm: no new session for this turn");
+    // A tool the agent starts without asking ends the turn: the text so far is discarded, the turn cancelled.
+    f.hub.on_host_event(chunk(&id, "Here is what I found: ")).await;
+    f.hub
+        .on_host_event(HostEvent::Event { session_id: id.clone(), kind: EventType::ToolCall, payload: json!({ "toolCallId": "t2", "title": "Read secrets", "kind": "read", "status": "pending" }) })
+        .await;
+    f.hub.on_host_event(stop(&id)).await;
+    assert!(turn.await.unwrap().is_err(), "no answer from a turn that ran a tool");
+    assert!(f.fake.calls().iter().any(|c| c == &format!("cancel {id}")));
+    // A reply past the cap ends the turn too.
+    let m = model.clone();
+    let turn = tokio::spawn(async move { m.complete("sys", "long", Duration::from_secs(10)).await });
+    wait_until("the fourth prompt", || {
+        let fake = f.fake.clone();
+        async move { fake.calls().iter().filter(|c| c.starts_with("prompt ") && c.contains(":brain-")).count() == 4 }
+    })
+    .await;
+    let id = brain_prompt(&f).await;
+    let big = "x".repeat(40 * 1024);
+    f.hub.on_host_event(chunk(&id, &big)).await;
+    f.hub.on_host_event(chunk(&id, &big)).await;
+    assert!(turn.await.unwrap().unwrap_err().to_string().contains("longer than"));
+    // Hook reports from its folder are dropped.
+    let cwd = f.hub.paths().data_dir.join("brain-session").to_string_lossy().into_owned();
+    f.hub.ingest_hook(HookSource::Claude, json!({ "hook_event_name": "UserPromptSubmit", "session_id": "brain-ext", "cwd": cwd, "prompt": "hi" })).await.unwrap();
+    assert!(!f.hub.st().sessions.values().any(|s| s.external_id.as_deref() == Some("brain-ext")));
+}
+
+#[tokio::test]
+async fn only_claude_code_can_be_the_acp_provider() {
+    let f = fixture_config(|c| c.brain.acp_agent = Some("codex".into())).await;
+    assert!(f.hub.acp_model().is_none(), "codex has no lockdown: no acp provider");
+    let f = fixture_config(|c| c.brain.acp_agent = None).await;
+    assert!(f.hub.acp_model().is_some());
+}
+
+#[tokio::test]
+async fn a_silent_brain_session_times_out_and_restarts() {
+    let f = fixture(None).await;
+    let model = f.hub.acp_model().unwrap();
+    let err = model.complete("sys", "hi", Duration::from_millis(300)).await.unwrap_err();
+    assert!(err.to_string().contains("did not answer"), "{err:#}");
+    let first = f.fake.calls().iter().find(|c| c.starts_with("prompt ")).unwrap().split_whitespace().nth(1).unwrap().to_string();
+    assert!(f.fake.calls().iter().any(|c| c == &format!("close {first}")), "closed after the timeout: {:?}", f.fake.calls());
+    // The next turn starts a new session.
+    let m = model.clone();
+    let turn = tokio::spawn(async move { m.complete("sys", "hi", Duration::from_secs(10)).await });
+    wait_until("a second session", || {
+        let fake = f.fake.clone();
+        async move { fake.calls().iter().filter(|c| c.starts_with("start claude-code")).count() == 2 }
+    })
+    .await;
+    let id = brain_prompt(&f).await;
+    assert_ne!(id, first);
+    f.hub.on_host_event(chunk(&id, "ok")).await;
+    f.hub.on_host_event(stop(&id)).await;
+    assert_eq!(turn.await.unwrap().unwrap(), "ok");
+}
+
+/// End to end: with no API key and Claude Code installed, the default pet reads a free-form message
+/// through the agent session; its "approve" is never an approval (the reply points at the card).
+#[tokio::test]
+async fn the_default_pet_reads_free_form_messages_through_the_agent_session() {
+    let mut f = fixture(None).await;
+    let s = start(&f).await;
+    let opt = |id: &str, kind| pawl_protocol::PermissionOption { option_id: id.into(), name: id.into(), kind };
+    f.hub
+        .on_host_event(HostEvent::PermissionRequest(PermissionRequest {
+            request_id: global_id(MID, "r1"),
+            machine_id: MID.into(),
+            session_id: s.id.clone(),
+            agent_id: "codex".into(),
+            tool_call: ToolCallPayload { tool_call_id: "t".into(), title: Some("bun test".into()), kind: Some(ToolKind::Execute), ..Default::default() },
+            options: vec![opt("allow-once", PermissionOptionKind::AllowOnce), opt("reject-once", PermissionOptionKind::RejectOnce)],
+            created_at: 1,
+        }))
+        .await;
+    drain(&mut f.rx);
+    ack_result(f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: "ya go for it buddy, ship that".into() }, &actor()).await);
+    let id = brain_prompt(&f).await;
+    let prompt = f.fake.calls().into_iter().find(|c| c.starts_with(&format!("prompt {id}"))).unwrap();
+    assert!(prompt.contains("JSON schema") && prompt.contains("<context>") && prompt.contains("R1: Codex"), "{prompt}");
+    let answer = json!({ "kind": "resolve", "agent": null, "machine": null, "repo": null, "pet": null, "session": null, "task": null, "decision": "approve", "which": "R1", "answer": null });
+    f.hub.on_host_event(chunk(&id, &answer.to_string())).await;
+    f.hub.on_host_event(stop(&id)).await;
+    let reply = match wait_for(&mut f.rx, "the pet's reply", |m| matches!(m, ServerMsg::Chat { message } if message.role == ChatRole::Pet)).await {
+        ServerMsg::Chat { message } => message,
+        _ => unreachable!(),
+    };
+    assert!(reply.text.contains("Tap Approve on the card above if you want Codex to run bun test."), "{}", reply.text);
+    assert!(reply.proposals.is_empty() && reply.session_id.is_none());
+    assert!(!f.fake.calls().iter().any(|c| c.starts_with(&format!("resolve {}", global_id(MID, "r1")))), "never approved: {:?}", f.fake.calls());
+    assert!(f.hub.st().pending.contains_key(&global_id(MID, "r1")), "still waiting for the user");
+}
+
+/// At start the "acp" provider exists only once agent discovery has run: a chat in that window waits for it
+/// (bounded) instead of answering as if no model were configured.
+#[tokio::test]
+async fn a_chat_during_startup_discovery_waits_for_the_agent_model() {
+    let mut f = fixture(None).await;
+    // As right after a start: discovery running, Claude Code not listed yet, no model.
+    f.hub.inner.agents_discovered.send_replace(false);
+    f.hub.st().agents.retain(|a| a.id != "claude-code");
+    f.hub.rebuild_brain();
+    assert!(!f.hub.brain().has_llm() && f.hub.pet_model_pending());
+    drain(&mut f.rx);
+    ack_result(f.hub.handle(ClientMsg::Chat { id: "c".into(), pet_id: None, text: "zxq frobnicate the thing".into() }, &actor()).await);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !drain(&mut f.rx).iter().any(|m| matches!(m, ServerMsg::Chat { message } if message.role == ChatRole::Pet)),
+        "no reply while the model is resolving"
+    );
+    // Discovery finishes: Claude Code is there, the brain gets the acp provider, the chat goes to it.
+    f.hub.st().agents.push(agent("claude-code"));
+    f.hub.rebuild_brain();
+    f.hub.inner.agents_discovered.send_replace(true);
+    let id = brain_prompt(&f).await;
+    let answer = json!({ "kind": "smalltalk", "agent": null, "machine": null, "repo": null, "pet": null, "session": null, "task": null, "decision": null, "which": null, "answer": "Woof! Right here." });
+    f.hub.on_host_event(chunk(&id, &answer.to_string())).await;
+    f.hub.on_host_event(stop(&id)).await;
+    let reply = match wait_for(&mut f.rx, "the pet's reply", |m| matches!(m, ServerMsg::Chat { message } if message.role == ChatRole::Pet)).await {
+        ServerMsg::Chat { message } => message,
+        _ => unreachable!(),
+    };
+    assert_eq!(reply.text, "\u{1F43E} Right here.", "plain style: the pet sound goes, one emoji first");
+    // Nothing to wait for once discovery is done (or when another model answers).
+    assert!(!f.hub.pet_model_pending());
+}
+
+// ---------- ask-by-default rules and the default pet's name ----------
+
+async fn hub_on(dir: &std::path::Path, edit: impl FnOnce(&Store)) -> Hub {
+    let paths = Paths::in_dir(dir);
+    let store = Store::open(&paths.db, MID).unwrap();
+    store.replace_agents(&[agent("codex"), agent("claude-code")]).unwrap();
+    edit(&store);
+    Hub::build(
+        HubOptions { paths, config: HubConfig { offline: true, ..Default::default() }, token: "t".repeat(64), machine: ident(), background: false },
+        store,
+        Host::Fake(FakeHost::default()),
+    )
+    .await
+    .unwrap()
+}
+
+/// Stored rules that are exactly the old defaults (reads automatic) move to the new defaults once, audited,
+/// with one notice; a customised rule set is left alone.
+#[tokio::test]
+async fn never_customised_default_rules_move_to_ask_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = hub_on(dir.path(), |s| s.set_rules(&pawl_brain::rules::legacy_default_rules()).unwrap()).await;
+    assert_eq!(hub.st().rules, pawl_brain::rules::default_rules());
+    assert_eq!(hub.store().rules().unwrap(), Some(pawl_brain::rules::default_rules()), "persisted");
+    let notices = hub.inner.startup_notices.lock().unwrap().clone();
+    assert!(notices.iter().any(|n| n.title == "Default rules now ask before reads"), "{notices:?}");
+    let audit = hub.store().settings_audit(10).unwrap();
+    assert!(audit.iter().any(|a| a.keys == ["rules"] && a.actor == "hub:default-rules"), "{audit:?}");
+    drop(hub);
+    // The next start finds the new defaults: nothing to do, no notice.
+    let hub = hub_on(dir.path(), |_| {}).await;
+    assert!(!hub.inner.startup_notices.lock().unwrap().iter().any(|n| n.title.starts_with("Default rules")));
+    drop(hub);
+    // A customised set (the old defaults plus one rule) stays as it is.
+    let dir = tempfile::tempdir().unwrap();
+    let mut custom = pawl_brain::rules::legacy_default_rules();
+    custom.push(Rule { id: "mine".into(), matcher: pawl_protocol::RuleMatch { tool_kind: Some(ToolKind::Fetch), path: None, agent: None }, action: pawl_protocol::RuleAction::Deny });
+    let c2 = custom.clone();
+    let hub = hub_on(dir.path(), move |s| s.set_rules(&c2).unwrap()).await;
+    assert_eq!(hub.st().rules, custom);
+    // No stored rules: the new defaults, read asks.
+    let f = fixture(None).await;
+    assert_eq!(f.hub.st().rules, pawl_brain::rules::default_rules());
+}
+
+/// The default pet gets a name of the pool once (not "Pawl", not another pet's), kept across starts.
+#[tokio::test]
+async fn the_default_pet_is_named_once_and_renamed_by_the_pet_name_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let hub = hub_on(dir.path(), |_| {}).await;
+    let name = hub.settings().bot.pet_name;
+    assert!(!name.is_empty() && name != "Pawl", "{name:?}");
+    assert!(!hub.pets().iter().any(|p| p.name.eq_ignore_ascii_case(&name)), "unique");
+    assert!(std::fs::read_to_string(&hub.paths().config).unwrap().lines().any(|l| l.trim() == format!("pet_name = \"{name}\"")));
+    assert_eq!(hub.brain_context(None).await.pet_name.as_deref(), Some(name.as_str()), "the bot knows it");
+    drop(hub);
+    let saved = HubConfig::load(&Paths::in_dir(dir.path())).unwrap();
+    assert_eq!(saved.brain.pet_name.as_deref(), Some(name.as_str()));
+    let again = hub_on(dir.path(), |_| {}).await;
+    assert_eq!(again.settings().bot.pet_name, name, "the same name after a restart");
+    again.ensure_pet("codex").await;
+    assert!(!again.pets()[0].name.eq_ignore_ascii_case(&name), "a new pet never gets the default pet's name");
+    // Renames follow the pet-name rules and broadcast the settings.
+    let mut rx = again.subscribe();
+    let actor = actor();
+    let set = |n: &str| ClientMsg::UpdateSettings { id: "u".into(), patch: Box::new(serde_json::from_value(json!({ "bot": { "petName": n } })).unwrap()) };
+    let taken = again.pets().into_iter().next().map(|p| p.name);
+    if let Some(taken) = taken {
+        let e = ack_error(again.handle(set(&taken.to_uppercase()), &actor).await);
+        assert!(e.contains("invalid:bot.petName") && e.contains("another pet's name"), "{e}");
+    }
+    for bad in ["", "   ", "Mo\u{202e}chi", &"x".repeat(41)] {
+        assert!(ack_error(again.handle(set(bad), &actor).await).contains("invalid:bot.petName"), "{bad:?}");
+    }
+    ack_result(again.handle(set(" Juno "), &actor).await);
+    assert_eq!(again.settings().bot.pet_name, "Juno");
+    assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|m| matches!(m, ServerMsg::Settings { .. })), "announced");
+    // A regular pet cannot take the default pet's name.
+    let pet = again.pets().into_iter().next().unwrap();
+    let r = again
+        .handle(ClientMsg::UpdatePet { id: "p".into(), pet_id: pet.id, patch: PetPatch { name: Some("juno".into()), ..Default::default() } }, &actor)
+        .await;
+    assert!(ack_error(r).contains("name_taken"));
+}

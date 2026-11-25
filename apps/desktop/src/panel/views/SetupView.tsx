@@ -80,7 +80,7 @@ export function SetupView() {
         {step === DONE && (
           <>
             <h2>All set{state.machine ? `, ${machineDisplayName(state.machine)}` : ""}!</h2>
-            <p className="hint">Start a session from the panel, or keep using your agents as usual; their pets will show up on the strip.</p>
+            <p className="hint">Start a session from the panel, or keep using your agents as usual. Your pet on screen watches them all: click it to chat, drag it anywhere, right-click it to open the hub.</p>
             <div className="form-actions">
               <button className="pill pill-primary" onClick={() => finish(() => navigate({ view: "new" }))}>
                 Start a session

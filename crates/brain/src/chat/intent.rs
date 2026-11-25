@@ -16,6 +16,10 @@
 //! - pet: any known pet name ("tell Biscuit to …", "Biscuit, run the tests", "what's Rex doing?");
 //!   a pet fixes machine + agent.
 //! - repo: names from every machine's repo index and sessions; the caller resolves them per machine.
+//!
+//! The default pet (the chat with no pet attached) orchestrates every agent: a plain instruction that
+//! starts with a task verb ("fix the failing test in repo api", "run the tests on the Laptop", "start a
+//! session in repo web") is a command with no agent; the caller picks one and only proposes it.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -91,7 +95,8 @@ pub(crate) struct CommandIntent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Intent {
     Help,
-    Resolve { approve: bool, always: bool, agent: Option<AgentRef>, pick: Option<Pick> },
+    /// `explicit`: an approve / deny verb was said ("approve", "allow codex"), not just "yes" / "sure".
+    Resolve { approve: bool, always: bool, agent: Option<AgentRef>, pick: Option<Pick>, explicit: bool },
     Command(CommandIntent),
     Status { agent: Option<AgentRef> },
     DailyReport,
@@ -248,6 +253,13 @@ const QUESTION_WORDS: &[&str] = &[
     "does", "did", "can", "could", "will", "would", "should", "any", "anything", "anyone",
 ];
 const STATUS_PHRASES: &[&str] = &["up to", "working on", "going on", "check on", "whats new", "where are we"];
+/// First words of a plain instruction for the default pet ("fix the failing test", "run the tests on the
+/// laptop"): verbs that clearly mean coding work. A message must start with one to become an agent-less
+/// command (which the user still confirms: it never runs by itself).
+const TASK_VERBS: &[&str] = &[
+    "fix", "debug", "refactor", "implement", "lint", "test", "retest", "run", "rerun", "build", "rebuild", "compile",
+    "typecheck", "deploy", "commit", "rebase", "revert", "bisect", "benchmark", "migrate", "reproduce", "review",
+];
 const SMALLTALK_QUESTIONS: &[&str] = &[
     "how are you", "how are u", "how r u", "how you doing", "hows it going", "how is it going", "how do you feel",
     "are you ok", "you ok", "whats up", "sup", "wassup",
@@ -996,16 +1008,16 @@ fn parse_pick(w: &str) -> Option<Pick> {
 }
 
 fn parse_resolve(toks: &[Tok], words: &[&str], s: &str, cat: &AgentCatalog, targets: &Targets, target: &mut Target) -> Option<Intent> {
-    let (approve, rest_start) = if APPROVE_WHOLE.contains(&s) {
-        (true, toks.len())
+    let (approve, rest_start, explicit) = if APPROVE_WHOLE.contains(&s) {
+        (true, toks.len(), false)
     } else if DENY_WHOLE.contains(&s) {
-        (false, toks.len())
+        (false, toks.len(), false)
     } else {
         let i = usize::from(ALWAYS.contains(&words[0]) && words.len() > 1);
         if APPROVE_VERBS.contains(&words[i]) {
-            (true, i + 1)
+            (true, i + 1, true)
         } else if DENY_VERBS.contains(&words[i]) {
-            (false, i + 1)
+            (false, i + 1, true)
         } else {
             return None;
         }
@@ -1020,7 +1032,7 @@ fn parse_resolve(toks: &[Tok], words: &[&str], s: &str, cat: &AgentCatalog, targ
         }
     }
     let pick = rest.iter().find_map(|t| parse_pick(&t.plain));
-    Some(Intent::Resolve { approve, always, agent, pick })
+    Some(Intent::Resolve { approve, always, agent, pick, explicit })
 }
 
 /// An agent or pet name at token `i` (a pet stands for its agent and fixes the target).
@@ -1047,6 +1059,21 @@ fn task_like(toks: &[Tok]) -> bool {
         && talk_kind(&s) == Talk::Other
 }
 
+/// True if `toks` read as a plain instruction for the default pet: two words or more, starting with a
+/// [`TASK_VERBS`] verb, and [`task_like`] (not a question, recap or small talk). A status word anywhere
+/// ("run status", "test what's running") makes it a status ask instead.
+fn is_instruction(toks: &[Tok]) -> bool {
+    let Some(first) = toks.first().map(|t| t.plain.as_str()) else { return false };
+    let words: Vec<&str> = toks.iter().map(|t| t.plain.as_str()).collect();
+    let s = words.join(" ");
+    toks.len() >= 2
+        && TASK_VERBS.contains(&first)
+        && !words.iter().any(|w| STATUS_WORDS.contains(w))
+        && !STATUS_PHRASES.iter().any(|p| s.contains(p))
+        && task_like(toks)
+}
+
+/// `orchestrate`: the default pet is chatted with ("start a session in repo api" needs no agent).
 fn parse_command(
     toks: &[Tok],
     cat: &AgentCatalog,
@@ -1054,6 +1081,7 @@ fn parse_command(
     targets: &Targets,
     target: &mut Target,
     addressed: Option<&PetRef>,
+    orchestrate: bool,
 ) -> Option<Intent> {
     let w = |i: usize| toks.get(i).map(|t| t.plain.as_str()).unwrap_or("");
     let first = w(0);
@@ -1094,8 +1122,9 @@ fn parse_command(
         }
         let (agent, mut j) = match agent_or_pet_at(toks, i, cat, targets, target) {
             Some((a, len)) => (Some(a), i + len),
-            // "start a session on the mac mini in api" / "Biscuit, start a new session in api".
-            None if (machine || addressed.is_some()) && AGENT_NOUNS.contains(&w(i)) => (None, i),
+            // "start a session on the mac mini in api" / "Biscuit, start a new session in api" / the default
+            // pet's "start a session in repo api".
+            None if (machine || addressed.is_some() || orchestrate) && AGENT_NOUNS.contains(&w(i)) => (None, i),
             None => return None,
         };
         while AGENT_NOUNS.contains(&w(j)) {
@@ -1172,7 +1201,8 @@ fn is_status(words: &[&str], s: &str, has_agent: bool, only_agent: bool) -> bool
             && (s.starts_with("how") || s.starts_with("is ") || s.starts_with("whats") || s.starts_with("what is")))
 }
 
-/// Parse the user's own message. `targets` names machines and pets; `pet_name` is the pet being chatted with.
+/// Parse the user's own message. `targets` names machines and pets; `pet_name` is the pet being chatted with,
+/// None for the default pet (which also takes plain instructions as commands with no agent).
 pub(crate) fn parse(text: &str, cat: &AgentCatalog, repos: &RepoIndex, targets: &Targets, pet_name: Option<&str>) -> Parsed {
     let mut toks = tokenize(text);
     let mut addressed = strip_fillers(&mut toks, pet_name, targets);
@@ -1187,10 +1217,11 @@ pub(crate) fn parse(text: &str, cat: &AgentCatalog, repos: &RepoIndex, targets: 
     }
     // Addressing alone ("Rex, good boy!") is small talk, judged on the whole message.
     let addressed_task = (addressed.is_some() || lead_machine) && talk_kind(text) == Talk::Other;
-    let intent = classify(&toks, cat, repos, targets, &mut target, addressed.as_ref(), addressed_task);
+    let intent = classify(&toks, cat, repos, targets, &mut target, addressed.as_ref(), addressed_task, pet_name.is_none());
     Parsed { intent, target }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn classify(
     toks: &[Tok],
     cat: &AgentCatalog,
@@ -1199,6 +1230,7 @@ fn classify(
     target: &mut Target,
     addressed: Option<&PetRef>,
     addressed_task: bool,
+    orchestrate: bool,
 ) -> Intent {
     if toks.is_empty() {
         return Intent::SmallTalk;
@@ -1211,16 +1243,22 @@ fn classify(
     if let Some(i) = parse_resolve(toks, &words, &s, cat, targets, target) {
         return i;
     }
-    if let Some(i) = parse_command(toks, cat, repos, targets, target, addressed) {
+    if let Some(i) = parse_command(toks, cat, repos, targets, target, addressed, orchestrate) {
         return i;
     }
     // "Biscuit, run the tests" / "on the mac mini, run the tests": the addressee is the agent.
-    if addressed_task && task_like(toks) {
+    // A status word makes it a status ask ("Biscuit, update me", "on the mac mini, check what's running").
+    if addressed_task && task_like(toks) && !words.iter().any(|w| STATUS_WORDS.contains(w)) {
         let agent = addressed.map(|p| AgentRef::Known(p.agent_id.clone()));
         if let Some(p) = addressed {
             target.pet = Some(p.clone());
         }
         return Intent::Command(command_from(toks, 0, agent, false, false, repos));
+    }
+    // The default pet: "fix the failing test in repo api" / "run the tests on the laptop" go to the agent
+    // it picks for the target machine.
+    if orchestrate && is_instruction(toks) {
+        return Intent::Command(command_from(toks, 0, None, false, false, repos));
     }
     if is_daily(&words, &s) {
         return Intent::DailyReport;
@@ -1425,17 +1463,16 @@ mod tests {
 
     #[test]
     fn approvals() {
-        assert_eq!(p("approve"), Intent::Resolve { approve: true, always: false, agent: None, pick: None });
-        assert_eq!(p("Yes!"), Intent::Resolve { approve: true, always: false, agent: None, pick: None });
-        assert_eq!(p("ok, deny it"), Intent::Resolve { approve: false, always: false, agent: None, pick: None });
-        assert_eq!(p("no"), Intent::Resolve { approve: false, always: false, agent: None, pick: None });
-        assert_eq!(
-            p("always allow codex"),
-            Intent::Resolve { approve: true, always: true, agent: Some(known("codex")), pick: None }
-        );
-        assert_eq!(p("approve #2"), Intent::Resolve { approve: true, always: false, agent: None, pick: Some(Pick::Nth(2)) });
-        assert_eq!(p("reject the last one"), Intent::Resolve { approve: false, always: false, agent: None, pick: Some(Pick::Last) });
-        assert_eq!(p("never"), Intent::Resolve { approve: false, always: true, agent: None, pick: None });
+        let r = |approve, always, agent, pick, explicit| Intent::Resolve { approve, always, agent, pick, explicit };
+        assert_eq!(p("approve"), r(true, false, None, None, true));
+        assert_eq!(p("Yes!"), r(true, false, None, None, false));
+        assert_eq!(p("sounds good"), r(true, false, None, None, false));
+        assert_eq!(p("ok, deny it"), r(false, false, None, None, true));
+        assert_eq!(p("no"), r(false, false, None, None, false));
+        assert_eq!(p("always allow codex"), r(true, true, Some(known("codex")), None, true));
+        assert_eq!(p("approve #2"), r(true, false, None, Some(Pick::Nth(2)), true));
+        assert_eq!(p("reject the last one"), r(false, false, None, Some(Pick::Last), true));
+        assert_eq!(p("never"), r(false, true, None, None, false));
         assert_eq!(p("oh no"), Intent::SmallTalk);
         assert_eq!(p("never mind"), Intent::SmallTalk);
     }
@@ -1589,7 +1626,10 @@ mod tests {
         assert_eq!(pt("Biscuit, how are you?").intent, Intent::SmallTalk);
         assert_eq!(pt("Rex, good boy!").intent, Intent::SmallTalk);
         let p = pt("Biscuit, approve");
-        assert_eq!((p.intent, p.target), (Intent::Resolve { approve: true, always: false, agent: None, pick: None }, Target::default()));
+        assert_eq!(
+            (p.intent, p.target),
+            (Intent::Resolve { approve: true, always: false, agent: None, pick: None, explicit: true }, Target::default())
+        );
         // Status of a pet's agent.
         let p = pt("what's Rex doing?");
         assert_eq!(p.intent, Intent::Status { agent: Some(known("codex")) });
@@ -1645,5 +1685,51 @@ mod tests {
         assert!(r.folders_on(PC, "api", false).is_empty());
         assert_eq!(r.names(5, |e| e.machine_id == MAC), vec!["api".to_string(), "web (work)".to_string()]);
         assert!(r.folder_by_key(MAC, &path_key("/Users/me/api")).is_some());
+    }
+
+    #[test]
+    fn default_pet_takes_plain_instructions_as_agentless_commands() {
+        let (c, r, t) = world();
+        let dp = |text: &str| parse(text, &c, &r, &t, None);
+        // The default pet (no pet chatted with): a task verb first, no agent named.
+        let p = dp("fix the failing test in repo api");
+        assert_eq!(
+            p.intent,
+            Intent::Command(CommandIntent { agent: None, repo: Some(named("api", true)), task: "fix the failing test".into(), force_new: false })
+        );
+        let p = dp("please run the tests on the Mac mini");
+        assert_eq!(p.target.machine, on(MAC));
+        assert!(matches!(p.intent, Intent::Command(CommandIntent { agent: None, ref task, .. }) if task == "run the tests"), "{p:?}");
+        let p = dp("can you refactor the parser");
+        assert!(matches!(p.intent, Intent::Command(CommandIntent { agent: None, ref task, .. }) if task == "refactor the parser"), "{p:?}");
+        let p = dp("start a new session in repo api");
+        assert!(matches!(p.intent, Intent::Command(CommandIntent { agent: None, force_new: true, .. })), "{p:?}");
+        // Named agents and pets still work as before.
+        assert!(matches!(dp("tell codex to fix the build").intent, Intent::Command(CommandIntent { agent: Some(_), .. })));
+        let p = dp("tell Rex to also run lint");
+        assert_eq!(p.target.pet.as_ref().map(|p| p.name.as_str()), Some("Rex"));
+        assert!(matches!(p.intent, Intent::Command(CommandIntent { ref task, .. }) if task == "also run lint"), "{p:?}");
+        // Not instructions: one word, questions, small talk, statements, everyday verbs.
+        for text in [
+            "test", "fix?", "the build is broken", "play fetch with me", "make me a sandwich", "continue with the plan",
+            "find my keys", "look at this", "try again later", "open the window", "new idea", "clean the kitchen",
+            "update the calendar", "handle it", "move on",
+        ] {
+            assert!(!matches!(dp(text).intent, Intent::Command(_)), "{text}: {:?}", dp(text).intent);
+        }
+        // Status words win over a verb: these are status asks.
+        for text in [
+            "update me", "check what's running", "look at the pending sessions", "run status", "test what's running",
+            "check on codex", "check the status", "what's everyone doing?", "review the progress",
+        ] {
+            assert!(matches!(dp(text).intent, Intent::Status { .. }), "{text}: {:?}", dp(text).intent);
+        }
+        assert!(matches!(dp("review what happened today").intent, Intent::DailyReport), "{:?}", dp("review what happened today").intent);
+        // The same for an addressed pet or machine ("Biscuit, update me" is not an instruction for its agent).
+        for text in ["Biscuit, update me", "Rex, check what's running", "on the mac mini, look at the pending sessions"] {
+            assert!(matches!(pt(text).intent, Intent::Status { .. }), "{text}: {:?}", pt(text).intent);
+        }
+        // A pet's own chat keeps today's rules: a bare instruction there is not a command.
+        assert_eq!(parse("fix the failing test in repo api", &c, &r, &t, Some("Biscuit")).intent, Intent::SmallTalk);
     }
 }

@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HookStatus, HubSettings } from "@pawl/protocol";
+import type { Agent, HookStatus, HubSettings } from "@pawl/protocol";
 import {
   broadFolderReason,
   isBroadFolder,
@@ -44,13 +44,41 @@ import {
   settingsErrorText,
   settingsFieldLabel,
   settingsPatch,
+  defaultAgentOptions,
+  BOT_PROVIDER_LABEL,
+  BOT_STYLE_LABEL,
+  BOT_STYLES,
+  isBotStyle,
+  botProviderLabel,
+  BOT_PROVIDERS,
+  ACP_BOT_AGENTS,
+  botProviderNow,
+  cloudPrivacyText,
+  cloudProviderInUse,
+  isBotProvider,
 } from "../src/index";
 import { configPortFromToml, machineIdFromToml, readHubCredentials, resolveHubCredentials, runtimePortFromJson, verifiedRuntimePort } from "../src/node";
 import { FakeSocket, tick, welcome } from "./fixtures";
 
 const base: HubSettings = {
   hub: { port: 47800, offline: false, hookSessionStaleHours: 12, ownedSessionIdleHours: 12, eventRetentionDays: 30, dailyReportTime: "18:00" },
-  bot: { model: "claude-haiku-5-5", anthropicApiKeySet: false, ollamaUrl: null, ollamaModel: null },
+  bot: {
+    model: "claude-haiku-5-5",
+    anthropicApiKeySet: false,
+    ollamaUrl: null,
+    ollamaModel: null,
+    defaultAgent: null,
+    provider: "auto",
+    openaiApiKeySet: false,
+    openaiModel: "openai-small",
+    geminiApiKeySet: false,
+    geminiModel: "gemini-flash",
+    acpAgent: "claude-code",
+    acpModel: "sonnet",
+    understand: false,
+    style: "plain",
+    petName: "Biscuit",
+  },
   watchdog: { waitingNudgeAfterMs: 300_000, repeatEveryMs: 600_000, tickSecs: 30 },
   peer: { listen: null, acceptIntents: false, acceptRosterIntros: true, startRoots: ["E:/work"] },
   repos: { paths: [] },
@@ -690,5 +718,166 @@ describe("accept devices introduced by paired hubs (peer.acceptRosterIntros)", (
     expect(withRemote[0]!.body).toContain("because remote control is on");
     expect(riskyChanges(base, { peer: { acceptRosterIntros: false } })).toEqual([]);
     expect(riskyChanges(base, { peer: { acceptRosterIntros: true } })).toEqual([]); // already on
+  });
+});
+
+describe("default agent (bot.defaultAgent)", () => {
+  test("draft and patch carry it; null is Automatic; only a change is sent", () => {
+    const d = editableSettings(base);
+    expect(d.bot.defaultAgent).toBeNull();
+    expect(settingsPatch(base, d)).toEqual({});
+    d.bot.defaultAgent = "codex";
+    expect(settingsPatch(base, d)).toEqual({ bot: { defaultAgent: "codex" } });
+    const picked = { ...base, bot: { ...base.bot, defaultAgent: "codex" } };
+    const back = editableSettings(picked);
+    back.bot.defaultAgent = null;
+    expect(settingsPatch(picked, back)).toEqual({ bot: { defaultAgent: null } });
+    expect(settingsFieldLabel("bot.default_agent")).toBe("Default agent");
+  });
+
+  test("a hub without the field never gets it in a patch", () => {
+    const old = { ...base, bot: { model: "m", anthropicApiKeySet: false, ollamaUrl: null, ollamaModel: null } } as unknown as HubSettings;
+    const d = editableSettings(old);
+    expect(settingsPatch(old, d)).toEqual({});
+    d.bot.model = "other";
+    expect(settingsPatch(old, d)).toEqual({ bot: { model: "other" } });
+  });
+
+  test("options: Automatic, then this machine's installed agents by name, plus a saved one that is gone", () => {
+    const agent = (id: string, name: string, machineId = "m1", installed = true): Agent => ({ id, name, machineId, command: [id], installed, source: "registry" });
+    const agents = [agent("codex", "Codex"), agent("claude-code", "Claude Code"), agent("gemini", "Gemini", "m1", false), agent("codex", "Codex", "m2")];
+    expect(defaultAgentOptions(agents, "m1", null)).toEqual([
+      { value: null, label: "Automatic (most recent session's agent)" },
+      { value: "claude-code", label: "Claude Code" },
+      { value: "codex", label: "Codex" },
+    ]);
+    expect(defaultAgentOptions(agents, "m1", "goose").at(-1)).toEqual({ value: "goose", label: "goose (not installed)" });
+    expect(defaultAgentOptions(agents, "m1", "codex")).toHaveLength(3);
+  });
+});
+
+describe("bot provider (provider, OpenAI / Gemini keys and models, understand)", () => {
+  test("draft and patch carry them; keys never; only changes are sent", () => {
+    const d = editableSettings(base);
+    expect(d.bot).toMatchObject({ provider: "auto", openaiModel: "openai-small", geminiModel: "gemini-flash", understand: false });
+    expect(JSON.stringify(d)).not.toContain("ApiKey");
+    expect(settingsPatch(base, d)).toEqual({});
+    d.bot.provider = "gemini";
+    d.bot.geminiModel = "gemini-pro";
+    d.bot.understand = true;
+    expect(settingsPatch(base, d)).toEqual({ bot: { provider: "gemini", geminiModel: "gemini-pro", understand: true } });
+    d.bot.acpAgent = "codex";
+    d.bot.acpModel = "gpt-5";
+    expect(settingsPatch(base, d).bot).toMatchObject({ acpAgent: "codex", acpModel: "gpt-5" });
+    d.bot.acpAgent = "";
+    expect(settingsPatch(base, d).bot?.acpAgent).toBeUndefined();
+    expect(settingsFieldLabel("bot.understand")).toBe("Understand any wording");
+    expect(settingsFieldLabel("bot.openai_api_key")).toBe("OpenAI API key");
+  });
+
+  test("a hub without the fields never gets them in a patch", () => {
+    const old = { ...base, bot: { model: "m", anthropicApiKeySet: false, ollamaUrl: null, ollamaModel: null, defaultAgent: null } } as unknown as HubSettings;
+    const d = editableSettings(old);
+    expect(settingsPatch(old, d)).toEqual({});
+    (d.bot as { provider: unknown }).provider = "nonsense";
+    expect(settingsPatch(old, d)).toEqual({});
+  });
+
+  test("write-only keys: set, trimmed, or cleared with null", () => {
+    expect(secretPatch("bot.openaiApiKey", " sk-x ")).toEqual({ bot: { openaiApiKey: "sk-x" } });
+    expect(secretPatch("bot.geminiApiKey", null)).toEqual({ bot: { geminiApiKey: null } });
+    expect(secretPatch("bot.anthropicApiKey", "a")).toEqual({ bot: { anthropicApiKey: "a" } });
+  });
+
+  test("adding or replacing a cloud key asks first and says what leaves the machine; clearing does not", () => {
+    const [add] = riskyChanges(base, { bot: { openaiApiKey: "sk-new" } }, { machineName: "Windows PC" });
+    expect(add).toMatchObject({ key: "bot.openaiApiKey", title: "Use OpenAI for the bot?", confirm: "Save key" });
+    expect(add!.body).toContain("summary of your sessions");
+    expect(add!.body).toContain("never file contents");
+    expect(add!.body).toContain("is sent to OpenAI");
+    const withGemini = { ...base, bot: { ...base.bot, geminiApiKeySet: true } };
+    expect(riskyChanges(withGemini, { bot: { geminiApiKey: "new" } })[0]).toMatchObject({ title: "Replace the Google (Gemini) key?", confirm: "Replace key" });
+    expect(riskyChanges(withGemini, { bot: { geminiApiKey: null } })).toEqual([]);
+    expect(riskyChanges(base, { bot: { anthropicApiKey: "  " } })).toEqual([]);
+    expect(riskyChanges(base, { bot: { provider: "openai" } })).toEqual([]);
+  });
+
+  test("switching to a cloud provider with a key, or turning on understand with one in use, asks first", () => {
+    const keys = { ...base, bot: { ...base.bot, openaiApiKeySet: true, provider: "ollama" as const } };
+    const [sw] = riskyChanges(keys, { bot: { provider: "openai" } }, { machineName: "Windows PC" });
+    expect(sw).toMatchObject({ key: "bot.provider", title: "Use OpenAI for the bot?", confirm: "Use OpenAI" });
+    expect(sw!.body).toContain("is sent to OpenAI");
+    // Auto picks the first cloud provider with a key.
+    expect(riskyChanges(keys, { bot: { provider: "auto" } })[0]).toMatchObject({ key: "bot.provider", title: "Use OpenAI for the bot?" });
+    // A cloud provider without a key, or a local one: nothing leaves.
+    expect(riskyChanges(keys, { bot: { provider: "gemini" } })).toEqual([]);
+    expect(riskyChanges({ ...keys, bot: { ...keys.bot, provider: "openai" } }, { bot: { provider: "acp" } })).toEqual([]);
+    // Saving the key in the same change asks once (the key's own confirm).
+    expect(riskyChanges(keys, { bot: { provider: "gemini", geminiApiKey: "k" } }).map((c) => c.key)).toEqual(["bot.geminiApiKey"]);
+    // Understand on while a cloud provider is in use.
+    const inUse = { ...keys, bot: { ...keys.bot, provider: "openai" as const } };
+    const [u] = riskyChanges(inUse, { bot: { understand: true } });
+    expect(u).toMatchObject({ key: "bot.understand", title: "Let OpenAI read what you write?", confirm: "Turn on" });
+    expect(riskyChanges(keys, { bot: { understand: true } })).toEqual([]);
+    expect(riskyChanges(inUse, { bot: { understand: false } })).toEqual([]);
+    expect(cloudProviderInUse("auto", { geminiApiKeySet: true })).toEqual({ provider: "gemini", name: "Google (Gemini)" });
+    expect(cloudProviderInUse("acp", { anthropicApiKeySet: true })).toBeNull();
+  });
+
+  test("what Auto uses right now (Settings says it, because an agent over ACP spends the person's plan)", () => {
+    const claude = { id: "claude-code", name: "Claude Code", installed: true, machineId: "m1" };
+    const bot = { ...base.bot, provider: "auto" as const };
+    expect(botProviderNow(bot, [claude], "m1")).toEqual({ provider: "acp", text: "Auto: using Claude Code on your Claude plan", usesPlan: true });
+    expect(botProviderNow({ ...bot, openaiApiKeySet: true }, [claude], "m1")).toEqual({ provider: "openai", text: "Auto: using OpenAI (your API key)", usesPlan: false });
+    expect(botProviderNow({ ...bot, anthropicApiKeySet: true, geminiApiKeySet: true }, [claude], "m1").provider).toBe("anthropic");
+    expect(botProviderNow({ ...bot, ollamaUrl: "http://x:1", ollamaModel: "llama3.2" }, [claude], "m1").text).toBe("Auto: using Ollama (llama3.2)");
+    // Claude Code not installed here (or only on another machine): nothing.
+    expect(botProviderNow(bot, [{ ...claude, machineId: "m2" }], "m1")).toMatchObject({ provider: null, usesPlan: false });
+    expect(botProviderNow(bot, [], "m1").text).toBe("Auto: nothing is set up yet, so your pet answers with simple built-in replies.");
+    // A chosen provider that is not set up says what it needs.
+    expect(botProviderNow({ ...bot, provider: "openai" }, [claude], "m1").text).toBe("OpenAI needs its API key; until then your pet answers with simple built-in replies.");
+    expect(botProviderNow({ ...bot, provider: "acp" }, [claude], "m1").text).toBe("Using Claude Code on your Claude plan");
+    expect(ACP_BOT_AGENTS).toEqual(["claude-code"]);
+  });
+
+  test("how Pawl talks (bot.style): plain by default, only a change is sent, never to a hub without it", () => {
+    const d = editableSettings(base);
+    expect(d.bot.style).toBe("plain");
+    d.bot.style = "playful";
+    expect(settingsPatch(base, d)).toEqual({ bot: { style: "playful" } });
+    expect(settingsFieldLabel("bot.style")).toBe("How Pawl talks");
+    expect(BOT_STYLES).toEqual(["plain", "playful"]);
+    expect(BOT_STYLE_LABEL.playful).toBe("Playful");
+    expect(isBotStyle("loud")).toBe(false);
+    const old = { ...base, bot: { ...base.bot, style: undefined } } as unknown as HubSettings;
+    const od = editableSettings(old);
+    expect(settingsPatch(old, od)).toEqual({});
+    (od.bot as { style: unknown }).style = "shouty";
+    expect(settingsPatch(old, od)).toEqual({});
+  });
+
+  test("the default pet's name (bot.petName): trimmed, only a real change is sent, never to a hub without it", () => {
+    const d = editableSettings(base);
+    expect(d.bot.petName).toBe("Biscuit");
+    d.bot.petName = "  Biscuit ";
+    expect(settingsPatch(base, d)).toEqual({});
+    d.bot.petName = " Mochi ";
+    expect(settingsPatch(base, d)).toEqual({ bot: { petName: "Mochi" } });
+    expect(settingsFieldLabel("bot.pet_name")).toBe("Default pet name");
+    const old = { ...base, bot: { ...base.bot, petName: undefined } } as unknown as HubSettings;
+    const od = editableSettings(old);
+    (od.bot as { petName: unknown }).petName = "Rex";
+    expect(settingsPatch(old, od)).toEqual({});
+  });
+
+  test("providers and the privacy text", () => {
+    expect(BOT_PROVIDERS).toEqual(["auto", "acp", "anthropic", "openai", "gemini", "ollama"]);
+    expect(botProviderLabel("acp")).toBe("Claude Code (your Claude plan, no API key)");
+    expect(botProviderLabel("acp", "Codex")).toBe("Codex (your plan, no API key)");
+    expect(botProviderLabel("openai", "Codex")).toBe("OpenAI");
+    expect(isBotProvider("ollama")).toBe(true);
+    expect(isBotProvider("mistral")).toBe(false);
+    expect(BOT_PROVIDER_LABEL.auto).toBe("Automatic");
+    expect(cloudPrivacyText("OpenAI")).toContain("titles, repo names, states and pending approvals");
   });
 });

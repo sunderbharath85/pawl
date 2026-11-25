@@ -137,10 +137,7 @@ impl Hub {
     }
 
     fn overrides(&self) -> cfgset::Overrides {
-        cfgset::Overrides {
-            keys: self.launch().overrides,
-            env_anthropic_key: std::env::var(crate::config::ENV_ANTHROPIC_KEY).is_ok_and(|k| !k.trim().is_empty()),
-        }
+        cfgset::Overrides::with_env(self.launch().overrides)
     }
 
     /// The effective settings (never a secret value).
@@ -189,8 +186,50 @@ impl Hub {
         if changed.is_empty() {
             return Ok(self.settings_reply(Vec::new()));
         }
+        if changed.contains(&cfgset::BOT_PET_NAME) {
+            let name = next.brain.pet_name.clone().unwrap_or_default();
+            if self.pet_name_taken(&name) {
+                return Err(InvalidSetting { field: cfgset::BOT_PET_NAME.into(), reason: format!("{name:?} is another pet's name") }.into());
+            }
+        }
         let applied = self.commit_settings(&cur, next, &changed, actor, SettingsAuditKind::Settings).await?;
         Ok(self.settings_reply(applied))
+    }
+
+    /// True if a pet of this or a paired machine has `name` (case-insensitive).
+    fn pet_name_taken(&self, name: &str) -> bool {
+        let key = name.trim().to_lowercase();
+        let local = self.st().pets.values().any(|p| p.name.trim().to_lowercase() == key);
+        local || self.remote_pet_names().iter().any(|n| n.trim().to_lowercase() == key)
+    }
+
+    /// The default pet's name, picked once (first start, or an empty setting): a name of the pet-name pool
+    /// that is not "Pawl" and no pet's name. Saved to config.toml and announced like a setting.
+    pub(super) async fn ensure_default_pet_name(&self) {
+        if self.default_pet_name().is_some() {
+            return;
+        }
+        let _one = self.inner.settings_write.lock().await;
+        let mut taken: Vec<String> = self.st().pets.values().map(|p| p.name.clone()).collect();
+        taken.extend(self.remote_pet_names());
+        taken.push("Pawl".into());
+        let name = pawl_brain::growth::default_name(&self.inner.machine_id, "default-pet", &taken);
+        let mut next = self.config();
+        next.brain.pet_name = Some(name.clone());
+        if let Err(e) = self.write_config(&next, &[cfgset::BOT_PET_NAME]).await {
+            tracing::warn!("could not save the default pet's name to config.toml: {e:#}");
+        }
+        *self.inner.config.write().unwrap_or_else(|p| p.into_inner()) = next;
+        // Not a user's change: logged and announced, not an audit row.
+        tracing::info!(name = %name, "default pet named");
+        self.announce_settings();
+    }
+
+    /// The old default rules were replaced by the new ones at start (see `Hub::build`).
+    pub(super) async fn audit_rules_migration(&self) {
+        let actor = Actor::internal("hub:default-rules");
+        let detail = Some("stored rules were the old defaults; reads and searches now ask".to_string());
+        self.audit_settings(&actor, SettingsAuditKind::Settings, vec!["rules".to_string()], detail).await;
     }
 
     fn settings_reply(&self, applied: Vec<String>) -> Value {
@@ -257,8 +296,12 @@ impl Hub {
     /// Settings the running hub reads at use time need nothing here; the others are rebuilt.
     async fn apply_runtime(&self, next: &HubConfig, changed: &[&'static str]) {
         let has = |k: &str| changed.contains(&k);
-        if has(cfgset::BOT_MODEL) || has(cfgset::BOT_KEY) || has(cfgset::BOT_OLLAMA_URL) || has(cfgset::BOT_OLLAMA_MODEL) {
-            *self.inner.brain.write().unwrap_or_else(|p| p.into_inner()) = Brain::new(next.brain.to_brain_config());
+        if cfgset::BRAIN_KEYS.iter().any(|k| has(k)) {
+            self.rebuild_brain();
+            if has(cfgset::BOT_ACP_AGENT) || has(cfgset::BOT_ACP_MODEL) || has(cfgset::BOT_PROVIDER) {
+                // A different agent or model: the next turn starts a fresh session.
+                self.reset_brain_session("settings changed").await;
+            }
         }
         if has(cfgset::WD_NUDGE) || has(cfgset::WD_REPEAT) {
             // New timings, same memory of what was already nudged (no repeat nudges).

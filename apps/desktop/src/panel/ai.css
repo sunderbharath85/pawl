@@ -1,0 +1,131 @@
+/*
+ * Tailwind CSS v4 + shadcn/ui for the AI Elements (session transcript, chat), panel window only.
+ * The panel keeps its hand-written CSS: Tailwind's theme and utilities are imported in layers WITHOUT the global
+ * preflight (layered rules lose to the panel's unlayered CSS), the reset below applies only inside `.ai-scope`, and
+ * the shadcn theme variables (--card, --accent and --radius clash with the panel's) are defined only there, mapped to
+ * the panel's warm palette. Utilities are generated only for the files that use them (source(none) + @source).
+ */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@source "../components";
+@source "../hooks";
+@source "../lib/highlighter.tsx";
+@source "./transcript";
+@source "../../node_modules/streamdown/dist/*.js";
+
+/* Dark follows the panel, which follows the system. */
+@custom-variant dark (@media (prefers-color-scheme: dark));
+
+@theme inline {
+  --font-sans: var(--font);
+  --font-heading: var(--font-display);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* shadcn/ui variables, only inside AI Elements containers, from the panel's palette (tokens.css; dark included). */
+.ai-scope {
+  --background: var(--paper);
+  --foreground: var(--ink);
+  --card: var(--pawl-card);
+  --card-foreground: var(--ink);
+  --popover: var(--pawl-card);
+  --popover-foreground: var(--ink);
+  --primary: var(--pawl-accent);
+  --primary-foreground: var(--on-accent);
+  --secondary: var(--paper-2);
+  --secondary-foreground: var(--ink);
+  --muted: var(--paper-2);
+  --muted-foreground: var(--ink-soft);
+  --accent: var(--paper-3);
+  --accent-foreground: var(--ink);
+  --destructive: var(--berry);
+  --border: var(--line);
+  --input: var(--line-strong);
+  --ring: var(--pawl-accent);
+  --radius: 0.75rem;
+  color: var(--foreground);
+  line-height: 1.5;
+}
+
+/* The part of Tailwind's preflight the components rely on, inside `.ai-scope` only (zero specificity, base layer). */
+@layer base {
+  :where(.ai-scope) *,
+  :where(.ai-scope) ::before,
+  :where(.ai-scope) ::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    border: 0 solid;
+    border-color: var(--border);
+    outline-color: color-mix(in oklab, var(--ring) 50%, transparent);
+  }
+  :where(.ai-scope) :where(h1, h2, h3, h4, h5, h6) {
+    font-size: inherit;
+    font-weight: inherit;
+  }
+  :where(.ai-scope) :where(ol, ul, menu) {
+    list-style: none;
+  }
+  :where(.ai-scope) :where(img, video, canvas) {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+  :where(.ai-scope) :where(svg) {
+    display: block;
+    vertical-align: middle;
+  }
+  :where(.ai-scope) :where(button, input, select, textarea) {
+    font: inherit;
+    color: inherit;
+    background-color: transparent;
+    border-radius: 0;
+    letter-spacing: inherit;
+  }
+  :where(.ai-scope) :where(button) {
+    cursor: pointer;
+  }
+  :where(.ai-scope) :where(a) {
+    color: inherit;
+    text-decoration: inherit;
+  }
+  :where(.ai-scope) :where(code, kbd, samp, pre) {
+    font-family: var(--font-mono);
+    font-size: 1em;
+  }
+  :where(.ai-scope) :where(table) {
+    border-collapse: collapse;
+    text-indent: 0;
+  }
+  :where(.ai-scope) :where(b, strong) {
+    font-weight: bolder;
+  }
+}

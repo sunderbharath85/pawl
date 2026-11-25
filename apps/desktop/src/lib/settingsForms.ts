@@ -12,6 +12,9 @@ import {
   CUSTOM_AGENTS_MAX,
   editableSettings,
   formatCommandLine,
+  ACP_BOT_AGENTS,
+  isBotProvider,
+  isBotStyle,
   normalizeReportTime,
   parseCommandLine,
   parsePositiveDecimal,
@@ -19,7 +22,7 @@ import {
   settingsPatch,
   type EditableSettings,
 } from "@pawl/hub-client";
-import type { CustomAgentSetting, HubSettings, HubSettingsPatch } from "@pawl/protocol";
+import type { BotProvider, BotStyle, CustomAgentSetting, HubSettings, HubSettingsPatch } from "@pawl/protocol";
 
 /** Field path → message. */
 export type FormErrors = Record<string, string>;
@@ -146,10 +149,42 @@ export interface BotForm {
   model: string;
   ollamaUrl: string;
   ollamaModel: string;
+  /** `bot.defaultAgent`: "" = Automatic; null when the hub predates the setting (the picker is hidden). */
+  defaultAgent: string | null;
+  /**
+   * The provider fields; null when the hub predates them (those controls are hidden): `provider`, the OpenAI /
+   * Gemini models, `understand`, and for provider "acp" the agent that thinks for the pet and its model.
+   */
+  provider: BotProvider | null;
+  openaiModel: string | null;
+  geminiModel: string | null;
+  understand: boolean | null;
+  acpAgent: string | null;
+  acpModel: string | null;
+  /** How Pawl talks ("plain" | "playful"); null when the hub predates it (the choice is hidden). */
+  style: BotStyle | null;
 }
 
+function orNull<T>(v: T | undefined, ok: (v: unknown) => boolean): T | null {
+  return v !== undefined && ok(v) ? v : null;
+}
+const isString = (v: unknown) => typeof v === "string";
+
 export function botForm(s: HubSettings): BotForm {
-  return { model: s.bot.model, ollamaUrl: s.bot.ollamaUrl ?? "", ollamaModel: s.bot.ollamaModel ?? "" };
+  const agent = s.bot.defaultAgent;
+  return {
+    model: s.bot.model,
+    ollamaUrl: s.bot.ollamaUrl ?? "",
+    ollamaModel: s.bot.ollamaModel ?? "",
+    defaultAgent: agent === undefined ? null : (agent ?? ""),
+    provider: orNull(s.bot.provider, isBotProvider),
+    openaiModel: orNull(s.bot.openaiModel, isString),
+    geminiModel: orNull(s.bot.geminiModel, isString),
+    understand: orNull(s.bot.understand, (v) => typeof v === "boolean"),
+    acpAgent: orNull(s.bot.acpAgent, isString),
+    acpModel: orNull(s.bot.acpModel, isString),
+    style: orNull(s.bot.style, isBotStyle),
+  };
 }
 
 export function botPatch(f: BotForm, s: HubSettings): FormResult {
@@ -158,10 +193,29 @@ export function botPatch(f: BotForm, s: HubSettings): FormResult {
   else if (/\s/.test(f.model.trim())) errors["bot.model"] = "A model id has no spaces.";
   if (f.ollamaUrl.trim()) put(errors, "bot.ollamaUrl", checkUrl(f.ollamaUrl, ["http", "https"]));
   if (/\s/.test(f.ollamaModel.trim())) errors["bot.ollamaModel"] = "A model name has no spaces.";
+  for (const [key, v] of [
+    ["bot.openaiModel", f.openaiModel],
+    ["bot.geminiModel", f.geminiModel],
+    ["bot.acpModel", f.acpModel],
+  ] as const) {
+    if (typeof v === "string" && /\s/.test(v.trim())) errors[key] = "A model name has no spaces.";
+  }
+  if (f.provider === "acp" && typeof f.acpAgent === "string") {
+    if (!f.acpAgent.trim()) errors["bot.acpAgent"] = "Pick the agent that thinks for your pet.";
+    else if (!ACP_BOT_AGENTS.includes(f.acpAgent.trim())) errors["bot.acpAgent"] = "Only Claude Code can think for your pet for now.";
+  }
   return finish(s, errors, (d) => {
     d.bot.model = f.model.trim();
     d.bot.ollamaUrl = f.ollamaUrl.trim() || null;
     d.bot.ollamaModel = f.ollamaModel.trim() || null;
+    if (f.defaultAgent !== null) d.bot.defaultAgent = f.defaultAgent || null;
+    if (f.provider !== null) d.bot.provider = f.provider;
+    if (f.openaiModel !== null) d.bot.openaiModel = f.openaiModel.trim();
+    if (f.geminiModel !== null) d.bot.geminiModel = f.geminiModel.trim();
+    if (f.understand !== null) d.bot.understand = f.understand;
+    if (f.acpAgent !== null && f.acpAgent.trim()) d.bot.acpAgent = f.acpAgent.trim();
+    if (f.acpModel !== null) d.bot.acpModel = f.acpModel.trim();
+    if (f.style !== null) d.bot.style = f.style;
   });
 }
 

@@ -22,6 +22,132 @@ pub(crate) fn clean_name(s: &str) -> String {
     truncate(&one_line(&s), NAME_MAX_CHARS)
 }
 
+/// What replaces a secret in text sent to a model.
+pub(crate) const REDACTED: &str = "[redacted]";
+
+/// Name parts that make `NAME=value` / `name: value` a secret.
+const SECRET_NAMES: &[&str] = &["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PWD", "AUTH", "CREDENTIAL", "COOKIE", "SESSION"];
+/// Token prefixes of well-known credentials.
+const SECRET_PREFIXES: &[&str] = &[
+    "sk-", "sk_", "pk_live_", "rk_live_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "xoxb-", "xoxp-", "xoxa-",
+    "xoxs-", "xoxr-", "xapp-", "AKIA", "ASIA", "AIza", "ya29.", "npm_", "hf_",
+];
+
+fn is_secret_name(name: &str) -> bool {
+    let up = name.trim_matches(|c: char| !c.is_ascii_alphanumeric()).to_ascii_uppercase();
+    !up.is_empty() && SECRET_NAMES.iter().any(|n| up == *n || up.ends_with(&format!("_{n}")) || up.starts_with(&format!("{n}_")) || up.contains(&format!("_{n}_")) || (up.len() > n.len() && up.ends_with(n)))
+}
+
+/// A run that looks like key material: 24+ chars of base64/hex/url-safe alphabet with letters and digits.
+fn looks_like_key(t: &str) -> bool {
+    let core = t.trim_matches(|c: char| "\"'`,;()[]{}<>".contains(c));
+    core.chars().count() >= 24
+        && core.chars().all(|c| c.is_ascii_alphanumeric() || "+/=_-.".contains(c))
+        && core.chars().any(|c| c.is_ascii_digit())
+        && core.chars().any(|c| c.is_ascii_alphabetic())
+        && !core.contains("..")
+}
+
+/// One whitespace-free token with secrets replaced.
+fn scrub_token(tok: &str) -> String {
+    let bare = tok.trim_matches(|c: char| "\"'`,;()[]{}<>".contains(c));
+    if bare.is_empty() {
+        return tok.to_string();
+    }
+    // scheme://user:pass@host -> scheme://[redacted]@host
+    if let Some(i) = bare.find("://") {
+        if let Some(at) = bare[i + 3..].find('@').map(|a| i + 3 + a) {
+            if bare[i + 3..at].contains(':') && !bare[i + 3..at].contains('/') {
+                return tok.replacen(&bare[i + 3..at], REDACTED, 1);
+            }
+        }
+    }
+    if SECRET_PREFIXES.iter().any(|p| bare.starts_with(p) && bare.len() >= p.len() + 8) {
+        return tok.replacen(bare, REDACTED, 1);
+    }
+    // NAME=value / name:value with a secret-looking name.
+    for sep in ['=', ':'] {
+        if let Some(i) = bare.find(sep) {
+            let (name, value) = (&bare[..i], &bare[i + 1..]);
+            if !value.is_empty() && !value.starts_with("//") && is_secret_name(name) {
+                return tok.replacen(bare, &format!("{name}{sep}{REDACTED}"), 1);
+            }
+        }
+    }
+    if looks_like_key(bare) {
+        return tok.replacen(bare, REDACTED, 1);
+    }
+    tok.to_string()
+}
+
+/// `s` with credentials replaced by [`REDACTED`]: API keys and tokens by their well-known prefixes
+/// (`sk-`, `ghp_`, `github_pat_`, `xoxb-`, `AKIA`, …), `Bearer` / `Basic` credentials, values of
+/// `KEY=` / `TOKEN=` / `SECRET=` / `PASSWORD=`-style names (also `export X=…` and `-H 'X-Api-Key: …'`), long
+/// base64 / hex runs, and the user info of URLs (`https://user:pass@host`). For text sent to a model.
+pub(crate) fn scrub_secrets(s: &str) -> String {
+    /// What the next token is, after the current one.
+    #[derive(PartialEq)]
+    enum Next {
+        Plain,
+        /// A credential ("Bearer x", "X-Api-Key: x", "--password x").
+        Secret,
+        /// After "Authorization:": a scheme ("Bearer") that announces the credential, or the credential.
+        AuthValue,
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut next = Next::Plain;
+    let mut rest = s;
+    while !rest.is_empty() {
+        let ws = rest.len() - rest.trim_start().len();
+        out.push_str(&rest[..ws]);
+        rest = &rest[ws..];
+        if rest.is_empty() {
+            break;
+        }
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let tok = &rest[..end];
+        rest = &rest[end..];
+        let bare = tok.trim_matches(|c: char| "\"'`,;()[]{}<>".contains(c));
+        let lower = bare.to_ascii_lowercase();
+        let scheme = matches!(lower.as_str(), "bearer" | "basic" | "token" | "digest");
+        if bare.is_empty() {
+            out.push_str(tok);
+            continue;
+        }
+        match next {
+            Next::Secret => {
+                out.push_str(&tok.replacen(bare, REDACTED, 1));
+                next = Next::Plain;
+                continue;
+            }
+            Next::AuthValue if !scheme => {
+                out.push_str(&tok.replacen(bare, REDACTED, 1));
+                next = Next::Plain;
+                continue;
+            }
+            _ => {}
+        }
+        let name = bare.strip_suffix(':');
+        next = if scheme {
+            Next::Secret
+        } else if matches!(name, Some(n) if n.eq_ignore_ascii_case("authorization") || n.eq_ignore_ascii_case("proxy-authorization")) {
+            Next::AuthValue
+        } else if name.is_some_and(is_secret_name)
+            || matches!(lower.as_str(), "--password" | "--token" | "--api-key" | "--apikey" | "--secret" | "--auth")
+        {
+            Next::Secret
+        } else {
+            Next::Plain
+        };
+        if next == Next::Plain {
+            out.push_str(&scrub_token(tok));
+        } else {
+            out.push_str(tok);
+        }
+    }
+    out
+}
+
 /// Last path segment of a cwd (`E:\work\ai-pet` -> `ai-pet`), cleaned with [`clean_name`].
 /// Falls back to the (cleaned) input.
 pub(crate) fn basename(path: &str) -> String {
@@ -160,6 +286,37 @@ mod tests {
         let long = format!("/x/{}", "a".repeat(500));
         assert_eq!(basename(&long).chars().count(), NAME_MAX_CHARS);
         assert_eq!(clean_name(" api\r\n(work) "), "api (work)");
+    }
+
+    #[test]
+    fn secrets_are_scrubbed() {
+        for (input, want) in [
+            ("curl -H 'Authorization: Bearer sk-abc123def456ghi789' https://x", "curl -H 'Authorization: Bearer [redacted]' https://x"),
+            ("Authorization: abcdef", "Authorization: [redacted]"),
+            ("export OPENAI_API_KEY=sk-proj-0123456789abcdef", "export OPENAI_API_KEY=[redacted]"),
+            ("TOKEN=xyz SECRET=abc PASSWORD=hunter2 DB_PASS=x", "TOKEN=[redacted] SECRET=[redacted] PASSWORD=[redacted] DB_PASS=x"),
+            ("-H \"X-Api-Key: 12345\"", "-H \"X-Api-Key: [redacted]\""),
+            ("git push https://user:ghp_secret@github.com/a/b", "git push https://[redacted]@github.com/a/b"),
+            ("token ghp_abcdefghijklmnopqrstuvwxyz0123", "token [redacted]"),
+            ("use github_pat_11ABCDEFG0123456789_abc and xoxb-1234-5678-abcd", "use [redacted] and [redacted]"),
+            ("aws AKIAIOSFODNN7EXAMPLE ok", "aws [redacted] ok"),
+            ("blob 3q2+7wQ9aZKxYv8mN1pL0sR4tU6wX8yZ== end", "blob [redacted] end"),
+            ("sha 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b", "sha [redacted]"),
+            ("mysql -u root --password s3cr3t db", "mysql -u root --password [redacted] db"),
+        ] {
+            assert_eq!(scrub_secrets(input), want, "{input}");
+        }
+        // Ordinary text stays as it is.
+        for keep in [
+            "fix the failing test in repo api",
+            "Run cargo build --release",
+            "C:\\work\\ai-pet\\src\\main.rs: line 12",
+            "see https://docs.rs/serde and gpt-6-luna",
+            "sk-learn is a library",
+            "the key insight: keep it simple",
+        ] {
+            assert_eq!(scrub_secrets(keep), keep);
+        }
     }
 
     #[test]

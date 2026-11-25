@@ -1,10 +1,15 @@
 // Settings sections that are not in config.toml: This machine (its name, via update_machine), Notifications and
-// the pet strip (desktop preferences kept per machine), and This app (hub process, setup, quit).
+// the pet on screen (desktop preferences kept per machine), and This app (hub process, setup, quit).
 import { useEffect, useRef, useState } from "react";
-import { MACHINE_NAME_MAX, OS_LABEL, checkMachineName, renameErrorText, trimWhiteSpace } from "@pawl/hub-client";
+import { MACHINE_NAME_MAX, OS_LABEL, PET_NAME_MAX, checkMachineName, renameErrorText, trimWhiteSpace } from "@pawl/hub-client";
+import { SPECIES_LIST, SPECIES_META } from "@pawl/pet-engine";
+import type { Species } from "@pawl/protocol";
 import { isTauri, native, onNative, type HubCredentials } from "../../../lib/native";
 import { notify } from "../../../lib/notifications";
+import { PET_ANIMATION_LABEL, type PetAnimationMode } from "../../../lib/petMotion";
+import { checkDefaultPetName, PETS_ON_SCREEN_LABEL, type PetsOnScreen } from "../../../lib/petScreen";
 import { useSettings, type DesktopSettings } from "../../../lib/settings";
+import { renameDefaultPet, useDefaultPetName } from "../../../lib/usePetName";
 import { usePanel } from "../../context";
 import { SettingsSection, Toggle } from "./shared";
 
@@ -144,7 +149,8 @@ export function NotificationsSection() {
   );
 }
 
-export function StripSection() {
+/** The pets on screen: the default pet (its name and species), how many pets show, their size, and where they are. */
+export function PetSection() {
   const { meta, toast } = usePanel();
   const [settings, setSettings] = useSettings();
   const [paused, setPaused] = useState(false);
@@ -154,22 +160,172 @@ export function StripSection() {
     return onNative("pets-paused", setPaused);
   }, [meta.phase]);
   return (
-    <SettingsSection id="strip" title="On the strip" description="The pets walking above your taskbar.">
-      <Toggle
-        label="Pause pets"
-        hint="Hide the strip above the taskbar. Notifications keep coming."
-        checked={paused}
-        onChange={() => native.setPetsPaused(!paused).catch((err) => toast(String(err), "error"))}
-        disabled={!isTauri}
-      />
-      <Toggle label="Show pet names" hint="A name tag under every pet on the strip." checked={settings.showPetNames} onChange={() => setSettings({ showPetNames: !settings.showPetNames })} />
+    <SettingsSection
+      id="pet"
+      title="Pet on screen"
+      description="Your default pet keeps an eye on every agent on every machine. Drag it anywhere, click it to chat, right-click it to open the hub."
+    >
+      <DefaultPetForm />
+      <fieldset className="field choice-group">
+        <legend className="field-label">Pets on screen</legend>
+        {(Object.keys(PETS_ON_SCREEN_LABEL) as PetsOnScreen[]).map((value) => (
+          <label key={value} className="choice">
+            <input type="radio" name="pets-on-screen" value={value} checked={settings.petsOnScreen === value} onChange={() => setSettings({ petsOnScreen: value })} />
+            <span className="choice-text">
+              <strong>{PETS_ON_SCREEN_LABEL[value]}</strong>
+              <span className="hint">
+                {value === "default"
+                  ? "One pet that shows what matters most: an approval, then running work, then naps."
+                  : "Plus a small pet beside it for every session that is running or needs you, with its own chat."}
+              </span>
+            </span>
+          </label>
+        ))}
+      </fieldset>
+      <fieldset className="field choice-group">
+        <legend className="field-label">Pet animation</legend>
+        {(Object.keys(PET_ANIMATION_LABEL) as PetAnimationMode[]).map((value) => (
+          <label key={value} className="choice">
+            <input type="radio" name="pet-animation" value={value} checked={settings.petAnimation === value} onChange={() => setSettings({ petAnimation: value })} />
+            <span className="choice-text">
+              <strong>{PET_ANIMATION_LABEL[value]}</strong>
+              <span className="hint">
+                {value === "chat"
+                  ? "Pets stay still. They move only while you chat with them in their bubble; approvals show as a badge and the bubble opens."
+                  : "Pets act out what the agents are doing: thinking, digging, barking for approvals, napping."}
+              </span>
+            </span>
+          </label>
+        ))}
+        <span className="hint">With “reduce motion” on in your system settings, pets always stay still.</span>
+      </fieldset>
+      <Toggle label="Show pet names" hint="A name tag under every pet on screen." checked={settings.showPetNames} onChange={() => setSettings({ showPetNames: !settings.showPetNames })} />
       <label className="field">
         <span className="field-label">
           Pet size <span className="muted">{settings.petSize}px</span>
         </span>
         <input type="range" min={72} max={168} step={8} value={settings.petSize} onChange={(e) => setSettings({ petSize: Number(e.target.value) })} />
       </label>
+      <Toggle
+        label="Pause pets"
+        hint="Hide the pets. Notifications keep coming."
+        checked={paused}
+        onChange={() => native.setPetsPaused(!paused).catch((err) => toast(String(err), "error"))}
+        disabled={!isTauri}
+      />
+      <div className="form-actions">
+        <button
+          className="pill"
+          disabled={!isTauri}
+          onClick={() =>
+            native
+              .resetPetPosition()
+              .then(() => toast("The pet is back in the bottom-right corner."))
+              .catch((err) => toast(String(err), "error"))
+          }
+        >
+          Reset pet position
+        </button>
+        <span className="hint">Back to the bottom-right corner of your main screen.</span>
+      </div>
     </SettingsSection>
+  );
+}
+
+/**
+ * The default pet's name (the hub's `bot.petName`: the same on every window and machine, checked like every pet name
+ * and then by the hub) and species (kept on this machine).
+ */
+function DefaultPetForm() {
+  const { client, state, meta, toast } = usePanel();
+  const [settings, setSettings] = useSettings();
+  const { name, canRename } = useDefaultPetName(client, state, meta.phase === "connected");
+  const [draft, setDraft] = useState(name);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const saved = useRef(name);
+  useEffect(() => {
+    const prev = saved.current;
+    saved.current = name;
+    setDraft((d) => (d === prev ? name : d));
+  }, [name]);
+
+  const check = checkDefaultPetName(draft, Object.values(state.pets));
+  const dirty = check.ok ? check.name !== name : true;
+  const liveError = !check.ok && draft.trim().length > 0 ? check.error : null;
+  const shown = error ?? liveError;
+  const save = async () => {
+    if (saving) return;
+    setSaving(true);
+    const res = await renameDefaultPet(client, state, draft);
+    setSaving(false);
+    if (!res.ok) {
+      setError(res.error);
+      return;
+    }
+    setError(null);
+    setDraft(res.name);
+    if (res.name !== name) toast(`Your default pet is now “${res.name}”`);
+  };
+
+  return (
+    <div className="default-pet-form">
+      <form
+        className="field"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void save();
+        }}
+      >
+        <label className="field-label" htmlFor="default-pet-name">
+          Default pet name
+        </label>
+        <span className="machine-name-row">
+          <input
+            id="default-pet-name"
+            className={`input${shown ? " is-invalid" : ""}`}
+            value={draft}
+            disabled={!canRename || saving}
+            aria-invalid={shown ? true : undefined}
+            aria-describedby="default-pet-name-note"
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setDraft(name);
+                setError(null);
+              }
+            }}
+          />
+          <button className="pill pill-primary" type="submit" disabled={!dirty || !canRename || saving}>
+            {saving ? "Saving…" : "Rename"}
+          </button>
+        </span>
+        {shown ? (
+          <span className="field-error" id="default-pet-name-note" role="alert">
+            {shown}
+          </span>
+        ) : (
+          <span className="hint" id="default-pet-name-note">
+            {canRename
+              ? `1–${PET_NAME_MAX} characters, not the name of another pet. Saved in the hub, so every window shows it.`
+              : "Renaming needs the hub to be running."}
+          </span>
+        )}
+      </form>
+      <label className="field">
+        <span className="field-label">Species</span>
+        <select className="input select" value={settings.defaultPetSpecies} onChange={(e) => setSettings({ defaultPetSpecies: e.target.value as Species })}>
+          {SPECIES_LIST.map((sp) => (
+            <option key={sp} value={sp}>
+              {SPECIES_META[sp].emoji} {SPECIES_META[sp].label}
+            </option>
+          ))}
+        </select>
+      </label>
+    </div>
   );
 }
 

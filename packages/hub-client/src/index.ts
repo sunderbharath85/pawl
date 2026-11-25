@@ -15,6 +15,7 @@ export {
 } from "./client";
 export {
   PROPOSAL_TTL_MS,
+  MAX_LEDGER_ENTRIES,
   ProposalLedger,
   proposalConfirmText,
   proposalDoneText,
@@ -23,6 +24,7 @@ export {
   proposalRetryable,
   repoIndexHas,
   type ProposalEntry,
+  type ProposalLedgerStore,
 } from "./proposals";
 export {
   approveOptionId,
@@ -143,6 +145,7 @@ export {
   checkWholeNumber,
   CUSTOM_AGENT_ID_RE,
   CUSTOM_AGENTS_MAX,
+  defaultAgentOptions,
   editableSettings,
   fieldIndex,
   fieldMatches,
@@ -156,7 +159,20 @@ export {
   hookLabel,
   hookRemovable,
   hookRemoveConfirm,
+  BOT_PROVIDER_LABEL,
+  BOT_STYLE_LABEL,
+  BOT_STYLES,
+  isBotStyle,
+  botProviderLabel,
+  BOT_PROVIDERS,
   broadFolderReason,
+  CLOUD_KEYS,
+  ACP_BOT_AGENTS,
+  botProviderNow,
+  cloudPrivacyText,
+  cloudProviderInUse,
+  type BotProviderNow,
+  isBotProvider,
   broadFolderWarning,
   isAbsolutePath,
   isBroadFolder,
@@ -184,6 +200,7 @@ export {
   settingsFieldLabel,
   settingsPatch,
   type CustomAgentProblems,
+  type DefaultAgentOption,
   type EditableSettings,
   type FieldProblem,
   type RiskContext,
@@ -191,5 +208,29 @@ export {
   type SecretKey,
   type SettingsFieldError,
 } from "./settings";
+export { cleanTitle, folderName, parsePrompt, TITLE_MAX, type ParsedPrompt, type PromptAttachment, type PromptNotice } from "./injected";
+export {
+  clipCode,
+  groupWork,
+  hookPlace,
+  languageOfPath,
+  OUTPUT_MAX_CHARS,
+  OUTPUT_MAX_LINES,
+  relativePath,
+  requestCommandText,
+  requestInputCode,
+  reuseBlocks,
+  reuseItems,
+  sameItem,
+  toTranscript,
+  workSummary,
+  type CodeText,
+  type NoticeTone,
+  type ToolItem,
+  type ToolStatus,
+  type TranscriptBlock,
+  type TranscriptItem,
+  type WorkBlock,
+} from "./transcript";
 export { DEFAULT_HUB_HTTP_URL, DEFAULT_HUB_WS_URL, toHubHttpUrl, toHubWsUrl } from "./url";
 export { fetchHubHealth, type HubHealth } from "./health";

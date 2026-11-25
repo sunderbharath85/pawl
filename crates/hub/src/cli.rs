@@ -962,10 +962,7 @@ async fn run_settings(paths: &Paths, port_flag: Option<u16>, as_json: bool) -> R
         }
         None => {
             let cfg = HubConfig::load(paths)?;
-            let overrides = crate::settings::Overrides {
-                keys: Default::default(),
-                env_anthropic_key: std::env::var(config::ENV_ANTHROPIC_KEY).is_ok_and(|k| !k.trim().is_empty()),
-            };
+            let overrides = crate::settings::Overrides::with_env(Default::default());
             (crate::settings::to_settings(&cfg, &overrides), Vec::new(), paths.config.display().to_string(), None)
         }
     };

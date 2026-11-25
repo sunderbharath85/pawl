@@ -83,10 +83,29 @@ fn rule(id: &str, tool_kind: Option<ToolKind>, path: Option<&str>, action: RuleA
     }
 }
 
-/// Safe defaults: auto-allow read/search inside the session cwd (`{cwd}/**`) and think;
-/// ask for edit/move/delete/execute/fetch/switch_mode/other. Sensitive paths are guarded
-/// in code (see [`is_sensitive_path`]), not by rules.
+/// Safe defaults: ask for everything an agent does (read and search included: allowing is the user's
+/// choice, e.g. "Always allow" on a request or a rule of their own), except think, which has no side
+/// effects (no file, process or network access) and stays automatic. Sensitive paths are guarded in code
+/// (see [`is_sensitive_path`]), not by rules.
 pub fn default_rules() -> Vec<Rule> {
+    use RuleAction::{Ask, AutoAllow};
+    vec![
+        rule("default-read", Some(ToolKind::Read), None, Ask),
+        rule("default-search", Some(ToolKind::Search), None, Ask),
+        rule("default-think", Some(ToolKind::Think), None, AutoAllow),
+        rule("default-edit", Some(ToolKind::Edit), None, Ask),
+        rule("default-move", Some(ToolKind::Move), None, Ask),
+        rule("default-delete", Some(ToolKind::Delete), None, Ask),
+        rule("default-execute", Some(ToolKind::Execute), None, Ask),
+        rule("default-fetch", Some(ToolKind::Fetch), None, Ask),
+        rule("default-switch-mode", Some(ToolKind::SwitchMode), None, Ask),
+        rule("default-other", Some(ToolKind::Other), None, Ask),
+    ]
+}
+
+/// The defaults before reads asked: read and search inside the session cwd were automatic. Kept only to
+/// recognise a stored copy nobody customised (the hub then moves it to [`default_rules`] once).
+pub fn legacy_default_rules() -> Vec<Rule> {
     use RuleAction::{Ask, AutoAllow};
     vec![
         rule("default-read", Some(ToolKind::Read), Some("{cwd}/**"), AutoAllow),
@@ -537,24 +556,26 @@ mod tests {
         }
     }
 
+    /// Path scoping is tested with the old cwd-scoped read/search rules (a rule a user can still write).
     fn read_in(cwd: Option<&str>, paths: &[&str]) -> RuleAction {
-        evaluate_in(&default_rules(), &req(Some(ToolKind::Read), paths), cwd)
+        evaluate_in(&legacy_default_rules(), &req(Some(ToolKind::Read), paths), cwd)
     }
 
     #[test]
-    fn defaults_auto_allow_only_safe_reads_inside_cwd() {
+    fn defaults_ask_for_everything_but_think() {
         let rules = default_rules();
         for kind in ALL_KINDS {
             let got = evaluate_in(&rules, &req(Some(kind), &["/work/repo/src/main.rs"]), CWD);
-            let want = if matches!(kind, ToolKind::Read | ToolKind::Search | ToolKind::Think) {
-                RuleAction::AutoAllow
-            } else {
-                RuleAction::Ask
-            };
+            let want = if kind == ToolKind::Think { RuleAction::AutoAllow } else { RuleAction::Ask };
             assert_eq!(got, want, "kind {kind:?}");
         }
+        // Reads and searches ask inside the cwd too.
+        assert_eq!(evaluate_in(&rules, &req(Some(ToolKind::Read), &["/work/repo/README.md"]), CWD), RuleAction::Ask);
+        assert_eq!(evaluate_in(&rules, &req(Some(ToolKind::Search), &["/work/repo/src"]), CWD), RuleAction::Ask);
         assert_eq!(evaluate_in(&rules, &req(Some(ToolKind::Think), &[]), CWD), RuleAction::AutoAllow);
         assert_eq!(evaluate_in(&rules, &req(None, &[]), CWD), RuleAction::Ask);
+        assert!(validate_rules(&rules).is_ok() && validate_rules(&legacy_default_rules()).is_ok());
+        assert_ne!(rules, legacy_default_rules());
     }
 
     #[test]
@@ -578,9 +599,9 @@ mod tests {
         assert_eq!(read_in(None, &["/work/repo/a.rs"]), RuleAction::Ask);
         assert_eq!(read_in(Some(""), &["/work/repo/a.rs"]), RuleAction::Ask);
         assert_eq!(read_in(Some("relative/dir"), &["relative/dir/a.rs"]), RuleAction::Ask);
-        assert_eq!(evaluate(&default_rules(), &req(Some(ToolKind::Read), &["/work/repo/a.rs"])), RuleAction::Ask);
+        assert_eq!(evaluate(&legacy_default_rules(), &req(Some(ToolKind::Read), &["/work/repo/a.rs"])), RuleAction::Ask);
         // Search follows the same scope.
-        let rules = default_rules();
+        let rules = legacy_default_rules();
         assert_eq!(evaluate_in(&rules, &req(Some(ToolKind::Search), &["/work/repo/src"]), CWD), RuleAction::AutoAllow);
         assert_eq!(evaluate_in(&rules, &req(Some(ToolKind::Search), &["/home/me"]), CWD), RuleAction::Ask);
         assert_eq!(evaluate_in(&rules, &req(Some(ToolKind::Search), &[]), CWD), RuleAction::Ask);
@@ -890,7 +911,8 @@ mod tests {
 
     #[test]
     fn raw_input_paths_are_checked() {
-        let rules = default_rules();
+        // Paths from raw input count for a cwd-scoped rule (the old defaults are one).
+        let rules = legacy_default_rules();
         let mut r = req(Some(ToolKind::Read), &[]);
         r.tool_call.raw_input = Some(json!({ "file_path": "/home/me/project/.env" }));
         assert_eq!(request_paths(&r), vec!["/home/me/project/.env".to_string()]);

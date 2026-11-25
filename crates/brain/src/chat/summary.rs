@@ -33,7 +33,49 @@ pub(crate) struct SessionFacts {
     /// The latest decision made on another machine: ("approved" | "denied" | "answered", machine id).
     pub last_remote_decision: Option<(&'static str, String)>,
     pub errors: usize,
+    /// The latest hook event in words ("finished its turn", "used Bash: ls"), never a raw hook name.
     pub last_hook: Option<String>,
+    /// The latest hook says the agent waits in its own terminal ("waiting for you in the terminal").
+    pub hook_waiting: Option<&'static str>,
+}
+
+/// A hook notification's type: the payload's `notification_type`, else a `snake_case:` prefix of the message.
+fn notification_type(h: &HookPayload) -> Option<String> {
+    let raw = h.raw.get("notification_type").or_else(|| h.raw.get("notificationType")).and_then(Value::as_str);
+    if let Some(t) = raw {
+        return Some(t.to_ascii_lowercase());
+    }
+    let m = h.message.as_deref()?.trim();
+    let (head, _) = m.split_once(':')?;
+    (head.len() <= 40 && head.chars().all(|c| c.is_ascii_lowercase() || c == '_')).then(|| head.to_string())
+}
+
+/// The message of a hook without a leading `snake_case:` type token.
+fn hook_message(h: &HookPayload) -> Option<String> {
+    let m = h.message.as_deref()?.trim();
+    let m = match m.split_once(':') {
+        Some((head, rest)) if !head.is_empty() && head.chars().all(|c| c.is_ascii_lowercase() || c == '_') => rest.trim(),
+        _ => m,
+    };
+    (!m.is_empty()).then(|| truncate(&one_line(m), 100))
+}
+
+/// (what the latest hook says happened, whether it says the agent waits in its terminal).
+fn humanize_hook(h: &HookPayload) -> (Option<String>, Option<&'static str>) {
+    let ev = h.hook_event.to_ascii_lowercase().replace(['_', '-'], "");
+    match ev.as_str() {
+        "notification" => match notification_type(h).as_deref() {
+            Some("idle_prompt" | "agent_idle") => (Some("waited for you in the terminal".into()), Some("waiting for you in the terminal")),
+            Some("permission_prompt") => (Some("asked for your OK in the terminal".into()), Some("waiting for your OK in the terminal")),
+            _ => (hook_message(h).map(|m| format!("said: “{m}”")), None),
+        },
+        "stop" | "subagentstop" | "agentturncomplete" => (Some("finished its turn".into()), None),
+        "sessionstart" => (Some("started".into()), None),
+        "sessionend" => (Some("ended".into()), None),
+        "userpromptsubmit" | "userpromptsubmitted" => (Some("got a new prompt".into()), None),
+        "pretooluse" | "posttooluse" | "pretooluseevent" => (hook_message(h).map(|m| format!("used {m}")), None),
+        _ => (hook_message(h).map(|m| format!("said: “{m}”")), None),
+    }
 }
 
 /// Events of one session, oldest first.
@@ -191,10 +233,9 @@ pub(crate) fn facts(events: &[&HubEvent]) -> SessionFacts {
             }
             EventType::Hook => {
                 if let Ok(h) = serde_json::from_value::<HookPayload>(p.clone()) {
-                    f.last_hook = Some(match h.message.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
-                        Some(m) => format!("{}: {}", h.hook_event, truncate(&one_line(m), 100)),
-                        None => h.hook_event,
-                    });
+                    let (said, waiting) = humanize_hook(&h);
+                    f.last_hook = said;
+                    f.hook_waiting = waiting;
                 }
             }
             EventType::SessionStart | EventType::SessionEnd | EventType::Notification => {}
@@ -254,13 +295,18 @@ pub(crate) fn deterministic_summary(
 ) -> String {
     let agent = agent_name(&session.agent_id, agents);
     let mut out = format!("{agent}{} in {}", machines.on(&session.machine_id), basename(&session.cwd));
-    if let Some(t) = session.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+    // A placeholder title ("Claude Code in ai-pet", "Pasted text") says nothing the line does not.
+    let placeholder = |t: &str| t == agent || t == "Pasted text" || t == format!("{agent} in {}", basename(&session.cwd));
+    if let Some(t) = session.title.as_deref().map(str::trim).filter(|t| !t.is_empty() && !placeholder(t)) {
         out.push_str(&format!(" (“{}”)", truncate(&one_line(t), 48)));
     }
     let phrase = if let Some(end) = session.ended_at {
         format!("finished; the session ended {}", ago(end, now))
     } else {
         match session.status {
+            SessionStatus::Idle | SessionStatus::Done if facts.hook_waiting.is_some() => {
+                facts.hook_waiting.unwrap_or_default().to_string()
+            }
             SessionStatus::Idle => "idle and ready for a task".to_string(),
             SessionStatus::Thinking => "thinking it over".to_string(),
             SessionStatus::Working => match &facts.last_tool {
@@ -298,8 +344,8 @@ pub(crate) fn deterministic_summary(
         if let Some(t) = &facts.last_thought {
             out.push_str(&format!(" Thinking: “{}”", truncate(&one_line(t), 90)));
         }
-    } else if let Some(h) = &facts.last_hook {
-        out.push_str(&format!(" Last hook: {h}."));
+    } else if let Some(h) = facts.last_hook.as_ref().filter(|_| facts.hook_waiting.is_none()) {
+        out.push_str(&format!(" Most recently it {h}."));
     }
     if let Some((done, total, next)) = &facts.plan {
         if *total > 0 {

@@ -26,7 +26,23 @@ import {
 
 const s: HubSettings = {
   hub: { port: 47800, offline: false, hookSessionStaleHours: 12, ownedSessionIdleHours: 12, eventRetentionDays: 30, dailyReportTime: "18:00" },
-  bot: { model: "claude-haiku-5-5", anthropicApiKeySet: true, ollamaUrl: null, ollamaModel: null },
+  bot: {
+    model: "claude-haiku-5-5",
+    anthropicApiKeySet: true,
+    ollamaUrl: null,
+    ollamaModel: null,
+    defaultAgent: null,
+    provider: "auto",
+    openaiApiKeySet: false,
+    openaiModel: "openai-small",
+    geminiApiKeySet: false,
+    geminiModel: "gemini-flash",
+    acpAgent: "claude-code",
+    acpModel: "sonnet",
+    understand: false,
+    style: "plain",
+    petName: "Biscuit",
+  },
   watchdog: { waitingNudgeAfterMs: 300_000, repeatEveryMs: 600_000, tickSecs: 30 },
   peer: { listen: null, acceptIntents: true, acceptRosterIntros: true, startRoots: ["E:/work"] },
   repos: { paths: ["E:/work/api"] },
@@ -87,13 +103,41 @@ describe("bot form", () => {
     const withOllama = { ...s, bot: { ...s.bot, ollamaUrl: "http://x:1", ollamaModel: "m" } };
     expect(botPatch({ ...botForm(withOllama), ollamaUrl: "", ollamaModel: "" }, withOllama).patch).toEqual({ bot: { ollamaUrl: null, ollamaModel: null } });
   });
+  test("default agent: \"\" is Automatic (null); a hub without the setting never gets it", () => {
+    expect(botForm(s).defaultAgent).toBe("");
+    expect(botPatch({ ...botForm(s), defaultAgent: "codex" }, s).patch).toEqual({ bot: { defaultAgent: "codex" } });
+    const picked = { ...s, bot: { ...s.bot, defaultAgent: "codex" } };
+    expect(botForm(picked).defaultAgent).toBe("codex");
+    expect(botPatch({ ...botForm(picked), defaultAgent: "" }, picked).patch).toEqual({ bot: { defaultAgent: null } });
+    const old = { ...s, bot: { model: "m", anthropicApiKeySet: false, ollamaUrl: null, ollamaModel: null } } as unknown as typeof s;
+    expect(botForm(old).defaultAgent).toBeNull();
+    expect(botPatch(botForm(old), old).patch).toEqual({});
+  });
   test("the secret never appears in the form or the patch", () => {
     expect(JSON.stringify(botForm(s))).not.toContain("anthropic");
     expect(botPatch({ ...botForm(s), model: "claude-sonnet-5-5" }, s).patch).toEqual({ bot: { model: "claude-sonnet-5-5" } });
   });
   test("errors", () => {
-    const r = botPatch({ model: "", ollamaUrl: "localhost:11434", ollamaModel: "a b" }, s);
-    expect(Object.keys(r.errors).sort()).toEqual(["bot.model", "bot.ollamaModel", "bot.ollamaUrl"]);
+    const r = botPatch({ ...botForm(s), model: "", ollamaUrl: "localhost:11434", ollamaModel: "a b", defaultAgent: "", openaiModel: "gpt 5" }, s);
+    expect(Object.keys(r.errors).sort()).toEqual(["bot.model", "bot.ollamaModel", "bot.ollamaUrl", "bot.openaiModel"]);
+    const acp = botPatch({ ...botForm(s), provider: "acp", acpAgent: " " }, s);
+    expect(Object.keys(acp.errors)).toEqual(["bot.acpAgent"]);
+    // Only Claude Code over ACP for now.
+    expect(botPatch({ ...botForm(s), provider: "acp", acpAgent: "codex" }, s).errors).toEqual({ "bot.acpAgent": "Only Claude Code can think for your pet for now." });
+    expect(botPatch({ ...botForm(s), provider: "acp", acpAgent: "claude-code" }, s).errors).toEqual({});
+  });
+  test("provider, models, understand and the ACP agent: only changes are sent; an older hub hides them", () => {
+    const f = botForm(s);
+    expect(f).toMatchObject({ provider: "auto", openaiModel: "openai-small", geminiModel: "gemini-flash", understand: false, acpAgent: "claude-code", acpModel: "sonnet" });
+    expect(botPatch(f, s).patch).toEqual({});
+    expect(botPatch({ ...f, provider: "acp", acpModel: " opus ", understand: true }, s).patch).toEqual({ bot: { provider: "acp", acpModel: "opus", understand: true } });
+    expect(botPatch({ ...f, provider: "openai", openaiModel: "gpt-5-mini" }, s).patch).toEqual({ bot: { provider: "openai", openaiModel: "gpt-5-mini" } });
+    expect(f.style).toBe("plain");
+    expect(botPatch({ ...f, style: "playful" }, s).patch).toEqual({ bot: { style: "playful" } });
+    const old = { ...s, bot: { model: "m", anthropicApiKeySet: false, ollamaUrl: null, ollamaModel: null, defaultAgent: null } } as unknown as typeof s;
+    const of = botForm(old);
+    expect(of).toMatchObject({ provider: null, openaiModel: null, understand: null, acpAgent: null, style: null });
+    expect(botPatch(of, old).patch).toEqual({});
   });
 });
 

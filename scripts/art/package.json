@@ -8,6 +8,7 @@
   "scripts": {
     "generate": "bun run generate.ts",
     "process": "bun run process.ts",
+    "icons": "bun run icons.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

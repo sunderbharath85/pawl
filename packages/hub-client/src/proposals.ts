@@ -1,6 +1,6 @@
-// Chat proposals (PLAN.md migration step 5): commands the bot understood for another machine's agent. The
-// bot never runs them; the user confirms on this device and the client sends the ordinary start_session /
-// prompt ClientMsg (step-4 rules apply). Pure helpers plus a tiny single-use ledger.
+// Chat proposals (PLAN.md migration step 5): commands the bot understood for an agent, on another machine or (when
+// no agent was named) on this one. The bot never runs them; the user confirms on this device and the client sends
+// the ordinary start_session / prompt ClientMsg (step-4 rules apply). Pure helpers plus a tiny single-use ledger.
 import { MACHINE_ID_RE, parseGlobalId, type ChatMessage, type ChatProposal, type MachineOs, type RepoRef } from "@pawl/protocol";
 import { isAlreadyDecided } from "./intents";
 import { machineDisplayName } from "./machine";
@@ -14,15 +14,14 @@ export function proposalExpired(message: Pick<ChatMessage, "ts">, now: number): 
 }
 
 /**
- * Why a proposal can't be executed as given, or null: malformed, a start aimed at this machine (`ownMachineId`;
- * local starts are never proposals, the hub runs them itself), or a prompt aimed at another machine's session than
- * it names. The hubs validate again; this refuses nonsense before sending.
+ * Why a proposal can't be executed as given, or null: malformed, or a prompt aimed at another machine's session than
+ * it names. A proposal may target this machine (the bot proposes agent-less commands for it too). The hubs validate
+ * again; this refuses nonsense before sending.
  */
-export function proposalProblem(p: ChatProposal, ownMachineId?: string): string | null {
+export function proposalProblem(p: ChatProposal): string | null {
   if (!MACHINE_ID_RE.test(p.machineId ?? "")) return "it names no valid machine";
   if (!p.agentId) return "it names no agent";
   if (p.kind === "start") {
-    if (ownMachineId !== undefined && p.machineId === ownMachineId) return "it targets this machine (local starts are not proposals)";
     return p.cwd?.trim() ? null : "it names no folder";
   }
   if (p.kind === "prompt") {
@@ -46,15 +45,21 @@ export function repoIndexHas(repos: readonly RepoRef[], cwd: string, os?: Machin
   return key !== "" && repos.some((r) => folderKey(r.path, os) === key);
 }
 
+/** "this machine" for this hub's own machine, else its name ("that machine" when unknown). */
+function proposalMachineName(state: Pick<HubState, "machine" | "machines">, p: ChatProposal): string {
+  if (state.machine?.id && p.machineId === state.machine.id) return "this machine";
+  return state.machines[p.machineId] ? machineDisplayName(state.machines[p.machineId]) : "that machine";
+}
+
 /** Confirm-step wording: machine name first, one go-ahead button. */
 export function proposalConfirmText(state: Pick<HubState, "machine" | "machines">, p: ChatProposal): { title: string; detail: string; button: string } {
-  const name = state.machines[p.machineId] ? machineDisplayName(state.machines[p.machineId]) : "that machine";
+  const name = proposalMachineName(state, p);
   return { title: `Run on ${name}?`, detail: p.summary, button: `Run on ${name}` };
 }
 
 /** Text for a proposal that went through. */
-export function proposalDoneText(state: Pick<HubState, "machines">, p: ChatProposal): string {
-  const name = state.machines[p.machineId] ? machineDisplayName(state.machines[p.machineId]) : "that machine";
+export function proposalDoneText(state: Pick<HubState, "machine" | "machines">, p: ChatProposal): string {
+  const name = proposalMachineName(state, p);
   return p.kind === "start" ? `Started on ${name}.` : `Sent to ${name}.`;
 }
 
@@ -81,6 +86,27 @@ export class ProposalLedger {
   private readonly listeners = new Set<() => void>();
   private version = 0;
 
+  /**
+   * `store` shares the ledger between windows of one app (e.g. localStorage): entries are read from it before every
+   * claim and written after every change, so a proposal used in one window is used in all of them.
+   */
+  constructor(private readonly store?: ProposalLedgerStore) {
+    this.reload();
+  }
+
+  /** Re-read the store (another window changed it); notifies subscribers when something changed. */
+  reload(): void {
+    if (!this.store) return;
+    const list = this.store.load();
+    if (!list) return;
+    const next = new Map(list.slice(-MAX_LEDGER_ENTRIES));
+    const same = next.size === this.entries.size && [...next].every(([k, v]) => JSON.stringify(this.entries.get(k)) === JSON.stringify(v));
+    if (same) return;
+    this.entries.clear();
+    for (const [k, v] of next) this.entries.set(k, v);
+    this.bump();
+  }
+
   get(messageId: string): ProposalEntry | undefined {
     return this.entries.get(messageId);
   }
@@ -91,8 +117,9 @@ export class ProposalLedger {
     return !e || (e.status === "failed" && e.retryable);
   }
 
-  /** Claim the message for `proposalId`; false if one of its proposals already ran or is running. */
+  /** Claim the message for `proposalId`; false if one of its proposals already ran or is running (in any window). */
   begin(messageId: string, proposalId: string): boolean {
+    this.reload();
     if (!this.available(messageId)) return false;
     this.set(messageId, { status: "running", proposalId });
     return true;
@@ -117,13 +144,31 @@ export class ProposalLedger {
   };
 
   private set(messageId: string, entry: ProposalEntry): void {
+    // Newest last (the store keeps the order, and the oldest go first).
+    this.entries.delete(messageId);
     this.entries.set(messageId, entry);
     // Keep the ledger small: proposals expire after PROPOSAL_TTL_MS anyway.
-    if (this.entries.size > 200) {
+    while (this.entries.size > MAX_LEDGER_ENTRIES) {
       const first = this.entries.keys().next().value;
-      if (first !== undefined) this.entries.delete(first);
+      if (first === undefined) break;
+      this.entries.delete(first);
     }
+    this.store?.save([...this.entries]);
+    this.bump();
+  }
+
+  private bump(): void {
     this.version++;
     for (const fn of [...this.listeners]) fn();
   }
+}
+
+/** Entries a ledger keeps (oldest dropped first). */
+export const MAX_LEDGER_ENTRIES = 200;
+
+/** Where a shared ledger keeps its entries (message id → entry, oldest first). */
+export interface ProposalLedgerStore {
+  /** Null when nothing is stored (or it is unreadable). */
+  load(): Array<[string, ProposalEntry]> | null;
+  save(entries: Array<[string, ProposalEntry]>): void;
 }

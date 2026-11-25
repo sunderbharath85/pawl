@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use pawl_discovery::CustomAgent;
 use pawl_protocol::{
-    CustomAgentSetting, HubSettings, HubSettingsBot, HubSettingsHub, HubSettingsPatch, HubSettingsPeer, HubSettingsRelay,
+    BotProvider, BotStyle, CustomAgentSetting, HubSettings, HubSettingsBot, HubSettingsHub, HubSettingsPatch, HubSettingsPeer, HubSettingsRelay,
     HubSettingsRepos, HubSettingsWatchdog,
 };
 use toml_edit::{DocumentMut, Item, TableLike, Value as TVal};
@@ -35,6 +35,17 @@ pub const BOT_MODEL: &str = "bot.model";
 pub const BOT_KEY: &str = "bot.anthropicApiKey";
 pub const BOT_OLLAMA_URL: &str = "bot.ollamaUrl";
 pub const BOT_OLLAMA_MODEL: &str = "bot.ollamaModel";
+pub const BOT_DEFAULT_AGENT: &str = "bot.defaultAgent";
+pub const BOT_PROVIDER: &str = "bot.provider";
+pub const BOT_OPENAI_KEY: &str = "bot.openaiApiKey";
+pub const BOT_OPENAI_MODEL: &str = "bot.openaiModel";
+pub const BOT_GEMINI_KEY: &str = "bot.geminiApiKey";
+pub const BOT_GEMINI_MODEL: &str = "bot.geminiModel";
+pub const BOT_ACP_AGENT: &str = "bot.acpAgent";
+pub const BOT_ACP_MODEL: &str = "bot.acpModel";
+pub const BOT_UNDERSTAND: &str = "bot.understand";
+pub const BOT_STYLE: &str = "bot.style";
+pub const BOT_PET_NAME: &str = "bot.petName";
 pub const WD_NUDGE: &str = "watchdog.waitingNudgeAfterMs";
 pub const WD_REPEAT: &str = "watchdog.repeatEveryMs";
 pub const WD_TICK: &str = "watchdog.tickSecs";
@@ -59,6 +70,17 @@ pub const ALL_KEYS: &[&str] = &[
     BOT_KEY,
     BOT_OLLAMA_URL,
     BOT_OLLAMA_MODEL,
+    BOT_DEFAULT_AGENT,
+    BOT_PROVIDER,
+    BOT_OPENAI_KEY,
+    BOT_OPENAI_MODEL,
+    BOT_GEMINI_KEY,
+    BOT_GEMINI_MODEL,
+    BOT_ACP_AGENT,
+    BOT_ACP_MODEL,
+    BOT_UNDERSTAND,
+    BOT_STYLE,
+    BOT_PET_NAME,
     WD_NUDGE,
     WD_REPEAT,
     WD_TICK,
@@ -73,7 +95,24 @@ pub const ALL_KEYS: &[&str] = &[
 ];
 
 /// Keys holding secrets: reported as changed, never with a value.
-pub const SECRET_KEYS: &[&str] = &[BOT_KEY, RELAY_KEY];
+pub const SECRET_KEYS: &[&str] = &[BOT_KEY, BOT_OPENAI_KEY, BOT_GEMINI_KEY, RELAY_KEY];
+
+/// Settings that change which model the pet uses or how (the brain is rebuilt when one changes).
+pub const BRAIN_KEYS: &[&str] = &[
+    BOT_MODEL,
+    BOT_KEY,
+    BOT_OLLAMA_URL,
+    BOT_OLLAMA_MODEL,
+    BOT_PROVIDER,
+    BOT_OPENAI_KEY,
+    BOT_OPENAI_MODEL,
+    BOT_GEMINI_KEY,
+    BOT_GEMINI_MODEL,
+    BOT_ACP_AGENT,
+    BOT_ACP_MODEL,
+    BOT_UNDERSTAND,
+    BOT_STYLE,
+];
 
 /// Keys the running hub cannot apply: they take effect at the next start.
 pub const RESTART_KEYS: &[&str] = &[HUB_PORT];
@@ -121,6 +160,43 @@ pub struct Overrides {
     pub keys: BTreeMap<String, String>,
     /// `ANTHROPIC_API_KEY` is set: it is the bot's key while config.toml has none.
     pub env_anthropic_key: bool,
+    /// `OPENAI_API_KEY` is set (same rule).
+    pub env_openai_key: bool,
+    /// `GEMINI_API_KEY` is set (same rule).
+    pub env_gemini_key: bool,
+}
+
+impl Overrides {
+    /// `keys` plus which key env vars are set (their values are never read here).
+    pub fn with_env(keys: BTreeMap<String, String>) -> Self {
+        let set = |var: &str| std::env::var(var).is_ok_and(|k| !k.trim().is_empty());
+        Self {
+            keys,
+            env_anthropic_key: set(crate::config::ENV_ANTHROPIC_KEY),
+            env_openai_key: set(crate::config::ENV_OPENAI_KEY),
+            env_gemini_key: set(crate::config::ENV_GEMINI_KEY),
+        }
+    }
+}
+
+/// "auto", "openai", … as written in config.toml.
+pub fn provider_name(p: BotProvider) -> &'static str {
+    match p {
+        BotProvider::Auto => "auto",
+        BotProvider::Anthropic => "anthropic",
+        BotProvider::Openai => "openai",
+        BotProvider::Gemini => "gemini",
+        BotProvider::Ollama => "ollama",
+        BotProvider::Acp => "acp",
+    }
+}
+
+/// "plain" / "playful" as written in config.toml.
+pub fn style_name(s: BotStyle) -> &'static str {
+    match s {
+        BotStyle::Plain => "plain",
+        BotStyle::Playful => "playful",
+    }
 }
 
 fn nonblank(o: &Option<String>) -> Option<String> {
@@ -135,9 +211,17 @@ fn daily_report_text(cfg: &HubConfig) -> String {
 /// The `HubSettings` clients see for `cfg` (the running hub's effective config).
 pub fn to_settings(cfg: &HubConfig, overrides: &Overrides) -> HubSettings {
     let key_in_config = nonblank(&cfg.brain.anthropic_api_key).is_some();
+    let openai_in_config = nonblank(&cfg.brain.openai_api_key).is_some();
+    let gemini_in_config = nonblank(&cfg.brain.gemini_api_key).is_some();
     let mut overridden_by = overrides.keys.clone();
-    if !key_in_config && overrides.env_anthropic_key {
-        overridden_by.insert(BOT_KEY.to_string(), crate::config::ENV_ANTHROPIC_KEY.to_string());
+    for (in_config, env, key, var) in [
+        (key_in_config, overrides.env_anthropic_key, BOT_KEY, crate::config::ENV_ANTHROPIC_KEY),
+        (openai_in_config, overrides.env_openai_key, BOT_OPENAI_KEY, crate::config::ENV_OPENAI_KEY),
+        (gemini_in_config, overrides.env_gemini_key, BOT_GEMINI_KEY, crate::config::ENV_GEMINI_KEY),
+    ] {
+        if !in_config && env {
+            overridden_by.insert(key.to_string(), var.to_string());
+        }
     }
     HubSettings {
         hub: HubSettingsHub {
@@ -153,6 +237,17 @@ pub fn to_settings(cfg: &HubConfig, overrides: &Overrides) -> HubSettings {
             anthropic_api_key_set: key_in_config || overrides.env_anthropic_key,
             ollama_url: nonblank(&cfg.brain.ollama_url),
             ollama_model: nonblank(&cfg.brain.ollama_model),
+            default_agent: nonblank(&cfg.brain.default_agent),
+            provider: cfg.brain.provider,
+            openai_api_key_set: openai_in_config || overrides.env_openai_key,
+            openai_model: cfg.brain.effective_openai_model(),
+            gemini_api_key_set: gemini_in_config || overrides.env_gemini_key,
+            gemini_model: cfg.brain.effective_gemini_model(),
+            acp_agent: cfg.brain.effective_acp_agent(),
+            acp_model: cfg.brain.effective_acp_model(),
+            understand: cfg.brain.understand,
+            style: cfg.brain.style,
+            pet_name: nonblank(&cfg.brain.pet_name).unwrap_or_default(),
         },
         watchdog: HubSettingsWatchdog {
             waiting_nudge_after_ms: cfg.watchdog.waiting_nudge_after_ms,
@@ -192,6 +287,17 @@ pub fn changed_keys(a: &HubConfig, b: &HubConfig) -> Vec<&'static str> {
             BOT_KEY => nonblank(&a.brain.anthropic_api_key) != nonblank(&b.brain.anthropic_api_key),
             BOT_OLLAMA_URL => x.bot.ollama_url != y.bot.ollama_url,
             BOT_OLLAMA_MODEL => x.bot.ollama_model != y.bot.ollama_model,
+            BOT_DEFAULT_AGENT => x.bot.default_agent != y.bot.default_agent,
+            BOT_PROVIDER => x.bot.provider != y.bot.provider,
+            BOT_OPENAI_KEY => nonblank(&a.brain.openai_api_key) != nonblank(&b.brain.openai_api_key),
+            BOT_OPENAI_MODEL => nonblank(&a.brain.openai_model) != nonblank(&b.brain.openai_model),
+            BOT_GEMINI_KEY => nonblank(&a.brain.gemini_api_key) != nonblank(&b.brain.gemini_api_key),
+            BOT_GEMINI_MODEL => nonblank(&a.brain.gemini_model) != nonblank(&b.brain.gemini_model),
+            BOT_ACP_AGENT => nonblank(&a.brain.acp_agent) != nonblank(&b.brain.acp_agent),
+            BOT_ACP_MODEL => nonblank(&a.brain.acp_model) != nonblank(&b.brain.acp_model),
+            BOT_UNDERSTAND => x.bot.understand != y.bot.understand,
+            BOT_STYLE => x.bot.style != y.bot.style,
+            BOT_PET_NAME => x.bot.pet_name != y.bot.pet_name,
             WD_NUDGE => x.watchdog.waiting_nudge_after_ms != y.watchdog.waiting_nudge_after_ms,
             WD_REPEAT => x.watchdog.repeat_every_ms != y.watchdog.repeat_every_ms,
             WD_TICK => x.watchdog.tick_secs != y.watchdog.tick_secs,
@@ -394,6 +500,62 @@ fn valid_agent_id(id: &str) -> bool {
     (1..=40).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// The default pet's agent: an id this hub knows (`known`: installed, registry and built-in agents, and
+/// the custom agents of the config being written).
+fn check_default_agent(v: &str, known: &[&str]) -> Result<String, InvalidSetting> {
+    check_known_agent(BOT_DEFAULT_AGENT, v, known)
+}
+
+/// An agent id this hub knows (see [`check_default_agent`]).
+fn check_known_agent(field: &str, v: &str, known: &[&str]) -> Result<String, InvalidSetting> {
+    let v = v.trim();
+    if !known.contains(&v) {
+        let reason = if v.chars().count() > MAX_AGENT_NAME_CHARS || v.chars().any(char::is_control) {
+            "is not a known agent (installed, registry or custom)".to_string()
+        } else {
+            format!("{v:?} is not a known agent (installed, registry or custom)")
+        };
+        return Err(invalid(field, reason));
+    }
+    Ok(v.to_string())
+}
+
+/// The agent the "acp" provider runs: only Claude Code for now (its tools are locked down; the field stays
+/// for other agents later).
+fn check_acp_agent(v: &str) -> Result<String, InvalidSetting> {
+    let v = v.trim();
+    if v != crate::config::DEFAULT_ACP_AGENT {
+        return Err(invalid(
+            BOT_ACP_AGENT,
+            format!("only {} can be the pet's model for now (its tools can be locked down; other agents' cannot yet)", crate::config::DEFAULT_ACP_AGENT),
+        ));
+    }
+    Ok(v.to_string())
+}
+
+/// The default pet's name: the pet-name rules (1-40 characters, no control or invisible characters such as
+/// bidi controls or zero-width ones). That no other pet has it is checked by the running hub.
+pub fn check_pet_name(v: &str) -> Result<String, InvalidSetting> {
+    let v = v.trim();
+    let len = v.chars().count();
+    if len == 0 || len > crate::core::MAX_PET_NAME_CHARS || !v.chars().all(crate::machine::name_char_ok) {
+        return Err(invalid(
+            BOT_PET_NAME,
+            format!("must be 1-{} characters without control or invisible characters (bidi controls, zero-width)", crate::core::MAX_PET_NAME_CHARS),
+        ));
+    }
+    Ok(v.to_string())
+}
+
+/// A model id, or "" for the provider's default.
+fn check_model_or_default(field: &str, v: &str) -> Result<Option<String>, InvalidSetting> {
+    if v.trim().is_empty() {
+        Ok(None)
+    } else {
+        check_model(field, v).map(Some)
+    }
+}
+
 /// Custom agents: <= 16; id `[a-z0-9-]{1,40}`, unique and not a built-in or registry id (`reserved`);
 /// name 1-80 characters; command a non-empty argv. `env` of an agent that keeps its id is kept.
 fn check_custom_agents(list: &[CustomAgentSetting], cur: &[CustomAgent], reserved: &[String]) -> Result<Vec<CustomAgent>, InvalidSetting> {
@@ -457,7 +619,9 @@ fn check_listen(v: &str, hub_port: u16) -> Result<Option<String>, InvalidSetting
 }
 
 /// Validate `patch` against the running config `cur`. Ok = the next config and the keys that
-/// changed (none: nothing to write). `reserved` = agent ids custom agents may not take.
+/// changed (none: nothing to write). `reserved` = agent ids custom agents may not take (built-in,
+/// registry and discovered agents); with the custom agents they are the ids `bot.defaultAgent` may name.
+/// A default agent that was a custom agent the patch removes falls back to automatic.
 /// Any error leaves everything as it was: nothing has been written or applied yet.
 pub fn apply_patch(cur: &HubConfig, patch: &HubSettingsPatch, reserved: &[String]) -> Result<(HubConfig, Vec<&'static str>), InvalidSetting> {
     let mut next = cur.clone();
@@ -502,6 +666,37 @@ pub fn apply_patch(cur: &HubConfig, patch: &HubSettingsPatch, reserved: &[String
             Some(Some(m)) if !m.trim().is_empty() => next.brain.ollama_model = Some(check_model(BOT_OLLAMA_MODEL, m)?),
             Some(_) => next.brain.ollama_model = None,
             None => {}
+        }
+        if let Some(p) = b.provider {
+            next.brain.provider = p;
+        }
+        match &b.openai_api_key {
+            Some(Some(k)) => next.brain.openai_api_key = Some(check_secret(BOT_OPENAI_KEY, k)?),
+            Some(None) => next.brain.openai_api_key = None,
+            None => {}
+        }
+        if let Some(m) = &b.openai_model {
+            next.brain.openai_model = check_model_or_default(BOT_OPENAI_MODEL, m)?;
+        }
+        match &b.gemini_api_key {
+            Some(Some(k)) => next.brain.gemini_api_key = Some(check_secret(BOT_GEMINI_KEY, k)?),
+            Some(None) => next.brain.gemini_api_key = None,
+            None => {}
+        }
+        if let Some(m) = &b.gemini_model {
+            next.brain.gemini_model = check_model_or_default(BOT_GEMINI_MODEL, m)?;
+        }
+        if let Some(m) = &b.acp_model {
+            next.brain.acp_model = check_model_or_default(BOT_ACP_MODEL, m)?;
+        }
+        if let Some(u) = b.understand {
+            next.brain.understand = u;
+        }
+        if let Some(st) = b.style {
+            next.brain.style = st;
+        }
+        if let Some(n) = &b.pet_name {
+            next.brain.pet_name = Some(check_pet_name(n)?);
         }
     }
     if let Some(w) = &patch.watchdog {
@@ -560,6 +755,23 @@ pub fn apply_patch(cur: &HubConfig, patch: &HubSettingsPatch, reserved: &[String
     }
     if let Some(list) = &patch.custom_agents {
         next.custom_agents = check_custom_agents(list, &cur.custom_agents, reserved)?;
+    }
+    let known: Vec<&str> = reserved.iter().map(String::as_str).chain(next.custom_agents.iter().map(|a| a.id.as_str())).collect();
+    match patch.bot.as_ref().and_then(|b| b.acp_agent.as_deref()) {
+        Some(id) if !id.trim().is_empty() => next.brain.acp_agent = Some(check_acp_agent(id)?),
+        Some(_) => next.brain.acp_agent = None,
+        None => {}
+    }
+    match patch.bot.as_ref().and_then(|b| b.default_agent.as_ref()) {
+        Some(Some(id)) if !id.trim().is_empty() => next.brain.default_agent = Some(check_default_agent(id, &known)?),
+        Some(_) => next.brain.default_agent = None,
+        None => {
+            // Its custom agent is gone: automatic again (an id discovery merely has not listed yet stays).
+            let removed = |id: &str| cur.custom_agents.iter().any(|a| a.id == id) && !known.contains(&id);
+            if nonblank(&next.brain.default_agent).is_some_and(|id| removed(&id)) {
+                next.brain.default_agent = None;
+            }
+        }
     }
     // The API port and the peer listener can never share a port on loopback / every interface
     // (check_listen covers a listener change; this covers a port change).
@@ -696,6 +908,17 @@ pub fn edit_config(old: Option<&str>, next: &HubConfig, changed: &[&str]) -> Res
             BOT_KEY => set_opt(section(&mut doc, "brain")?, "anthropic_api_key", next.brain.anthropic_api_key.as_deref()),
             BOT_OLLAMA_URL => set_opt(section(&mut doc, "brain")?, "ollama_url", next.brain.ollama_url.as_deref()),
             BOT_OLLAMA_MODEL => set_opt(section(&mut doc, "brain")?, "ollama_model", next.brain.ollama_model.as_deref()),
+            BOT_DEFAULT_AGENT => set_opt(section(&mut doc, "brain")?, "default_agent", nonblank(&next.brain.default_agent).as_deref()),
+            BOT_PROVIDER => set_value(section(&mut doc, "brain")?, "provider", provider_name(next.brain.provider)),
+            BOT_OPENAI_KEY => set_opt(section(&mut doc, "brain")?, "openai_api_key", nonblank(&next.brain.openai_api_key).as_deref()),
+            BOT_OPENAI_MODEL => set_opt(section(&mut doc, "brain")?, "openai_model", nonblank(&next.brain.openai_model).as_deref()),
+            BOT_GEMINI_KEY => set_opt(section(&mut doc, "brain")?, "gemini_api_key", nonblank(&next.brain.gemini_api_key).as_deref()),
+            BOT_GEMINI_MODEL => set_opt(section(&mut doc, "brain")?, "gemini_model", nonblank(&next.brain.gemini_model).as_deref()),
+            BOT_ACP_AGENT => set_opt(section(&mut doc, "brain")?, "acp_agent", nonblank(&next.brain.acp_agent).as_deref()),
+            BOT_ACP_MODEL => set_opt(section(&mut doc, "brain")?, "acp_model", nonblank(&next.brain.acp_model).as_deref()),
+            BOT_UNDERSTAND => set_value(section(&mut doc, "brain")?, "understand", next.brain.understand),
+            BOT_STYLE => set_value(section(&mut doc, "brain")?, "style", style_name(next.brain.style)),
+            BOT_PET_NAME => set_opt(section(&mut doc, "brain")?, "pet_name", nonblank(&next.brain.pet_name).as_deref()),
             WD_NUDGE => set_value(section(&mut doc, "watchdog")?, "waiting_nudge_after_ms", next.watchdog.waiting_nudge_after_ms),
             WD_REPEAT => set_value(section(&mut doc, "watchdog")?, "repeat_every_ms", next.watchdog.repeat_every_ms),
             WD_TICK => {
@@ -775,6 +998,17 @@ pub fn masked_lines(s: &HubSettings, restart_required: &[String]) -> Vec<String>
         format!("anthropic api key         {}{}", set(s.bot.anthropic_api_key_set), over(BOT_KEY)),
         format!("ollama url                {}", opt(&s.bot.ollama_url)),
         format!("ollama model              {}", opt(&s.bot.ollama_model)),
+        format!("default agent             {}", s.bot.default_agent.clone().unwrap_or_else(|| "(automatic)".into())),
+        format!("provider                  {}", provider_name(s.bot.provider)),
+        format!("openai api key            {}{}", set(s.bot.openai_api_key_set), over(BOT_OPENAI_KEY)),
+        format!("openai model              {}", s.bot.openai_model),
+        format!("gemini api key            {}{}", set(s.bot.gemini_api_key_set), over(BOT_GEMINI_KEY)),
+        format!("gemini model              {}", s.bot.gemini_model),
+        format!("acp agent                 {} (uses your own plan, no tools)", s.bot.acp_agent),
+        format!("acp model                 {}", s.bot.acp_model),
+        format!("understand any wording    {}", s.bot.understand),
+        format!("style                     {}", style_name(s.bot.style)),
+        format!("pet name                  {}", if s.bot.pet_name.is_empty() { "(not picked yet)" } else { &s.bot.pet_name }),
         "[watchdog]".to_string(),
         format!("waiting nudge after ms    {}", s.watchdog.waiting_nudge_after_ms),
         format!("repeat every ms           {}", s.watchdog.repeat_every_ms),

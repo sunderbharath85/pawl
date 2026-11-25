@@ -164,15 +164,17 @@ Rename it in Settings`}
     const active = route.view === "session" && route.sessionId === s.id;
     const meta = STATUS_META[s.status];
     const waiting = Object.values(state.pending).filter((p) => p.sessionId === s.id).length;
+    const title = sessionTitle(s, state.agents);
     return (
       <button
         key={s.id}
+        title={title}
         className={`session-row${active ? " is-active" : ""}${s.endedAt ? " is-ended" : ""}`}
         onClick={() => navigate({ view: "session", sessionId: s.id })}
       >
         <span className={`dot tone-${meta.tone}`} title={meta.label} />
         <span className="session-row-main">
-          <span className="session-row-title">{sessionTitle(s, state.agents)}</span>
+          <span className="session-row-title">{title}</span>
           <span className="session-row-sub">
             {agentName(state.agents, s.agentId, s.machineId)} · {SOURCE_LABEL[s.source]} · {timeAgo(s.lastEventAt, now)}
           </span>

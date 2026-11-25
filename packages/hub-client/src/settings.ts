@@ -1,7 +1,7 @@
 // Hub settings (PLAN.md migration step 5b): pure helpers shared by the desktop Settings view, the first-run setup
 // and VS Code. Field errors, client-side checks that mirror the hub's validation, patch diffing, the wording of
 // in-app confirms for risky changes, and hook labels. No DOM, Node or React imports here.
-import type { CustomAgentSetting, HookStatus, HookTargetName, HubSettings, HubSettingsPatch, PanelView } from "@pawl/protocol";
+import type { Agent, AgentId, BotProvider, BotStyle, CustomAgentSetting, HookStatus, HookTargetName, HubSettings, HubSettingsPatch, MachineId, PanelView } from "@pawl/protocol";
 
 /** The first protocol version with `get_settings` / `update_settings` / `hook_status` / `install_hooks` / `open_panel`. */
 export const SETTINGS_PROTOCOL_VERSION = 7;
@@ -92,6 +92,17 @@ export const SETTINGS_FIELD_LABELS: Record<string, string> = {
   "bot.anthropicApiKey": "Anthropic API key",
   "bot.ollamaUrl": "Ollama URL",
   "bot.ollamaModel": "Ollama model",
+  "bot.provider": "Bot provider",
+  "bot.openaiApiKey": "OpenAI API key",
+  "bot.openaiModel": "OpenAI model",
+  "bot.geminiApiKey": "Gemini API key",
+  "bot.geminiModel": "Gemini model",
+  "bot.understand": "Understand any wording",
+  "bot.acpAgent": "Agent for the bot",
+  "bot.acpModel": "Agent model",
+  "bot.style": "How Pawl talks",
+  "bot.petName": "Default pet name",
+  "bot.defaultAgent": "Default agent",
   "watchdog.waitingNudgeAfterMs": "First nudge after",
   "watchdog.repeatEveryMs": "Repeat nudges every",
   "watchdog.tickSecs": "Watchdog check interval",
@@ -407,7 +418,7 @@ function sameAgents(a: readonly CustomAgentSetting[], b: readonly CustomAgentSet
 
 /** The editable (non-secret) settings: what a form holds. */
 export type EditableSettings = Omit<HubSettings, "overriddenBy" | "bot" | "relay"> & {
-  bot: Omit<HubSettings["bot"], "anthropicApiKeySet">;
+  bot: Omit<HubSettings["bot"], "anthropicApiKeySet" | "openaiApiKeySet" | "geminiApiKeySet">;
   relay: Omit<HubSettings["relay"], "accessKeySet">;
 };
 
@@ -427,6 +438,22 @@ export function settingsPatch(base: HubSettings, draft: EditableSettings): HubSe
   if (draft.bot.model !== base.bot.model) bot.model = draft.bot.model;
   if (draft.bot.ollamaUrl !== base.bot.ollamaUrl) bot.ollamaUrl = draft.bot.ollamaUrl;
   if (draft.bot.ollamaModel !== base.bot.ollamaModel) bot.ollamaModel = draft.bot.ollamaModel;
+  // A hub that predates bot.defaultAgent has none (undefined on both sides): never part of the patch.
+  if (draft.bot.defaultAgent !== base.bot.defaultAgent && (draft.bot.defaultAgent === null || typeof draft.bot.defaultAgent === "string")) {
+    bot.defaultAgent = draft.bot.defaultAgent;
+  }
+  // The provider fields too: only a change, and only when the draft holds a real value (an older hub has none).
+  if (draft.bot.provider !== base.bot.provider && isBotProvider(draft.bot.provider)) bot.provider = draft.bot.provider;
+  if (draft.bot.openaiModel !== base.bot.openaiModel && typeof draft.bot.openaiModel === "string") bot.openaiModel = draft.bot.openaiModel;
+  if (draft.bot.geminiModel !== base.bot.geminiModel && typeof draft.bot.geminiModel === "string") bot.geminiModel = draft.bot.geminiModel;
+  if (draft.bot.understand !== base.bot.understand && typeof draft.bot.understand === "boolean") bot.understand = draft.bot.understand;
+  if (draft.bot.acpAgent !== base.bot.acpAgent && typeof draft.bot.acpAgent === "string" && draft.bot.acpAgent) bot.acpAgent = draft.bot.acpAgent;
+  if (draft.bot.acpModel !== base.bot.acpModel && typeof draft.bot.acpModel === "string") bot.acpModel = draft.bot.acpModel;
+  if (draft.bot.style !== base.bot.style && isBotStyle(draft.bot.style)) bot.style = draft.bot.style;
+  // The default pet's name: sent trimmed, only when it really changed (and never to a hub without the field).
+  if (typeof draft.bot.petName === "string" && typeof base.bot.petName === "string" && draft.bot.petName.trim() !== base.bot.petName) {
+    bot.petName = draft.bot.petName.trim();
+  }
   if (Object.keys(bot).length) patch.bot = bot;
 
   const watchdog: NonNullable<HubSettingsPatch["watchdog"]> = {};
@@ -451,11 +478,49 @@ export function settingsPatch(base: HubSettings, draft: EditableSettings): HubSe
   return patch;
 }
 
+export interface DefaultAgentOption {
+  /** null = Automatic. */
+  value: AgentId | null;
+  label: string;
+}
+
+/**
+ * Choices for `bot.defaultAgent` (the agent the default pet hands work to when the user names none): Automatic, then
+ * this machine's installed agents by name. A saved agent that is no longer installed stays listed so the form shows it.
+ */
+export function defaultAgentOptions(agents: readonly Agent[], machineId: MachineId | undefined, current: AgentId | null | undefined): DefaultAgentOption[] {
+  const own = agents
+    .filter((a) => a.installed && (!machineId || a.machineId === machineId))
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  const seen = new Set<string>();
+  const out: DefaultAgentOption[] = [{ value: null, label: "Automatic (most recent session's agent)" }];
+  for (const a of own) {
+    if (seen.has(a.id)) continue;
+    seen.add(a.id);
+    out.push({ value: a.id, label: a.name.trim() || a.id });
+  }
+  if (current && !seen.has(current)) out.push({ value: current, label: `${current} (not installed)` });
+  return out;
+}
+
 /** The editable part of `settings` (a fresh copy for a form). */
 export function editableSettings(s: HubSettings): EditableSettings {
   return {
     hub: { ...s.hub },
-    bot: { model: s.bot.model, ollamaUrl: s.bot.ollamaUrl, ollamaModel: s.bot.ollamaModel },
+    bot: {
+      model: s.bot.model,
+      ollamaUrl: s.bot.ollamaUrl,
+      ollamaModel: s.bot.ollamaModel,
+      defaultAgent: s.bot.defaultAgent,
+      provider: s.bot.provider,
+      openaiModel: s.bot.openaiModel,
+      geminiModel: s.bot.geminiModel,
+      understand: s.bot.understand,
+      acpAgent: s.bot.acpAgent,
+      acpModel: s.bot.acpModel,
+      style: s.bot.style,
+      petName: s.bot.petName,
+    },
     watchdog: { ...s.watchdog },
     peer: {
       listen: s.peer.listen,
@@ -470,11 +535,143 @@ export function editableSettings(s: HubSettings): EditableSettings {
 }
 
 /** Write-only secrets. A string sets (or replaces) it, null clears it. */
-export type SecretKey = "bot.anthropicApiKey" | "relay.accessKey";
+export type SecretKey = "bot.anthropicApiKey" | "bot.openaiApiKey" | "bot.geminiApiKey" | "relay.accessKey";
 
 export function secretPatch(key: SecretKey, value: string | null): HubSettingsPatch {
   const v = value === null ? null : value.trim();
-  return key === "bot.anthropicApiKey" ? { bot: { anthropicApiKey: v } } : { relay: { accessKey: v } };
+  switch (key) {
+    case "bot.anthropicApiKey":
+      return { bot: { anthropicApiKey: v } };
+    case "bot.openaiApiKey":
+      return { bot: { openaiApiKey: v } };
+    case "bot.geminiApiKey":
+      return { bot: { geminiApiKey: v } };
+    case "relay.accessKey":
+      return { relay: { accessKey: v } };
+  }
+}
+
+export const BOT_PROVIDERS: readonly BotProvider[] = ["auto", "acp", "anthropic", "openai", "gemini", "ollama"];
+
+export const BOT_PROVIDER_LABEL: Record<BotProvider, string> = {
+  auto: "Automatic",
+  anthropic: "Anthropic (Claude)",
+  openai: "OpenAI",
+  gemini: "Google Gemini",
+  ollama: "Ollama (on your network)",
+  acp: "Claude Code (your Claude plan, no API key)",
+};
+
+/** The provider's label; "acp" names the chosen agent ("Codex (your plan, no API key)") when it is not Claude Code. */
+export function botProviderLabel(provider: BotProvider, acpAgentName?: string | null): string {
+  if (provider === "acp" && acpAgentName && acpAgentName !== "Claude Code") return `${acpAgentName} (your plan, no API key)`;
+  return BOT_PROVIDER_LABEL[provider];
+}
+
+/** How the pet's replies sound: plain sentences (default), or playful with a bit of dog. */
+export const BOT_STYLES: readonly BotStyle[] = ["plain", "playful"];
+
+export const BOT_STYLE_LABEL: Record<BotStyle, string> = {
+  plain: "Plain",
+  playful: "Playful",
+};
+
+export function isBotStyle(v: unknown): v is BotStyle {
+  return typeof v === "string" && (BOT_STYLES as readonly string[]).includes(v);
+}
+
+export function isBotProvider(v: unknown): v is BotProvider {
+  return typeof v === "string" && (BOT_PROVIDERS as readonly string[]).includes(v);
+}
+
+/** The cloud providers a key can be set for, and their names. */
+export const CLOUD_KEYS: ReadonlyArray<{ key: "anthropicApiKey" | "openaiApiKey" | "geminiApiKey"; name: string }> = [
+  { key: "anthropicApiKey", name: "Anthropic" },
+  { key: "openaiApiKey", name: "OpenAI" },
+  { key: "geminiApiKey", name: "Google (Gemini)" },
+];
+
+const CLOUD_PROVIDERS: ReadonlyArray<{ provider: BotProvider; keySet: "anthropicApiKeySet" | "openaiApiKeySet" | "geminiApiKeySet"; key: (typeof CLOUD_KEYS)[number]["key"]; name: string }> = [
+  { provider: "anthropic", keySet: "anthropicApiKeySet", key: "anthropicApiKey", name: "Anthropic" },
+  { provider: "openai", keySet: "openaiApiKeySet", key: "openaiApiKey", name: "OpenAI" },
+  { provider: "gemini", keySet: "geminiApiKeySet", key: "geminiApiKey", name: "Google (Gemini)" },
+];
+
+/**
+ * The cloud provider the bot would use with `provider` (and these keys set), or null for a local one (Ollama, an
+ * agent over ACP) or none: a cloud provider by name when its key is set; "auto" = the first cloud provider with a key.
+ */
+export function cloudProviderInUse(
+  provider: BotProvider | undefined,
+  keys: Partial<Record<"anthropicApiKeySet" | "openaiApiKeySet" | "geminiApiKeySet", boolean>>,
+): { provider: BotProvider; name: string } | null {
+  const found = CLOUD_PROVIDERS.find((c) => (provider === undefined || provider === "auto" ? true : c.provider === provider) && keys[c.keySet] === true);
+  if (!found) return null;
+  if (provider !== undefined && provider !== "auto" && provider !== found.provider) return null;
+  return { provider: found.provider, name: found.name };
+}
+
+/** The agents that can think for the pet over ACP (the hub accepts only these as `bot.acpAgent` for now). */
+export const ACP_BOT_AGENTS: readonly AgentId[] = ["claude-code"];
+
+export interface BotProviderNow {
+  /** The provider in use, or null when none is set up (the pet answers with simple built-in replies). */
+  provider: Exclude<BotProvider, "auto"> | null;
+  /** One line for Settings: "Auto: using Claude Code on your Claude plan". */
+  text: string;
+  /** It spends the person's own plan (an agent over ACP), so Settings says so plainly. */
+  usesPlan: boolean;
+}
+
+/**
+ * Which provider the bot uses right now, from the saved settings: the chosen one, or for "auto" the first set up of
+ * Anthropic, OpenAI, Gemini (a key), Ollama (URL and model), then the ACP agent when it is installed on this machine.
+ */
+export function botProviderNow(
+  bot: Partial<HubSettings["bot"]>,
+  agents: readonly Pick<Agent, "id" | "name" | "installed" | "machineId">[],
+  machineId?: MachineId,
+): BotProviderNow {
+  const auto = !bot.provider || bot.provider === "auto";
+  const head = auto ? "Auto: using " : "Using ";
+  const acpId = bot.acpAgent || "claude-code";
+  const acp = agents.find((a) => a.id === acpId && a.installed && (!machineId || a.machineId === machineId));
+  const acpName = acp?.name?.trim() || (acpId === "claude-code" ? "Claude Code" : acpId);
+  const plan = acpId === "claude-code" ? "your Claude plan" : `your ${acpName} plan`;
+  const ready: Record<Exclude<BotProvider, "auto">, boolean> = {
+    anthropic: bot.anthropicApiKeySet === true,
+    openai: bot.openaiApiKeySet === true,
+    gemini: bot.geminiApiKeySet === true,
+    ollama: !!bot.ollamaUrl && !!bot.ollamaModel,
+    acp: !!acp,
+  };
+  const words: Record<Exclude<BotProvider, "auto">, string> = {
+    anthropic: "Anthropic (your API key)",
+    openai: "OpenAI (your API key)",
+    gemini: "Google Gemini (your API key)",
+    ollama: `Ollama${bot.ollamaModel ? ` (${bot.ollamaModel})` : ""}`,
+    acp: `${acpName} on ${plan}`,
+  };
+  const order: Exclude<BotProvider, "auto">[] = ["anthropic", "openai", "gemini", "ollama", "acp"];
+  const chosen = auto ? order.find((p) => ready[p]) : (bot.provider as Exclude<BotProvider, "auto">);
+  if (!chosen) {
+    return { provider: null, text: "Auto: nothing is set up yet, so your pet answers with simple built-in replies.", usesPlan: false };
+  }
+  if (!ready[chosen]) {
+    const missing =
+      chosen === "ollama" ? "needs a URL and a model" : chosen === "acp" ? `needs ${acpName} installed on this machine` : "needs its API key";
+    return { provider: null, text: `${BOT_PROVIDER_LABEL[chosen].replace(/ \(.*\)$/, "")} ${missing}; until then your pet answers with simple built-in replies.`, usesPlan: false };
+  }
+  return { provider: chosen, text: `${head}${words[chosen]}`, usesPlan: chosen === "acp" };
+}
+
+/** What a cloud bot provider receives, said once for the privacy note and the confirm. */
+export function cloudPrivacyText(provider: string): string {
+  return (
+    `When the bot uses ${provider}, each message you send to the default pet, plus a short summary of your sessions ` +
+    "(titles, repo names, states and pending approvals; never file contents), is sent to " +
+    `${provider} to write the reply.`
+  );
 }
 
 export function isEmptyPatch(p: HubSettingsPatch): boolean {
@@ -643,6 +840,42 @@ export function riskyChanges(base: HubSettings, patch: HubSettingsPatch, ctx: Ri
           (acceptIntents ? "" : " This takes effect once remote control is on."),
       });
     }
+  }
+  // Adding or changing a cloud key: what leaves the machine from now on (clearing one needs no confirm).
+  for (const { key, name } of CLOUD_KEYS) {
+    const v = patch.bot?.[key];
+    if (typeof v !== "string" || v.trim() === "") continue;
+    const had = base.bot[`${key}Set` as "anthropicApiKeySet" | "openaiApiKeySet" | "geminiApiKeySet"] === true;
+    out.push({
+      key: `bot.${key}`,
+      title: had ? `Replace the ${name} key?` : `Use ${name} for the bot?`,
+      confirm: had ? "Replace key" : "Save key",
+      body:
+        cloudPrivacyText(name) +
+        ` The key stays on ${here}, in the hub's settings, and is never shown again. Clear it any time to stop.`,
+    });
+  }
+  // Switching to a cloud provider that already has a key, or letting it read free-form messages: say what leaves.
+  const keyed = new Set(CLOUD_PROVIDERS.filter((c) => typeof patch.bot?.[c.key] === "string" && patch.bot[c.key]!.trim() !== "").map((c) => c.provider));
+  const before = cloudProviderInUse(base.bot.provider, base.bot);
+  const after = cloudProviderInUse(patch.bot?.provider ?? base.bot.provider, base.bot);
+  if (patch.bot?.provider !== undefined && patch.bot.provider !== base.bot.provider && after && after.provider !== before?.provider && !keyed.has(after.provider)) {
+    out.push({
+      key: "bot.provider",
+      title: `Use ${after.name} for the bot?`,
+      confirm: `Use ${after.name}`,
+      body: cloudPrivacyText(after.name),
+    });
+  }
+  if (patch.bot?.understand === true && base.bot.understand !== true && after && !keyed.has(after.provider)) {
+    out.push({
+      key: "bot.understand",
+      title: `Let ${after.name} read what you write?`,
+      confirm: "Turn on",
+      body:
+        cloudPrivacyText(after.name) +
+        " With this on it also works out what you mean from free-form messages; whatever it understands only ever becomes a card you confirm.",
+    });
   }
   if (patch.customAgents) {
     const byId = new Map(base.customAgents.map((a) => [a.id, a]));

@@ -1,40 +1,15 @@
-import { useState } from "react";
 import type { PermissionOption, PermissionRequest } from "@pawl/protocol";
-import {
-  TOOL_KIND_ICON,
-  agentName,
-  errorText,
-  permissionSummary,
-  sessionTitle,
-  shortPath,
-  timeAgo,
-} from "../../lib/format";
-import {
-  intentErrorText,
-  isAllowOption,
-  isAlreadyDecided,
-  isLocal,
-  machineDisplayName,
-  needsConfirmation,
-  offlineReason,
-  petFor,
-  remoteOptionBlocked,
-} from "@pawl/hub-client";
+import { TOOL_KIND_ICON, agentName, permissionSummary, sessionTitle, shortPath, timeAgo } from "../../lib/format";
+import { petFor, requestCommandText } from "@pawl/hub-client";
 import { usePanel } from "../context";
 import { PetAvatar } from "../PetAvatar";
+import { usePermissionAnswer } from "../usePermissionAnswer";
 
 const OPTION_CLASS: Record<PermissionOption["kind"], string> = {
   allow_once: "pill pill-good",
   allow_always: "pill",
   reject_once: "pill pill-bad",
   reject_always: "pill pill-bad",
-};
-
-const OPTION_ORDER: Record<PermissionOption["kind"], number> = {
-  allow_once: 0,
-  allow_always: 1,
-  reject_once: 2,
-  reject_always: 3,
 };
 
 interface Props {
@@ -44,53 +19,13 @@ interface Props {
 }
 
 export function PermissionCard({ req, compact = false, highlight = false }: Props) {
-  const { client, state, navigate, toast, now } = usePanel();
-  const [busy, setBusy] = useState<string | null>(null);
-  /** The allow option waiting for "Approve on Mac mini" (another machine's request). */
-  const [confirm, setConfirm] = useState<{ optionId: string; label: string } | null>(null);
-  /** Result of the last answer that did not go through (shown inline; the card stays until the mirror resolves it). */
-  const [problem, setProblem] = useState<string | null>(null);
-  const [answered, setAnswered] = useState(false);
+  const { state, navigate, now } = usePanel();
+  const answer = usePermissionAnswer(req);
+  const { options, remote, machineName, offline, busy, confirm, problem, answered, resolve } = answer;
   const pet = petFor(Object.values(state.pets), req.machineId, req.agentId);
   const session = state.sessions[req.sessionId];
   const kind = req.toolCall.kind ?? "other";
-  const options = [...req.options].sort((a, b) => OPTION_ORDER[a.kind] - OPTION_ORDER[b.kind]);
-  // Another machine's request: answering is forwarded to its owner (migration step 4).
-  const remote = !isLocal(state, req.machineId);
   const machine = state.machines[req.machineId];
-  const machineName = machineDisplayName(machine);
-  const offline = offlineReason(state, req.machineId);
-
-  const resolve = async (optionId: string | null, label: string, confirmed = false) => {
-    // Always-allow on another machine's request is chosen on that machine only.
-    if (offline || answered || remoteOptionBlocked(state, req, optionId)) return;
-    // Approving another machine's request needs a confirm step on this device first.
-    if (!confirmed && needsConfirmation(state, req, optionId) && optionId) {
-      setConfirm({ optionId, label });
-      setProblem(null);
-      return;
-    }
-    setBusy(optionId ?? "cancel");
-    setProblem(null);
-    try {
-      await client.resolvePermission(req.requestId, optionId, confirmed ? { confirmed: true } : {});
-      toast(remote ? `${label} on ${machineName}: ${permissionSummary(req)}` : `${label}: ${permissionSummary(req)}`);
-      // Keep showing the request until the mirror's permission_resolved removes it.
-      setAnswered(true);
-    } catch (err) {
-      if (isAlreadyDecided(err)) {
-        setAnswered(true);
-        setProblem("Already answered.");
-      } else {
-        const text = remote ? intentErrorText(err, machineName, isAllowOption(req, optionId) ? "approve" : "deny") : errorText(err);
-        if (remote) setProblem(text);
-        else toast(text, "error");
-      }
-      setBusy(null);
-    } finally {
-      setConfirm(null);
-    }
-  };
 
   const raw = req.toolCall.rawInput;
   const rawText = raw === undefined || raw === null ? "" : typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
@@ -139,9 +74,8 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
           ))}
         </ul>
       )}
-      {!compact && rawText && (
-        <pre className="perm-raw">{rawText.length > 1600 ? rawText.slice(0, 1600) + "\n…" : rawText}</pre>
-      )}
+      {/* Never cut: all of what would run (the block scrolls). */}
+      {!compact && rawText && <pre className="perm-raw">{rawText}</pre>}
       {!compact && renderButtons()}
     </article>
   );
@@ -151,7 +85,8 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
       return (
         <div className="perm-actions perm-confirm" role="group" aria-label={`Approve on ${machineName}?`}>
           <span className="perm-confirm-text">
-            {confirm.label} on <strong className="perm-confirm-machine">{machineName}</strong>: {permissionSummary(req)}?
+            {confirm.label} on <strong className="perm-confirm-machine">{machineName}</strong>:
+            <code className="perm-confirm-command">{requestCommandText(req.toolCall)}</code>
           </span>
           <button
             className="pill pill-good"
@@ -159,12 +94,12 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
             disabled={busy !== null}
             onClick={() => void resolve(confirm.optionId, confirm.label, true)}
             onKeyDown={(e) => {
-              if (e.key === "Escape") setConfirm(null);
+              if (e.key === "Escape") answer.cancelConfirm();
             }}
           >
             {busy === confirm.optionId ? "…" : `${confirm.label} on ${machineName}`}
           </button>
-          <button className="pill pill-ghost" disabled={busy !== null} onClick={() => setConfirm(null)}>
+          <button className="pill pill-ghost" disabled={busy !== null} onClick={() => answer.cancelConfirm()}>
             Back
           </button>
         </div>
@@ -174,7 +109,7 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
     return (
       <div className="perm-actions">
         {options.map((o) => {
-          const choose = remoteOptionBlocked(state, req, o.optionId);
+          const choose = answer.blockedReason(o.optionId);
           return (
             <button
               key={o.optionId}
@@ -183,11 +118,11 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
               title={offline ?? choose ?? undefined}
               onClick={() => void resolve(o.optionId, o.name)}
             >
-              {busy === o.optionId ? "…" : needsConfirmation(state, req, o.optionId) ? `${o.name}…` : o.name}
+              {busy === o.optionId ? "…" : answer.asksConfirm(o.optionId) ? `${o.name}…` : o.name}
             </button>
           );
         })}
-        {!options.some((o) => o.kind.startsWith("reject")) && (
+        {answer.needsPlainDeny && (
           <button className="pill pill-bad" disabled={blocked} title={offline ?? undefined} onClick={() => void resolve(null, "Denied")}>
             Deny
           </button>
@@ -203,7 +138,7 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
         ) : remote ? (
           <span className="remote-note">
             Runs on {machineName}; approving asks you to confirm first.
-            {options.some((o) => remoteOptionBlocked(state, req, o.optionId)) ? ` Choose always-allow on ${machineName}.` : ""}
+            {options.some((o) => answer.blockedReason(o.optionId)) ? ` Choose always-allow on ${machineName}.` : ""}
           </span>
         ) : null}
       </div>

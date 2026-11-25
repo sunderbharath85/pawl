@@ -51,6 +51,7 @@ fn validation_table_names_camel_case_fields() {
         (json!({ "bot": { "ollamaUrl": "http://user:pw@host:11434" } }), "bot.ollamaUrl"),
         (json!({ "bot": { "ollamaUrl": "http://host:99999" } }), "bot.ollamaUrl"),
         (json!({ "bot": { "ollamaModel": "a b" } }), "bot.ollamaModel"),
+        (json!({ "bot": { "defaultAgent": "nope" } }), "bot.defaultAgent"),
         (json!({ "watchdog": { "waitingNudgeAfterMs": 0 } }), "watchdog.waitingNudgeAfterMs"),
         (json!({ "watchdog": { "repeatEveryMs": -5 } }), "watchdog.repeatEveryMs"),
         (json!({ "watchdog": { "tickSecs": 0 } }), "watchdog.tickSecs"),
@@ -235,7 +236,7 @@ fn settings_view_never_carries_secrets() {
     assert!(!dbg.contains(SECRET) && !dbg.contains(RELAY_SECRET), "{dbg}");
 
     // The env key counts as set and is reported as the source while config.toml has none.
-    let env = Overrides { keys: BTreeMap::new(), env_anthropic_key: true };
+    let env = Overrides { keys: BTreeMap::new(), env_anthropic_key: true, ..Default::default() };
     let s = to_settings(&HubConfig::default(), &env);
     assert!(s.bot.anthropic_api_key_set);
     assert_eq!(s.overridden_by.get(BOT_KEY).map(String::as_str), Some("ANTHROPIC_API_KEY"));
@@ -369,3 +370,129 @@ fn patches_build_from_typed_sections_too() {
     assert_eq!(changed, vec![HUB_OFFLINE, BOT_OLLAMA_MODEL, WD_REPEAT, PEER_ACCEPT]);
 }
 
+#[test]
+fn default_agent_is_validated_persisted_and_cleared() {
+    let cur = HubConfig::default();
+    // A known id: set (trimmed), shown, written under [brain] next to its comments, read back.
+    let (next, changed) = apply_patch(&cur, &patch(json!({ "bot": { "defaultAgent": " codex " } })), &reserved()).unwrap();
+    assert_eq!(changed, vec![BOT_DEFAULT_AGENT]);
+    assert_eq!(next.brain.default_agent.as_deref(), Some("codex"));
+    assert_eq!(to_settings(&next, &Overrides::default()).bot.default_agent.as_deref(), Some("codex"));
+    let text = edit_config(Some("[brain]\nmodel = \"claude-haiku-5-5\" # keep me\n"), &next, &changed).unwrap();
+    assert!(text.contains("default_agent = \"codex\"") && text.contains("# keep me"), "{text}");
+    assert_eq!(HubConfig::parse(&text).unwrap().brain.default_agent.as_deref(), Some("codex"));
+    assert!(masked_lines(&to_settings(&next, &Overrides::default()), &[]).iter().any(|l| l.starts_with("default agent") && l.ends_with("codex")));
+    // null or "" = automatic: the key goes away.
+    for v in [json!(null), json!("")] {
+        let (back, changed) = apply_patch(&next, &patch(json!({ "bot": { "defaultAgent": v } })), &reserved()).unwrap();
+        assert_eq!((back.brain.default_agent.as_deref(), changed.clone()), (None, vec![BOT_DEFAULT_AGENT]));
+        let t = edit_config(Some(&text), &back, &changed).unwrap();
+        assert!(!t.contains("default_agent") && t.contains("# keep me"), "{t}");
+    }
+    // Unknown ids are refused; one with control characters is not echoed.
+    let e = err_of(&cur, json!({ "bot": { "defaultAgent": "nope" } }));
+    assert_eq!(e.to_string(), "invalid:bot.defaultAgent: \"nope\" is not a known agent (installed, registry or custom)");
+    let e = err_of(&cur, json!({ "bot": { "defaultAgent": "x\u{1b}[2J" } }));
+    assert!(e.field == BOT_DEFAULT_AGENT && !e.to_string().contains('\u{1b}'), "{e}");
+    // A custom agent may be the default, also one the same patch adds; removing it = automatic again.
+    let custom = json!([{ "id": "my-agent", "name": "My Agent", "command": ["my-agent", "--acp"] }]);
+    let (with, changed) = apply_patch(&cur, &patch(json!({ "customAgents": custom, "bot": { "defaultAgent": "my-agent" } })), &reserved()).unwrap();
+    assert_eq!((with.brain.default_agent.as_deref(), changed), (Some("my-agent"), vec![BOT_DEFAULT_AGENT, CUSTOM_AGENTS]));
+    let (without, changed) = apply_patch(&with, &patch(json!({ "customAgents": [] })), &reserved()).unwrap();
+    assert_eq!((without.brain.default_agent.as_deref(), changed), (None, vec![BOT_DEFAULT_AGENT, CUSTOM_AGENTS]));
+    // Other patches leave it alone.
+    let (same, changed) = apply_patch(&with, &patch(json!({ "hub": { "offline": true } })), &reserved()).unwrap();
+    assert_eq!((same.brain.default_agent.as_deref(), changed), (Some("my-agent"), vec![HUB_OFFLINE]));
+}
+
+#[test]
+fn bot_providers_are_validated_persisted_and_never_shown() {
+    const OPENAI: &str = "sk-proj-openai-test-0123456789";
+    const GEMINI: &str = "AIza-gemini-test-0123456789";
+    let cur = HubConfig::default();
+    // Defaults: automatic provider, understanding on, the documented default models, Claude Code + Sonnet for acp.
+    let s = to_settings(&cur, &Overrides::default());
+    assert_eq!((s.bot.provider, s.bot.understand), (BotProvider::Auto, true));
+    assert_eq!((s.bot.openai_model.as_str(), s.bot.gemini_model.as_str()), ("gpt-6-luna", "gemini-3.5-flash-lite"));
+    assert_eq!((s.bot.acp_agent.as_str(), s.bot.acp_model.as_str()), ("claude-code", "sonnet"));
+    assert!(!s.bot.openai_api_key_set && !s.bot.gemini_api_key_set);
+    let p = json!({ "bot": {
+        "provider": "openai", "openaiApiKey": OPENAI, "openaiModel": " gpt-6-luna ", "geminiApiKey": GEMINI,
+        "geminiModel": "", "acpAgent": "claude-code", "acpModel": "opus", "understand": false,
+    } });
+    let (next, changed) = apply_patch(&cur, &patch(p), &reserved()).unwrap();
+    assert_eq!(changed, vec![BOT_PROVIDER, BOT_OPENAI_KEY, BOT_OPENAI_MODEL, BOT_GEMINI_KEY, BOT_ACP_AGENT, BOT_ACP_MODEL, BOT_UNDERSTAND]);
+    let s = to_settings(&next, &Overrides::default());
+    assert_eq!((s.bot.provider, s.bot.understand, s.bot.openai_api_key_set, s.bot.gemini_api_key_set), (BotProvider::Openai, false, true, true));
+    assert_eq!((s.bot.acp_agent.as_str(), s.bot.acp_model.as_str(), s.bot.gemini_model.as_str()), ("claude-code", "opus", "gemini-3.5-flash-lite"));
+    // Written under [brain]; read back the same; keys never in the view, the CLI lines or Debug.
+    let text = edit_config(None, &next, &changed).unwrap();
+    for line in ["provider = \"openai\"", "openai_model = \"gpt-6-luna\"", "acp_agent = \"claude-code\"", "acp_model = \"opus\"", "understand = false"] {
+        assert!(text.lines().any(|l| l.trim() == line), "{line}: {text}");
+    }
+    assert!(!text.lines().any(|l| l.trim_start().starts_with("gemini_model")), "blank = default, not written: {text}");
+    let back = HubConfig::parse(&text).unwrap();
+    assert_eq!(to_settings(&back, &Overrides::default()), s);
+    let shown = serde_json::to_string(&s).unwrap() + &masked_lines(&s, &[]).join("\n") + &format!("{next:?}");
+    assert!(!shown.contains(OPENAI) && !shown.contains(GEMINI), "{shown}");
+    assert!(masked_lines(&s, &[]).iter().any(|l| l.contains("uses your own plan")));
+    // Clearing a key: null. An empty key, a bad model, an unknown acp agent or provider: refused.
+    let (cleared, changed) = apply_patch(&next, &patch(json!({ "bot": { "openaiApiKey": null } })), &reserved()).unwrap();
+    assert_eq!((cleared.brain.openai_api_key.as_deref(), changed), (None, vec![BOT_OPENAI_KEY]));
+    for (p, field) in [
+        (json!({ "bot": { "openaiApiKey": "" } }), BOT_OPENAI_KEY),
+        (json!({ "bot": { "geminiApiKey": "has space" } }), BOT_GEMINI_KEY),
+        (json!({ "bot": { "openaiModel": "gpt 6" } }), BOT_OPENAI_MODEL),
+        (json!({ "bot": { "geminiModel": "x".repeat(200) } }), BOT_GEMINI_MODEL),
+        (json!({ "bot": { "acpModel": "a\u{7}b" } }), BOT_ACP_MODEL),
+        (json!({ "bot": { "acpAgent": "no-such-agent" } }), BOT_ACP_AGENT),
+        (json!({ "bot": { "acpAgent": "codex" } }), BOT_ACP_AGENT),
+    ] {
+        assert_eq!(err_of(&cur, p.clone()).field, field, "{p}");
+    }
+    // Only Claude Code's tools can be locked down, so only it can be the pet's model (for now).
+    let e = err_of(&cur, json!({ "bot": { "acpAgent": "codex" } }));
+    assert!(e.reason.contains("only claude-code"), "{e}");
+    assert!(serde_json::from_value::<HubSettingsPatch>(json!({ "bot": { "provider": "skynet" } })).is_err(), "providers are a closed list");
+    // The env keys count as set and are named as the source while config.toml has none.
+    let env = Overrides { env_openai_key: true, env_gemini_key: true, ..Default::default() };
+    let s = to_settings(&HubConfig::default(), &env);
+    assert!(s.bot.openai_api_key_set && s.bot.gemini_api_key_set);
+    assert_eq!(s.overridden_by.get(BOT_OPENAI_KEY).map(String::as_str), Some("OPENAI_API_KEY"));
+    assert_eq!(s.overridden_by.get(BOT_GEMINI_KEY).map(String::as_str), Some("GEMINI_API_KEY"));
+    // The brain gets the keys and the choices.
+    let b = next.brain.to_brain_config();
+    assert_eq!((b.provider, b.openai_api_key.as_deref(), b.understand), (BotProvider::Openai, Some(OPENAI), false));
+}
+
+#[test]
+fn the_reply_style_defaults_to_plain_and_is_persisted() {
+    let cur = HubConfig::default();
+    assert_eq!(to_settings(&cur, &Overrides::default()).bot.style, BotStyle::Plain);
+    assert_eq!(cur.brain.to_brain_config().style, BotStyle::Plain);
+    let (next, changed) = apply_patch(&cur, &patch(json!({ "bot": { "style": "playful" } })), &reserved()).unwrap();
+    assert_eq!((next.brain.style, changed.clone()), (BotStyle::Playful, vec![BOT_STYLE]));
+    let text = edit_config(None, &next, &changed).unwrap();
+    assert!(text.lines().any(|l| l.trim() == "style = \"playful\""), "{text}");
+    assert_eq!(HubConfig::parse(&text).unwrap().brain.style, BotStyle::Playful);
+    assert!(masked_lines(&to_settings(&next, &Overrides::default()), &[]).iter().any(|l| l.starts_with("style") && l.ends_with("playful")));
+    // A closed list: anything else fails the patch.
+    assert!(serde_json::from_value::<HubSettingsPatch>(json!({ "bot": { "style": "pirate" } })).is_err());
+    assert!(HubConfig::parse("[brain]\nstyle = \"pirate\"\n").is_err());
+    let (back, _) = apply_patch(&next, &patch(json!({ "bot": { "style": "plain" } })), &reserved()).unwrap();
+    assert_eq!(back.brain.style, BotStyle::Plain);
+}
+
+#[test]
+fn the_pet_name_follows_the_pet_name_rules() {
+    let cur = HubConfig::default();
+    let (next, changed) = apply_patch(&cur, &patch(json!({ "bot": { "petName": "  Mochi " } })), &reserved()).unwrap();
+    assert_eq!((next.brain.pet_name.as_deref(), changed.clone()), (Some("Mochi"), vec![BOT_PET_NAME]));
+    assert_eq!(to_settings(&next, &Overrides::default()).bot.pet_name, "Mochi");
+    let text = edit_config(None, &next, &changed).unwrap();
+    assert!(text.lines().any(|l| l.trim() == "pet_name = \"Mochi\""), "{text}");
+    for bad in [json!(""), json!("  "), json!("a\u{0007}b"), json!("Mo\u{200B}chi"), json!("x".repeat(41))] {
+        assert_eq!(err_of(&cur, json!({ "bot": { "petName": bad } })).field, BOT_PET_NAME, "{bad}");
+    }
+    assert_eq!(to_settings(&cur, &Overrides::default()).bot.pet_name, "", "not picked yet");
+}

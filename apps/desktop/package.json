@@ -16,23 +16,34 @@
     "icons": "python scripts/make-icon.py && tauri icon src-tauri/icons/source.png"
   },
   "dependencies": {
+    "@base-ui/react": "^1.9.0",
     "@pawl/hub-client": "workspace:*",
     "@pawl/pet-engine": "workspace:*",
     "@pawl/protocol": "workspace:*",
+    "@shadcn/react": "^0.3.1",
     "@tauri-apps/api": "^2.12.5",
     "@tauri-apps/plugin-dialog": "^2.8.4",
     "@tauri-apps/plugin-notification": "^2.8.1",
+    "class-variance-authority": "^0.7.1",
+    "cn": "^0.5.2",
+    "lucide-react": "^1.79.0",
     "qrcode": "^1.5.4",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "shiki": "^4.6.0",
+    "streamdown": "^2.8.1"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
     "@tauri-apps/cli": "^2.12.6",
     "@types/node": "^22.20.5",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.3.0",
+    "shadcn": "^4.23.0",
+    "tailwindcss": "^4.3.5",
+    "tw-animate-css": "^1.4.0",
     "typescript": "^5.9.0",
     "vite": "^8.3.8"
   }

@@ -6,7 +6,7 @@ import { DEFAULT_SPECIES, type Pet } from "@pawl/protocol";
 /** Client-only placeholder id (never sent to the hub; real pet ids are global). */
 export const FALLBACK_PET_ID = "local-dog";
 
-/** Shown when the hub has no pets yet (or is offline) so the strip is never empty. */
+/** Shown when the hub has no pets yet (or is offline) so lists are never empty. */
 export function fallbackPet(machineId: string): Pet {
   return {
     id: FALLBACK_PET_ID,

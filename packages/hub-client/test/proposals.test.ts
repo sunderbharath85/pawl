@@ -6,7 +6,10 @@ import {
   HubRequestError,
   initialHubState,
   PROPOSAL_TTL_MS,
+  MAX_LEDGER_ENTRIES,
   ProposalLedger,
+  type ProposalEntry,
+  type ProposalLedgerStore,
   proposalConfirmText,
   proposalDoneText,
   proposalExpired,
@@ -154,15 +157,32 @@ describe("executeProposal", () => {
     await expect(q).rejects.toMatchObject({ code: "forbidden" });
   });
 
-  test("a start proposal for this machine is invalid; nothing is sent (not even list_repos)", async () => {
+  test("a start proposal for this machine (agent-less command) checks the local repos, then starts here", async () => {
     const { c, ws } = connected();
-    const before = ws.sent.length;
-    const err = (await c.executeProposal({ ...startP, machineId: MID }, { confirmed: true }).catch((e: unknown) => e)) as HubRequestError;
-    expect(err).toMatchObject({ code: "invalid", requestType: "start_session" });
-    expect(err.message).toContain("this machine");
-    expect(ws.sent.length).toBe(before);
-    expect(proposalProblem({ ...startP, machineId: MID }, MID)).toContain("local starts are not proposals");
-    expect(proposalProblem(startP, MID)).toBeNull();
+    const local: ChatProposal = { ...startP, machineId: MID, cwd: "E:/work/api", summary: "Start Claude Code here in api: run the tests" };
+    expect(proposalProblem(local)).toBeNull();
+    const p = c.executeProposal(local, { confirmed: true });
+    await tick();
+    const req = ws.lastSent();
+    // This machine's own repos: no machineId on list_repos.
+    expect(req).toEqual({ type: "list_repos", id: req.id });
+    ws.receive({ type: "ack", id: req.id, ok: true, result: { repos: [{ name: "api", path: "E:/work/api" }] } });
+    await tick();
+    // A local start: no machineId and no confirmed flag on the wire (those are for other machines).
+    expect(ws.lastSent()).toEqual({ type: "start_session", id: ws.lastSent().id, agentId: "claude-code", cwd: "E:/work/api", prompt: "run the tests" });
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: true, result: { session: session(`${MID}:new`) } });
+    expect(await p).toMatchObject({ kind: "started", session: { id: `${MID}:new` } });
+    // Still only after the user confirmed.
+    await expect(c.executeProposal(local)).rejects.toMatchObject({ code: "unconfirmed" });
+  });
+
+  test("a prompt proposal for one of this machine's sessions is sent here", async () => {
+    const { c, ws } = connected();
+    const local: ChatProposal = { ...promptP, machineId: MID, sessionId: `${MID}:s1` };
+    const p = c.executeProposal(local, { confirmed: true });
+    expect(ws.lastSent()).toEqual({ type: "prompt", id: ws.lastSent().id, sessionId: `${MID}:s1`, text: "run the tests" });
+    ws.receive({ type: "ack", id: ws.lastSent().id, ok: true, result: {} });
+    expect(await p).toEqual({ kind: "sent", sessionId: `${MID}:s1` });
   });
 
   test("a start whose folder is not in that machine's repo index is invalid; nothing is started", async () => {
@@ -217,6 +237,11 @@ describe("proposal helpers", () => {
     expect(proposalConfirmText({ machine: undefined, machines: {} }, startP).button).toBe("Run on that machine");
     expect(proposalDoneText(state, startP)).toBe("Started on Mac mini.");
     expect(proposalDoneText(state, promptP)).toBe("Sent to Mac mini.");
+    // This machine's own proposals say so.
+    const here = { ...startP, machineId: MID };
+    expect(proposalConfirmText(state, here)).toEqual({ title: "Run on this machine?", detail: here.summary, button: "Run on this machine" });
+    expect(proposalDoneText(state, here)).toBe("Started on this machine.");
+    expect(proposalDoneText(state, { ...promptP, machineId: MID, sessionId: `${MID}:s1` })).toBe("Sent to this machine.");
     expect(proposalProblem(startP)).toBeNull();
     expect(proposalProblem(promptP)).toBeNull();
   });
@@ -269,5 +294,58 @@ describe("ProposalLedger", () => {
     expect(l.begin("m1", "b")).toBe(true);
     l.failed("m1", "b", "No answer from Mac mini yet — check that machine.", false);
     expect(l.available("m1")).toBe(false);
+  });
+});
+
+describe("ProposalLedger shared through a store (two windows)", () => {
+  function memoryStore() {
+    let data: Array<[string, ProposalEntry]> | null = null;
+    const store: ProposalLedgerStore = {
+      load: () => (data ? data.map(([k, v]) => [k, { ...v }] as [string, ProposalEntry]) : null),
+      save: (entries) => {
+        data = entries.map(([k, v]) => [k, { ...v }]);
+      },
+    };
+    return store;
+  }
+
+  test("a proposal used in one window is used in the other, even before it reloads", () => {
+    const store = memoryStore();
+    const bubble = new ProposalLedger(store);
+    const panel = new ProposalLedger(store);
+    expect(bubble.begin("m1", "a")).toBe(true);
+    // The panel has not reloaded yet, but claiming re-reads the store first.
+    expect(panel.begin("m1", "b")).toBe(false);
+    expect(panel.get("m1")).toEqual({ status: "running", proposalId: "a" });
+    bubble.done("m1", "a", "Started on this machine.", "s1");
+    let changes = 0;
+    panel.subscribe(() => changes++);
+    panel.reload();
+    expect(changes).toBe(1);
+    expect(panel.available("m1")).toBe(false);
+    panel.reload();
+    expect(changes).toBe(1); // nothing new
+    // A reopened window (a new ledger) starts with what was stored.
+    expect(new ProposalLedger(store).get("m1")).toMatchObject({ status: "done", sessionId: "s1" });
+  });
+
+  test("a retryable failure frees the message in every window", () => {
+    const store = memoryStore();
+    const a = new ProposalLedger(store);
+    const b = new ProposalLedger(store);
+    a.begin("m1", "x");
+    a.failed("m1", "x", "Mac mini is offline.", true);
+    expect(b.begin("m1", "y")).toBe(true);
+    expect(a.begin("m1", "x")).toBe(false);
+  });
+
+  test("the store is capped, oldest first out", () => {
+    const store = memoryStore();
+    const l = new ProposalLedger(store);
+    for (let i = 0; i < MAX_LEDGER_ENTRIES + 5; i++) l.begin(`m${i}`, "p");
+    const saved = store.load()!;
+    expect(saved).toHaveLength(MAX_LEDGER_ENTRIES);
+    expect(saved[0]![0]).toBe("m5");
+    expect(l.available("m0")).toBe(true);
   });
 });

@@ -630,6 +630,14 @@ export interface CustomAgentSetting {
  * The hub's editable settings (config.toml + defaults). Secrets are never sent: only whether they are set.
  * `overriddenBy` lists keys whose effective value comes from a CLI flag or env var instead (e.g. "hub.port": "--port").
  */
+/**
+ * Which language model the pet uses. "acp" = an installed coding agent over ACP (default Claude Code with Sonnet), so no
+ * API key is needed; it runs with every tool denied. "auto" = the first configured of anthropic, openai, gemini, ollama,
+ * then acp when that agent is installed.
+ */
+export type BotProvider = "auto" | "anthropic" | "openai" | "gemini" | "ollama" | "acp";
+export type BotStyle = "plain" | "playful";
+
 export interface HubSettings {
   hub: {
     port: number;
@@ -640,7 +648,36 @@ export interface HubSettings {
     /** "HH:MM" local time, or "" for off. */
     dailyReportTime: string;
   };
-  bot: { model: string; anthropicApiKeySet: boolean; ollamaUrl: string | null; ollamaModel: string | null };
+  /**
+   * `defaultAgent` = the agent the default pet hands work to when the user names none ("fix the failing test in repo
+   * api"); null = automatic (the agent of the most recent session, else the first installed one).
+   * Providers: Anthropic (`model`), OpenAI (`openaiModel`), Gemini (`geminiModel`), Ollama; API keys are write-only.
+   * `provider` picks one ("auto" = the first configured, in that order). `understand` = let the model turn free-form
+   * messages into the pet's intents; whatever it understands only ever becomes a card or proposal the user clicks.
+   */
+  bot: {
+    model: string;
+    anthropicApiKeySet: boolean;
+    ollamaUrl: string | null;
+    ollamaModel: string | null;
+    defaultAgent: AgentId | null;
+    provider: BotProvider;
+    openaiApiKeySet: boolean;
+    openaiModel: string;
+    geminiApiKeySet: boolean;
+    geminiModel: string;
+    /** provider "acp": the agent that thinks for the pet (default "claude-code") and its model (default "sonnet"). */
+    acpAgent: AgentId;
+    acpModel: string;
+    understand: boolean;
+    /** How the pet talks: "plain" (default; direct answers, no *actions* or barks) or "playful" (dog flourishes). */
+    style: BotStyle;
+    /**
+     * The default (orchestrator) pet's own name, shown on its name tag and bubble and used by the bot. The hub picks
+     * one from its pet-name pool on first start (never "Pawl", never another pet's name); the user can rename it.
+     */
+    petName: string;
+  };
   watchdog: { waitingNudgeAfterMs: number; repeatEveryMs: number; tickSecs: number };
   /**
    * `listen` = peer-listener address ("ip:port") or null when off; `acceptIntents` = remote control on;
@@ -655,12 +692,16 @@ export interface HubSettings {
 }
 
 /**
- * Partial update. Omitted keys are unchanged. Arrays replace the whole list. `bot.anthropicApiKey`: a string sets it,
- * null clears it (write-only; never read back).
+ * Partial update. Omitted keys are unchanged. Arrays replace the whole list. `bot.anthropicApiKey`, `bot.openaiApiKey`,
+ * `bot.geminiApiKey`: a string sets it, null clears it (write-only; never read back).
  */
 export interface HubSettingsPatch {
   hub?: Partial<HubSettings["hub"]>;
-  bot?: Partial<Omit<HubSettings["bot"], "anthropicApiKeySet">> & { anthropicApiKey?: string | null };
+  bot?: Partial<Omit<HubSettings["bot"], "anthropicApiKeySet" | "openaiApiKeySet" | "geminiApiKeySet">> & {
+    anthropicApiKey?: string | null;
+    openaiApiKey?: string | null;
+    geminiApiKey?: string | null;
+  };
   watchdog?: Partial<HubSettings["watchdog"]>;
   peer?: Partial<HubSettings["peer"]>;
   repos?: Partial<HubSettings["repos"]>;

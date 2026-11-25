@@ -110,3 +110,34 @@ Inspect `.cache/qa/<species>.png`, the previews and the raw frames. Decisions go
 
 Regenerate a bad frame with `generate.ts --activities <a> --frames <n> --regen [--note "..."]`,
 then rerun `process.ts`.
+
+## Reaction icons (`icons.ts`)
+
+Small sticker icons the pet puts in front of its chat replies, in the dog sprites' style:
+`paw` (greeting), `look` (status overview), `alert` (needs you), `done` (finished), `thinking`
+(not sure / asking which), `sleep` (all quiet), `tools` (proposing to start or prompt an agent).
+
+```
+assets/icons/<name>.png      128 x 128 RGBA, centred, ~6% transparent margin
+assets/icons/<name>@48.png   48 x 48, resampled from the full-res key; use it for 20-24 CSS px
+assets/icons/manifest.json   { version: 1, size: 128, smallSize: 48,
+                               icons: { <name>: { file, small, emoji, meaning } } }   (emoji = fallback)
+```
+
+```bash
+bun run icons.ts                                   # generate missing icons (cached), process, contact sheet, check
+bun run icons.ts --names look --regen [--note "..."]   # new variant for one icon
+bun run icons.ts --no-gen                          # reprocess cached raws only
+bun run icons.ts --dry-run                         # print prompts
+bun run icons.ts --check                           # validate assets/icons only
+```
+
+- One 1:1 1K image per icon, same background rules as the pets (flat `#00FF00`, no green on the
+  icon, no shadows, outlined). Image input: a 2 x 2 style sheet of the shipped dog frames (idle,
+  thinking, alert, napping) on green, rebuilt from `assets/pets/dog/*.png` on every run, so it needs
+  no cached reference sheet.
+- Cache: `.cache/raw/icons/<name>.v<N>.<ext>` + `.json`, append-only like the pets; the newest
+  variant wins unless `overrides.json` pins one: `{ "icons": { "look": { "variant": 1 } } }`.
+- Processing: the same chroma key + despill as `process.ts`, specks dropped, union bbox of the kept
+  parts fitted (longer side) into the square, Lanczos straight to each size.
+- QA: `docs/screenshots/reaction-icons.png` (128 / 48 / 24 / 20 px inline, light and dark).

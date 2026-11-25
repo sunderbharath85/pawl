@@ -1,13 +1,13 @@
-//! Pawl desktop shell (Tauri 2): pet strip window, panel window, tray, and
+//! Pawl desktop shell (Tauri 2): pet window, panel window, tray, and
 //! the small amount of native glue the React UI needs (hub credentials, health,
-//! spawning `pawl serve`, click-through hit-testing).
+//! spawning `pawl serve`, click-through hit-testing, moving the pet).
 
 mod hub;
 mod pet_window;
 mod tray;
 
 use hub::{HubCredentials, HubHealth, HubProcess, StartHubResult};
-use pet_window::{PetWindowState, PANEL_LABEL};
+use pet_window::{PanelFocusState, PetWindowState, PANEL_LABEL, PET_LABEL};
 use std::time::Duration;
 use tauri::{Emitter, Manager, WindowEvent};
 
@@ -52,19 +52,29 @@ async fn lan_address() -> Option<String> {
 
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
+    quit(&app);
+}
+
+/// "Quit Pawl" (tray, the pet's menu, Settings): stop the hub too if this app started it, then exit.
+pub fn quit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(pid) = app.state::<HubProcess>().stop_owned() {
+        eprintln!("[pawl] stopped the hub this app started (pid {pid})");
+    }
     app.exit(0);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        // Must be registered first: a second launch just surfaces the panel.
+        // Must be registered first. A second launch (also what clicking an OS notification can do) only wakes
+        // the pet's bubble: the panel opens when the user asks for it (right-click the pet -> Open hub, or the tray).
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            pet_window::show_panel(app, None);
+            pet_window::pet_attention(app);
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(PetWindowState::default())
+        .manage(PanelFocusState::default())
         .manage(HubProcess::default())
         .invoke_handler(tauri::generate_handler![
             hub_credentials,
@@ -75,10 +85,14 @@ pub fn run() {
             quit_app,
             pet_window::set_hit_rects,
             pet_window::set_capture_all,
-            pet_window::set_follow_cursor,
+            pet_window::set_pet_frame,
+            pet_window::pet_start_drag,
+            pet_window::pet_context_menu,
+            pet_window::reset_pet_position,
             pet_window::set_pets_paused,
             pet_window::get_pets_paused,
             pet_window::open_panel,
+            pet_window::take_panel_focus,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -89,14 +103,15 @@ pub fn run() {
             tray::create(handle)?;
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // Closing the panel hides it; the app lives in the tray.
-            if window.label() == PANEL_LABEL {
-                if let WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
+        .on_window_event(|window, event| match (window.label(), event) {
+            // Closing the panel hides it (the app lives in the tray); Open hub shows it again, or recreates it.
+            (PANEL_LABEL, WindowEvent::CloseRequested { api, .. }) => {
+                api.prevent_close();
+                let _ = window.hide();
             }
+            // The user dragged the pet (or the OS moved it): follow it, save once it is dropped.
+            (PET_LABEL, WindowEvent::Moved(pos)) => pet_window::on_moved(window.app_handle(), *pos),
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running Pawl desktop");

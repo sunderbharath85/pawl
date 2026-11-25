@@ -45,6 +45,19 @@ use std::sync::Arc;
 
 use pawl_protocol::{Agent, AgentId, HistorySession, MachineId, Session, SessionId};
 
+pub use spawn::CLEAN_ENV_KEEP;
+
+/// Extra options for [`AcpHost::start_session_with`] (all off by default: [`AcpHost::start_session`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StartOptions {
+    /// `_meta` of `session/new` (an object; agent-specific extensions, e.g. claude-agent-acp's
+    /// `{"claudeCode": {"options": {...}}}` with Claude Agent SDK options). Other values are ignored.
+    pub meta: Option<serde_json::Value>,
+    /// Start the agent process (its own connection) with a cleared environment: only the
+    /// [`CLEAN_ENV_KEEP`] variables of the hub's, plus `agent.env`.
+    pub clean_env: bool,
+}
+
 /// Events emitted by the host to the hub.
 #[derive(Debug, Clone)]
 pub enum HostEvent {
@@ -93,7 +106,20 @@ impl AcpHost {
 
     /// Spawn (or reuse) the agent process, `initialize`, `session/new`. If `prompt` is Some, send it (non-blocking).
     pub async fn start_session(&self, agent: &Agent, cwd: PathBuf, hub_session_id: SessionId, prompt: Option<String>) -> anyhow::Result<Session> {
-        self.inner.start_session(agent, cwd, hub_session_id, prompt).await
+        self.inner.start_session(agent, cwd, hub_session_id, prompt, StartOptions::default()).await
+    }
+
+    /// [`Self::start_session`] with [`StartOptions`]: a `session/new` `_meta`, and/or an agent process with a
+    /// clean environment (a separate process from the same agent's ordinary sessions).
+    pub async fn start_session_with(
+        &self,
+        agent: &Agent,
+        cwd: PathBuf,
+        hub_session_id: SessionId,
+        prompt: Option<String>,
+        opts: StartOptions,
+    ) -> anyhow::Result<Session> {
+        self.inner.start_session(agent, cwd, hub_session_id, prompt, opts).await
     }
 
     /// Starts a turn; returns once sent. Turn end arrives as Event{kind: Stop} + Session upsert.

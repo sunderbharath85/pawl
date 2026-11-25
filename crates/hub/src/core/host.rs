@@ -27,6 +27,25 @@ impl Host {
         }
     }
 
+    /// `start_session` with ACP start options (`session/new` `_meta`, a clean agent environment).
+    pub(crate) async fn start_session_with(
+        &self,
+        agent: &Agent,
+        cwd: PathBuf,
+        id: SessionId,
+        prompt: Option<String>,
+        opts: pawl_acp::StartOptions,
+    ) -> Result<Session> {
+        match self {
+            Host::Acp(h) => h.start_session_with(agent, cwd, id, prompt, opts).await,
+            #[cfg(test)]
+            Host::Fake(f) => {
+                f.options.lock().unwrap().push(opts);
+                f.start_session(agent, cwd, id, prompt)
+            }
+        }
+    }
+
     pub(crate) async fn prompt(&self, id: &str, text: String) -> Result<()> {
         match self {
             Host::Acp(h) => h.prompt(id, text).await,
@@ -115,6 +134,10 @@ pub(crate) mod fake {
     #[derive(Clone, Default)]
     pub(crate) struct FakeHost {
         pub calls: Arc<Mutex<Vec<String>>>,
+        /// Every agent a session was started with (env included).
+        pub started: Arc<Mutex<Vec<Agent>>>,
+        /// The start options of every `start_session_with`.
+        pub options: Arc<Mutex<Vec<pawl_acp::StartOptions>>>,
     }
 
     impl FakeHost {
@@ -129,6 +152,7 @@ pub(crate) mod fake {
 
         pub(crate) fn start_session(&self, agent: &Agent, cwd: PathBuf, id: SessionId, prompt: Option<String>) -> Result<Session> {
             self.record(format!("start {} {}", agent.id, prompt.unwrap_or_default()))?;
+            self.started.lock().unwrap().push(agent.clone());
             let now = pawl_protocol::now_ms();
             // Hub session ids are global; the owning machine is their prefix.
             let machine_id = pawl_protocol::parse_global_id(&id).map(|(m, _)| m.to_string()).unwrap_or_default();

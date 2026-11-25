@@ -23,15 +23,65 @@
   --lilac-soft: #ebe4f7;
   --berry: #c4524b;
   --berry-soft: #f8dcd8;
+  /* Aliases for the AI Elements scope (panel/ai.css), where --card and --accent mean shadcn's. */
+  --pawl-card: var(--card);
+  --pawl-accent: var(--accent);
+  --on-accent: #fff;
+  /* Scrollbars: thin, a soft tan thumb on a transparent track (shared by the panel, its AI Elements and the pet). */
+  --scrollbar-size: 8px;
+  --scrollbar-thumb: rgba(138, 114, 97, 0.36);
+  --scrollbar-thumb-hover: rgba(138, 114, 97, 0.62);
+  --scrollbar-track: transparent;
+  /* The cartoon outline of bubbles (ink on light; a soft edge on dark, where ink is light). */
+  --outline: var(--ink);
 
   --radius-s: 10px;
   --radius: 16px;
   --radius-l: 24px;
   --shadow-s: 0 1px 0 rgba(90, 60, 30, 0.06), 0 2px 6px rgba(90, 60, 30, 0.08);
   --shadow: 0 2px 0 rgba(90, 60, 30, 0.05), 0 10px 28px -8px rgba(90, 60, 30, 0.25);
-  --font: "Nunito", "Quicksand", ui-rounded, "SF Pro Rounded", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-  --font-display: "Fredoka", "Nunito", ui-rounded, "SF Pro Rounded", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font: "Nunito", "Quicksand", ui-rounded, "SF Pro Rounded", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif,
+    "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji";
+  --font-display: "Fredoka", "Nunito", ui-rounded, "SF Pro Rounded", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif,
+    "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji";
   --font-mono: "Cascadia Code", "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace;
+}
+
+/* Dark: the same warm palette at night (follows the system setting). */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --paper: #1d1814;
+    --paper-2: #28211c;
+    --paper-3: #342b24;
+    --card: #241e19;
+    --ink: #f1e5d6;
+    --ink-2: #d9c6b1;
+    --ink-soft: #a8917c;
+    --line: #3b3129;
+    --line-strong: #54463a;
+
+    --accent: #e8834a;
+    --accent-deep: #f29b65;
+    --accent-soft: #4a2e1f;
+    --honey: #e9b04a;
+    --honey-soft: #46381a;
+    --sage: #7fae7a;
+    --sage-soft: #243528;
+    --sky: #79a9d3;
+    --sky-soft: #1f2d3a;
+    --lilac: #a996d6;
+    --lilac-soft: #2e2840;
+    --berry: #e2766e;
+    --berry-soft: #472523;
+    --on-accent: #1d1814;
+    --scrollbar-thumb: rgba(232, 208, 182, 0.2);
+    --scrollbar-thumb-hover: rgba(232, 208, 182, 0.38);
+    --outline: #6a5646;
+
+    --shadow-s: 0 1px 0 rgba(0, 0, 0, 0.25), 0 2px 6px rgba(0, 0, 0, 0.3);
+    --shadow: 0 2px 0 rgba(0, 0, 0, 0.2), 0 10px 28px -8px rgba(0, 0, 0, 0.55);
+  }
 }
 
 *,
@@ -57,6 +107,73 @@ body {
 button {
   font: inherit;
   color: inherit;
+}
+
+/* A pet reply's reaction icon (lib/ReactionIcon.tsx), aligned with the first line of the reply. */
+.reaction-line {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.reaction-icon,
+.reaction-emoji {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-top: -2px;
+}
+.reaction-icon {
+  object-fit: contain;
+  user-select: none;
+}
+.reaction-emoji {
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 17px;
+  line-height: 22px;
+  text-align: center;
+}
+.reaction-text {
+  min-width: 0;
+}
+
+/*
+ * Thin themed scrollbars everywhere. WebView2 (Chromium) and WebKit style ::-webkit-scrollbar: 8px, a rounded thumb,
+ * no arrow buttons, darker on hover. Chromium ignores those rules on an element that sets the standard
+ * scrollbar-width / scrollbar-color, so the standard properties only go to engines without ::-webkit-scrollbar.
+ * Scrollbars appear only where something overflows (overflow: auto).
+ */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  }
+}
+::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+  background: var(--scrollbar-track);
+}
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+::-webkit-scrollbar-thumb {
+  min-height: 32px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-color: var(--scrollbar-thumb);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active {
+  background-color: var(--scrollbar-thumb-hover);
+}
+::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 .pill {
@@ -95,6 +212,13 @@ button {
   border-color: #557f52;
   color: #fff;
   box-shadow: 0 2px 0 #557f52;
+}
+@media (prefers-color-scheme: dark) {
+  /* Filled buttons are light on dark: dark text on them. */
+  .pill-primary,
+  .pill-good {
+    color: var(--on-accent);
+  }
 }
 .pill-bad {
   background: var(--card);

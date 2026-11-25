@@ -146,7 +146,7 @@ pub mod hooks {
 
 ```rust
 pub mod rules {
-    pub fn default_rules() -> Vec<Rule>;          // auto_allow read/search/think; ask execute/delete/fetch/edit/move/other
+    pub fn default_rules() -> Vec<Rule>;          // auto_allow think only; ask read/search/edit/move/delete/execute/fetch/other (2026-11-24: "by default it should be Ask")
     /// First matching rule wins; no match → Ask. Never AutoAllow delete/execute/fetch unless a rule explicitly
     /// matches that toolKind (default_rules never does). Glob on every location path.
     pub fn evaluate(rules: &[Rule], req: &PermissionRequest) -> RuleAction;

@@ -189,7 +189,7 @@ export function NewSessionView() {
     <section className="view">
       <header className="view-head">
         <h1>New session</h1>
-        <p>Pick a machine and an agent, point it at a folder and give it a job. Its pet will walk the strip while it works.</p>
+        <p>Pick a machine and an agent, point it at a folder and give it a job. Your pet on screen keeps an eye on it while it works.</p>
       </header>
 
       <form

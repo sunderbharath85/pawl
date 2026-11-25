@@ -12,15 +12,41 @@ import {
   proposalExpired,
   proposalRetryable,
 } from "@pawl/hub-client";
+import type { HubClient, HubState } from "@pawl/hub-client";
 import type { ChatMessage, ChatProposal } from "@pawl/protocol";
 import { usePanel } from "../context";
 import * as I from "../icons";
+import { browserStorage, PROPOSALS_KEY, storageProposalStore } from "../../lib/proposalStore";
 
-/** Which messages' proposals were used: lives as long as the panel window (not persisted). */
-export const proposalLedger = new ProposalLedger();
+/**
+ * Which messages' proposals were used. Kept in localStorage, shared by the panel and the pet bubble and kept across
+ * reloads, so a proposal runs once whichever window confirms it.
+ */
+export const proposalLedger = new ProposalLedger(storageProposalStore(browserStorage()));
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key === PROPOSALS_KEY || e.key === null) proposalLedger.reload();
+  });
+}
+
+/** What the proposal buttons need (the panel passes its context; the pet bubble its own). */
+export interface ProposalEnv {
+  client: HubClient;
+  state: HubState;
+  now: number;
+  connected: boolean;
+  /** Shows an "open session →" link after a run (the panel); left out in the pet bubble. */
+  onOpenSession?: ((sessionId: string) => void) | undefined;
+}
 
 export function ChatProposals({ message }: { message: ChatMessage }) {
   const { client, state, now, meta, navigate } = usePanel();
+  const env: ProposalEnv = { client, state, now, connected: meta.phase === "connected", onOpenSession: (sessionId) => navigate({ view: "session", sessionId }) };
+  return <ChatProposalsView message={message} env={env} />;
+}
+
+export function ChatProposalsView({ message, env }: { message: ChatMessage; env: ProposalEnv }) {
+  const { client, state, now, onOpenSession } = env;
   useSyncExternalStore(proposalLedger.subscribe, proposalLedger.snapshot, proposalLedger.snapshot);
   const [confirming, setConfirming] = useState<string | null>(null);
   const proposals = message.proposals ?? [];
@@ -28,7 +54,7 @@ export function ChatProposals({ message }: { message: ChatMessage }) {
 
   const entry = proposalLedger.get(message.id);
   const expired = proposalExpired(message, now);
-  const connected = meta.phase === "connected";
+  const connected = env.connected;
   const open = proposalLedger.available(message.id) && !expired && connected;
 
   const run = async (p: ChatProposal) => {
@@ -84,8 +110,8 @@ export function ChatProposals({ message }: { message: ChatMessage }) {
       {entry?.status === "done" && (
         <span className="proposal-result is-ok">
           {entry.text}{" "}
-          {entry.sessionId && (
-            <button className="link" onClick={() => navigate({ view: "session", sessionId: entry.sessionId! })}>
+          {entry.sessionId && onOpenSession && (
+            <button className="link" onClick={() => onOpenSession(entry.sessionId!)}>
               open session →
             </button>
           )}

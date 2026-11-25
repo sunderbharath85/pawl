@@ -467,7 +467,7 @@ export class HubClient {
     if (opts.confirmed !== true) throw new HubRequestError("unconfirmed", type, "a chat proposal runs only after the user confirms it on this device");
     const own = this.state.machine?.id;
     if (p.kind === "start" && !own) throw new HubRequestError("no_machine", type, "the hub has not introduced this machine yet");
-    const problem = proposalProblem(p, own);
+    const problem = proposalProblem(p);
     if (problem) throw new HubRequestError("invalid", type, `the proposal cannot run: ${problem}`);
     if (p.kind === "start") {
       const cwd = p.cwd!.trim();

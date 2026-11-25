@@ -11,5 +11,6 @@ pub mod notify;
 pub mod server;
 pub mod settings;
 pub mod store;
+pub mod titles;
 
 pub const HUB_VERSION: &str = env!("CARGO_PKG_VERSION");

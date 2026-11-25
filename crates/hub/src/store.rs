@@ -650,6 +650,16 @@ impl Store {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    /// This machine's sessions whose stored title starts like injected text (`<…`, `[Image…`).
+    pub fn sessions_with_injected_titles(&self) -> Result<Vec<Session>> {
+        let c = self.conn();
+        let mut st = c.prepare(&format!(
+            "SELECT {SESSION_COLS} FROM sessions WHERE machine_id = ?1 AND (ltrim(title) LIKE '<%' OR ltrim(title) LIKE '[Image%')"
+        ))?;
+        let rows = st.query_map(params![self.machine_id], row_session)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     /// Most recent sessions of every machine (this one's and mirrored), ended or not.
     pub fn recent_sessions(&self, limit: u32) -> Result<Vec<Session>> {
         let c = self.conn();

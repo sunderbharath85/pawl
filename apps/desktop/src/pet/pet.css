@@ -1,6 +1,6 @@
 @import "../styles/tokens.css";
 
-/* The strip window is transparent and click-through; only pets/bubbles are solid. */
+/* The pet window is transparent and click-through; only pets and bubbles are solid. */
 html,
 body.pet-body,
 .pet-body #root {
@@ -10,113 +10,563 @@ body.pet-body,
   -webkit-user-select: none;
 }
 
-.strip {
+.pet-root {
   position: relative;
-  width: 100vw;
-  height: 100vh;
   overflow: hidden;
 }
-.strip.is-hover {
-  cursor: pointer;
-}
-.strip-stage {
+
+/* --- pets --- */
+.pet-box {
   position: absolute;
-  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: grab;
+  outline: none;
+  touch-action: none;
+}
+.pet-box:active {
+  cursor: grabbing;
+}
+.pet-box:focus-visible .pet-sprite {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 14px;
+}
+.pet-sprite {
+  line-height: 0;
+  filter: drop-shadow(0 6px 6px rgba(60, 35, 15, 0.22));
+}
+.pet-name {
+  max-width: calc(100% + 16px);
+  margin-top: 1px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--card) 92%, transparent);
+  border: 1.5px solid var(--line-strong);
+  font-family: var(--font-display);
+  font-size: 11.5px;
+  font-weight: 800;
+  line-height: 15px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pet-box.is-session .pet-name {
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.pet-badge {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--berry);
+  color: var(--on-accent);
+  border: 2px solid var(--card);
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: var(--shadow-s);
+}
+/* A still pet: no animation anywhere in its drawing (the first frame of a sprite strip, the SVG at rest). */
+.pet-box.is-still .ap-pet,
+.pet-box.is-still .ap-pet * {
+  animation: none !important;
+  transition: none !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pet-box .ap-pet,
+  .pet-box .ap-pet * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+/* "It needs you" without a count: a small static mark. */
+.pet-mark {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--honey);
+  color: #3a2a1f;
+  border: 2px solid var(--card);
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 16px;
+  text-align: center;
+  box-shadow: var(--shadow-s);
+}
+.pet-more {
+  position: absolute;
+  appearance: none;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+  box-shadow: var(--shadow-s);
+}
+.fallback-dog {
+  font-size: 64px;
+  line-height: 1;
+  justify-content: flex-end;
 }
 
-.strip-toast {
+/* --- the chat bubble --- */
+.pet-bubble {
   position: absolute;
-  right: 16px;
-  top: 10px;
-  max-width: 340px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--card);
+  border: 2px solid var(--outline);
+  border-radius: 18px;
+  box-shadow: 0 4px 0 var(--outline);
+  font-size: 13px;
+  user-select: text;
+  -webkit-user-select: text;
+  animation: pet-pop 0.22s cubic-bezier(0.2, 1.4, 0.4, 1);
+}
+.pet-bubble::after,
+.pet-say::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--tail-x) - 8px);
+  width: 16px;
+  height: 16px;
+  background: var(--card);
+  transform: rotate(45deg);
+}
+.pet-bubble.is-above::after {
+  bottom: -10px;
+  border-right: 2px solid var(--outline);
+  border-bottom: 2px solid var(--outline);
+}
+.pet-bubble.is-below::after {
+  top: -10px;
+  border-left: 2px solid var(--outline);
+  border-top: 2px solid var(--outline);
+}
+.pb-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 8px 6px 14px;
+}
+.pb-head-text {
+  flex: 1;
+  min-width: 0;
+}
+.pb-title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pb-sub {
+  margin-top: 1px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  line-height: 1.3;
+}
+.pb-close {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 8px;
+}
+.pb-close:hover {
+  background: var(--paper-2);
+  color: var(--ink);
+}
+.pb-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pb-note {
+  margin: 0 12px 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-s);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+.pb-note.is-problem {
+  background: var(--berry-soft);
+  color: var(--berry);
+  border: 1.5px solid var(--berry);
+}
+.pb-text {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  line-height: 1.4;
+}
+/* The default pet's rename field (its menu's "Rename…"). */
+.pb-rename {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 8px;
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+}
+.pb-rename-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+.pb-rename-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.pb-rename-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1.5px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+}
+.pb-rename-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.pb-rename-input.is-invalid {
+  border-color: var(--berry);
+}
+.pb-rename-error {
+  font-size: 12px;
+  color: var(--berry);
+}
+
+.pb-hint,
+.pb-empty {
+  font-size: 12px;
+  color: var(--ink-soft);
+  line-height: 1.4;
+}
+.pb-waiting {
+  padding: 8px 10px;
+  border-radius: var(--radius-s);
+  background: var(--honey-soft);
+  border: 1.5px solid var(--honey);
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+.pb-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pb-actions .pill {
+  padding: 4px 12px;
+  font-size: 12.5px;
+}
+
+/* approvals */
+.pb-approval {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  border: 1.5px solid var(--accent);
+}
+.pb-approval.is-remote {
+  background: var(--sky-soft);
+  border-color: var(--sky);
+}
+.pb-approval-who {
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--ink-2);
+}
+.pb-command {
+  margin: 0;
+  max-height: 120px;
+  overflow: auto;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--card);
+  border: 1px solid var(--line-strong);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+.pb-approval-text {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+/* chat */
+.pb-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pb-msg {
+  max-width: 88%;
+  display: flex;
+  flex-direction: column;
+}
+.pb-msg-text {
+  padding: 6px 10px;
+  border-radius: 12px;
+  line-height: 1.38;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pb-msg.is-user {
+  align-self: flex-end;
+}
+.pb-msg.is-user .pb-msg-text {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-bottom-right-radius: 4px;
+}
+.pb-msg.is-pet {
+  align-self: flex-start;
+}
+.pb-msg.is-pet .pb-msg-text {
+  background: var(--paper-2);
+  border-bottom-left-radius: 4px;
+}
+.pb-time {
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--ink-soft);
+}
+
+.pb-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.pb-chip {
+  appearance: none;
+  border: 1.5px solid var(--accent);
+  background: var(--card);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.pb-chip:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+.pb-chip:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.pb-composer {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+  padding: 8px 10px 10px;
+  border-top: 2px dashed var(--line);
+}
+.pb-composer textarea {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  padding: 6px 9px;
+  border-radius: 10px;
+  border: 1.5px solid var(--line-strong);
+  background: var(--card);
+  outline: none;
+}
+.pb-composer textarea::placeholder {
+  color: var(--ink-soft);
+  opacity: 1;
+}
+.pb-composer textarea:focus {
+  border-color: var(--accent);
+}
+.pb-composer textarea:disabled {
+  background: var(--paper);
+  color: var(--ink-soft);
+}
+.pb-composer .pill {
+  padding: 6px 12px;
+  font-size: 12.5px;
+}
+
+/* chat proposals (same look as the panel's) */
+.proposals {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  margin-top: 5px;
+}
+.proposals-ask {
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--ink-2);
+}
+.proposal {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  text-align: left;
+  color: var(--ink);
+  background: var(--card);
+  border: 1.5px solid var(--accent);
+  border-radius: 12px;
+  cursor: pointer;
+}
+.proposal:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+.proposal:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  border-color: var(--line-strong);
+}
+.proposal.is-used {
+  opacity: 0.85;
+  border-style: dashed;
+}
+.proposal-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  max-width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--radius-s);
+  border: 1.5px solid var(--honey);
+  background: var(--honey-soft);
+}
+.proposal-confirm-text {
+  flex: 1 1 100%;
+  font-size: 12.5px;
+}
+.proposal-confirm-machine {
+  font-weight: 900;
+}
+.proposal-confirm-actions {
+  display: flex;
+  gap: 6px;
+}
+.proposal-confirm-actions .pill {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.proposal-result {
+  font-size: 12px;
+  font-weight: 700;
+}
+.proposal-result.is-ok {
+  color: var(--sage);
+}
+.proposal-result.is-problem {
+  color: var(--berry);
+}
+.hint {
+  font-size: 11.5px;
+  color: var(--ink-soft);
+}
+
+.typing {
+  display: inline-flex;
+  gap: 4px;
+  padding: 8px 12px;
+  background: var(--paper-2);
+  border-radius: 12px;
+  align-self: flex-start;
+}
+.typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pet-hop 1s ease-in-out infinite;
+}
+.typing span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.typing span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* a one-line speech bubble while the chat bubble is closed */
+.pet-say {
+  position: absolute;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.pet-say.is-above {
+  align-items: flex-end;
+}
+.pet-say::after {
+  display: none;
+}
+.pet-say-text {
+  pointer-events: auto;
+  appearance: none;
+  max-width: 100%;
   background: var(--berry-soft);
   color: var(--berry);
   border: 1.5px solid var(--berry);
   border-radius: 14px;
-  padding: 8px 12px;
+  padding: 7px 12px;
   font-size: 12.5px;
   font-weight: 700;
+  text-align: left;
+  cursor: pointer;
   box-shadow: var(--shadow);
-  animation: strip-pop 0.25s ease-out;
+  animation: pet-pop 0.25s ease-out;
 }
 
-/* --- hub-offline dog --- */
-.sleepy {
-  position: absolute;
-  right: 28px;
-  bottom: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-}
-.sleepy-pet {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  padding: 0;
-  cursor: pointer;
-  line-height: 0;
-  filter: drop-shadow(0 6px 6px rgba(60, 35, 15, 0.22));
-}
-.sleepy-bubble {
-  position: relative;
-  max-width: 280px;
-  margin-right: 26px;
-  background: var(--card);
-  border: 2px solid var(--ink);
-  border-radius: 18px;
-  padding: 10px 14px 12px;
-  box-shadow: 0 4px 0 var(--ink);
-  animation: strip-pop 0.3s cubic-bezier(0.2, 1.4, 0.4, 1);
-}
-.sleepy-bubble::after {
-  content: "";
-  position: absolute;
-  right: 34px;
-  bottom: -11px;
-  width: 16px;
-  height: 16px;
-  background: var(--card);
-  border-right: 2px solid var(--ink);
-  border-bottom: 2px solid var(--ink);
-  transform: rotate(45deg);
-}
-.sleepy-title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-weight: 800;
-  font-size: 14px;
-}
-.sleepy-sub {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: var(--ink-soft);
-  line-height: 1.35;
-}
-.sleepy-actions {
-  display: flex;
-  gap: 6px;
-  margin-top: 8px;
-}
-.sleepy-actions .pill {
-  padding: 4px 12px;
-  font-size: 12px;
-}
-.sleepy-close {
-  position: absolute;
-  top: 2px;
-  right: 6px;
-  border: 0;
-  background: transparent;
-  color: var(--ink-soft);
-  font-size: 16px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 4px;
-}
-
-@keyframes strip-pop {
+@keyframes pet-pop {
   from {
     opacity: 0;
     transform: translateY(6px) scale(0.96);
@@ -126,8 +576,20 @@ body.pet-body,
     transform: none;
   }
 }
-
-.fallback-dog {
-  font-size: 64px;
-  line-height: 1;
+@keyframes pet-hop {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pet-bubble,
+  .pet-badge,
+  .pet-say-text,
+  .typing span {
+    animation: none;
+  }
 }

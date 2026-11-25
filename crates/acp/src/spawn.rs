@@ -12,6 +12,21 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 /// Environment variables never forwarded to agent processes.
 const SCRUBBED_ENV: &[&str] = &["PAWL_HUB_TOKEN"];
 
+/// The hub's environment variables an agent started with a clean environment keeps
+/// ([`crate::StartOptions::clean_env`]): what a process needs to run, find its user's login and config,
+/// and reach the network (proxies, CA files). No API keys or tokens; the agent's own `env` comes on top.
+pub const CLEAN_ENV_KEEP: &[&str] = &[
+    "PATH", "PATHEXT", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "TEMP",
+    "TMP", "TMPDIR", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
+    "COMMONPROGRAMFILES", "USER", "USERNAME", "LOGNAME", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ", "TERM", "SHELL",
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "CLAUDE_CONFIG_DIR",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR",
+];
+
+fn keep_in_clean_env(key: &str) -> bool {
+    CLEAN_ENV_KEEP.iter().any(|k| k.eq_ignore_ascii_case(key))
+}
+
 /// How many trailing stderr lines to keep for error reports.
 const STDERR_TAIL_LINES: usize = 20;
 
@@ -74,12 +89,14 @@ pub(crate) fn resolve_program(program: &str, env: Option<&BTreeMap<String, Strin
     which::which_in(program, path_var, cwd).with_context(|| format!("could not find agent executable `{program}` on PATH"))
 }
 
-/// Spawn `command` (program + args) in `cwd` with `env` layered over the hub's environment.
+/// Spawn `command` (program + args) in `cwd` with `env` layered over the hub's environment, or with
+/// `clean_env` over only the [`CLEAN_ENV_KEEP`] variables of it.
 pub(crate) fn spawn_agent(
     agent_id: &str,
     command: &[String],
     env: Option<&BTreeMap<String, String>>,
     cwd: &Path,
+    clean_env: bool,
 ) -> anyhow::Result<Spawned> {
     let Some((program, args)) = command.split_first() else {
         bail!("agent `{agent_id}` has no command configured");
@@ -93,6 +110,14 @@ pub(crate) fn spawn_agent(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    if clean_env {
+        cmd.env_clear();
+        for (key, value) in std::env::vars_os() {
+            if key.to_str().is_some_and(keep_in_clean_env) {
+                cmd.env(&key, &value);
+            }
+        }
+    }
     for key in SCRUBBED_ENV {
         cmd.env_remove(key);
     }
@@ -300,13 +325,49 @@ mod tests {
             eprintln!("npx not on PATH; skipping");
             return;
         }
-        let mut s = spawn_agent("npx-test", &["npx".into(), "--version".into()], None, &cwd).unwrap();
+        let mut s = spawn_agent("npx-test", &["npx".into(), "--version".into()], None, &cwd, false).unwrap();
         drop(s.stdin);
         let mut out = String::new();
         tokio::io::AsyncReadExt::read_to_string(&mut s.stdout, &mut out).await.unwrap();
         let status = s.child.wait().await.unwrap();
         assert!(status.success(), "npx --version failed: {status}");
         assert!(out.trim().chars().next().is_some_and(|c| c.is_ascii_digit()), "unexpected output {out:?}");
+    }
+
+    /// A clean environment keeps only the allow-listed variables of the hub's, plus the agent's own.
+    #[tokio::test]
+    async fn clean_env_drops_inherited_variables() {
+        // SAFETY of the test: unique names, read only by the child spawned below.
+        std::env::set_var("PAWL_TEST_SECRET_KEY_7Q", "sk-should-not-leak");
+        let cwd = std::env::current_dir().unwrap();
+        let cmd: Vec<String> = if cfg!(windows) { vec!["cmd".into(), "/C".into(), "set".into()] } else { vec!["env".into()] };
+        let env = BTreeMap::from([("PAWL_TEST_AGENT_VAR".to_string(), "from-agent".to_string())]);
+        let run = |clean: bool| {
+            let (cmd, env, cwd) = (cmd.clone(), env.clone(), cwd.clone());
+            async move {
+                let mut s = spawn_agent("env-test", &cmd, Some(&env), &cwd, clean).unwrap();
+                drop(s.stdin);
+                let mut out = String::new();
+                tokio::io::AsyncReadExt::read_to_string(&mut s.stdout, &mut out).await.unwrap();
+                let _ = s.child.wait().await;
+                out
+            }
+        };
+        let inherited = run(false).await;
+        assert!(inherited.contains("PAWL_TEST_SECRET_KEY_7Q=sk-should-not-leak"), "layered env inherits: {inherited}");
+        let clean = run(true).await;
+        assert!(!clean.contains("PAWL_TEST_SECRET_KEY_7Q") && !clean.contains("sk-should-not-leak"), "{clean}");
+        assert!(clean.contains("PAWL_TEST_AGENT_VAR=from-agent"), "the agent's own env stays: {clean}");
+        let names: Vec<&str> = clean.lines().filter_map(|l| l.split_once('=').map(|(k, _)| k)).collect();
+        assert!(names.iter().any(|k| k.eq_ignore_ascii_case("PATH")), "PATH is kept: {clean}");
+        for k in names {
+            assert!(keep_in_clean_env(k) || k == "PAWL_TEST_AGENT_VAR" || is_os_injected(k), "unexpected inherited {k}");
+        }
+    }
+
+    /// Variables the OS or the shell adds to every child itself (not inherited from the hub).
+    fn is_os_injected(k: &str) -> bool {
+        k.starts_with('=') || ["PROMPT", "PWD", "SHLVL", "_", "OLDPWD"].iter().any(|x| x.eq_ignore_ascii_case(k))
     }
 
     #[test]

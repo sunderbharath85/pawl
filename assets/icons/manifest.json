@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "size": 128,
+  "smallSize": 48,
+  "icons": {
+    "paw": {
+      "file": "paw.png",
+      "small": "paw@48.png",
+      "emoji": "🐾",
+      "meaning": "greeting / general reply"
+    },
+    "look": {
+      "file": "look.png",
+      "small": "look@48.png",
+      "emoji": "👀",
+      "meaning": "status overview"
+    },
+    "alert": {
+      "file": "alert.png",
+      "small": "alert@48.png",
+      "emoji": "⚠️",
+      "meaning": "something needs you"
+    },
+    "done": {
+      "file": "done.png",
+      "small": "done@48.png",
+      "emoji": "✅",
+      "meaning": "finished"
+    },
+    "thinking": {
+      "file": "thinking.png",
+      "small": "thinking@48.png",
+      "emoji": "🤔",
+      "meaning": "not sure / asking which"
+    },
+    "sleep": {
+      "file": "sleep.png",
+      "small": "sleep@48.png",
+      "emoji": "💤",
+      "meaning": "all quiet"
+    },
+    "tools": {
+      "file": "tools.png",
+      "small": "tools@48.png",
+      "emoji": "🛠️",
+      "meaning": "proposing to start or prompt an agent"
+    }
+  }
+}

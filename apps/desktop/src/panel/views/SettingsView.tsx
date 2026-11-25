@@ -1,11 +1,11 @@
 // Settings (PLAN.md migration step 5b): every hub setting is changeable here; the CLI and config.toml are only for
 // initial setup. Hub sections read and write the hub's config.toml through get_settings / update_settings (local
-// only); Notifications, the strip and This app are desktop preferences on this computer.
+// only); Notifications, the pet on screen and This app are desktop preferences on this computer.
 import { useEffect, type ReactNode } from "react";
 import { machineDisplayName, restartText } from "@pawl/hub-client";
 import { usePanel } from "../context";
 import { AgentsSection } from "./settings/AgentsSection";
-import { AppSection, MachineSection, NotificationsSection, StripSection } from "./settings/AppSections";
+import { AppSection, MachineSection, NotificationsSection, PetSection } from "./settings/AppSections";
 import { PairingSection } from "./settings/PairingSection";
 import { BotSection, HubSection, NudgesSection, RelaySection, RemoteSection, ReposSection } from "./settings/sections";
 import { useHubSettings, useRestartHub, type HubSettingsView } from "./settings/shared";
@@ -21,7 +21,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{ id: string; label: string; hub: 
   { id: "nudges", label: "Nudges & reports", hub: true },
   { id: "notifications", label: "Notifications", hub: false },
   { id: "relay", label: "Relay", hub: true },
-  { id: "strip", label: "On the strip", hub: false },
+  { id: "pet", label: "Pet on screen", hub: false },
   { id: "app", label: "This app", hub: false },
 ];
 
@@ -79,7 +79,7 @@ export function SettingsView({ section }: { section?: string | undefined }) {
           )}
           <NotificationsSection />
           {props && <RelaySection {...props} />}
-          <StripSection />
+          <PetSection />
           <AppSection configPath={hs.configPath} />
         </div>
       </div>

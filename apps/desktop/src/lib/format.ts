@@ -1,5 +1,5 @@
 import type { Agent, PermissionRequest, Session, SessionStatus, ToolKind } from "@pawl/protocol";
-import { agentFor } from "@pawl/hub-client";
+import { agentFor, cleanTitle, folderName } from "@pawl/hub-client";
 
 export const STATUS_META: Record<SessionStatus, { label: string; tone: string }> = {
   idle: { label: "Idle", tone: "idle" },
@@ -61,8 +61,12 @@ export function agentName(agents: Agent[], id: string, machineId?: string): stri
   return agentFor(agents, id, machineId)?.name ?? id;
 }
 
+/**
+ * A session's title fit to show: what the person asked, without text the agent harness injected (task
+ * notifications, system reminders, pasted blocks, image markers; hub-client `cleanTitle`), else "<agent> in <repo>".
+ */
 export function sessionTitle(s: Session, agents: Agent[]): string {
-  return s.title?.trim() || `${agentName(agents, s.agentId, s.machineId)} · ${shortPath(s.cwd || "~")}`;
+  return cleanTitle(s.title, { agent: agentName(agents, s.agentId, s.machineId), repo: folderName(s.cwd) });
 }
 
 export function permissionSummary(req: PermissionRequest): string {

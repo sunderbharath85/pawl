@@ -1,6 +1,7 @@
 //! Hub core: in-memory cache over the store; merges the ACP host feed (owned sessions) and agent
 //! hook feeds into sessions + events; applies permission rules; answers every `ClientMsg`.
 
+mod brain_session;
 mod host;
 mod intents;
 mod mirror;
@@ -34,6 +35,7 @@ use crate::config::{HubConfig, Paths};
 use crate::machine::{self, MachineIdentity};
 use crate::notify;
 use crate::store::{AuditEntry, AuditOrigin, AuditOutcome, Store};
+use crate::titles;
 use host::Host;
 pub use settings::ClientGuard;
 
@@ -56,6 +58,8 @@ pub const ACTIVITY_STEP_MS: i64 = 30_000;
 const MAX_PROPOSALS: usize = 5;
 /// Events handed to the brain: up to this many of this machine's, plus up to half as many mirrored.
 const BRAIN_EVENTS: u32 = 400;
+/// Longest a chat reply waits for a configured pet model that is still starting (agent discovery at start).
+const MODEL_WAIT: Duration = Duration::from_secs(5);
 
 /// This machine's user activity (ClientMsg `user_activity`) and what was last announced of it.
 #[derive(Default)]
@@ -321,8 +325,15 @@ struct Inner {
     store: Store,
     bus: Bus,
     host: Host,
-    /// Rebuilt when the bot settings change.
+    /// Rebuilt when the bot settings change or agents are rediscovered (see [`Hub::rebuild_brain`]).
     brain: RwLock<Brain>,
+    /// The "acp" provider's hidden agent session (see `brain_session.rs`).
+    brain_session: Mutex<brain_session::BrainSessionState>,
+    /// One brain-session turn at a time.
+    brain_turn: tokio::sync::Mutex<()>,
+    /// Agent discovery has finished at least once since start (the "acp" provider depends on it). True
+    /// from the start for hubs that do not discover in the background.
+    agents_discovered: watch::Sender<bool>,
     state: Mutex<State>,
     watchdog: Mutex<Watchdog>,
     discovery: tokio::sync::Mutex<()>,
@@ -413,6 +424,35 @@ impl Hub {
             })
             .await?;
 
+        // Titles stored before injected text was cleaned out ("<task-notification>…", "[Image #40]"): cleaned
+        // once at start. Only titles that start like one are read, so this is cheap after the first run.
+        let names = agents.clone();
+        let retitled: Vec<Session> = store
+            .run(move |s| {
+                let mut out = Vec::new();
+                for mut x in s.sessions_with_injected_titles()? {
+                    let agent_name =
+                        names.iter().find(|a| a.id == x.agent_id).map(|a| a.name.clone()).unwrap_or_else(|| pretty_agent_name(&x.agent_id));
+                    let old = x.title.clone().unwrap_or_default();
+                    let new = titles::next(Some(&old), titles::from_prompt(&old), true, &agent_name, &x.cwd);
+                    if new != old {
+                        x.title = Some(new);
+                        s.upsert_session(&x)?;
+                        out.push(x);
+                    }
+                }
+                Ok(out)
+            })
+            .await?;
+        if !retitled.is_empty() {
+            tracing::info!("cleaned {} session title(s) that held injected text", retitled.len());
+        }
+        for r in &retitled {
+            if let Some(s) = sessions.iter_mut().find(|s| s.id == r.id) {
+                s.title = r.title.clone();
+            }
+        }
+
         // Owned sessions die with the hub process that owned their agent connection.
         let mut closed = Vec::new();
         for s in sessions.iter_mut().filter(|s| s.source == SessionSource::Owned && s.ended_at.is_none()) {
@@ -450,6 +490,18 @@ impl Hub {
                 .await?;
         }
 
+        // Stored rules that are exactly the old defaults (saved, never customised) move to the new defaults
+        // once: reads and searches ask now. Customised rule sets are left alone.
+        let migrated_defaults = db_rules.as_ref().is_some_and(|r| *r == pawl_brain::rules::legacy_default_rules());
+        let db_rules = if migrated_defaults {
+            let new = pawl_brain::rules::default_rules();
+            let n2 = new.clone();
+            store.run(move |s| s.set_rules(&n2)).await?;
+            tracing::info!("default permission rules updated: reads and searches now ask");
+            Some(new)
+        } else {
+            db_rules
+        };
         // Security floor: rules that fail validation never reach the engine.
         let (rules_source, loaded) = match (db_rules, config.rules.clone()) {
             (Some(r), _) => ("hub.db", r),
@@ -458,6 +510,16 @@ impl Hub {
         };
         let (rules, dropped) = sanitize_rules(loaded);
         let mut startup_notices = Vec::new();
+        if migrated_defaults {
+            startup_notices.push(notify::make(
+                &machine_id,
+                NotificationLevel::Info,
+                "Default rules now ask before reads",
+                "Agents now ask before reading or searching files. Choose “Always allow” on a request, or add a rule, to allow it again.",
+                None,
+                None,
+            ));
+        }
         if !dropped.is_empty() {
             let list = dropped.iter().map(|(id, why)| format!("{id:?} ({why})")).collect::<Vec<_>>().join("; ");
             tracing::warn!("ignoring {} invalid permission rule(s) from {rules_source}: {list}", dropped.len());
@@ -493,6 +555,9 @@ impl Hub {
         let hub = Hub {
             inner: Arc::new(Inner {
                 brain: RwLock::new(Brain::new(config.brain.to_brain_config())),
+                brain_session: Mutex::new(brain_session::BrainSessionState::default()),
+                brain_turn: tokio::sync::Mutex::new(()),
+                agents_discovered: watch::channel(!background).0,
                 watchdog: Mutex::new(Watchdog::new(config.watchdog.to_watchdog_config(), machine_id.clone())),
                 paths,
                 launch: Mutex::new(settings::Launch { served: false, port: config.port, overrides: BTreeMap::new() }),
@@ -526,12 +591,19 @@ impl Hub {
             }),
         };
         hub.set_mirror(mirror_sessions, mirror_pets, mirror_pending);
+        // Now that the hub exists the brain can hold the "acp" provider's session handle.
+        hub.rebuild_brain();
+        tokio::spawn(hub.clone().brain_session_loop());
         hub.rebuild_repo_index().await;
         tokio::spawn(hub.clone().repo_index_loop());
         let tap = hub.inner.bus.tap();
         tokio::spawn(hub.clone().mirror_out_loop(tap));
         tokio::spawn(hub.clone().mirror_prune_loop());
         hub.load_peers().await?;
+        if migrated_defaults {
+            hub.audit_rules_migration().await;
+        }
+        hub.ensure_default_pet_name().await;
         hub.refresh_presence();
         tokio::spawn(hub.clone().peer_loop(peer_rx));
         // About this hub's config: never mirrored to peers.
@@ -550,6 +622,9 @@ impl Hub {
                 if let Err(e) = h.refresh_agents(false).await {
                     tracing::warn!("agent discovery failed: {e:#}");
                 }
+                // Done either way: a chat waiting for the "acp" provider stops waiting.
+                h.inner.agents_discovered.send_replace(true);
+                h.log_pet_model();
             });
             tokio::spawn(hub.clone().watchdog_loop());
             tokio::spawn(hub.clone().daily_report_loop());
@@ -584,6 +659,48 @@ impl Hub {
     /// The pet brain for the current bot settings.
     fn brain(&self) -> Brain {
         self.inner.brain.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// The default (orchestrator) pet's name (`bot.petName`), once picked.
+    pub(crate) fn default_pet_name(&self) -> Option<String> {
+        self.cfg().brain.pet_name.clone().map(|n| n.trim().to_string()).filter(|n| !n.is_empty())
+    }
+
+    /// A brain for the current bot settings, with the "acp" provider's session while its agent is installed.
+    pub(crate) fn rebuild_brain(&self) {
+        let brain = Brain::with_session(self.cfg().brain.to_brain_config(), self.acp_model());
+        *self.inner.brain.write().unwrap_or_else(|p| p.into_inner()) = brain;
+        if *self.inner.agents_discovered.borrow() {
+            self.log_pet_model();
+        }
+    }
+
+    /// One line about the pet's model (at start once discovery is done, and after each change).
+    fn log_pet_model(&self) {
+        match self.brain().model_label() {
+            Some(m) => tracing::info!(model = %m, "pet model"),
+            None => tracing::info!("pet model: none configured; deterministic replies"),
+        }
+    }
+
+    /// The "acp" provider may still appear: discovery has not finished, the provider allows acp, and no
+    /// other model answers.
+    fn pet_model_pending(&self) -> bool {
+        let cfg = self.cfg();
+        !*self.inner.agents_discovered.borrow()
+            && matches!(cfg.brain.provider, pawl_protocol::BotProvider::Auto | pawl_protocol::BotProvider::Acp)
+            && cfg.brain.effective_acp_agent() == brain_session::LOCKED_AGENT
+            && !self.brain().has_llm()
+    }
+
+    /// The brain for a chat reply: while the configured model is still resolving (startup discovery), wait
+    /// for it, at most [`MODEL_WAIT`], instead of answering as if none were configured.
+    async fn ready_brain(&self) -> (Brain, bool) {
+        if self.pet_model_pending() {
+            let mut rx = self.inner.agents_discovered.subscribe();
+            let _ = tokio::time::timeout(MODEL_WAIT, rx.wait_for(|done| *done)).await;
+        }
+        (self.brain(), self.pet_model_pending())
     }
 
     pub fn paths(&self) -> &Paths {
@@ -1047,7 +1164,9 @@ impl Hub {
             Ok(v.to_string())
         }
         self.check_owned(pet_id)?;
-        let remote_names = self.remote_pet_names();
+        let mut remote_names = self.remote_pet_names();
+        // The default pet's name is taken too.
+        remote_names.extend(self.default_pet_name());
         let pet = {
             let mut st = self.st();
             let name = match &patch.name {
@@ -1170,6 +1289,8 @@ impl Hub {
         for a in agents.iter().filter(|a| a.installed) {
             self.ensure_pet(&a.id).await;
         }
+        // The "acp" provider exists only while its agent is installed.
+        self.rebuild_brain();
         self.refresh_presence();
         Ok(agents)
     }
@@ -1210,6 +1331,7 @@ impl Hub {
     async fn ensure_pet(&self, agent_id: &str) {
         let mid = self.inner.machine_id.clone();
         let remote_names = self.remote_pet_names();
+        let default_name = self.default_pet_name();
         let created = {
             let mut st = self.st();
             if st.pet_for(&mid, agent_id).is_some() {
@@ -1220,6 +1342,7 @@ impl Hub {
                 agent.machine_id = mid.clone();
                 let mut taken: Vec<String> = st.pets.values().map(|p| p.name.clone()).collect();
                 taken.extend(remote_names);
+                taken.extend(default_name.clone());
                 let mut pet = pawl_brain::growth::default_pet(&agent, &taken);
                 pet.agent_id = agent_id.to_string();
                 pet.machine_id = mid.clone();
@@ -1284,18 +1407,44 @@ impl Hub {
 
     // ------------------------------------------------------------ sessions & events
 
+    /// A user prompt of a session whose title is still a placeholder (the fallback, "Pasted text", or
+    /// empty): a prompt with real text becomes its title, and the session update is broadcast.
+    async fn retitle_from_prompt(&self, session_id: &str, text: &str) {
+        let updated = {
+            let mut st = self.st();
+            let Some((agent_id, cwd, title)) = st.sessions.get(session_id).map(|s| (s.agent_id.clone(), s.cwd.clone(), s.title.clone())) else {
+                return;
+            };
+            let agent_name = st.agent_name(&agent_id);
+            if !titles::is_placeholder(title.as_deref(), &agent_name, &cwd) {
+                return;
+            }
+            let new = titles::next(title.as_deref(), titles::from_prompt(text), false, &agent_name, &cwd);
+            if title.as_deref() == Some(new.as_str()) {
+                return;
+            }
+            let s = st.sessions.get_mut(session_id).expect("looked up above");
+            s.title = Some(new);
+            s.clone()
+        };
+        self.persist_and_broadcast_session(&updated).await;
+    }
+
     /// Upsert a session reported by the ACP host (owned sessions).
     async fn merge_session(&self, s: Session) -> Session {
         let (merged, stale) = {
             let mut st = self.st();
             let mut m = s;
+            let prev_title = st.sessions.get(&m.id).and_then(|p| p.title.clone());
             if let Some(prev) = st.sessions.get(&m.id) {
-                if m.title.is_none() {
-                    m.title = prev.title.clone();
-                }
                 m.started_at = m.started_at.min(prev.started_at);
                 m.last_event_at = m.last_event_at.max(prev.last_event_at);
             }
+            // The agent's title (its first prompt, or one it set) when it is real text; else what we had,
+            // else "<agent> in <folder>" until a real prompt arrives (see `retitle_from_prompt`).
+            let candidate = m.title.as_deref().map(titles::from_prompt).unwrap_or(titles::Candidate::Nothing);
+            let agent_name = st.agent_name(&m.agent_id);
+            m.title = Some(titles::next(prev_title.as_deref(), candidate, true, &agent_name, &m.cwd));
             st.index_session(&m);
             st.sessions.insert(m.id.clone(), m.clone());
             let finished = m.ended_at.is_some() || matches!(m.status, SessionStatus::Done | SessionStatus::Error);
@@ -1361,6 +1510,17 @@ impl Hub {
     }
 
     pub(crate) async fn on_host_event(&self, ev: HostEvent) {
+        // The brain's own agent session: collected for the brain, never a hub session.
+        let brain = match &ev {
+            HostEvent::Session(s) => brain_session::is_brain_session(&s.id),
+            HostEvent::Event { session_id, .. } => brain_session::is_brain_session(session_id),
+            HostEvent::PermissionRequest(r) => brain_session::is_brain_session(&r.session_id),
+            HostEvent::AgentCapabilities { .. } => false,
+        };
+        if brain {
+            self.on_brain_event(ev).await;
+            return;
+        }
         match ev {
             HostEvent::Session(s) => {
                 self.merge_session(s).await;
@@ -1379,6 +1539,11 @@ impl Hub {
         if kind == EventType::PermissionResolved {
             self.on_host_permission_resolved(payload).await;
             return Ok(());
+        }
+        if kind == EventType::UserMessage {
+            if let Some(text) = payload.get("text").and_then(Value::as_str) {
+                self.retitle_from_prompt(session_id, text).await;
+            }
         }
         let event = self.record_event(session_id, kind, payload).await?;
         let Some(session) = self.session(session_id) else { return Ok(()) };
@@ -1700,6 +1865,10 @@ impl Hub {
         let Some(n) = pawl_discovery::hooks::normalize(source, raw) else {
             return Ok(());
         };
+        // The brain's agent session runs with hooks off; a report from its folder is dropped all the same.
+        if n.cwd.as_deref().is_some_and(|c| brain_session::in_brain_dir(&self.inner.paths.data_dir, c)) {
+            return Ok(());
+        }
         let now = pawl_protocol::now_ms();
         let session = {
             let mut st = self.st();
@@ -1722,14 +1891,24 @@ impl Hub {
             if let Some(status) = n.status {
                 s.status = status;
             }
-            if let Some(t) = n.title.as_ref().map(|t| t.trim()).filter(|t| !t.is_empty()) {
-                s.title = Some(t.to_string());
-            }
             if let Some(cwd) = n.cwd.as_ref().filter(|c| !c.is_empty()) {
                 if s.cwd.is_empty() {
                     s.cwd = cwd.clone();
                 }
             }
+            // The hook's title (an explicit session title, else the prompt, clipped), else the full prompt
+            // text of a prompt event; injected text never counts. Real text follows the latest prompt.
+            let mut candidate = n.title.as_deref().map(titles::from_prompt).unwrap_or(titles::Candidate::Nothing);
+            let is_prompt = matches!(n.payload.hook_event.to_ascii_lowercase().as_str(), "userpromptsubmit" | "userpromptsubmitted");
+            if is_prompt && !matches!(candidate, titles::Candidate::Real(_)) {
+                match n.payload.message.as_deref().map(titles::from_prompt) {
+                    Some(c @ titles::Candidate::Real(_)) => candidate = c,
+                    Some(titles::Candidate::Pasted) => candidate = titles::Candidate::Pasted,
+                    _ => {}
+                }
+            }
+            let agent_name = st.agent_name(&s.agent_id);
+            s.title = Some(titles::next(s.title.as_deref(), candidate, true, &agent_name, &s.cwd));
             if n.source == SessionSource::VscodeHook {
                 s.source = SessionSource::VscodeHook;
             }
@@ -1782,7 +1961,8 @@ impl Hub {
                 self.check_owned(id)?;
                 Some(self.st().pets.get(id).cloned().ok_or(AckCode::NotFound)?)
             }
-            None => self.default_chat_pet(),
+            // No pet attached: the default pet, which orchestrates every agent (replies carry no pet id).
+            None => None,
         };
         let msg = ChatMessage {
             id: self.new_id(),
@@ -1803,7 +1983,7 @@ impl Hub {
         Ok(msg)
     }
 
-    /// Pet of the agent with the most recent open session, else the first pet.
+    /// Pet of the agent with the most recent open session, else the first pet (the daily report's voice).
     fn default_chat_pet(&self) -> Option<Pet> {
         let st = self.st();
         let active = st.sessions_sorted(|s| s.ended_at.is_none());
@@ -1876,12 +2056,17 @@ impl Hub {
             recent_events,
             pending,
             pet,
+            default_agent: self.cfg().brain.default_agent.clone().filter(|a| !a.trim().is_empty()),
+            model_pending: false,
+            pet_name: self.default_pet_name(),
         }
     }
 
     async fn chat_reply(&self, user: ChatMessage, pet: Option<Pet>, actor: Actor) {
-        let ctx = self.brain_context(pet.clone()).await;
-        let reply = match self.brain().handle(&user.text, &ctx).await {
+        let (brain, pending) = self.ready_brain().await;
+        let mut ctx = self.brain_context(pet.clone()).await;
+        ctx.model_pending = pending;
+        let reply = match brain.handle(&user.text, &ctx).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("brain failed: {e:#}");

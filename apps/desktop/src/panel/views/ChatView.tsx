@@ -7,6 +7,9 @@ import { usePanel } from "../context";
 import * as I from "../icons";
 import { PetAvatar } from "../PetAvatar";
 import { ChatProposals } from "./ChatProposals";
+import { PetReplyText } from "../../lib/ReactionIcon";
+import { useSettings } from "../../lib/settings";
+import { useDefaultPetName } from "../../lib/usePetName";
 
 const SUGGESTIONS = ["What's everyone doing?", "Summarize the last session", "Approve it", "Tell Codex to run the tests"];
 
@@ -20,6 +23,9 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
   const [sending, setSending] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const realPet = pet && state.pets[pet.id] ? pet : undefined;
+  // Replies without a pet id are the default pet's (it orchestrates every agent): its own name, from the hub.
+  const [settings] = useSettings();
+  const { name: defaultName } = useDefaultPetName(client, state, meta.phase === "connected");
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -70,7 +76,7 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
           <div className="empty">
             <PetAvatar species={pet?.species ?? "dog"} activity="happy" size={110} />
             <h3>
-              {SPECIES_META[pet?.species ?? "dog"].sound} I'm {pet?.name ?? "your pet"}.
+              {SPECIES_META[pet?.species ?? "dog"].sound} I'm {realPet?.name ?? defaultName}.
             </h3>
             <p>
               {realPet ? `I keep an eye on ${agentName(state.agents, realPet.agentId, realPet.machineId)}.` : "I keep an eye on your agents."} Try one of
@@ -79,7 +85,9 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
           </div>
         )}
         {state.chat.map((m) => {
-          const from = m.petId ? pets.find((p) => p.id === m.petId) : pet;
+          const from = m.petId ? pets.find((p) => p.id === m.petId) : undefined;
+          const fromName = m.petId ? (from?.name ?? "Pet") : defaultName;
+          const fromSpecies = m.petId ? (from?.species ?? "dog") : settings.defaultPetSpecies;
           return m.role === "user" ? (
             <div key={m.id} className="msg msg-user">
               <div className="msg-bubble">{m.text}</div>
@@ -87,10 +95,12 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
             </div>
           ) : (
             <div key={m.id} className="msg msg-pet">
-              <PetAvatar species={from?.species ?? "dog"} activity={activityOf(from?.id)} size={36} />
+              <PetAvatar species={fromSpecies} activity={activityOf(from?.id)} size={36} />
               <div>
-                <div className="msg-name">{from?.name ?? "Pet"}</div>
-                <div className="msg-bubble">{m.text}</div>
+                <div className="msg-name">{fromName}</div>
+                <div className="msg-bubble">
+                  <PetReplyText text={m.text} />
+                </div>
                 <ChatProposals message={m} />
                 <div className="msg-foot">
                   <time>{clockTime(m.ts)}</time>
@@ -133,7 +143,7 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
         <textarea
           rows={2}
           value={text}
-          placeholder={`Say something to ${pet?.name ?? "your pet"}…`}
+          placeholder={`Say something to ${realPet?.name ?? defaultName}…`}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {

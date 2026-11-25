@@ -548,3 +548,18 @@ async fn watchdog_timings_change_without_repeating_nudges() {
     f.hub.watchdog_tick().await;
     assert_eq!(nudges(&drain(&mut f.rx)), 0, "the watchdog still remembers that nudge");
 }
+
+#[tokio::test]
+async fn the_default_agent_is_saved_shown_and_refused_when_unknown() {
+    let f = fx().await;
+    let v = ok(update(&f.hub, json!({ "bot": { "defaultAgent": "codex" } })).await);
+    assert_eq!(v["settings"]["bot"]["defaultAgent"], json!("codex"));
+    assert_eq!(v["applied"], json!(["bot.defaultAgent"]), "read at use time: applied now");
+    let key_line = |hub: &Hub| config_text(hub).lines().any(|l| l.trim() == "default_agent = \"codex\"");
+    assert!(key_line(&f.hub), "{}", config_text(&f.hub));
+    assert!(err(update(&f.hub, json!({ "bot": { "defaultAgent": "no-such-agent" } })).await).starts_with("invalid:bot.defaultAgent:"));
+    assert_eq!(f.hub.settings().bot.default_agent.as_deref(), Some("codex"), "a refused patch changes nothing");
+    let v = ok(update(&f.hub, json!({ "bot": { "defaultAgent": null } })).await);
+    assert_eq!(v["settings"]["bot"]["defaultAgent"], json!(null));
+    assert!(!key_line(&f.hub), "{}", config_text(&f.hub));
+}

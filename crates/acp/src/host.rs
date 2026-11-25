@@ -167,10 +167,11 @@ enum StatusChange {
     Force(pp::SessionStatus),
 }
 
-fn conn_key(agent: &pp::Agent, cwd: &Path) -> String {
+fn conn_key(agent: &pp::Agent, cwd: &Path, clean_env: bool) -> String {
     let env = serde_json::to_string(&agent.env).unwrap_or_default();
     let cmd = serde_json::to_string(&agent.command).unwrap_or_default();
-    format!("{}\u{1f}{}\u{1f}{cmd}\u{1f}{env}", agent.id, cwd.display())
+    let clean = if clean_env { "\u{1f}clean" } else { "" };
+    format!("{}\u{1f}{}\u{1f}{cmd}\u{1f}{env}{clean}", agent.id, cwd.display())
 }
 
 /// Validate a session cwd: returns (path sent to the agent, canonical root).
@@ -706,11 +707,11 @@ impl Inner {
 
     /// The live connection for (agent, cwd), spawning it if needed. The guard keeps
     /// it from being stopped as unused until the caller registered its session.
-    async fn get_or_spawn(self: &Arc<Self>, agent: &pp::Agent, cwd: &Path) -> anyhow::Result<(Arc<Conn>, OpenGuard)> {
+    async fn get_or_spawn(self: &Arc<Self>, agent: &pp::Agent, cwd: &Path, clean_env: bool) -> anyhow::Result<(Arc<Conn>, OpenGuard)> {
         if self.shutting_down.load(Ordering::SeqCst) {
             bail!("ACP host is shut down");
         }
-        let key = conn_key(agent, cwd);
+        let key = conn_key(agent, cwd, clean_env);
         let slot = lock(&self.conns).entry(key.clone()).or_default().clone();
         let mut guard = slot.lock().await;
         if let Some(c) = guard.as_ref() {
@@ -718,7 +719,7 @@ impl Inner {
                 return Ok((c.clone(), OpenGuard::new(&c.shared)));
             }
         }
-        let spawned = spawn::spawn_agent(&agent.id, &agent.command, agent.env.as_ref(), cwd)?;
+        let spawned = spawn::spawn_agent(&agent.id, &agent.command, agent.env.as_ref(), cwd, clean_env)?;
         tracing::info!(agent = %agent.id, program = %spawned.program.display(), cwd = %cwd.display(), "spawned ACP agent");
         let transport = ByteStreams::new(spawned.stdin.compat_write(), spawned.stdout.compat());
         let conn = self.attach(&agent.id, key, transport, Some((spawned.child, spawned.tree)), spawned.stderr_tail).await?;
@@ -969,12 +970,15 @@ impl Inner {
         cwd: PathBuf,
         hub_id: pp::SessionId,
         prompt: Option<String>,
+        opts: crate::StartOptions,
     ) -> anyhow::Result<pp::Session> {
         self.ensure_local_agent(agent)?;
         self.ensure_new_hub_id(&hub_id)?;
         let (cwd_abs, root) = prepare_cwd(&cwd)?;
-        let (conn, _open) = self.get_or_spawn(agent, &cwd_abs).await?;
-        let resp = tokio::time::timeout(SESSION_TIMEOUT, conn.cx.send_request(acp::NewSessionRequest::new(cwd_abs.clone())).block_task())
+        let (conn, _open) = self.get_or_spawn(agent, &cwd_abs, opts.clean_env).await?;
+        let mut req = acp::NewSessionRequest::new(cwd_abs.clone());
+        req.meta = opts.meta.as_ref().and_then(|m| m.as_object().cloned());
+        let resp = tokio::time::timeout(SESSION_TIMEOUT, conn.cx.send_request(req).block_task())
             .await
             .map_err(|_| anyhow!("session/new timed out after {}s", SESSION_TIMEOUT.as_secs()))?
             .map_err(|e| self.request_error(&conn, "session/new", e))?;
@@ -1099,7 +1103,7 @@ impl Inner {
             None => None,
         };
         let (conn, _open) = match &filter_cwd {
-            Some(c) => self.get_or_spawn(agent, c).await?,
+            Some(c) => self.get_or_spawn(agent, c, false).await?,
             None => match self.find_live_conn(agent) {
                 Some(c) => c,
                 None => {
@@ -1107,7 +1111,7 @@ impl Inner {
                         .or_else(|| std::env::current_dir().ok())
                         .context("no home directory to start the agent in")?;
                     let (home, _) = prepare_cwd(&home)?;
-                    self.get_or_spawn(agent, &home).await?
+                    self.get_or_spawn(agent, &home, false).await?
                 }
             },
         };
@@ -1148,7 +1152,7 @@ impl Inner {
             }
         }
         let (cwd_abs, root) = prepare_cwd(&cwd)?;
-        let (conn, _open) = self.get_or_spawn(agent, &cwd_abs).await?;
+        let (conn, _open) = self.get_or_spawn(agent, &cwd_abs, false).await?;
         let caps = conn.caps.clone();
         if !caps.resume_session && !caps.load_session {
             bail!("agent `{}` supports neither session/resume nor session/load", agent.id);
@@ -1284,7 +1288,7 @@ impl Inner {
         transport: impl ConnectTo<Client> + 'static,
     ) -> anyhow::Result<()> {
         let (cwd_abs, _) = prepare_cwd(cwd)?;
-        let key = conn_key(agent, &cwd_abs);
+        let key = conn_key(agent, &cwd_abs, false);
         let conn = self.attach(&agent.id, key.clone(), transport, None, StderrTail::default()).await?;
         let slot = lock(&self.conns).entry(key).or_default().clone();
         *slot.lock().await = Some(conn);

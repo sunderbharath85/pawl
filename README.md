@@ -4,19 +4,19 @@ Named dog pets that watch and drive your coding agents over ACP ([Agent Client P
 
 **Website:** https://sunderbharath85.github.io/pawl/ · **Download:** [latest release](https://github.com/sunderbharath85/pawl/releases)
 
-![The desktop strip: named dogs nap, Bento barks for an approval, and the Laptop's dogs visit](docs/screenshots/pet-strip.png)
+![Your pet on the desktop with its chat bubble open: an approval on top, then the chat](docs/screenshots/pet-bubble-light.png)
 
-*The desktop strip, which sits along the bottom of your screen (shown here on a plain background). Each agent's dog has a name. Juniper needs an approval for `bun test`; the dogs tagged "· Laptop" belong to another paired machine.*
+*One pet sits wherever you drag it on your screen. Click it to open its chat bubble: approvals waiting for you come first, and you can ask it anything about your agents in plain words. It stays still until you talk to it.*
 
 ## What it is
 
 Pawl runs one **hub** per machine. The hub connects to the coding agents installed on that machine (Claude Code, Codex, Gemini CLI and others) and tracks every session it can see. Each agent gets a pet, a dog by default, with a name.
 
-The pet shows what its agent is doing. It naps when nothing is running, digs while the agent edits or runs tools, and barks when the agent needs your approval. You can approve or deny from the pet, start a session in a repo, send a prompt, or ask the pet what its agent is doing.
+One default pet, with its own name, orchestrates all of them: ask it what is going on, approve or deny requests, or tell it to start or prompt an agent. Anything it would start or send comes back as a card you confirm. It can use a language model to understand any wording: your Claude Code (no API key, on your Claude plan, with every tool turned off), or Anthropic, OpenAI, Gemini or Ollama.
 
 You see the pets in three places:
 
-- **Desktop dog:** a Tauri app with a transparent, always-on-top strip where the dogs walk, plus a panel for sessions, the event feed, chat, approvals, pets and rules.
+- **Desktop pet:** a Tauri app with one pet you can drag anywhere and a chat bubble, plus a window (right-click the pet, "Open hub") for sessions as readable conversations, chat, approvals, pets, machines, rules and settings.
 - **Pawl for VS Code:** pets in the status bar and a webview, approvals, commands, and opening the files an agent edited.
 - **Phone:** an Expo app for iOS and Android that pairs by QR code and reaches every machine through your relay. Approving or starting an agent needs biometrics or the device passcode.
 
@@ -32,8 +32,8 @@ The desktop panel, connected to two paired machines ("Desk PC" and "Laptop"):
 | **Home:** who is busy and who needs you | **Approvals:** from this machine, and from the Laptop after a confirmation |
 | ![Machines view](docs/screenshots/panel-machines.png) | ![Pets view](docs/screenshots/panel-pets.png) |
 | **Machines:** paired machines, phones, and pairing | **Pets:** rename, pick dog, cat, bird or robot, set a personality |
-| ![New session view](docs/screenshots/panel-new-session.png) | |
-| **New session:** pick a machine and an agent; each agent shows its pet | |
+| ![New session view](docs/screenshots/panel-new-session.png) | ![Session view](docs/screenshots/session-view-light.png) |
+| **New session:** pick a machine and an agent; each agent shows its pet | **A session:** the conversation, with tool calls grouped and approvals inline |
 
 ## How it works
 
@@ -198,7 +198,7 @@ docs/CONTRACTS.md      interface contracts between the parts above
 Approving an agent's request can run commands on your machine, so the defaults are strict.
 
 - **Local API:** the hub binds `127.0.0.1` only. Every WebSocket connection and hook POST needs the bearer token from the data directory (32 random bytes, created on first start). WebSocket connections that carry a browser `Origin` are refused unless it is the Tauri app, a VS Code webview, or the desktop app's Vite dev server, so a web page you visit cannot drive the hub.
-- **Approval rules:** the first matching rule wins, and no match means *ask*. By default only reads and searches inside the session's working folder are auto-approved.
+- **Approval rules:** the first matching rule wins, and no match means *ask*. By default every tool call asks you, reads included; only the agent's internal "think" steps go through. "Always allow" is your choice per request, and you can add rules that auto-approve reads.
 - **Hard floor:** commands (`execute`), deletes, network access (`fetch`) and unknown tool kinds are never auto-approved, whatever the rules say. Rules that try are rejected when saved.
 - **Sensitive paths always ask:** `.env*`, keys and certificates, `.ssh`, `.aws`, credential files, the hub's own token and similar paths are never auto-approved. A deny rule still denies.
 - **File access:** the ACP file read/write methods the hub serves are limited to the session's working folder. The agent process itself runs with your user's permissions, as it would without Pawl.

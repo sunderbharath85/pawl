@@ -983,6 +983,56 @@ pub struct HubSettingsBot {
     pub anthropic_api_key_set: bool,
     pub ollama_url: Option<String>,
     pub ollama_model: Option<String>,
+    /// The agent the default pet hands work to when the user names none; None = automatic (the most recent
+    /// session's agent, else the first installed one).
+    #[serde(default)]
+    pub default_agent: Option<AgentId>,
+    /// Which model provider the pet uses; Auto = the first configured (anthropic, openai, gemini, ollama).
+    #[serde(default)]
+    pub provider: BotProvider,
+    #[serde(default)]
+    pub openai_api_key_set: bool,
+    #[serde(default)]
+    pub openai_model: String,
+    #[serde(default)]
+    pub gemini_api_key_set: bool,
+    #[serde(default)]
+    pub gemini_model: String,
+    /// Provider Acp: the installed agent that thinks for the pet (default "claude-code") and its model ("sonnet").
+    #[serde(default)]
+    pub acp_agent: AgentId,
+    #[serde(default)]
+    pub acp_model: String,
+    /// Let the model turn free-form messages into intents; they only ever become cards or proposals the user clicks.
+    #[serde(default)]
+    pub understand: bool,
+    /// How the pet talks: Plain (default; no *actions* or barks) or Playful.
+    #[serde(default)]
+    pub style: BotStyle,
+    /// The default (orchestrator) pet's own name; the hub picks one from its name pool on first start.
+    #[serde(default)]
+    pub pet_name: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BotStyle {
+    #[default]
+    Plain,
+    Playful,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BotProvider {
+    #[default]
+    Auto,
+    Anthropic,
+    Openai,
+    Gemini,
+    Ollama,
+    /// An installed coding agent over ACP (Claude Code + Sonnet by default), every tool denied.
+    Acp,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1072,6 +1122,31 @@ pub struct HubSettingsBotPatch {
     pub ollama_url: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
     pub ollama_model: Option<Option<String>>,
+    /// Some(Some(id)) sets the default agent; Some(None) = automatic.
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub default_agent: Option<Option<AgentId>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<BotProvider>,
+    /// Write-only: Some(Some(key)) sets it, Some(None) clears it.
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub openai_api_key: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_model: Option<String>,
+    /// Write-only: Some(Some(key)) sets it, Some(None) clears it.
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub gemini_api_key: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_agent: Option<AgentId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub understand: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<BotStyle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pet_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1133,6 +1208,17 @@ impl std::fmt::Debug for HubSettingsBotPatch {
             .field("anthropic_api_key", &secret_patch(&self.anthropic_api_key))
             .field("ollama_url", &self.ollama_url)
             .field("ollama_model", &self.ollama_model)
+            .field("default_agent", &self.default_agent)
+            .field("provider", &self.provider)
+            .field("openai_api_key", &secret_patch(&self.openai_api_key))
+            .field("openai_model", &self.openai_model)
+            .field("gemini_api_key", &secret_patch(&self.gemini_api_key))
+            .field("gemini_model", &self.gemini_model)
+            .field("acp_agent", &self.acp_agent)
+            .field("acp_model", &self.acp_model)
+            .field("understand", &self.understand)
+            .field("style", &self.style)
+            .field("pet_name", &self.pet_name)
             .finish()
     }
 }

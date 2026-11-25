@@ -1,7 +1,7 @@
 // Settings sections backed by the hub's config.toml: Hub, Remote control, Repos, Bot, Nudges & reports, Relay.
 import { useEffect, useMemo, useState } from "react";
-import { relayStatusText, secretPatch, type SecretKey } from "@pawl/hub-client";
-import type { HubSettings, RepoRef } from "@pawl/protocol";
+import { ACP_BOT_AGENTS, BOT_PROVIDERS, BOT_STYLE_LABEL, BOT_STYLES, botProviderLabel, botProviderNow, defaultAgentOptions, relayStatusText, secretPatch, type SecretKey } from "@pawl/hub-client";
+import type { BotProvider, HubSettings, RepoRef } from "@pawl/protocol";
 import { timeAgo } from "../../../lib/format";
 import {
   botForm,
@@ -300,69 +300,256 @@ export function ReposSection({ settings, live }: SectionProps) {
 // ---------------------------------------------------------------- Bot
 
 export function BotSection({ settings, live }: SectionProps) {
+  const { state } = usePanel();
   const source = useMemo(() => botForm(settings), [settings]);
   const { draft, update, dirty, reset } = useDraft(source);
-  const save = useSectionSave(["bot.model", "bot.ollamaUrl", "bot.ollamaModel"]);
+  const save = useSectionSave([
+    "bot.model",
+    "bot.ollamaUrl",
+    "bot.ollamaModel",
+    "bot.defaultAgent",
+    "bot.provider",
+    "bot.openaiModel",
+    "bot.geminiModel",
+    "bot.understand",
+    "bot.acpAgent",
+    "bot.acpModel",
+    "bot.style",
+  ]);
   const saveSecret = useSecretSaver();
   const err = (k: string) => errorFor(save.errors, k);
+  const agentChoices = useMemo(
+    () => (draft.defaultAgent === null ? [] : defaultAgentOptions(state.agents, state.machine?.id, draft.defaultAgent || null)),
+    [state.agents, state.machine?.id, draft.defaultAgent],
+  );
+  // The agents that can think for the pet over ACP: only Claude Code for now (the hub accepts only those); other
+  // installed agents are listed as not supported yet.
+  const acpChoices = useMemo(() => {
+    const own = state.agents.filter((a) => a.installed && (!state.machine || a.machineId === state.machine.id));
+    const list = own.map((a) => ({ id: a.id, name: a.name.trim() || a.id, supported: ACP_BOT_AGENTS.includes(a.id) }));
+    for (const id of ACP_BOT_AGENTS) {
+      if (!list.some((a) => a.id === id)) list.push({ id, name: `${id === "claude-code" ? "Claude Code" : id} (not installed)`, supported: true });
+    }
+    if (draft.acpAgent && !list.some((a) => a.id === draft.acpAgent)) list.push({ id: draft.acpAgent, name: draft.acpAgent, supported: false });
+    return list.sort((a, b) => Number(b.supported) - Number(a.supported) || a.name.localeCompare(b.name));
+  }, [state.agents, state.machine, draft.acpAgent]);
+  // What the bot uses right now (saved settings), so "Auto" never quietly spends the person's plan.
+  const now = useMemo(() => botProviderNow(settings.bot, state.agents, state.machine?.id), [settings.bot, state.agents, state.machine?.id]);
+  const acpName = acpChoices.find((a) => a.id === draft.acpAgent)?.name ?? null;
+  const provider = draft.provider;
+  const field = (key: keyof typeof draft, label: string, hint: string, placeholder: string) => (
+    <Field label={label} error={err(`bot.${String(key)}`)} hint={hint}>
+      {(a) => (
+        <input
+          id={a.id}
+          className={`input mono${a.invalid ? " is-invalid" : ""}`}
+          value={String(draft[key] ?? "")}
+          placeholder={placeholder}
+          spellCheck={false}
+          disabled={!live || save.saving}
+          aria-invalid={a.invalid || undefined}
+          aria-describedby={a.describedBy}
+          onChange={(e) => update({ [key]: e.target.value } as Partial<typeof draft>)}
+        />
+      )}
+    </Field>
+  );
+  const shows = (p: BotProvider) => provider === null || provider === "auto" || provider === p;
 
   return (
-    <SettingsSection id="bot" title="Bot" description="The pets' chat brain: Anthropic when a key is set, else Ollama when both its URL and model are set, else simple built-in replies.">
+    <SettingsSection
+      id="bot"
+      title="Bot"
+      description="Your default pet's brain: it reads your messages, answers questions about your sessions and turns requests into cards you confirm."
+    >
       <div className="settings-fields">
-        <Field label="Model" error={err("bot.model")} hint="Anthropic model id, e.g. claude-haiku-5-5.">
-          {(a) => (
-            <input
-              id={a.id}
-              className={`input mono${a.invalid ? " is-invalid" : ""}`}
-              value={draft.model}
-              spellCheck={false}
-              disabled={!live || save.saving}
-              aria-invalid={a.invalid || undefined}
-              aria-describedby={a.describedBy}
-              onChange={(e) => update({ model: e.target.value })}
+        {provider !== null && (
+          <Field
+            label="Provider"
+            error={err("bot.provider")}
+            hint="Automatic uses the first one that is set up: Anthropic, OpenAI, Gemini, Ollama, then Claude Code over ACP when it is installed."
+          >
+            {(a) => (
+              <select
+                id={a.id}
+                className={`input select${a.invalid ? " is-invalid" : ""}`}
+                value={provider}
+                disabled={!live || save.saving}
+                aria-describedby={a.describedBy}
+                onChange={(e) => update({ provider: e.target.value as BotProvider })}
+              >
+                {BOT_PROVIDERS.map((p) => (
+                  <option key={p} value={p}>
+                    {botProviderLabel(p, acpName)}
+                  </option>
+                ))}
+              </select>
+            )}
+          </Field>
+        )}
+        {provider !== null && (
+          <p className={`bot-now${now.usesPlan ? " is-plan" : ""}${now.provider === null ? " is-none" : ""}`} role="status">
+            <strong>{now.text}.</strong>
+            {now.usesPlan ? " Every message to your pet uses your plan's usage, like a short chat of your own." : ""}
+            {dirty ? " (Saved settings; save to apply your changes.)" : ""}
+          </p>
+        )}
+        {provider === "acp" && draft.acpAgent !== null && (
+          <>
+            <Field
+              label="Agent for the bot"
+              error={err("bot.acpAgent")}
+              hint="Uses your Claude plan's usage (or that agent's own plan); no API key needed. The pet's brain session runs with every tool turned off, so it can only read and reply."
+            >
+              {(a) => (
+                <select
+                  id={a.id}
+                  className={`input select${a.invalid ? " is-invalid" : ""}`}
+                  value={draft.acpAgent ?? ""}
+                  disabled={!live || save.saving}
+                  aria-invalid={a.invalid || undefined}
+                  aria-describedby={a.describedBy}
+                  onChange={(e) => update({ acpAgent: e.target.value })}
+                >
+                  {/* An empty choice says so instead of seeming to pick the first agent. */}
+                  {!draft.acpAgent && (
+                    <option value="" disabled>
+                      {acpChoices.length === 0 ? "No agents installed" : "Choose an agent…"}
+                    </option>
+                  )}
+                  {acpChoices.map((c) => (
+                    <option key={c.id} value={c.id} disabled={!c.supported}>
+                      {c.supported ? c.name : `${c.name} (not supported yet)`}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </Field>
+            {draft.acpModel !== null && field("acpModel", "Agent model", "e.g. sonnet. Empty = the agent's default.", "sonnet")}
+          </>
+        )}
+        {draft.defaultAgent !== null && (
+          <Field
+            label="Default agent"
+            error={err("bot.defaultAgent")}
+            hint="Who the default pet hands work to when you don't name an agent (“fix the failing test in api”). Automatic picks the agent of your most recent session."
+          >
+            {(a) => (
+              <select
+                id={a.id}
+                className={`input select${a.invalid ? " is-invalid" : ""}`}
+                value={draft.defaultAgent ?? ""}
+                disabled={!live || save.saving}
+                aria-invalid={a.invalid || undefined}
+                aria-describedby={a.describedBy}
+                onChange={(e) => update({ defaultAgent: e.target.value })}
+              >
+                {agentChoices.map((c) => (
+                  <option key={c.value ?? ""} value={c.value ?? ""}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            )}
+          </Field>
+        )}
+        {shows("anthropic") && (
+          <>
+            {field("model", "Anthropic model", "Anthropic model id, e.g. claude-haiku-5-5.", "claude-haiku-5-5")}
+            <SecretField
+              label="Anthropic API key"
+              isSet={settings.bot.anthropicApiKeySet}
+              disabled={!live}
+              placeholder="sk-ant-…"
+              hint="Stored by the hub on this machine. It is never shown again, here or anywhere."
+              clearEffect="The bot stops using Anthropic until a key is set again."
+              overriddenBy={settings.overriddenBy["bot.anthropicApiKey"]}
+              onSave={(v) => saveSecret("bot.anthropicApiKey", v)}
             />
-          )}
-        </Field>
-        <SecretField
-          label="Anthropic API key"
-          isSet={settings.bot.anthropicApiKeySet}
-          disabled={!live}
-          placeholder="sk-ant-…"
-          hint="Stored by the hub on this machine. It is never shown again, here or anywhere."
-          clearEffect="The bot stops using Anthropic until a key is set again."
-          overriddenBy={settings.overriddenBy["bot.anthropicApiKey"]}
-          onSave={(v) => saveSecret("bot.anthropicApiKey", v)}
-        />
-        <Field label="Ollama URL" error={err("bot.ollamaUrl")} hint="Optional local model server, e.g. http://127.0.0.1:11434. Used with the model below; empty = off.">
-          {(a) => (
-            <input
-              id={a.id}
-              className={`input mono${a.invalid ? " is-invalid" : ""}`}
-              value={draft.ollamaUrl}
-              placeholder="http://127.0.0.1:11434"
-              spellCheck={false}
+          </>
+        )}
+        {provider !== null && shows("openai") && (
+          <>
+            {draft.openaiModel !== null && field("openaiModel", "OpenAI model", "OpenAI model id.", "gpt-5-mini")}
+            {typeof settings.bot.openaiApiKeySet === "boolean" && (
+              <SecretField
+                label="OpenAI API key"
+                isSet={settings.bot.openaiApiKeySet}
+                disabled={!live}
+                placeholder="sk-…"
+                hint="Stored by the hub on this machine. It is never shown again, here or anywhere."
+                clearEffect="The bot stops using OpenAI until a key is set again."
+                overriddenBy={settings.overriddenBy["bot.openaiApiKey"]}
+                onSave={(v) => saveSecret("bot.openaiApiKey", v)}
+              />
+            )}
+          </>
+        )}
+        {provider !== null && shows("gemini") && (
+          <>
+            {draft.geminiModel !== null && field("geminiModel", "Gemini model", "Google Gemini model id.", "gemini-flash")}
+            {typeof settings.bot.geminiApiKeySet === "boolean" && (
+              <SecretField
+                label="Gemini API key"
+                isSet={settings.bot.geminiApiKeySet}
+                disabled={!live}
+                placeholder="AIza…"
+                hint="Stored by the hub on this machine. It is never shown again, here or anywhere."
+                clearEffect="The bot stops using Gemini until a key is set again."
+                overriddenBy={settings.overriddenBy["bot.geminiApiKey"]}
+                onSave={(v) => saveSecret("bot.geminiApiKey", v)}
+              />
+            )}
+          </>
+        )}
+        {shows("ollama") && (
+          <>
+            {field("ollamaUrl", "Ollama URL", "Optional local model server, e.g. http://127.0.0.1:11434. Used with the model below; empty = off.", "http://127.0.0.1:11434")}
+            {field("ollamaModel", "Ollama model", "e.g. llama3.2. Ollama is used only when both the URL and the model are set.", "llama3.2")}
+          </>
+        )}
+        {draft.style !== null && (
+          <fieldset className="field choice-group is-wide">
+            <legend className="field-label">How Pawl talks</legend>
+            {BOT_STYLES.map((value) => (
+              <label key={value} className="choice">
+                <input
+                  type="radio"
+                  name="bot-style"
+                  value={value}
+                  checked={draft.style === value}
+                  disabled={!live || save.saving}
+                  onChange={() => update({ style: value })}
+                />
+                <span className="choice-text">
+                  <strong>
+                    {BOT_STYLE_LABEL[value]}
+                    {value === "plain" ? " (default)" : ""}
+                  </strong>
+                  <span className="hint">
+                    {value === "plain" ? "Short, clear sentences: what is going on and what needs you." : "The same answers with a bit of dog in them."}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+        )}
+        {draft.understand !== null && (
+          <div className="field is-wide">
+            <Toggle
+              label="Understand any wording"
+              hint="Let the model read free-form messages (“could you have codex look at the flaky test?”) and turn them into cards you confirm. Off: the pet understands a fixed set of phrasings."
+              checked={draft.understand}
               disabled={!live || save.saving}
-              aria-invalid={a.invalid || undefined}
-              aria-describedby={a.describedBy}
-              onChange={(e) => update({ ollamaUrl: e.target.value })}
+              onChange={() => update({ understand: !draft.understand })}
             />
-          )}
-        </Field>
-        <Field label="Ollama model" error={err("bot.ollamaModel")} hint="e.g. llama3.2. Ollama is used only when both the URL and the model are set.">
-          {(a) => (
-            <input
-              id={a.id}
-              className={`input mono${a.invalid ? " is-invalid" : ""}`}
-              value={draft.ollamaModel}
-              placeholder="llama3.2"
-              spellCheck={false}
-              disabled={!live || save.saving}
-              aria-invalid={a.invalid || undefined}
-              aria-describedby={a.describedBy}
-              onChange={(e) => update({ ollamaModel: e.target.value })}
-            />
-          )}
-        </Field>
+            <p className="hint privacy-note">
+              Privacy: when a cloud provider (Anthropic, OpenAI or Gemini) answers, your message plus a short summary of your sessions (titles, repo
+              names, states and pending approvals; never file contents) is sent to that provider. Ollama and Claude Code over ACP stay on your machine
+              and your own plan.
+            </p>
+          </div>
+        )}
       </div>
       <SaveBar dirty={dirty} saving={save.saving} message={save.message} disabled={!live} onReset={() => (reset(), save.clear())} onSave={() => void save.run(botPatch(draft, settings))} />
     </SettingsSection>

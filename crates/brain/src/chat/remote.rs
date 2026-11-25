@@ -3,12 +3,13 @@
 //! The bot never runs anything on another machine by itself. For a remote target it replies with
 //! [`ChatProposal`]s; the user confirms one in a client, which sends the ordinary `start_session` /
 //! `prompt` ClientMsg (validated by both hubs as usual). Proposals are built here only, from the
-//! deterministic parse of the user's own message; local targets keep using [`super::BrainAction`].
+//! deterministic parse of the user's own message; local targets keep using [`super::BrainAction`], except a
+//! command that named no agent, which is a proposal for this machine too ([`summary`] is shared).
 
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
 
-use pawl_protocol::{Agent, ChatProposal, ChatProposalKind, MachineId, Session, SessionSource, SessionStatus, UnixMs};
+use pawl_protocol::{Agent, AgentId, ChatProposal, ChatProposalKind, MachineId, Session, SessionSource, SessionStatus, UnixMs};
 
 use super::intent::{AgentRef, CommandIntent, Folder, MachineRef, RepoIndex, RepoRef, Target};
 use super::voice::Voice;
@@ -82,6 +83,70 @@ pub(super) fn same_machine(ctx: &BrainContext, a: &str, b: &str) -> bool {
     } else {
         a == b
     }
+}
+
+/// Built-in agents in the order the default pet prefers them when nothing else decides (ids and their
+/// registry ids). Any other installed agent comes after these, by name.
+const AGENT_ORDER: &[&[&str]] = &[
+    &["claude-code", "claude-acp"],
+    &["codex", "codex-acp"],
+    &["gemini"],
+    &["github-copilot", "copilot", "github-copilot-cli"],
+    &["opencode"],
+];
+
+/// Why an agent the user did not name was chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Picked {
+    /// The `bot.defaultAgent` setting.
+    Setting,
+    /// The agent of the most recent session on that machine.
+    Recent,
+    /// The first installed agent ([`AGENT_ORDER`], then by name).
+    First,
+}
+
+/// The agent for a command that names none, on machine `m`: the `bot.defaultAgent` setting if it is
+/// installed there; else the agent of the most recent session there (when installed: a hook-only agent
+/// cannot be started); else the first installed one in [`AGENT_ORDER`], then by name. None = nothing
+/// is installed there.
+pub(super) fn pick_agent(ctx: &BrainContext, m: &str) -> Option<(AgentId, Picked)> {
+    let installed: Vec<&Agent> = agents_on(ctx, m).into_iter().filter(|a| a.installed).collect();
+    let has = |id: &str| installed.iter().any(|a| a.id == id);
+    if let Some(id) = ctx.default_agent.as_deref().map(str::trim).filter(|id| has(id)) {
+        return Some((id.to_string(), Picked::Setting));
+    }
+    let recent = ctx
+        .sessions
+        .iter()
+        .filter(|s| same_machine(ctx, &s.machine_id, m) && has(&s.agent_id))
+        .max_by_key(|s| (s.last_event_at, s.ended_at.is_none()));
+    if let Some(s) = recent {
+        return Some((s.agent_id.clone(), Picked::Recent));
+    }
+    let rank = |a: &Agent| AGENT_ORDER.iter().position(|ids| ids.contains(&a.id.as_str())).unwrap_or(AGENT_ORDER.len());
+    installed
+        .iter()
+        .min_by_key(|a| (rank(a), a.name.trim().to_lowercase(), a.id.clone()))
+        .map(|a| (a.id.clone(), Picked::First))
+}
+
+/// " I picked Codex (your default agent); for another, name it: “tell claude to …”." when `m` has
+/// more than one installed agent (with one, nothing was chosen).
+pub(super) fn picked_note(ctx: &BrainContext, m: &str, id: &str, why: Picked) -> String {
+    let installed: Vec<&Agent> = agents_on(ctx, m).into_iter().filter(|a| a.installed).collect();
+    let Some(other) = installed.iter().find(|a| a.id != id) else { return String::new() };
+    let everyone = all_agents(ctx);
+    let mname = machine_name(ctx, m);
+    let reason = match why {
+        Picked::Setting => "your default agent".to_string(),
+        Picked::Recent if is_local(ctx, m) => "it had the last session here".to_string(),
+        Picked::Recent => format!("it had the last session on {mname}"),
+        Picked::First => "the first one installed".to_string(),
+    };
+    let handle = agent_handle(&other.id, &everyone);
+    let example = if is_local(ctx, m) { format!("tell {handle} to …") } else { format!("tell the {mname}'s {handle} to …") };
+    format!(" I picked {} ({reason}); for another, name it: “{example}”.", agent_name(id, &everyone))
 }
 
 /// Paired machines (not this one) that have `agent_id` installed.
@@ -189,18 +254,21 @@ fn agents_hint(agents: &[&Agent]) -> String {
 }
 
 /// One-line button text: "Start Claude Code on Mac mini in ai-pet: run the tests" /
-/// "Send to Claude Code on Mac mini (ai-pet): run the tests".
-fn summary(kind: ChatProposalKind, agent: &str, machine: &str, repo: &str, task: &str) -> String {
+/// "Send to Claude Code on Mac mini (ai-pet): run the tests". `machine` None: no "on …" (this machine
+/// while it is the only one known).
+pub(super) fn summary(kind: ChatProposalKind, agent: &str, machine: Option<&str>, repo: &str, task: &str) -> String {
     let task = truncate(task, SUMMARY_TASK_CHARS);
+    let on = machine.map(|m| format!(" on {m}")).unwrap_or_default();
     match (kind, task.is_empty()) {
-        (ChatProposalKind::Start, true) => format!("Start {agent} on {machine} in {repo}"),
-        (ChatProposalKind::Start, false) => format!("Start {agent} on {machine} in {repo}: {task}"),
-        (ChatProposalKind::Prompt, _) => format!("Send to {agent} on {machine} ({repo}): {task}"),
+        (ChatProposalKind::Start, true) => format!("Start {agent}{on} in {repo}"),
+        (ChatProposalKind::Start, false) => format!("Start {agent}{on} in {repo}: {task}"),
+        (ChatProposalKind::Prompt, _) => format!("Send to {agent}{on} ({repo}): {task}"),
     }
 }
 
-/// Proposals for one paired machine, or why there are none.
-fn plan_on(ctx: &BrainContext, repos: &RepoIndex, cmd: &CommandIntent, m: &str, now: UnixMs) -> Result<Vec<ChatProposal>, Refusal> {
+/// Proposals for one paired machine and, when the agent was picked for the user, a note saying which;
+/// or why there are none.
+fn plan_on(ctx: &BrainContext, repos: &RepoIndex, cmd: &CommandIntent, m: &str, now: UnixMs) -> Result<(Vec<ChatProposal>, String), Refusal> {
     let mname = machine_name(ctx, m);
     match ctx.machines.iter().find(|x| x.id == m) {
         None => return Err(sorry(format!("{mname} isn't paired with this machine, so I can't send it anything."))),
@@ -211,7 +279,7 @@ fn plan_on(ctx: &BrainContext, repos: &RepoIndex, cmd: &CommandIntent, m: &str, 
     }
     let agents = agents_on(ctx, m);
     let everyone = all_agents(ctx);
-    let installed: Vec<&Agent> = agents.iter().copied().filter(|a| a.installed).collect();
+    let mut note = String::new();
     let agent_id = match &cmd.agent {
         Some(AgentRef::Known(id)) => {
             let name = agent_name(id, &everyone);
@@ -227,20 +295,34 @@ fn plan_on(ctx: &BrainContext, repos: &RepoIndex, cmd: &CommandIntent, m: &str, 
             }
         }
         Some(AgentRef::Unknown(name)) => return Err(sorry(format!("I don't see {name} on {mname}.{}", agents_hint(&agents)))),
-        None => match installed.as_slice() {
-            [one] => one.id.clone(),
-            [] => return Err(sorry(format!("{mname} has no agents I can start."))),
-            many => {
-                let handle = agent_handle(&many[0].id, &everyone);
-                return Err(ask(format!(
-                    "Which agent on {mname}?{} Say “tell the {mname}'s {handle} to …”.",
-                    agents_hint(&installed)
-                )));
+        None => match pick_agent(ctx, m) {
+            Some((id, why)) => {
+                note = picked_note(ctx, m, &id, why);
+                id
             }
+            None => return Err(sorry(format!("{mname} has no agents I can start."))),
         },
     };
     let aname = agent_name(&agent_id, &everyone);
     let handle = agent_handle(&agent_id, &everyone);
+    // Folders of the open sessions of that agent there that this hub's peer owns, newest first (only
+    // folders the machine's index lists): with no repo named ("tell Rex to also run lint"), each is a
+    // place to send the task to.
+    let mut open_owned: Vec<&Session> = ctx
+        .sessions
+        .iter()
+        .filter(|s| {
+            s.machine_id == m
+                && s.agent_id == agent_id
+                && s.source == SessionSource::Owned
+                && s.ended_at.is_none()
+                && s.status != SessionStatus::Error
+        })
+        .collect();
+    open_owned.sort_by_key(|s| Reverse(s.last_event_at));
+    let mut seen = BTreeSet::new();
+    let open_folders: Vec<Folder> =
+        open_owned.iter().filter_map(|s| repos.folder_by_key(m, &path_key(&s.cwd))).filter(|(cwd, _)| seen.insert(path_key(cwd))).collect();
     let folders: Vec<Folder> = match &cmd.repo {
         Some(RepoRef::Named { name, key, explicit }) => {
             let f = repos.folders_on(m, key, *explicit);
@@ -261,6 +343,7 @@ fn plan_on(ctx: &BrainContext, repos: &RepoIndex, cmd: &CommandIntent, m: &str, 
                 )))
             }
         },
+        None if !cmd.force_new && !open_folders.is_empty() => open_folders,
         None => {
             // That agent's most recent session folder there, if the machine's index still has it.
             let mut used: Vec<&Session> =
@@ -315,10 +398,10 @@ fn plan_on(ctx: &BrainContext, repos: &RepoIndex, cmd: &CommandIntent, m: &str, 
             repo_name: Some(repo.clone()),
             session_id: open.map(|s| s.id.clone()),
             text: task.clone(),
-            summary: summary(kind, &aname, &mname, &repo, &task),
+            summary: summary(kind, &aname, Some(&mname), &repo, &task),
         });
     }
-    Ok(out)
+    Ok((out, note))
 }
 
 /// Reply for a command routed to other machines: proposals and a question when there are several.
@@ -333,9 +416,15 @@ pub(super) fn remote_command(
 ) -> BrainReply {
     let mut proposals: Vec<ChatProposal> = Vec::new();
     let mut refusals: Vec<Refusal> = Vec::new();
+    let mut picked = String::new();
     for m in machines {
         match plan_on(ctx, repos, cmd, m, now) {
-            Ok(p) => proposals.extend(p),
+            Ok((p, note)) => {
+                proposals.extend(p);
+                if !picked.contains(&note) {
+                    picked.push_str(&note);
+                }
+            }
             Err(r) => refusals.push(r),
         }
     }
@@ -346,7 +435,8 @@ pub(super) fn remote_command(
         let why = if why.is_empty() { "I couldn't find where to run that.".to_string() } else { why.join(" ") };
         return say(format!("{lead} {why}"));
     }
-    let notes: String = refusals.iter().map(|r| format!(" ({})", r.text.trim_end_matches('.'))).collect();
+    let notes: String =
+        picked + &refusals.iter().map(|r| format!(" ({})", r.text.trim_end_matches('.'))).collect::<String>();
     let text = if proposals.len() == 1 {
         let p = &proposals[0];
         format!(

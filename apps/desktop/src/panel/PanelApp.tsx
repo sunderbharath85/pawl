@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHubState } from "@pawl/hub-client/react";
 import { isTauri, native, onNative, type PanelFocus } from "../lib/native";
 import { readSettings, writeSettings } from "../lib/settings";
@@ -12,7 +12,6 @@ import { routeForView } from "./routes";
 import { Sidebar } from "./Sidebar";
 import { HubBanner } from "./HubBanner";
 import { HomeView } from "./views/HomeView";
-import { SessionView } from "./views/SessionView";
 import { NewSessionView } from "./views/NewSessionView";
 import { ChatView } from "./views/ChatView";
 import { ApprovalsView } from "./views/ApprovalsView";
@@ -22,6 +21,9 @@ import { SettingsView } from "./views/SettingsView";
 import { MachinesView } from "./views/MachinesView";
 import { SetupView } from "./views/SetupView";
 import { PendingStrip } from "./views/PendingStrip";
+
+/** The session view brings the AI Elements, markdown and code highlighting: loaded when first opened. */
+const SessionView = lazy(() => import("./views/SessionView").then((m) => ({ default: m.SessionView })));
 
 interface Toast {
   id: number;
@@ -73,8 +75,16 @@ export function PanelApp() {
   }, []);
 
   useEffect(() => onNative("panel-focus", (focus) => setRoute(routeFromFocus(focus))), []);
+  // A panel created again by "Open hub" / "Settings" asks which view it was opened for.
+  useEffect(() => {
+    if (!isTauri) return;
+    native
+      .takePanelFocus()
+      .then((focus) => focus && setRoute(routeFromFocus(focus)))
+      .catch(() => {});
+  }, []);
 
-  // Another local client (VS Code) asked for a view: show the panel there.
+  // The user asked another local client (VS Code: "Open panel") for a view: show the panel there.
   useEffect(
     () =>
       client.onMessage("open_panel", (msg) => {
@@ -84,12 +94,17 @@ export function PanelApp() {
     [client],
   );
 
-  // First run: open the setup once by itself (Settings → This app reopens it).
+  // First run: the setup is what the panel shows the first time the user opens it (the panel never opens by
+  // itself; the pet's bubble points there). Settings → This app reopens it.
   useEffect(() => {
     if (readSettings().setupOffered) return;
-    writeSettings({ setupOffered: true });
     setRoute({ view: "setup" });
-    if (isTauri) void native.openPanel().catch(() => {});
+    const offered = () => {
+      writeSettings({ setupOffered: true });
+      window.removeEventListener("focus", offered);
+    };
+    window.addEventListener("focus", offered);
+    return () => window.removeEventListener("focus", offered);
   }, []);
 
   // Input in the panel means the user is on this machine (hub-client throttles the reports).
@@ -147,7 +162,11 @@ function renderRoute(route: Route) {
     case "home":
       return <HomeView />;
     case "session":
-      return <SessionView sessionId={route.sessionId} />;
+      return (
+        <Suspense fallback={<div className="feed-empty">Opening the session…</div>}>
+          <SessionView sessionId={route.sessionId} />
+        </Suspense>
+      );
     case "new":
       return <NewSessionView />;
     case "chat":

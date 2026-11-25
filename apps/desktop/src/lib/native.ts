@@ -2,6 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { homeDir } from "@tauri-apps/api/path";
+import type { PetFrame, PetSpace } from "./petLayout";
 
 export interface HubCredentials {
   /** HTTP base, e.g. http://127.0.0.1:47800 */
@@ -35,7 +36,7 @@ export interface HitRect {
   h: number;
 }
 
-/** Payload of the `panel-focus` event (pet click → panel). */
+/** Payload of the `panel-focus` event (the pet's menu → panel). */
 export interface PanelFocus {
   petId?: string;
   sessionId?: string;
@@ -69,11 +70,20 @@ export const native = {
   quit: () => invoke<void>("quit_app"),
   setHitRects: (rects: HitRect[]) => invoke<void>("set_hit_rects", { rects }),
   setCaptureAll: (capture: boolean) => invoke<void>("set_capture_all", { capture }),
-  /** While the strip shows an approval it follows the monitor under the cursor. */
-  setFollowCursor: (follow: boolean) => invoke<void>("set_follow_cursor", { follow }),
+  /** Size the pet window to `frame` (the default pet stays where the user put it); resolves with the room around it. */
+  setPetFrame: (frame: PetFrame) => invoke<PetSpace | null>("set_pet_frame", { frame }),
+  /** Start moving the pet with the mouse (call while the button is down). */
+  petStartDrag: () => invoke<void>("pet_start_drag"),
+  /** The pet's right-click menu: its name, Open hub, Rename… (enabled by `canRename`), Reset position, Settings, Quit. */
+  petContextMenu: (name: string, canRename: boolean) => invoke<void>("pet_context_menu", { name, canRename }),
+  /** Put the pet back at its default spot (bottom-right of the main monitor). */
+  resetPetPosition: () => invoke<void>("reset_pet_position"),
   setPetsPaused: (paused: boolean) => invoke<void>("set_pets_paused", { paused }),
   getPetsPaused: () => invoke<boolean>("get_pets_paused"),
+  /** Show the panel (created again if it was closed), bring it to the front and focus it. Only on the user's request. */
   openPanel: (focus?: PanelFocus) => invoke<void>("open_panel", { focus: focus ?? null }),
+  /** The view the panel was opened for before it was listening (once). */
+  takePanelFocus: () => invoke<PanelFocus | null>("take_panel_focus"),
 };
 
 export interface NativeEvents {
@@ -81,6 +91,12 @@ export interface NativeEvents {
   "hub-start-failed": string;
   "pets-paused": boolean;
   "pet-hover": boolean;
+  /** Room around the default pet changed (it was dragged, reset, or the monitors changed). */
+  "pet-space": PetSpace;
+  /** Open the pet's bubble (tray icon click, a second launch). */
+  "pet-attention": null;
+  /** "Rename…" in the pet's menu: open the bubble with the rename field. */
+  "pet-rename": null;
   "panel-focus": PanelFocus;
   /** The global cursor moved (throttled by Rust): the user is on this machine. */
   "user-activity": null;
