@@ -85,7 +85,8 @@ export interface Agent {
   description?: string;
   icon?: string;
   installed: boolean;
-  source: "registry" | "custom";
+  /** "a2a": an outside A2A agent the user added by URL (id `a2a:<slug>`, no command; A2A phase A3). */
+  source: "registry" | "custom" | "a2a";
   /** Filled after the first `initialize` with this agent. */
   capabilities?: AgentCapabilities;
 }
@@ -710,6 +711,38 @@ export interface A2aSettings {
   url: string | null;
   error: string | null;
   callers: A2aCallerSetting[];
+  /** Outside A2A agents Pawl delegates to (phase A3). Missing from hubs before A3. */
+  agents?: A2aAgentSetting[];
+}
+
+/** Agent ids of outside A2A agents start with this (`a2a:<slug>`). */
+export const A2A_AGENT_PREFIX = "a2a:";
+
+/**
+ * An outside A2A agent (`[[a2a.agents]]`): `id` [a-z0-9-]{1,40} (agent id `a2a:<id>`), the URL it was added by
+ * (https, or http to this machine), its bearer token (write-only: `tokenSet`), the last card fetched and the last
+ * fetch error. Its tool-call questions become ordinary approval cards (kind "other" unless it says otherwise), never
+ * auto-approved.
+ */
+export interface A2aAgentSetting {
+  id: string;
+  name: string;
+  url: string;
+  tokenSet: boolean;
+  card?: A2aAgentCardSummary;
+  error?: string;
+}
+
+/** `signature`: "unsigned" (no signatures) or "unverified" (signed; Pawl does not verify card signatures). */
+export interface A2aAgentCardSummary {
+  name: string;
+  description: string;
+  version: string;
+  protocolVersion: "1.0" | "0.3" | string;
+  streaming: boolean;
+  skills: Array<{ id: string; name: string; description: string }>;
+  signature: "unsigned" | "unverified";
+  fetchedAt: UnixMs;
 }
 
 /** One outside A2A caller (`[[a2a.callers]]`). `id`: [a-z0-9-]{1,40}, unique; audited as `a2a:<id>`. */
@@ -725,6 +758,8 @@ export interface A2aSettingsPatch {
   server?: boolean;
   port?: number;
   callers?: Array<{ id: string; name: string; allowApprovals?: boolean }>;
+  /** Replaces the list. `token`: a string sets it, null clears it, absent keeps it (while the id stays). */
+  agents?: Array<{ id: string; name?: string; url: string; token?: string | null }>;
 }
 
 /**

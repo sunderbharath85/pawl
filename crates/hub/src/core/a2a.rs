@@ -173,7 +173,7 @@ impl Hub {
         let task = self.tasks().begin(session_id, &text, caller);
         // The ACP host emits the `user_message` event for every prompt it sends; recording it here
         // too would log (and print) the prompt twice.
-        match self.inner.host.prompt(session_id, text).await {
+        match self.exec_prompt(session_id, text).await {
             Ok(()) => {
                 self.tasks().commit(&task.id);
                 Ok(self.tasks().get(&task.id, None).unwrap_or(task))

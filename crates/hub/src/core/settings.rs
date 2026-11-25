@@ -147,6 +147,11 @@ impl Hub {
         s.a2a.running = a2a.running;
         s.a2a.url = a2a.url;
         s.a2a.error = a2a.error;
+        for agent in s.a2a.agents.iter_mut() {
+            let (card, error) = self.a2a_card_summary(&agent.id);
+            agent.card = card;
+            agent.error = error;
+        }
         s
     }
 
@@ -311,6 +316,11 @@ impl Hub {
         if cfgset::A2A_KEYS.iter().any(|k| has(k)) {
             // Start, stop, move, or replace the callers (a removed or rotated token stops at once).
             self.sync_a2a_server().await;
+        }
+        if cfgset::A2A_AGENT_KEYS.iter().any(|k| has(k)) {
+            // Fetch the outside agents' cards again and rebuild the agent list.
+            let hub = self.clone();
+            tokio::spawn(async move { hub.refresh_a2a_cards().await });
         }
         if cfgset::BRAIN_KEYS.iter().any(|k| has(k)) {
             self.rebuild_brain();

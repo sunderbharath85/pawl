@@ -26,6 +26,10 @@ axum = "0.8.9"
 subtle = "2.6.1"
 # `A2aHandler` is an #[async_trait] trait (re-exported for the hub).
 async-trait = "0.1"
+# Calling outside A2A agents (phase A3): the brain's reqwest; `url` for origin checks (in the tree
+# through reqwest).
+reqwest = { version = "0.13", features = ["json"] }
+url = "2"
 
 [dev-dependencies]
 # Drives the server's router without a socket in tests (already in the tree through axum).

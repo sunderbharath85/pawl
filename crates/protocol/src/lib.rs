@@ -435,7 +435,13 @@ pub struct AgentCapabilities {
 pub enum AgentSource {
     Registry,
     Custom,
+    /// An outside A2A agent the user added by URL (Settings, `[[a2a.agents]]`); its id is
+    /// `a2a:<slug>` (A2A phase A3). No command: the hub talks A2A to it.
+    A2a,
 }
+
+/// Agent ids of outside A2A agents start with this (`a2a:<slug>`).
+pub const A2A_AGENT_PREFIX: &str = "a2a:";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1089,6 +1095,61 @@ pub struct HubSettingsA2a {
     pub error: Option<String>,
     #[serde(default)]
     pub callers: Vec<A2aCallerSetting>,
+    /// Outside A2A agents Pawl delegates to (phase A3).
+    #[serde(default)]
+    pub agents: Vec<A2aAgentSetting>,
+}
+
+/// An outside A2A agent (`[[a2a.agents]]`): `id` `[a-z0-9-]{1,40}` (its agent id is `a2a:<id>`), the URL
+/// it was added by (https, or http to this machine), its bearer token (write-only: `token_set`), the
+/// last card fetched (`card`) and the last fetch error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aAgentSetting {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub token_set: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<A2aAgentCardSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// What an outside agent's Agent Card says, for Settings. `signature`: "unsigned" (no signatures) or
+/// "unverified" (signed; Pawl does not verify card signatures). `protocol_version`: "1.0" or "0.3".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aAgentCardSummary {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub protocol_version: String,
+    pub streaming: bool,
+    pub skills: Vec<A2aSkillSummary>,
+    pub signature: String,
+    pub fetched_at: UnixMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aSkillSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
+/// One outside agent in a patch (`agents` replaces the list). `token`: a string sets it, null clears
+/// it, absent keeps it (while the id stays).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aAgentPatch {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub url: String,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub token: Option<Option<String>>,
 }
 
 /// One outside A2A caller of the localhost server (`[[a2a.callers]]`). `id`: `[a-z0-9-]{1,40}`, unique; it
@@ -1113,6 +1174,8 @@ pub struct HubSettingsA2aPatch {
     pub port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callers: Option<Vec<A2aCallerPatch>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<Vec<A2aAgentPatch>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

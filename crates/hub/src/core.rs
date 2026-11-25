@@ -2,6 +2,7 @@
 //! hook feeds into sessions + events; applies permission rules; answers every `ClientMsg`.
 
 pub(crate) mod a2a;
+pub(crate) mod a2a_agents;
 pub(crate) mod a2a_server;
 mod brain_session;
 mod host;
@@ -371,6 +372,8 @@ struct Inner {
     /// The localhost A2A server (`core/a2a_server.rs`) and its live state for the settings view.
     a2a_runtime: tokio::sync::Mutex<a2a_server::A2aRuntime>,
     a2a_status: Mutex<a2a_server::A2aStatus>,
+    /// Outside A2A agents' sessions (`core/a2a_agents.rs`); they report like the ACP host.
+    remote: Arc<a2a_agents::RemoteAgents>,
 }
 
 /// The hub. Cheap to clone; all clones share state.
@@ -562,6 +565,8 @@ impl Hub {
         let (shutdown, _) = watch::channel(false);
         let (restart, _) = watch::channel(false);
         let tasks = pawl_a2a::TaskRegistry::new(machine_id.clone());
+        let (remote_tx, remote_rx) = mpsc::unbounded_channel();
+        let remote = Arc::new(a2a_agents::RemoteAgents::new(machine_id.clone(), remote_tx));
         let hub = Hub {
             inner: Arc::new(Inner {
                 brain: RwLock::new(Brain::new(config.brain.to_brain_config())),
@@ -601,6 +606,7 @@ impl Hub {
                 tasks,
                 a2a_runtime: tokio::sync::Mutex::new(a2a_server::A2aRuntime::default()),
                 a2a_status: Mutex::new(a2a_server::A2aStatus::default()),
+                remote,
             }),
         };
         hub.set_mirror(mirror_sessions, mirror_pets, mirror_pending);
@@ -628,6 +634,8 @@ impl Hub {
         }
 
         tokio::spawn(hub.clone().pet_flush_loop());
+        // Outside A2A agents report through their own channel, handled like the ACP host's events.
+        tokio::spawn(hub.clone().host_loop(remote_rx));
         if background {
             hub.start_peer_links().await?;
             let h = hub.clone();
@@ -643,6 +651,11 @@ impl Hub {
             tokio::spawn(hub.clone().daily_report_loop());
             // The localhost A2A server, when `[a2a] server = true` (off by default).
             hub.sync_a2a_server().await;
+            // Outside A2A agents' cards (ETag-cached), so they are listed as agents.
+            if !hub.cfg().a2a.agents.is_empty() {
+                let h = hub.clone();
+                tokio::spawn(async move { h.refresh_a2a_cards().await });
+            }
         }
         Ok(hub)
     }
@@ -880,6 +893,7 @@ impl Hub {
     pub async fn shutdown(&self) {
         let _ = self.inner.shutdown.send(true);
         self.stop_a2a_server().await;
+        self.inner.remote.shutdown();
         self.flush_pets().await;
         self.inner.peer.shutdown().await;
         self.inner.host.shutdown().await;
@@ -1053,6 +1067,10 @@ impl Hub {
     /// Start an owned ACP session without a prompt (the ACP executor behind the A2A facade).
     pub(super) async fn launch_session(&self, agent_id: &str, cwd: &str) -> Result<Session> {
         let agent = self.find_agent(agent_id).await?;
+        if agent.source == AgentSource::A2a {
+            // An outside A2A agent works where it runs; no folder here.
+            return self.launch_remote(&agent).await;
+        }
         let cwd = resolve_cwd(cwd)?;
         let id = self.new_id();
         self.ensure_pet(&agent.id).await;
@@ -1102,7 +1120,7 @@ impl Hub {
     /// `session/cancel` to the agent of an owned session (the ACP executor behind the A2A facade).
     pub(super) async fn acp_cancel(&self, session_id: &str, actor: &Actor) -> Result<()> {
         self.owned_open_session(session_id)?;
-        self.inner.host.cancel(session_id).await?;
+        self.exec_cancel(session_id).await?;
         // ACP: after session/cancel the client answers every pending permission request with `cancelled`.
         let stale = self.st().take_pending_for_session(session_id);
         for req in stale {
@@ -1115,7 +1133,7 @@ impl Hub {
     /// serves no other session. The hub marks it ended right away; the host's upsert follows.
     pub async fn close_session(&self, session_id: &str) -> Result<()> {
         let s = self.owned_open_session(session_id)?;
-        self.inner.host.close_session(session_id).await?;
+        self.exec_close(session_id).await?;
         let mut ended = self.session(session_id).unwrap_or(s);
         if ended.ended_at.is_none() {
             ended.ended_at = Some(pawl_protocol::now_ms());
@@ -1129,6 +1147,9 @@ impl Hub {
 
     pub async fn list_history(&self, agent_id: &str, cwd: Option<String>) -> Result<Vec<HistorySession>> {
         let agent = self.find_agent(agent_id).await?;
+        if agent.source == AgentSource::A2a {
+            return Ok(Vec::new()); // outside agents keep their own history
+        }
         let cwd = match cwd.filter(|c| !c.trim().is_empty()) {
             Some(c) => Some(resolve_cwd(&c)?),
             None => None,
@@ -1146,6 +1167,9 @@ impl Hub {
             return Ok(s.clone());
         }
         let agent = self.find_agent(agent_id).await?;
+        if agent.source == AgentSource::A2a {
+            bail!("{} sessions cannot be resumed; start a new one", agent.name);
+        }
         let cwd = resolve_cwd(cwd)?;
         let id = self.new_id();
         self.ensure_pet(&agent.id).await;
@@ -1286,6 +1310,8 @@ impl Hub {
         let _guard = self.inner.discovery.lock().await;
         let cfg = self.config();
         let mut found = discover_agents(&self.inner.paths, &cfg, &self.inner.machine_id, force).await?;
+        // Outside A2A agents (Settings > A2A agents) next to the ACP ones.
+        found.extend(self.a2a_agent_list());
         let agents = {
             let mut st = self.st();
             for a in found.iter_mut() {
@@ -1751,7 +1777,7 @@ impl Hub {
                 }
             }
         };
-        let result = self.inner.host.resolve_permission(request_id, option_id.clone()).await;
+        let result = self.exec_resolve(request_id, option_id.clone()).await;
         let outcome = match (&result, option_kind) {
             (Err(_), _) => AuditOutcome::Failed,
             (Ok(()), None) => AuditOutcome::Cancelled,
@@ -1786,7 +1812,7 @@ impl Hub {
 
     /// Drop a pending request that can no longer be answered normally (turn cancelled, session over).
     async fn close_permission(&self, req: PermissionRequest, by: ResolvedBy, actor: &Actor, why: &str) {
-        let r = self.inner.host.resolve_permission(&req.request_id, None).await;
+        let r = self.exec_resolve(&req.request_id, None).await;
         let detail = match &r {
             Ok(()) => why.to_string(),
             Err(e) => format!("{why} (agent: {e:#})"),

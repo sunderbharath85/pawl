@@ -1686,6 +1686,7 @@ dependencies = [
  "chrono",
  "futures",
  "pawl-protocol",
+ "reqwest",
  "serde",
  "serde_json",
  "subtle",
@@ -1693,6 +1694,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "url",
  "uuid",
 ]
 

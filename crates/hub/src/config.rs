@@ -236,11 +236,36 @@ pub struct A2aSection {
     pub port: u16,
     /// Outside A2A clients allowed to call it (`[[a2a.callers]]`).
     pub callers: Vec<A2aCaller>,
+    /// Outside A2A agents Pawl delegates to (`[[a2a.agents]]`, phase A3).
+    pub agents: Vec<A2aAgentConfig>,
 }
 
 impl Default for A2aSection {
     fn default() -> Self {
-        Self { server: false, port: A2A_DEFAULT_PORT, callers: Vec::new() }
+        Self { server: false, port: A2A_DEFAULT_PORT, callers: Vec::new(), agents: Vec::new() }
+    }
+}
+
+/// An outside A2A agent: its agent id is `a2a:<id>`. The token (sent as `Authorization: Bearer`) is a
+/// secret: write-only in the UI, never logged, never sent to clients.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct A2aAgentConfig {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+impl fmt::Debug for A2aAgentConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("A2aAgentConfig")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
     }
 }
 
@@ -464,6 +489,9 @@ pub(crate) const CONFIG_TEMPLATE: &str = r#"# Pawl hub configuration. Every key 
 # id = "ci-bot"
 # name = "CI bot"
 # allow_approvals = false          # true: may allow once / deny its own sessions' requests (never execute, delete, fetch)
+# [[a2a.agents]]                   # outside A2A agents Pawl can delegate to (agent id "a2a:<id>")
+# id = "gemini"
+# url = "http://localhost:41242"   # https, or http to this machine; the token is set in Settings
 #
 # [watchdog]
 # waiting_nudge_after_ms = 300000

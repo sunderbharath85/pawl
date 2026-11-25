@@ -17,6 +17,7 @@
 //! ([`spec`]) and the functions of this crate, so an SDK upgrade stays local.
 
 pub mod card;
+pub mod client;
 pub mod compat;
 pub mod ext;
 pub mod mapping;

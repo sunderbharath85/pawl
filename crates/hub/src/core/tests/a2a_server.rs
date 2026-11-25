@@ -297,6 +297,7 @@ async fn the_server_is_off_by_default_and_follows_its_settings() {
         server: Some(true),
         port: Some(port),
         callers: Some(vec![A2aCallerPatch { id: "ci".into(), name: "CI bot".into(), allow_approvals: false }]),
+        agents: None,
     });
     f.hub.update_settings(&patch, &me).await.unwrap();
     let s = f.hub.settings();

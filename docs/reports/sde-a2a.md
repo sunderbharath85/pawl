@@ -267,3 +267,91 @@ Docs read before coding (2026-11-24):
 - Results: `cargo test -p pawl-a2a` 62 passed (53 + 9 conformance); `cargo test --workspace --no-fail-fast` exit 0
   (pawl-a2a 62, pawl-acp 25, pawl-brain 111, pawl-discovery 39, pawl-hub 227, pawl-peer 105 + 1 ignored,
   pawl-protocol 4); `cargo clippy --workspace --all-targets -- -D warnings` clean. No wire change.
+
+## Phase A3 — outside A2A agents as sub-agents (done)
+
+### What it does
+
+- Settings `[[a2a.agents]]` (`id` `[a-z0-9-]{1,40}`, optional `name`, `url`, `token`), all through the hub API
+  (`update_settings` `a2a.agents`, the list replaces; `token`: a string sets it, null clears it, absent keeps it
+  while the id stays). URL: absolute `https://`, or `http://` to this machine only; no user info. Token: 1-512
+  visible ASCII characters, write-only (`tokenSet`), never logged, audited as the key `a2a.agentTokens`. At most 16.
+- Card (`crates/a2a/src/client.rs`): fetched from `/.well-known/agent-card.json` under the URL (or the URL when it
+  names a `.json` file), with the bearer token, `If-None-Match` / ETag revalidation, 256 KiB cap, 60 s timeout,
+  **no redirects**. 0.3 and 1.0 cards are read (0.3 normalized by `compat::card_from_v03`; OpenAPI-style
+  schemes converted; a card in both shapes works). Signatures are not verified (no JWS library approved): Settings
+  show `signature: "unsigned"` (none) or `"unverified"` (present). The card's JSON-RPC endpoint must be on the
+  **same origin** as the URL the user added (else the agent is refused: the card cannot send the token elsewhere);
+  1.0 is preferred, 0.3 used when it is all the card offers. Cards are cached in memory (fetched at start, on every
+  agents/token change and on `list_agents{refresh}`); the agent list itself is persisted as before.
+- Agents: each configured agent is an agent `a2a:<id>` (`source: "a2a"`, name from the setting, else the card),
+  `installed` once its card was fetched, with a pet, listed next to the ACP agents (bot, proposals, peers' presence:
+  `:` is now allowed in peer agent ids). Settings show its card summary (name, description, version, protocol
+  version, streaming, up to 50 skills, signature, fetch time) and the last fetch error.
+- Sessions: starting `a2a:<id>` (any client, the bot, the A2A facade) makes a session of this machine
+  (`source: owned`, cwd = the agent URL), so it shows in every client and in paired machines' mirrors; it is
+  remote-driven from the start (rules never auto-approve). Each prompt is `SendStreamingMessage` (or blocking
+  `SendMessage` when the card says no streaming) in the agent's context; the next prompt continues that context.
+  One turn at a time ("already running a prompt; cancel it first", like ACP).
+- Mapping (`crates/hub/src/core/a2a_agents.rs`, events through the same `HostEvent` path as the ACP host, so pets,
+  notifications, the event log, mirror and our own A2A task view all work unchanged): working status text and
+  artifact text -> agent message chunks (data / file parts shown as placeholders); COMPLETED -> `end_turn`,
+  CANCELED -> `cancelled`, REJECTED -> `refusal`, FAILED -> an error; a stream that ends mid-task, a timeout
+  (10 min idle) or more than 64 MiB / 1 MiB per event -> an error.
+- `INPUT_REQUIRED` with a Structured Input schema that picks one value (one enum property) -> an approval card:
+  options = the values (kinds from Pawl-style details when another Pawl asks, else from the word: deny / reject /
+  no / cancel -> reject, "always" -> always, anything else -> allow once), tool kind **other** unless Pawl-style
+  details name one, title = the agent's text. Never auto-approved (remote-driven session; and `other` can never
+  be auto-allowed). The answer goes back as a `structured_input` part tagged with the agent's input request id
+  (`{<property>: <value>}`), on the open stream's task; "deny with no option" cancels the agent's task. Other
+  questions (plain text, auth required, a schema Pawl cannot fill in) are shown as the agent's message and the
+  user's next prompt answers them (sent with the task id).
+- Cancel = `CancelTask` on the agent's task (the reader stops, the turn ends `cancelled`); close = cancel + end.
+  Resume and history do not apply to outside agents.
+
+### Wire changes (additive; PROTOCOL_VERSION stays 8; t13 told)
+
+- `Agent.source` gains `"a2a"`; `A2A_AGENT_PREFIX = "a2a:"`.
+- `A2aSettings.agents?: A2aAgentSetting[]` (`{id, name, url, tokenSet, card?: A2aAgentCardSummary, error?}`);
+  `A2aAgentCardSummary {name, description, version, protocolVersion, streaming, skills[{id,name,description}],
+  signature: "unsigned"|"unverified", fetchedAt}`; `A2aSettingsPatch.agents?: {id, name?, url, token?: string|null}[]`.
+- Rust code that builds `HubSettingsA2aPatch { .. }` field by field needs `agents: None` (one hub test).
+
+### Files (A3)
+
+- New: `crates/a2a/src/client.rs`, `crates/a2a/src/client/tests.rs`, `crates/hub/src/core/a2a_agents.rs`,
+  `crates/hub/src/core/tests/a2a_agents.rs`.
+- Changed: `crates/a2a/{Cargo.toml,src/lib.rs}` (deps `reqwest 0.13` json, the brain's; `url 2`; both already
+  in the tree), `crates/hub/src/{config.rs,settings.rs,repos.rs,core.rs}`,
+  `crates/hub/src/core/{a2a.rs,settings.rs,tests.rs,tests/a2a_server.rs}`, `crates/protocol/src/lib.rs`,
+  `packages/protocol/src/index.ts` (CRLF kept), `Cargo.lock` (two dependency lines, no new package).
+
+### Commands and results (A3)
+
+- `cargo test -p pawl-a2a`: 67 passed (+5 client: card fetch + ETag + same-origin endpoint, 1.0 and 0.3 calls and
+  streams against a real loopback agent, wrong token -> 401, oversized card / redirect / junk / signed 0.3 card,
+  URL rules, SSE parsing).
+- `cargo test -p pawl-hub --lib`: 235 passed (+8: listed with card summary and write-only token; a streaming turn
+  with an approval card answered (structured input tagged with the input id; completes; the A2A task view
+  follows; audited; the next prompt keeps the context); deny -> refusal; never auto-approved even with a read
+  rule; cancel -> `CancelTask` + `cancelled`; one turn at a time; close; a non-streaming agent; validation and an
+  unreachable agent's error; removal). Stable across repeated runs.
+- `cargo test --workspace --no-fail-fast`: exit 0 (pawl-a2a 67, pawl-acp 25, pawl-brain 111, pawl-discovery 39,
+  pawl-hub 235, pawl-peer 105 + 1 ignored, pawl-protocol 4). `cargo clippy --workspace --all-targets -- -D
+  warnings`: clean.
+- TS: `bunx tsc --noEmit` clean in packages/protocol, packages/hub-client, packages/pet-engine, apps/desktop,
+  apps/vscode, apps/mobile; `bun test` in packages/hub-client: 339 passed.
+
+### Decisions (A3)
+
+- Own client over reqwest (not `a2a-client-lf`): one path for 1.0 and 0.3 agents (Gemini CLI's A2A server is
+  0.3), our own caps, timeouts and redirect policy, and no `a2a-pb` / tonic (which t13 just removed).
+- http only to loopback; token only to the card's same-origin endpoint; no redirects.
+- An outside agent's text questions end the user's turn (local stop `end_turn`) while the agent's task waits; the
+  next prompt answers with the task id.
+
+### Known gaps (A3)
+
+- Card signatures are shown, not verified (needs an approved JWS library).
+- Cards are cached in memory only (refetched at start).
+- Push notifications from outside agents are not used (streaming or blocking calls only).
