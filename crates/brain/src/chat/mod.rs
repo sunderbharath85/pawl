@@ -171,6 +171,34 @@ pub struct BrainContext {
     pub model_pending: bool,
     /// The default pet's name (`bot.petName`): the name the pet answers as when no pet is attached.
     pub pet_name: Option<String>,
+    /// The latest A2A task of each of this machine's owned sessions (PLAN.md "A2A orchestration":
+    /// the orchestrator's status reads the tasks its delegations created), newest first.
+    pub tasks: Vec<TaskBrief>,
+}
+
+/// One delegation (A2A task) as the bot sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskBrief {
+    /// The session (the task's A2A context).
+    pub session_id: SessionId,
+    pub task_id: String,
+    /// The A2A state without its prefix: "submitted", "working", "input_required", "completed",
+    /// "canceled", "rejected", "failed".
+    pub state: String,
+    /// The task's latest status line (agent text), if any.
+    pub text: Option<String>,
+}
+
+/// What the latest task of `session_id` says about how its turn ended, when that is not plain
+/// success: "Its last task was canceled." Untrusted agent text is never quoted here.
+pub(crate) fn task_outcome_note(ctx: &BrainContext, session_id: &str) -> Option<&'static str> {
+    let t = ctx.tasks.iter().find(|t| t.session_id == session_id)?;
+    match t.state.as_str() {
+        "canceled" => Some(" Its last task was canceled."),
+        "rejected" => Some(" The agent refused its last task."),
+        "failed" => Some(" Its last task failed."),
+        _ => None,
+    }
 }
 
 impl Default for BrainContext {
@@ -198,6 +226,7 @@ impl Default for BrainContext {
             default_agent: None,
             model_pending: false,
             pet_name: None,
+            tasks: Vec::new(),
         }
     }
 }
@@ -683,6 +712,9 @@ impl Brain {
         let mut text = self
             .summarize_inner(primary, &ctx.recent_events, &ctx.agents, &ctx.pending, &machines, voice, true, now)
             .await;
+        if let Some(note) = task_outcome_note(ctx, &primary.id) {
+            text.push_str(note);
+        }
         if live.len() > 1 {
             text.push_str(&others_line(&live[1..], &machines));
         }

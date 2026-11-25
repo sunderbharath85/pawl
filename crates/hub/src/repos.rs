@@ -157,7 +157,7 @@ pub fn validate_peer_agents(agents: Vec<pawl_protocol::Agent>) -> Vec<pawl_proto
     let id_ok = |id: &str| {
         !id.is_empty()
             && id.chars().count() <= PEER_AGENT_ID_MAX
-            && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':'))
     };
     let name_ok = |n: &str| !n.trim().is_empty() && n.chars().count() <= PEER_AGENT_NAME_MAX && !n.chars().any(char::is_control);
     agents.into_iter().filter(|a| id_ok(&a.id) && name_ok(&a.name)).take(PEER_AGENTS_MAX).collect()

@@ -35,6 +35,7 @@ const MIGRATIONS: &[Migration] =
         Migration::Sql(SCHEMA_V6),
         Migration::Sql(SCHEMA_V7),
         Migration::Sql(SCHEMA_V8),
+        Migration::Sql(SCHEMA_V9),
     ];
 
 const SCHEMA_V1: &str = r#"
@@ -239,6 +240,23 @@ CREATE TABLE roster_intro_pending (
 );
 "#;
 
+/// v9 (A2A, phase A2): every call to the localhost A2A server, by caller. Never message text or tokens.
+const SCHEMA_V9: &str = r#"
+CREATE TABLE a2a_log (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      INTEGER NOT NULL,
+    caller  TEXT NOT NULL,
+    method  TEXT NOT NULL,
+    target  TEXT,
+    status  TEXT NOT NULL,
+    detail  TEXT
+);
+CREATE INDEX a2a_log_ts ON a2a_log(ts);
+"#;
+
+/// a2a_log rows kept (oldest pruned first).
+pub const A2A_LOG_MAX_ROWS: i64 = 100_000;
+
 /// settings_audit rows kept (oldest pruned first).
 pub const SETTINGS_AUDIT_MAX_ROWS: i64 = 10_000;
 
@@ -378,6 +396,22 @@ pub struct PairingAuditEntry {
     pub remote_addr: Option<String>,
     /// e.g. "desktop#3", "cli#1", "peer".
     pub actor: String,
+    pub detail: Option<String>,
+}
+
+/// One call to the localhost A2A server (`a2a_log`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct A2aLogEntry {
+    pub id: i64,
+    pub ts: UnixMs,
+    /// "a2a:<caller id>".
+    pub caller: String,
+    /// The A2A method ("SendMessage", "GetTask", ...).
+    pub method: String,
+    /// The task or context the call named, if any.
+    pub target: Option<String>,
+    /// "ok", or the error ("task_not_found", "forbidden", ...).
+    pub status: String,
     pub detail: Option<String>,
 }
 
@@ -1272,6 +1306,28 @@ impl Store {
         let id = c.last_insert_rowid();
         c.execute("DELETE FROM settings_audit WHERE id <= ?1", params![id - SETTINGS_AUDIT_MAX_ROWS])?;
         Ok(id)
+    }
+
+    /// Log one call to the localhost A2A server; keeps the newest A2A_LOG_MAX_ROWS.
+    pub fn insert_a2a_log(&self, e: &A2aLogEntry) -> Result<i64> {
+        let c = self.conn();
+        c.execute(
+            "INSERT INTO a2a_log (ts, caller, method, target, status, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![e.ts, e.caller, e.method, e.target, e.status, e.detail],
+        )?;
+        let id = c.last_insert_rowid();
+        c.execute("DELETE FROM a2a_log WHERE id <= ?1", params![id - A2A_LOG_MAX_ROWS])?;
+        Ok(id)
+    }
+
+    /// Latest A2A server calls (newest first).
+    pub fn a2a_log(&self, limit: u32) -> Result<Vec<A2aLogEntry>> {
+        let c = self.conn();
+        let mut st = c.prepare("SELECT id, ts, caller, method, target, status, detail FROM a2a_log ORDER BY id DESC LIMIT ?1")?;
+        let rows = st.query_map([limit], |r| {
+            Ok(A2aLogEntry { id: r.get(0)?, ts: r.get(1)?, caller: r.get(2)?, method: r.get(3)?, target: r.get(4)?, status: r.get(5)?, detail: r.get(6)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Latest settings audit entries (newest first).

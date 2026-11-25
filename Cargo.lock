@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "a2a-lf"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9bdc39f79399c01ec4df5da3b653e31b3bac52214ca3d8331d6f059c273b5b8"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -128,6 +142,17 @@ name = "anyhow"
 version = "1.0.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2cb931c189b85683d69a5cfad41d4d418671e1ac413dd209f3f2fc31e3cfd902"
+
+[[package]]
+name = "async-trait"
+version = "0.1.92"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
 
 [[package]]
 name = "atomic-waker"
@@ -1651,6 +1676,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "pawl-a2a"
+version = "0.1.1"
+dependencies = [
+ "a2a-lf",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "futures",
+ "hyper",
+ "hyper-util",
+ "pawl-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "pawl-acp"
 version = "0.1.1"
 dependencies = [
@@ -1715,6 +1765,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "hex",
+ "pawl-a2a",
  "pawl-acp",
  "pawl-brain",
  "pawl-discovery",
@@ -1730,6 +1781,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml",
  "toml_edit",
+ "tower",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

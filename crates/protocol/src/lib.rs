@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 pub const HUB_DEFAULT_PORT: u16 = 47800;
 pub const HUB_HOST: &str = "127.0.0.1";
 pub const HUB_DATA_DIR_NAME: &str = "pawl";
@@ -233,6 +233,31 @@ pub struct Presence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_active_at: Option<UnixMs>,
     pub ts: UnixMs,
+    /// The sender's PROTOCOL_VERSION (v9+; absent = 8 or older). From 9 on, start / prompt / cancel go to it
+    /// as A2A JSON-RPC (`PeerBody::A2a`) instead of intents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u32>,
+}
+
+/// The first PROTOCOL_VERSION whose hubs talk A2A to each other over the peer link.
+pub const A2A_PEER_MIN_PROTOCOL: u32 = 9;
+/// Custom A2A protocol binding (spec 5.8, 12) of the encrypted peer link: JSON-RPC 2.0 A2A 1.0 requests
+/// and responses inside `PeerBody::A2a` frames.
+pub const A2A_PEER_BINDING: &str = "https://sunderbharath85.github.io/pawl/a2a/binding/peer-link/v1";
+
+/// One frame of an A2A call over the peer link (`PeerBody::A2a`), tagged `kind`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum A2aPeerFrame {
+    /// Origin -> owner: a JSON-RPC request (A2A 1.0). `client` = the local client that asked; `confirmed` = the
+    /// user confirmed on that device (required for a start, as with intents).
+    Request { rpc: Value, client: ClientKind, confirmed: bool },
+    /// Owner -> origin: the JSON-RPC response of a unary method.
+    Response { rpc: Value },
+    /// Owner -> origin: one JSON-RPC response of a stream (`SendStreamingMessage`, `SubscribeToTask`).
+    Event { rpc: Value },
+    /// Owner -> origin: the stream is over.
+    End,
 }
 
 pub const PEER_PROTOCOL_VERSION: u8 = 1;
@@ -417,6 +442,9 @@ pub enum PeerBody {
     /// Group roster (migration step 7): sent after pairing a new device to every other linked hub (the new device) and
     /// to the new device (the other hubs). Accepted only from a paired hub; never replaces an existing device's key.
     RosterIntro { devices: Vec<IntroDevice> },
+    /// A2A over the encrypted link (protocol v9, between v9 hubs only): one call `call_id` (unique per origin),
+    /// its request and its answer frames. Replaces the start / prompt / cancel intents; approve / deny stay intents.
+    A2a { call_id: String, frame: A2aPeerFrame },
 }
 
 // ---------- agents ----------
@@ -435,7 +463,13 @@ pub struct AgentCapabilities {
 pub enum AgentSource {
     Registry,
     Custom,
+    /// An outside A2A agent the user added by URL (Settings, `[[a2a.agents]]`); its id is
+    /// `a2a:<slug>` (A2A phase A3). No command: the hub talks A2A to it.
+    A2a,
 }
+
+/// Agent ids of outside A2A agents start with this (`a2a:<slug>`).
+pub const A2A_AGENT_PREFIX: &str = "a2a:";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1068,6 +1102,135 @@ pub struct HubSettingsRelay {
     pub access_key_set: bool,
 }
 
+/// Default port of the localhost A2A server (`[a2a] port`; it only ever binds 127.0.0.1).
+pub const A2A_DEFAULT_PORT: u16 = 47802;
+
+/// `[a2a]` (PLAN.md "A2A orchestration", phase A2): Pawl as an A2A agent on 127.0.0.1. `server` = the
+/// localhost A2A server is on (off by default); `running` / `url` / `error` = its live state. Callers are
+/// outside A2A clients, each with its own bearer token (write-only: only `token_set`; `a2a_rotate_token`
+/// shows a new one once) and its own `allow_approvals` (default false: it can never answer permission
+/// requests; true: allow once or deny, never "always", never execute / delete / fetch).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsA2a {
+    pub server: bool,
+    pub port: u16,
+    #[serde(default)]
+    pub running: bool,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub callers: Vec<A2aCallerSetting>,
+    /// Outside A2A agents Pawl delegates to (phase A3).
+    #[serde(default)]
+    pub agents: Vec<A2aAgentSetting>,
+}
+
+/// An outside A2A agent (`[[a2a.agents]]`): `id` `[a-z0-9-]{1,40}` (its agent id is `a2a:<id>`), the URL
+/// it was added by (https, or http to this machine), its bearer token (write-only: `token_set`), the
+/// last card fetched (`card`) and the last fetch error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aAgentSetting {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub token_set: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<A2aAgentCardSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// What an outside agent's Agent Card says, for Settings. `signature`: "unsigned" (no signatures) or
+/// "unverified" (signed; Pawl does not verify card signatures). `protocol_version`: "1.0" or "0.3".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aAgentCardSummary {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub protocol_version: String,
+    pub streaming: bool,
+    pub skills: Vec<A2aSkillSummary>,
+    pub signature: String,
+    pub fetched_at: UnixMs,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aSkillSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
+/// One outside agent in a patch (`agents` replaces the list). `token`: a string sets it, null clears
+/// it, absent keeps it (while the id stays).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aAgentPatch {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub url: String,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub token: Option<Option<String>>,
+}
+
+/// One outside A2A caller of the localhost server (`[[a2a.callers]]`). `id`: `[a-z0-9-]{1,40}`, unique; it
+/// appears in the audit log as `a2a:<id>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aCallerSetting {
+    pub id: String,
+    pub name: String,
+    pub token_set: bool,
+    pub allow_approvals: bool,
+}
+
+/// `callers` replaces the whole list; a caller keeps its token while its id stays, a new id starts
+/// without one (`a2a_rotate_token`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsA2aPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callers: Option<Vec<A2aCallerPatch>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<Vec<A2aAgentPatch>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aCallerPatch {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub allow_approvals: bool,
+}
+
+/// One delegation (A2A task, one per prompt turn) of this machine's sessions (`list_tasks`).
+/// `state`: "submitted" | "working" | "input_required" | "completed" | "canceled" | "rejected" | "failed".
+/// `caller`: who started it: "local", "peer:<machineId>" or "a2a:<callerId>".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aTaskSummary {
+    pub task_id: String,
+    pub session_id: SessionId,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub caller: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<UnixMs>,
+}
+
 /// The hub's editable settings (config.toml + defaults). Secrets are never sent: only whether they are set.
 /// `overridden_by` lists keys whose effective value comes from a CLI flag or env var (e.g. "hub.port" -> "--port").
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1082,6 +1245,9 @@ pub struct HubSettings {
     pub custom_agents: Vec<CustomAgentSetting>,
     #[serde(default)]
     pub overridden_by: BTreeMap<String, String>,
+    /// The localhost A2A server and its callers (A2A phase A2). Boxed: keeps `ServerMsg` small.
+    #[serde(default)]
+    pub a2a: Box<HubSettingsA2a>,
 }
 
 /// `Some(None)` = explicit null (clear), `None` = key absent (unchanged).
@@ -1250,6 +1416,8 @@ pub struct HubSettingsPatch {
     pub relay: Option<HubSettingsRelayPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_agents: Option<Vec<CustomAgentSetting>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a2a: Option<HubSettingsA2aPatch>,
 }
 
 /// Agent hooks the hub can install (same targets as `pawl install-hooks`). copilot-vscode is per repo.
@@ -1409,6 +1577,15 @@ pub enum ClientMsg {
     /// Local only. The hub acks, starts a replacement process with the same arguments, says bye to peers and exits;
     /// running sessions end. Clients reconnect on their own. The running port is in data_dir/runtime.json.
     RestartHub { id: String },
+    /// A2A (phase A2, local only): a new bearer token for the outside A2A caller `caller_id`, returned once
+    /// (`{token}`) and never readable again; the previous token stops working at once.
+    A2aRotateToken { id: String, caller_id: String },
+    /// A2A: this machine's delegations (tasks), newest first (`{tasks: A2aTaskSummary[]}`); `session_id` filters.
+    ListTasks {
+        id: String,
+        #[serde(default)]
+        session_id: Option<SessionId>,
+    },
 }
 
 impl ClientMsg {
@@ -1438,7 +1615,9 @@ impl ClientMsg {
             | ClientMsg::HookStatus { id }
             | ClientMsg::InstallHooks { id, .. }
             | ClientMsg::OpenPanel { id, .. }
-            | ClientMsg::RestartHub { id } => id,
+            | ClientMsg::RestartHub { id }
+            | ClientMsg::A2aRotateToken { id, .. }
+            | ClientMsg::ListTasks { id, .. } => id,
         }
     }
 }

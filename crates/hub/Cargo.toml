@@ -19,6 +19,8 @@ pawl-acp = { workspace = true }
 pawl-discovery = { workspace = true }
 pawl-brain = { workspace = true }
 pawl-peer = { workspace = true }
+# The root Cargo.toml is the orchestrator's; the A2A crate is referenced by path.
+pawl-a2a = { path = "../a2a" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -42,3 +44,5 @@ tracing-appender = "0.2.5"
 
 [dev-dependencies]
 tempfile = "3"
+# Drives the A2A server's router without a socket in tests (already in the tree through axum).
+tower = { version = "0.5", features = ["util"] }

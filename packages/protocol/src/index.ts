@@ -3,7 +3,7 @@
 // crates/protocol/src/lib.rs and must stay byte-compatible (camelCase fields,
 // snake_case `type` tags). Change both together.
 
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 export const HUB_DEFAULT_PORT = 47800;
 export const HUB_HOST = "127.0.0.1";
 /** Folder name under the OS data dir (Win %APPDATA%, mac ~/Library/Application Support, linux ~/.local/share). */
@@ -85,7 +85,8 @@ export interface Agent {
   description?: string;
   icon?: string;
   installed: boolean;
-  source: "registry" | "custom";
+  /** "a2a": an outside A2A agent the user added by URL (id `a2a:<slug>`, no command; A2A phase A3). */
+  source: "registry" | "custom" | "a2a";
   /** Filled after the first `initialize` with this agent. */
   capabilities?: AgentCapabilities;
 }
@@ -420,7 +421,28 @@ export interface Presence {
   /** Last local user input on this machine (step 3 uses it for "runs to you"). */
   userActiveAt?: UnixMs;
   ts: UnixMs;
+  /**
+   * The sender's PROTOCOL_VERSION (v9+; absent = 8 or older). From 9 on, start / prompt / cancel go to it as A2A
+   * JSON-RPC (`a2a` peer bodies) instead of intents.
+   */
+  protocolVersion?: number;
 }
+
+/** The first PROTOCOL_VERSION whose hubs talk A2A to each other over the peer link. */
+export const A2A_PEER_MIN_PROTOCOL = 9;
+/** Custom A2A protocol binding (spec 5.8, 12) of the encrypted peer link. */
+export const A2A_PEER_BINDING = "https://sunderbharath85.github.io/pawl/a2a/binding/peer-link/v1";
+
+/**
+ * One frame of an A2A call over the peer link. `request` (origin -> owner): a JSON-RPC A2A 1.0 request, the local
+ * client that asked and whether the user confirmed (required for a start). `response`: the JSON-RPC response of a
+ * unary method. `event`: one JSON-RPC response of a stream. `end`: the stream is over.
+ */
+export type A2aPeerFrame =
+  | { kind: "request"; rpc: unknown; client: ClientKind; confirmed: boolean }
+  | { kind: "response"; rpc: unknown }
+  | { kind: "event"; rpc: unknown }
+  | { kind: "end" };
 
 export const PEER_PROTOCOL_VERSION = 1;
 export const PEER_DEFAULT_PORT = 47801;
@@ -553,7 +575,12 @@ export type PeerBody =
    * device) and to the new device (the other hubs). Accepted only from a paired hub; never replaces an existing
    * device's key; receivers audit it and tell the user.
    */
-  | { type: "roster_intro"; devices: IntroDevice[] };
+  | { type: "roster_intro"; devices: IntroDevice[] }
+  /**
+   * A2A over the encrypted link (protocol v9, between v9 hubs only): one call `callId` (unique per origin), its request
+   * and its answer frames. Replaces the start / prompt / cancel intents; approve / deny stay intents.
+   */
+  | { type: "a2a"; callId: string; frame: A2aPeerFrame };
 
 export type PeerBodyType = PeerBody["type"];
 
@@ -689,6 +716,89 @@ export interface HubSettings {
   relay: { url: string | null; accessKeySet: boolean };
   customAgents: CustomAgentSetting[];
   overriddenBy: Record<string, string>;
+  /** The localhost A2A server and its callers (A2A phase A2). Always sent by hubs that speak A2A. */
+  a2a?: A2aSettings;
+}
+
+/** Default port of the localhost A2A server (`[a2a] port`; it only ever binds 127.0.0.1). */
+export const A2A_DEFAULT_PORT = 47802;
+
+/**
+ * `[a2a]` (PLAN.md "A2A orchestration", phase A2): Pawl as an A2A agent on 127.0.0.1. `server` = the localhost A2A
+ * server is on (off by default); `running` / `url` / `error` = its live state. Callers are outside A2A clients, each
+ * with its own bearer token (write-only: only `tokenSet`; `a2a_rotate_token` shows a new one once) and its own
+ * `allowApprovals` (default false: it can never answer permission requests; true: allow once or deny, never "always",
+ * never execute / delete / fetch). Turning the server on or allowing a caller's approvals deserves an in-app confirm.
+ */
+export interface A2aSettings {
+  server: boolean;
+  port: number;
+  running: boolean;
+  url: string | null;
+  error: string | null;
+  callers: A2aCallerSetting[];
+  /** Outside A2A agents Pawl delegates to (phase A3). Missing from hubs before A3. */
+  agents?: A2aAgentSetting[];
+}
+
+/** Agent ids of outside A2A agents start with this (`a2a:<slug>`). */
+export const A2A_AGENT_PREFIX = "a2a:";
+
+/**
+ * An outside A2A agent (`[[a2a.agents]]`): `id` [a-z0-9-]{1,40} (agent id `a2a:<id>`), the URL it was added by
+ * (https, or http to this machine), its bearer token (write-only: `tokenSet`), the last card fetched and the last
+ * fetch error. Its tool-call questions become ordinary approval cards (kind "other" unless it says otherwise), never
+ * auto-approved.
+ */
+export interface A2aAgentSetting {
+  id: string;
+  name: string;
+  url: string;
+  tokenSet: boolean;
+  card?: A2aAgentCardSummary;
+  error?: string;
+}
+
+/** `signature`: "unsigned" (no signatures) or "unverified" (signed; Pawl does not verify card signatures). */
+export interface A2aAgentCardSummary {
+  name: string;
+  description: string;
+  version: string;
+  protocolVersion: "1.0" | "0.3" | string;
+  streaming: boolean;
+  skills: Array<{ id: string; name: string; description: string }>;
+  signature: "unsigned" | "unverified";
+  fetchedAt: UnixMs;
+}
+
+/** One outside A2A caller (`[[a2a.callers]]`). `id`: [a-z0-9-]{1,40}, unique; audited as `a2a:<id>`. */
+export interface A2aCallerSetting {
+  id: string;
+  name: string;
+  tokenSet: boolean;
+  allowApprovals: boolean;
+}
+
+/** `callers` replaces the whole list; a caller keeps its token while its id stays, a new id starts without one. */
+export interface A2aSettingsPatch {
+  server?: boolean;
+  port?: number;
+  callers?: Array<{ id: string; name: string; allowApprovals?: boolean }>;
+  /** Replaces the list. `token`: a string sets it, null clears it, absent keeps it (while the id stays). */
+  agents?: Array<{ id: string; name?: string; url: string; token?: string | null }>;
+}
+
+/**
+ * One delegation (A2A task, one per prompt turn) of this machine's sessions (`list_tasks`).
+ * `caller`: who started it: "local", "peer:<machineId>" or "a2a:<callerId>".
+ */
+export interface A2aTaskSummary {
+  taskId: string;
+  sessionId: SessionId;
+  state: "submitted" | "working" | "input_required" | "completed" | "canceled" | "rejected" | "failed" | "auth_required" | "unspecified";
+  text?: string;
+  caller: string;
+  updatedAt?: UnixMs;
 }
 
 /**
@@ -707,6 +817,7 @@ export interface HubSettingsPatch {
   repos?: Partial<HubSettings["repos"]>;
   relay?: { url?: string | null; accessKey?: string | null };
   customAgents?: CustomAgentSetting[];
+  a2a?: A2aSettingsPatch;
 }
 
 /** Agent hooks the hub can install (same targets as `pawl install-hooks`). copilot-vscode is per repo. */
@@ -792,7 +903,11 @@ export type ClientMsg =
    * Local only. The hub acks, starts a replacement process with the same arguments, says bye to peers and exits;
    * running sessions end. Clients reconnect on their own. The running port is in data_dir/runtime.json.
    */
-  | { type: "restart_hub"; id: string };
+  | { type: "restart_hub"; id: string }
+  /** A2A (phase A2, local only): a new bearer token for an outside A2A caller, returned once; the old one stops working. */
+  | { type: "a2a_rotate_token"; id: string; callerId: string }
+  /** A2A: this machine's delegations (tasks), newest first; `sessionId` filters. */
+  | { type: "list_tasks"; id: string; sessionId?: SessionId };
 
 export type ClientMsgType = ClientMsg["type"];
 
@@ -824,6 +939,8 @@ export interface AckResults {
   install_hooks: { plan: string; applied: boolean; status: HookStatus };
   open_panel: { delivered: boolean };
   restart_hub: Record<string, never>;
+  a2a_rotate_token: { token: string };
+  list_tasks: { tasks: A2aTaskSummary[] };
 }
 
 // ---------- hub -> client ----------

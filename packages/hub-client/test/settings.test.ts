@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Agent, HookStatus, HubSettings } from "@pawl/protocol";
+import type { A2aTaskSummary, Agent, HookStatus, HubSettings } from "@pawl/protocol";
 import {
   broadFolderReason,
   isBroadFolder,
@@ -645,6 +645,51 @@ describe("restartHub", () => {
     expect(c.getState().status).toBe("disconnected");
     await tick(10);
     expect(FakeSocket.instances.length).toBe(2);
+    c.close();
+  });
+});
+
+describe("A2A: rotateA2aToken and listTasks", () => {
+  beforeEach(() => FakeSocket.reset());
+  test("rotateA2aToken returns the token once; invalid:<field> becomes a SettingsError", async () => {
+    const c = new HubClient({ token: "t", client: "desktop", clientVersion: "1", WebSocketImpl: FakeSocket, requestTimeoutMs: 200 });
+    c.connect();
+    const ws = FakeSocket.last();
+    ws.handshake(welcome);
+    const p = c.rotateA2aToken("ci");
+    await tick();
+    const req = ws.lastSent();
+    expect(req).toEqual({ type: "a2a_rotate_token", id: req.id, callerId: "ci" });
+    ws.receive({ type: "ack", id: req.id, ok: true, result: { token: "ab".repeat(32) } });
+    expect(await p).toBe("ab".repeat(32));
+    const bad = c.rotateA2aToken("nobody");
+    await tick();
+    const req2 = ws.lastSent();
+    ws.receive({ type: "ack", id: req2.id, ok: false, error: "invalid:callerId: is not a configured A2A caller" });
+    const err = await bad.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SettingsError);
+    expect((err as SettingsError).field).toBe("callerId");
+    c.close();
+  });
+
+  test("listTasks sends the session filter only when given", async () => {
+    const c = new HubClient({ token: "t", client: "desktop", clientVersion: "1", WebSocketImpl: FakeSocket, requestTimeoutMs: 200 });
+    c.connect();
+    const ws = FakeSocket.last();
+    ws.handshake(welcome);
+    const all = c.listTasks();
+    await tick();
+    const req = ws.lastSent();
+    expect(req).toEqual({ type: "list_tasks", id: req.id });
+    const task: A2aTaskSummary = { taskId: "m:t", sessionId: "m:s", state: "working", caller: "a2a:ci" };
+    ws.receive({ type: "ack", id: req.id, ok: true, result: { tasks: [task] } });
+    expect(await all).toEqual([task]);
+    const one = c.listTasks("m:s");
+    await tick();
+    const req2 = ws.lastSent();
+    expect(req2).toEqual({ type: "list_tasks", id: req2.id, sessionId: "m:s" });
+    ws.receive({ type: "ack", id: req2.id, ok: true, result: {} });
+    expect(await one).toEqual([]);
     c.close();
   });
 });

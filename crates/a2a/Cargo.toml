@@ -1,0 +1,41 @@
+[package]
+name = "pawl-a2a"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pawl's A2A (Agent2Agent) layer: an A2A view of ACP sessions, structured-input approvals, 0.3/1.0 compatibility"
+
+[dependencies]
+pawl-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+# Official A2A Rust SDK (https://github.com/a2aproject/a2a-rs), pre-1.0: pinned exactly and wrapped
+# behind this crate's own functions. `a2a-lf` is imported as `a2a`.
+a2a = { package = "a2a-lf", version = "=0.4.2" }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# The localhost A2A server (phase A2): Pawl's own JSON-RPC + HTTP+JSON dispatcher over the `a2a-lf`
+# types, on the hub's axum (the SDK's server crate is not used: its protobuf build pulls in a vendored
+# protoc and tonic/prost).
+axum = "0.8.9"
+# Our own accept loop (header-read timeout, connection cap); both already in the tree through axum.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "service"] }
+subtle = "2.6.1"
+# `A2aHandler` is an #[async_trait] trait (re-exported for the hub).
+async-trait = "0.1"
+# Calling outside A2A agents (phase A3): the brain's reqwest; `url` for origin checks (in the tree
+# through reqwest).
+reqwest = { version = "0.13", features = ["json"] }
+url = "2"
+
+[dev-dependencies]
+# Drives the server's router without a socket in tests (already in the tree through axum).
+tower = { version = "0.5", features = ["util"] }
+# Paused clocks for the timeout tests.
+tokio = { workspace = true, features = ["test-util"] }

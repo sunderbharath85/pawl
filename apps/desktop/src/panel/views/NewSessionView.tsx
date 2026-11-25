@@ -13,6 +13,8 @@ import {
 } from "@pawl/hub-client";
 import { isTauri } from "../../lib/native";
 import { useSettings } from "../../lib/settings";
+import { isLoopbackUrl, urlHost } from "@pawl/hub-client";
+import { isOutsideAgent, outsideAgentUrl, startCwd } from "../../lib/a2aUi";
 import { usePanel } from "../context";
 import * as I from "../icons";
 import { PetAvatar } from "../PetAvatar";
@@ -125,6 +127,9 @@ export function NewSessionView() {
   const selected: Agent | undefined =
     agents.find((a) => a.id === agentId && a.installed) ?? agents.find((a) => a.installed);
   const pet = selected ? petFor(Object.values(state.pets), target, selected.id) : undefined;
+  // An outside A2A agent works where it runs (its URL), not in a folder here: no folder to pick.
+  const outside = isOutsideAgent(selected);
+  const outsideUrl = selected && outside && !remote ? outsideAgentUrl(selected.id, state.settings?.a2a) : null;
 
   const browse = async () => {
     if (!isTauri) {
@@ -156,7 +161,7 @@ export function NewSessionView() {
   };
 
   const start = async (confirmed: boolean) => {
-    if (!selected || !cwd.trim() || busy) return;
+    if (!selected || (!outside && !cwd.trim()) || busy) return;
     // Starting on another machine runs code there: confirm on this device first.
     if (remote && !confirmed) {
       setConfirming(true);
@@ -166,12 +171,12 @@ export function NewSessionView() {
     try {
       const session = await client.startSession({
         agentId: selected.id,
-        cwd: cwd.trim(),
+        cwd: startCwd(selected, cwd, state.settings?.a2a),
         prompt: prompt.trim() || undefined,
         machineId: remote ? target : undefined,
         confirmed: remote ? true : undefined,
       });
-      if (!remote) setSettings({ lastAgentId: selected.id, lastCwd: cwd.trim() });
+      if (!remote) setSettings(outside ? { lastAgentId: selected.id } : { lastAgentId: selected.id, lastCwd: cwd.trim() });
       toast(remote ? `${pet?.name ?? "The pet"} is on it on ${targetName}!` : `${pet?.name ?? "Your pet"} is on it!`);
       navigate({ view: "session", sessionId: session.id });
     } catch (err) {
@@ -260,7 +265,7 @@ export function NewSessionView() {
                       setAgentId(a.id);
                       setConfirming(false);
                     }}
-                    title={a.installed ? a.command.join(" ") : "Not installed"}
+                    title={a.installed ? (isOutsideAgent(a) ? "An outside A2A agent" : a.command.join(" ")) : "Not installed"}
                   >
                     <PetAvatar species={p?.species ?? "dog"} activity={isSel ? "happy" : "idle"} size={44} />
                     <span className="agent-card-text">
@@ -277,76 +282,86 @@ export function NewSessionView() {
           )}
         </div>
 
-        <div className="field">
-          <label className="field-label" htmlFor="new-session-cwd">
-            Working folder{remote ? ` on ${targetName}` : ""}
-          </label>
-          <div className="input-row">
-            <input
-              id="new-session-cwd"
-              className="input mono"
-              value={cwd}
-              list="new-session-cwds"
-              placeholder={
-                remote
-                  ? `Only folders ${targetName} already uses`
-                  : navigator.userAgent.includes("Windows")
-                    ? "C:\\code\\my-project"
-                    : "~/code/my-project"
-              }
-              onChange={(e) => {
-                setCwd(e.target.value);
-                setConfirming(false);
-              }}
-              spellCheck={false}
-            />
-            {!remote && (
-              <button type="button" className="pill" onClick={() => void browse()}>
-                <I.Folder size={14} /> Browse…
-              </button>
+        {outside && selected ? (
+          <div className="field">
+            <span className="field-label">Where it works</span>
+            <span className="hint outside-agent-note">
+              {selected.name} is an outside A2A agent: it works where it runs{outsideUrl ? ` (${urlHost(outsideUrl)})` : ""}, not in a folder on {targetName}. Your
+              prompts go to it{outsideUrl && !isLoopbackUrl(outsideUrl) ? ` at ${urlHost(outsideUrl)}` : ""}; its questions come back here as approvals.
+            </span>
+          </div>
+        ) : (
+          <div className="field">
+            <label className="field-label" htmlFor="new-session-cwd">
+              Working folder{remote ? ` on ${targetName}` : ""}
+            </label>
+            <div className="input-row">
+              <input
+                id="new-session-cwd"
+                className="input mono"
+                value={cwd}
+                list="new-session-cwds"
+                placeholder={
+                  remote
+                    ? `Only folders ${targetName} already uses`
+                    : navigator.userAgent.includes("Windows")
+                      ? "C:\\code\\my-project"
+                      : "~/code/my-project"
+                }
+                onChange={(e) => {
+                  setCwd(e.target.value);
+                  setConfirming(false);
+                }}
+                spellCheck={false}
+              />
+              {!remote && (
+                <button type="button" className="pill" onClick={() => void browse()}>
+                  <I.Folder size={14} /> Browse…
+                </button>
+              )}
+            </div>
+            <datalist id="new-session-cwds">
+              {repos.map((r) => (
+                <option key={r.path} value={r.path} label={r.name} />
+              ))}
+            </datalist>
+            {repoPicks.length > 0 && (
+              <div className="repo-picker" role="listbox" aria-label={`Repos on ${targetName}`}>
+                {repoPicks.map((r) => (
+                  <button
+                    type="button"
+                    key={r.path}
+                    role="option"
+                    aria-selected={r.path === cwd.trim()}
+                    className="repo-choice"
+                    title={r.path}
+                    onClick={() => {
+                      setCwd(r.path);
+                      setConfirming(false);
+                    }}
+                  >
+                    <strong>{r.name}</strong>
+                    <span className="mono">{shortPath(r.path, 3)}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            {repoIndex?.machineId === target && repoIndex.loading && <span className="hint">Loading the repos {targetName} uses…</span>}
+            {repoIndex?.machineId === target && repoIndex.error && <span className="field-error">{repoIndex.error}</span>}
+            {cwd && (
+              <span className="hint">
+                The agent can read and write files inside {shortPath(cwd, 3)}
+                {remote ? ` on ${targetName}` : ""}.
+              </span>
+            )}
+            {remote && (
+              <span className="hint">
+                Only folders {targetName} already uses
+                {repos.length > 0 ? " (pick one of its repos)" : `: start a session on ${targetName} first to add one`}.
+              </span>
             )}
           </div>
-          <datalist id="new-session-cwds">
-            {repos.map((r) => (
-              <option key={r.path} value={r.path} label={r.name} />
-            ))}
-          </datalist>
-          {repoPicks.length > 0 && (
-            <div className="repo-picker" role="listbox" aria-label={`Repos on ${targetName}`}>
-              {repoPicks.map((r) => (
-                <button
-                  type="button"
-                  key={r.path}
-                  role="option"
-                  aria-selected={r.path === cwd.trim()}
-                  className="repo-choice"
-                  title={r.path}
-                  onClick={() => {
-                    setCwd(r.path);
-                    setConfirming(false);
-                  }}
-                >
-                  <strong>{r.name}</strong>
-                  <span className="mono">{shortPath(r.path, 3)}</span>
-                </button>
-              ))}
-            </div>
-          )}
-          {repoIndex?.machineId === target && repoIndex.loading && <span className="hint">Loading the repos {targetName} uses…</span>}
-          {repoIndex?.machineId === target && repoIndex.error && <span className="field-error">{repoIndex.error}</span>}
-          {cwd && (
-            <span className="hint">
-              The agent can read and write files inside {shortPath(cwd, 3)}
-              {remote ? ` on ${targetName}` : ""}.
-            </span>
-          )}
-          {remote && (
-            <span className="hint">
-              Only folders {targetName} already uses
-              {repos.length > 0 ? " (pick one of its repos)" : `: start a session on ${targetName} first to add one`}.
-            </span>
-          )}
-        </div>
+        )}
 
         <label className="field">
           <span className="field-label">First prompt (optional)</span>
@@ -368,8 +383,17 @@ export function NewSessionView() {
         {confirming && selected ? (
           <div className="start-confirm" role="group" aria-label={`Start on ${targetName}?`}>
             <span className="start-confirm-text">
-              Start <strong>{selected.name}</strong> on <strong className="start-confirm-machine">{targetName}</strong> in{" "}
-              <span className="mono">{cwd.trim()}</span>? It runs on {targetName}, with access to that folder there.
+              {outside ? (
+                <>
+                  Start <strong>{selected.name}</strong> from <strong className="start-confirm-machine">{targetName}</strong>? It is an outside A2A agent:{" "}
+                  {targetName} sends it your prompts.
+                </>
+              ) : (
+                <>
+                  Start <strong>{selected.name}</strong> on <strong className="start-confirm-machine">{targetName}</strong> in{" "}
+                  <span className="mono">{cwd.trim()}</span>? It runs on {targetName}, with access to that folder there.
+                </>
+              )}
             </span>
             <span className="form-actions">
               <button type="button" className="pill pill-primary" autoFocus disabled={busy} onClick={() => void start(true)}>
@@ -382,7 +406,7 @@ export function NewSessionView() {
           </div>
         ) : (
           <div className="form-actions">
-            <button className="pill pill-primary big" type="submit" disabled={disabled || busy || !selected || !cwd.trim()}>
+            <button className="pill pill-primary big" type="submit" disabled={disabled || busy || !selected || (!outside && !cwd.trim())}>
               {busy ? "Starting…" : `Start with ${selected?.name ?? "agent"}${remote ? "…" : ""}`}
             </button>
             {remote ? <span className="chip chip-machine">Runs on {targetName}</span> : <span className="hint">Ctrl+Enter to start</span>}

@@ -732,6 +732,8 @@ impl Hub {
             PeerBody::IntentAck { intent_id, status, reason, result } => {
                 self.on_intent_ack(from, &intent_id, super::intents::Ack { status, reason, result })
             }
+            // A2A over the link (protocol v9): start / prompt / cancel and their answers.
+            PeerBody::A2a { call_id, frame } => self.on_a2a_frame(from, call_id, frame),
             PeerBody::RosterIntro { .. }
             | PeerBody::PairRequest { .. }
             | PeerBody::PairAccept { .. }

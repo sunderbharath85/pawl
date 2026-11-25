@@ -208,6 +208,32 @@ export {
   type SecretKey,
   type SettingsFieldError,
 } from "./settings";
+export {
+  A2A_AGENTS_MAX,
+  A2A_ID_RE,
+  A2A_TASK_STATE_LABEL,
+  a2aCallerLabel,
+  a2aCardUrl,
+  a2aOf,
+  a2aRiskyChanges,
+  a2aServerPatch,
+  a2aServerStatus,
+  a2aTaskTone,
+  addAgentPatch,
+  addCallerPatch,
+  agentTokenPatch,
+  callerApprovalsPatch,
+  checkA2aAgentUrl,
+  checkA2aName,
+  checkA2aToken,
+  isA2aAgentId,
+  isLoopbackUrl,
+  removeAgentPatch,
+  removeCallerPatch,
+  suggestA2aId,
+  urlHost,
+  type A2aTaskTone,
+} from "./a2a";
 export { cleanTitle, folderName, parsePrompt, TITLE_MAX, type ParsedPrompt, type PromptAttachment, type PromptNotice } from "./injected";
 export {
   clipCode,
