@@ -538,6 +538,7 @@ async fn watchdog_timings_change_without_repeating_nudges() {
         tool_call: ToolCallPayload { tool_call_id: "tc".into(), title: Some("cargo test".into()), kind: None, status: None, locations: None, raw_input: None },
         options: vec![PermissionOption { option_id: "allow".into(), name: "Allow".into(), kind: PermissionOptionKind::AllowOnce }],
         created_at: pawl_protocol::now_ms() - 3_600_000,
+        voice_code: None,
     };
     f.hub.st().pending.insert(req.request_id.clone(), req);
     let nudges = |msgs: &[ServerMsg]| msgs.iter().filter(|m| matches!(m, ServerMsg::Notification { .. })).count();

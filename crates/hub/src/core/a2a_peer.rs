@@ -281,6 +281,8 @@ impl Hub {
             status,
             reason,
             repeats: 0,
+            via: None,
+            transcript: None,
         })
         .await;
         match outcome {
@@ -439,6 +441,8 @@ impl Hub {
             status,
             reason,
             repeats: 0,
+            via: None,
+            transcript: None,
         })
         .await;
         if let Some(mut st) = stream {

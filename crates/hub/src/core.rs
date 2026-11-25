@@ -12,6 +12,7 @@ mod mirror;
 mod peers;
 mod repo_index;
 mod settings;
+mod voice;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -381,6 +382,8 @@ struct Inner {
     remote: Arc<a2a_agents::RemoteAgents>,
     /// A2A calls over the peer link (`core/a2a_peer.rs`): waiting (origin) and answered (owner).
     a2a_peer: Mutex<a2a_peer::A2aPeerState>,
+    /// Approvals by voice: read-backs per chat and wrong codes (`core/voice.rs`).
+    voice: Mutex<voice::VoiceState>,
 }
 
 /// The hub. Cheap to clone; all clones share state.
@@ -618,6 +621,7 @@ impl Hub {
                 a2a_test_state: Mutex::new(None),
                 remote,
                 a2a_peer: Mutex::new(a2a_peer::A2aPeerState::default()),
+                voice: Mutex::new(voice::VoiceState::default()),
             }),
         };
         hub.set_mirror(mirror_sessions, mirror_pets, mirror_pending);
@@ -985,7 +989,15 @@ impl Hub {
             ClientMsg::ResumeSession { agent_id, acp_session_id, cwd, .. } => {
                 json!({ "session": self.resume_session(&agent_id, acp_session_id, &cwd).await? })
             }
-            ClientMsg::Chat { pet_id, text, .. } => json!({ "message": self.chat(pet_id, text, actor).await? }),
+            ClientMsg::Chat { pet_id, text, via, .. } => {
+                // `via: "voice"`: a speech transcript (approvals follow the voice rules, see core/voice.rs).
+                let spoken = match via.as_deref() {
+                    None => false,
+                    Some(voice::VOICE) => true,
+                    Some(_) => return Err(anyhow::Error::new(AckCode::Invalid).context("chat via must be \"voice\" or absent")),
+                };
+                json!({ "message": self.chat_as(pet_id, text, spoken, actor).await? })
+            }
             ClientMsg::UpdatePet { pet_id, patch, .. } => json!({ "pet": self.update_pet(&pet_id, patch).await? }),
             ClientMsg::SetRules { rules, .. } => json!({ "rules": self.set_rules(rules).await? }),
             ClientMsg::UpdateMachine { machine_id, name, .. } => {
@@ -1702,15 +1714,20 @@ impl Hub {
         let action = self.rule_action(&rules, &req);
         if action != RuleAction::Ask {
             if let Some(opt) = auto_option(&req, action) {
-                self.st().pending.insert(req.request_id.clone(), req.clone());
+                self.insert_pending(req.clone());
                 match self.resolve_permission(&req.request_id, opt, ResolvedBy::Rule, &Actor::rule(action)).await {
                     Ok(()) => return,
                     Err(e) => tracing::warn!("rule {action:?} could not resolve {}: {e:#}; asking instead", req.request_id),
                 }
             }
         }
-        self.st().pending.insert(req.request_id.clone(), req.clone());
-        if let Err(e) = self.record_event(&req.session_id, EventType::RequestPermission, serde_json::to_value(&req).unwrap_or_default()).await {
+        let req = self.insert_pending(req);
+        // History never keeps the voice code (it is only good while the request waits).
+        let mut payload = serde_json::to_value(&req).unwrap_or_default();
+        if let Value::Object(m) = &mut payload {
+            m.remove("voiceCode");
+        }
+        if let Err(e) = self.record_event(&req.session_id, EventType::RequestPermission, payload).await {
             tracing::warn!("record permission request: {e:#}");
         }
         self.inner.bus.send(ServerMsg::PermissionRequest { request: req.clone() });
@@ -1744,6 +1761,20 @@ impl Hub {
         by: ResolvedBy,
         actor: &Actor,
         remote: Option<RemoteDecision>,
+    ) -> Result<()> {
+        self.decide_as(request_id, option_id, by, actor, remote, None).await
+    }
+
+    /// [`Hub::decide`]; `transcript`: the decision was spoken (audited with `via: "voice"` and the
+    /// transcript, and announced with `via: "voice"`).
+    pub(super) async fn decide_as(
+        &self,
+        request_id: &str,
+        option_id: Option<String>,
+        by: ResolvedBy,
+        actor: &Actor,
+        remote: Option<RemoteDecision>,
+        transcript: Option<&str>,
     ) -> Result<()> {
         self.check_owned(request_id)?;
         // A request being decided right now (agent call in flight) is waited for: its real outcome
@@ -1796,7 +1827,7 @@ impl Hub {
             (Ok(()), Some(_)) => AuditOutcome::Rejected,
         };
         let origin = remote.as_ref().map(|r| r.origin.clone());
-        self.audit(&req, by, actor, option_id.clone(), option_kind, outcome, result.as_ref().err().map(|e| format!("{e:#}")), origin)
+        self.audit_as(&req, by, actor, option_id.clone(), option_kind, outcome, result.as_ref().err().map(|e| format!("{e:#}")), origin, transcript)
             .await;
         if let Err(e) = result {
             {
@@ -1817,7 +1848,8 @@ impl Hub {
             Some(option_id) => PermissionOutcome::Selected { option_id },
             None => PermissionOutcome::Cancelled,
         };
-        self.after_resolved(&req, outcome, by, remote.map(|r| r.origin.machine_id)).await;
+        let via = transcript.map(|_| voice::VOICE);
+        self.after_resolved_via(&req, outcome, by, remote.map(|r| r.origin.machine_id), via).await;
         Ok(())
     }
 
@@ -1835,11 +1867,24 @@ impl Hub {
 
     /// `by_machine_id`: the machine the decision came from when it was not this one.
     async fn after_resolved(&self, req: &PermissionRequest, outcome: PermissionOutcome, by: ResolvedBy, by_machine_id: Option<MachineId>) {
+        self.after_resolved_via(req, outcome, by, by_machine_id, None).await
+    }
+
+    /// `via`: Some("voice") when the user answered by speaking.
+    async fn after_resolved_via(
+        &self,
+        req: &PermissionRequest,
+        outcome: PermissionOutcome,
+        by: ResolvedBy,
+        by_machine_id: Option<MachineId>,
+        via: Option<&str>,
+    ) {
         let payload = PermissionResolvedPayload {
             request_id: req.request_id.clone(),
             outcome: outcome.clone(),
             by,
             by_machine_id: by_machine_id.clone(),
+            via: via.map(str::to_string),
         };
         let mut payload = serde_json::to_value(&payload).unwrap_or_else(|_| json!({}));
         if let (Value::Object(m), Ok(tc)) = (&mut payload, serde_json::to_value(&req.tool_call)) {
@@ -1890,6 +1935,23 @@ impl Hub {
         detail: Option<String>,
         origin: Option<AuditOrigin>,
     ) {
+        self.audit_as(req, by, actor, option_id, option_kind, outcome, detail, origin, None).await
+    }
+
+    /// [`Hub::audit`]; `transcript`: a spoken decision (recorded with `via: "voice"`).
+    #[allow(clippy::too_many_arguments)]
+    async fn audit_as(
+        &self,
+        req: &PermissionRequest,
+        by: ResolvedBy,
+        actor: &Actor,
+        option_id: Option<String>,
+        option_kind: Option<PermissionOptionKind>,
+        outcome: AuditOutcome,
+        detail: Option<String>,
+        origin: Option<AuditOrigin>,
+        transcript: Option<&str>,
+    ) {
         let entry = AuditEntry {
             id: 0,
             ts: pawl_protocol::now_ms(),
@@ -1908,6 +1970,8 @@ impl Hub {
             outcome,
             detail,
             origin,
+            via: transcript.map(|_| voice::VOICE.to_string()),
+            transcript: transcript.map(voice::cut_transcript),
         };
         tracing::info!(
             request = %entry.request_id, session = %entry.session_id, actor = %entry.actor,
@@ -2009,6 +2073,11 @@ impl Hub {
 
     /// Store + broadcast the user's line, answer asynchronously as a `chat` ServerMsg.
     pub async fn chat(&self, pet_id: Option<PetId>, text: String, actor: &Actor) -> Result<ChatMessage> {
+        self.chat_as(pet_id, text, false, actor).await
+    }
+
+    /// [`Hub::chat`]; `spoken`: the text is a speech transcript (`via: "voice"`).
+    pub async fn chat_as(&self, pet_id: Option<PetId>, text: String, spoken: bool, actor: &Actor) -> Result<ChatMessage> {
         let text = text.trim().to_string();
         if text.is_empty() {
             bail!("chat text is empty");
@@ -2039,7 +2108,7 @@ impl Hub {
         self.inner.bus.send(ServerMsg::Chat { message: msg.clone() });
         let hub = self.clone();
         let (m3, actor) = (msg.clone(), actor.clone());
-        tokio::spawn(async move { hub.chat_reply(m3, pet, actor).await });
+        tokio::spawn(async move { hub.chat_reply(m3, pet, actor, spoken).await });
         Ok(msg)
     }
 
@@ -2133,38 +2202,52 @@ impl Hub {
                     text: t.status.message.as_ref().and_then(|m| m.text()).map(|s| s.chars().take(200).collect()),
                 })
                 .collect(),
+            // Typed chat; `chat_reply` sets these for a speech transcript.
+            spoken: false,
+            read_back: None,
+            voice_locked: false,
         }
     }
 
-    async fn chat_reply(&self, user: ChatMessage, pet: Option<Pet>, actor: Actor) {
+    async fn chat_reply(&self, user: ChatMessage, pet: Option<Pet>, actor: Actor, spoken: bool) {
         let (brain, pending) = self.ready_brain().await;
         let mut ctx = self.brain_context(pet.clone()).await;
         ctx.model_pending = pending;
+        // A read-back is good for the chat's next message only, and only a spoken one uses it.
+        let now = pawl_protocol::now_ms();
+        let pet_id = pet.as_ref().map(|p| p.id.clone());
+        let read_back = self.take_read_back(pet_id.as_ref(), now);
+        if spoken {
+            ctx.spoken = true;
+            ctx.read_back = read_back;
+            ctx.voice_locked = self.voice_locked(now);
+        }
         let reply = match brain.handle(&user.text, &ctx).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("brain failed: {e:#}");
-                BrainReply {
-                    text: "*whimper* My brain got tangled. Try me again in a moment?".into(),
-                    action: None,
-                    proposals: Vec::new(),
-                }
+                BrainReply { text: "*whimper* My brain got tangled. Try me again in a moment?".into(), ..Default::default() }
             }
         };
-        self.deliver_reply(pet, reply, &actor).await;
+        if spoken {
+            self.note_voice_reply(pet_id.as_ref(), reply.read_back.clone(), reply.code_miss, now);
+        }
+        let transcript = spoken.then_some(user.text.as_str());
+        self.deliver_reply(pet, reply, &actor, transcript).await;
     }
 
     /// A brain reply becomes the pet's chat message: a local action runs here (as before);
     /// commands for another machine are only proposed: they are stored and broadcast with the
     /// message, and the user confirms one in a client, which sends the ordinary start_session /
     /// prompt (step-4 rules apply).
-    pub(super) async fn deliver_reply(&self, pet: Option<Pet>, reply: BrainReply, actor: &Actor) -> ChatMessage {
+    /// `transcript`: the user spoke the message (`via: "voice"`): approvals follow the voice rules.
+    pub(super) async fn deliver_reply(&self, pet: Option<Pet>, reply: BrainReply, actor: &Actor, transcript: Option<&str>) -> ChatMessage {
         let mut text = reply.text;
         let mut session_id = None;
         let mut proposals = reply.proposals;
         proposals.truncate(MAX_PROPOSALS);
         if let Some(action) = reply.action {
-            match self.execute_action(action, actor).await {
+            match self.execute_action(action, actor, transcript).await {
                 Ok(sid) => session_id = sid,
                 Err(e) => text.push_str(&format!("\n\n(I couldn't do that: {e:#})")),
             }
@@ -2187,7 +2270,7 @@ impl Hub {
         msg
     }
 
-    async fn execute_action(&self, action: BrainAction, actor: &Actor) -> Result<Option<SessionId>> {
+    async fn execute_action(&self, action: BrainAction, actor: &Actor, transcript: Option<&str>) -> Result<Option<SessionId>> {
         match action {
             BrainAction::StartSession { agent_id, cwd, prompt } => {
                 let prompt = Some(prompt).filter(|p| !p.trim().is_empty());
@@ -2197,6 +2280,9 @@ impl Hub {
             BrainAction::Prompt { session_id, text } => {
                 self.prompt(&session_id, text).await?;
                 Ok(Some(session_id))
+            }
+            BrainAction::ResolvePermission { request_id, option_id } if transcript.is_some() => {
+                self.resolve_by_voice(&request_id, option_id, &actor.via_chat(), transcript.unwrap_or_default()).await
             }
             BrainAction::ResolvePermission { request_id, option_id } => {
                 let sid = self.st().pending.get(&request_id).map(|p| p.session_id.clone());

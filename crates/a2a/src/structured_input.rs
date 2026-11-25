@@ -268,6 +268,7 @@ mod tests {
                 PermissionOption { option_id: "reject".into(), name: "Reject".into(), kind: PermissionOptionKind::RejectOnce },
             ],
             created_at: 1,
+            voice_code: None,
         }
     }
 

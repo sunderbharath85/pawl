@@ -535,6 +535,7 @@ mod tests {
             },
             options: vec![],
             created_at: now,
+            voice_code: None,
         });
         c.recent_events.push(pawl_protocol::HubEvent {
             id: "e1".into(),
@@ -594,6 +595,7 @@ mod tests {
             },
             options: vec![],
             created_at: now,
+            voice_code: None,
         });
         c.recent_events.push(pawl_protocol::HubEvent {
             id: "e1".into(),
@@ -623,6 +625,7 @@ mod tests {
             tool_call: pawl_protocol::ToolCallPayload { tool_call_id: "t".into(), title: Some(title.into()), kind: Some(ToolKind::Execute), ..Default::default() },
             options: vec![],
             created_at: 0,
+            voice_code: None,
         };
         for (title, program) in [
             ("bun test", "bun"),

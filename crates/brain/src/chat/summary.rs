@@ -123,7 +123,7 @@ fn push_capped(buf: &mut String, text: &str) {
     }
 }
 
-fn kind_label(kind: Option<ToolKind>) -> &'static str {
+pub(crate) fn kind_label(kind: Option<ToolKind>) -> &'static str {
     match kind {
         Some(ToolKind::Read) => "read a file",
         Some(ToolKind::Edit) => "edit a file",

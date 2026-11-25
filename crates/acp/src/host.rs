@@ -472,6 +472,7 @@ impl Inner {
             tool_call,
             options,
             created_at: pp::now_ms(),
+            voice_code: None,
         };
         // Status first: the hub may resolve the request (rules) as soon as it sees it, and
         // that resolution's status change must not be overwritten by this one.
@@ -1299,6 +1300,6 @@ impl Inner {
 fn permission_resolved(request_id: &str, outcome: pp::PermissionOutcome, by: pp::ResolvedBy) -> (pp::EventType, serde_json::Value) {
     (
         pp::EventType::PermissionResolved,
-        to_json(&pp::PermissionResolvedPayload { request_id: request_id.to_string(), outcome, by, by_machine_id: None }),
+        to_json(&pp::PermissionResolvedPayload { request_id: request_id.to_string(), outcome, by, by_machine_id: None, via: None }),
     )
 }

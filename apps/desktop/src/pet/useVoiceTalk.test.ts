@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { markSpeechEnd, markSpeechStart, SPEECH_QUIET_MS, speechBusy } from "../lib/speech";
 import { DIDNT_CATCH, voiceReaction } from "./useVoiceTalk";
 
 describe("what the pet window does with voice events", () => {
@@ -21,5 +22,32 @@ describe("what the pet window does with voice events", () => {
     expect(voiceReaction({ type: "wake", keyword: "Mochi", score: 0.9 }, seen, true)).toEqual({ kind: "none" });
     expect(voiceReaction({ type: "transcript", id: "u3", text: "hello" }, seen, true)).toEqual({ kind: "none" });
     expect(seen.size).toBe(0);
+  });
+});
+
+describe("the pet never answers itself", () => {
+  const talking = { busy: true, manual: false };
+  test("while the pet speaks: wake words are ignored, an utterance that starts is cancelled, a transcript is dropped", () => {
+    const seen = new Set<string>();
+    expect(voiceReaction({ type: "wake", keyword: "Mochi", score: 1 }, seen, false, talking)).toEqual({ kind: "none" });
+    expect(voiceReaction({ type: "state", state: "hearing" }, seen, false, talking)).toEqual({ kind: "cancel" });
+    expect(voiceReaction({ type: "transcript", id: "u5", text: "approve" }, seen, false, talking)).toEqual({ kind: "none" });
+    // Dropped for good: it is not sent later either.
+    expect(voiceReaction({ type: "transcript", id: "u5", text: "approve" }, seen, false)).toEqual({ kind: "none" });
+  });
+
+  test("the user talking from Pawl's UI (holding the pet, the mic button) still works right after the pet spoke", () => {
+    const user = { busy: true, manual: true };
+    expect(voiceReaction({ type: "state", state: "hearing" }, new Set(), false, user)).toEqual({ kind: "open" });
+    expect(voiceReaction({ type: "transcript", id: "u6", text: "what's up" }, new Set(), false, user)).toEqual({ kind: "send", text: "what's up" });
+  });
+
+  test("busy while speaking and for 500 ms after it ends", () => {
+    markSpeechStart();
+    expect(speechBusy(Date.now() + 10_000)).toBe(true);
+    const end = Date.now();
+    markSpeechEnd(end);
+    expect(speechBusy(end + SPEECH_QUIET_MS - 1)).toBe(true);
+    expect(speechBusy(end + SPEECH_QUIET_MS + 1)).toBe(false);
   });
 });

@@ -1304,7 +1304,7 @@ async fn run_chat(paths: &Paths, port_flag: Option<u16>, text: String, pick: Opt
     let me = hub.welcome.machine.id.clone();
     let machines = hub.welcome.machines.clone();
     let mut conn = Conn::Remote(Box::new(hub));
-    let v = conn.request(ClientMsg::Chat { id: rid(), pet_id: None, text }).await?;
+    let v = conn.request(ClientMsg::Chat { id: rid(), pet_id: None, text, via: None }).await?;
     let sent: ChatMessage = serde_json::from_value(v.get("message").cloned().unwrap_or_default()).context("parse message")?;
     let reply = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
@@ -2015,6 +2015,7 @@ mod tests {
                 PermissionOption { option_id: "no".into(), name: "Reject".into(), kind: PermissionOptionKind::RejectOnce },
             ],
             created_at: 0,
+            voice_code: None,
         }
     }
 

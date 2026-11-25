@@ -206,6 +206,7 @@ const APPROVE_WHOLE: &[&str] = &[
     "yes", "y", "yep", "yeah", "yup", "ya", "sure", "go ahead", "do it", "lgtm", "ship it", "yes please", "go for it",
     "sounds good", "👍", "✅",
 ];
+const YES_LEAD: &[&str] = &["yes", "yeah", "yep", "yup", "ya", "sure"];
 const DENY_VERBS: &[&str] = &["deny", "denied", "reject", "decline", "refuse", "disallow", "block", "veto"];
 const DENY_WHOLE: &[&str] = &[
     "no", "n", "nope", "nah", "no way", "dont", "do not", "dont do it", "no thanks", "never", "👎", "❌",
@@ -1014,6 +1015,8 @@ fn parse_resolve(toks: &[Tok], words: &[&str], s: &str, cat: &AgentCatalog, targ
         (false, toks.len(), false)
     } else {
         let i = usize::from(ALWAYS.contains(&words[0]) && words.len() > 1);
+        // "yes, approve" / "yeah approve it": the verb counts (an explicit approve).
+        let i = i + usize::from(words.len() > i + 1 && YES_LEAD.contains(&words[i]) && APPROVE_VERBS.contains(&words[i + 1]));
         if APPROVE_VERBS.contains(&words[i]) {
             (true, i + 1, true)
         } else if DENY_VERBS.contains(&words[i]) {

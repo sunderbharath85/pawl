@@ -289,6 +289,7 @@ mod tests {
                 kind: PermissionOptionKind::AllowOnce,
             }],
             created_at: created,
+            voice_code: None,
         }
     }
 

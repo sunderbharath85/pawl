@@ -202,10 +202,6 @@ export function PetApp() {
   const dismiss = useCallback((id: string) => setDismissed((d) => new Set(d).add(id)), []);
   const chatSent = useCallback((id: string) => setSentChat((s) => new Set([...s].slice(-20)).add(id)), []);
   const promptSent = useCallback((sessionId: string, at: number) => setSentPrompts((p) => ({ ...p, [sessionId]: at })), []);
-  const env: BubbleEnv = useMemo(
-    () => ({ client, state, now, connected, say, dismiss, chatSent, promptSent }),
-    [client, state, now, connected, say, dismiss, chatSent, promptSent],
-  );
 
   // Voice (Settings > Voice): wake word, push-to-talk, transcripts to the chat, replies read aloud.
   const voice = useVoiceTalk({
@@ -225,6 +221,11 @@ export function PetApp() {
   });
   const voiceNow = useRef(voice);
   voiceNow.current = voice;
+  const voiceOn = voice.enabled;
+  const env: BubbleEnv = useMemo(
+    () => ({ client, state, now, connected, say, dismiss, chatSent, promptSent, voiceOn }),
+    [client, state, now, connected, say, dismiss, chatSent, promptSent, voiceOn],
+  );
 
   const toggle = useCallback((target: string) => setOpen((o) => clickBubble(o, target)), []);
   const menuMuted = voice.menuMuted;

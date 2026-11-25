@@ -29,6 +29,7 @@ import type { RenameResult } from "../lib/usePetName";
 import type { ListenPhase, MicMarker as Marker } from "../lib/voice";
 import { useVoiceSentIds } from "../lib/voiceShared";
 import { ListeningPanel, MicButton, MicMarker } from "./VoiceBits";
+import { VoiceCodeChip } from "../lib/VoiceCodeChip";
 import { BUBBLE_W, type BubblePlace } from "../lib/petLayout";
 import { repoName, type DefaultPetState, type SessionChip } from "../lib/petScreen";
 import { answerErrorText } from "../lib/where";
@@ -48,6 +49,8 @@ export interface BubbleEnv {
   chatSent(messageId: string): void;
   /** The person prompted this session from the bubble (the pet animates until the agent's first reply). */
   promptSent(sessionId: string, at: number): void;
+  /** Voice is on: approval cards show the spoken code ("say: approve 4 7"). */
+  voiceOn?: boolean;
 }
 
 const EMPTY_EVENTS: HubEvent[] = [];
@@ -170,6 +173,7 @@ export function ApprovalCard({ req, env }: { req: PermissionRequest; env: Bubble
         <div className="pb-approval-text">{action}?</div>
       )}
       {command !== action && <pre className="pb-command">{command}</pre>}
+      {env.voiceOn && req.voiceCode ? <VoiceCodeChip code={req.voiceCode} /> : null}
       <div className="pb-actions">
         {confirming ? (
           <>

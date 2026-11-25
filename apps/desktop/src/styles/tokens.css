@@ -234,3 +234,30 @@ button {
 .pill-ghost:hover {
   background: var(--paper-2);
 }
+
+/* The spoken code on an approval card ("say: approve 4 7", lib/VoiceCodeChip.tsx): big enough to read from a distance. */
+.voice-code {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  width: fit-content;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 2px solid var(--accent);
+  background: var(--card);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+.voice-code-say {
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+.voice-code-digits {
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}

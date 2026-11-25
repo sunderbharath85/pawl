@@ -535,6 +535,7 @@ impl RemoteAgents {
             },
             options,
             created_at: pawl_protocol::now_ms(),
+            voice_code: None,
         };
         self.st().requests.insert(
             request_id,

@@ -1,6 +1,7 @@
 // "Read replies aloud" (Settings > Voice): the pet's replies spoken with the webview's speech synthesis, which uses
 // the system's voices (no download, nothing leaves this PC on Windows and macOS). UI-side only.
 import { useEffect, useState } from "react";
+import { stripVoiceCodes } from "@pawl/hub-client";
 import { splitReaction } from "./reactions";
 
 function synth(): SpeechSynthesis | null {
@@ -25,13 +26,52 @@ export function spokenText(reply: string): string {
     .trim();
 }
 
-/** Speak a reply (stopping whatever was being said). */
-export function speak(reply: string, opts: { voiceURI?: string; rate?: number } = {}): void {
+// ---------------------------------------------------------------- the pet is talking (the mic must not listen to it)
+
+/** After the pet stops talking, its voice may still echo in the room: wake words are ignored this much longer. */
+export const SPEECH_QUIET_MS = 500;
+
+let speaking = false;
+let quietUntil = 0;
+/** The utterance being said: only its own events count (a cancelled one reports its end late). */
+let current: SpeechSynthesisUtterance | null = null;
+
+/** The pet started saying something. */
+export function markSpeechStart(): void {
+  speaking = true;
+}
+
+/** The pet stopped (finished, was cut off, or failed): quiet for `SPEECH_QUIET_MS` more. */
+export function markSpeechEnd(at = Date.now()): void {
+  speaking = false;
+  quietUntil = Math.max(quietUntil, at + SPEECH_QUIET_MS);
+}
+
+/** The pet is talking, or stopped less than `SPEECH_QUIET_MS` ago: anything the mic hears may be its own voice. */
+export function speechBusy(now = Date.now()): boolean {
+  return speaking || now < quietUntil;
+}
+
+/**
+ * Speak a reply (stopping whatever was being said). Never a voice code: `codes` (the codes of waiting requests) and
+ * any digits after "approve" are removed first, so the microphone cannot hear the pet approve something by itself.
+ */
+export function speak(reply: string, opts: { voiceURI?: string; rate?: number; codes?: Iterable<string | null | undefined> } = {}): void {
   const s = synth();
-  const text = spokenText(reply);
+  const text = stripVoiceCodes(spokenText(reply), opts.codes ?? []);
   if (!s || !text) return;
   s.cancel();
   const u = new SpeechSynthesisUtterance(text);
+  const ended = () => {
+    if (current !== u) return;
+    current = null;
+    markSpeechEnd();
+  };
+  u.addEventListener("end", ended);
+  u.addEventListener("error", ended);
+  current = u;
+  // Busy from now (the start event comes a little later).
+  markSpeechStart();
   const voice = opts.voiceURI ? s.getVoices().find((v) => v.voiceURI === opts.voiceURI) : undefined;
   if (voice) {
     u.voice = voice;
@@ -45,6 +85,8 @@ export function speak(reply: string, opts: { voiceURI?: string; rate?: number } 
 export function stopSpeaking(): void {
   const s = synth();
   if (s && (s.speaking || s.pending)) s.cancel();
+  current = null;
+  if (speaking) markSpeechEnd();
 }
 
 /** The system's voices (they load asynchronously in some engines). */

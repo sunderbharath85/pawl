@@ -167,6 +167,8 @@ fn clamp_event(mut e: HubEvent, now: UnixMs) -> HubEvent {
 
 fn clamp_request(mut r: PermissionRequest, now: UnixMs) -> PermissionRequest {
     r.created_at = clamp_ts(r.created_at, now);
+    // Only a well-formed voice code (two digits) counts; anything else means "answer on the screen".
+    r.voice_code = r.voice_code.filter(|c| pawl_brain::chat::spoken::is_voice_code(c));
     r
 }
 
@@ -224,7 +226,7 @@ fn body_len(b: &PeerBody) -> usize {
 }
 
 impl Hub {
-    fn mirror(&self) -> MutexGuard<'_, MirrorCache> {
+    pub(super) fn mirror(&self) -> MutexGuard<'_, MirrorCache> {
         self.inner.mirror.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -1056,6 +1058,7 @@ mod tests {
             },
             options: vec![PermissionOption { option_id: "ok".into(), name: "Allow".into(), kind: PermissionOptionKind::AllowOnce }],
             created_at: 3,
+            voice_code: None,
         }
     }
 

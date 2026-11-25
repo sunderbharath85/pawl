@@ -4,7 +4,7 @@
 // Outside the Tauri app (browser dev) voice is unavailable unless a backend is installed (the dev mock, tests).
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef, useSyncExternalStore } from "react";
 import { isTauri } from "./native";
 
 // ---------------------------------------------------------------- contract types
@@ -416,4 +416,42 @@ export function useVoice(onEvent?: (e: VoiceEvent, model: VoiceModel) => void): 
   );
 
   return { ...model, available: !!api, refresh, configure, api };
+}
+
+// ---------------------------------------------------------------- is voice on? (one watcher per window)
+
+let voiceOn = false;
+let watching = false;
+const onChange = new Set<() => void>();
+
+function setVoiceOn(v: boolean): void {
+  if (v === voiceOn) return;
+  voiceOn = v;
+  onChange.forEach((fn) => fn());
+}
+
+function watchVoiceOn(): void {
+  const api = voiceBackend();
+  if (watching || !api) return;
+  watching = true;
+  api.subscribe((e) => {
+    if (e.type === "state") setVoiceOn(e.state !== "off");
+  });
+  api.status().then(
+    (s) => setVoiceOn(s.config.enabled && s.state !== "off"),
+    () => {},
+  );
+}
+
+/** Voice is turned on (Settings > Voice): approval cards then show the spoken code. False outside the app. */
+export function useVoiceEnabled(): boolean {
+  return useSyncExternalStore(
+    (fn) => {
+      watchVoiceOn();
+      onChange.add(fn);
+      return () => onChange.delete(fn);
+    },
+    () => voiceOn,
+    () => false,
+  );
 }

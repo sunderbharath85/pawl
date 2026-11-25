@@ -156,3 +156,103 @@ One join between them: a voice turn switches the bubble to Pawl-wide, because tr
   - The dev mock now sends speech-like dBFS levels (0.5-0.85).
 - **Tests:** `levelPercent` (clamping, NaN).
 - **Gates:** desktop 3 tsc configs, 139 pass, vite build ok; hub-client 337.
+
+## Voice approvals UI (v0.2 item 3)
+
+**Wire.** t13 added these fields:
+
+- `chat.via: "voice"`;
+- `PermissionRequest.voiceCode` (two digits);
+- `PermissionResolvedPayload.via: "voice"`.
+
+sde-brain builds the hub rules: by voice, a read or edit on this machine needs "approve" after the read-back; execute, delete, fetch and any other kind, and every remote request, need the code; "always allow" is never offered by voice. This UI only shows and says those rules.
+
+**hub-client: `src/voice.ts`, `src/decisions.ts` (exported)**
+
+- `formatVoiceCode("47")` gives "4 7". `voiceCodeChipText` gives "say: approve 4 7".
+- `voiceCodeNeeded(req, local)`: false only for read and edit on this machine.
+- `approvalReadBack(req, {agentName, machineName, local})`, for example "Claude Code wants to run bun test on Desk PC. Say approve 4 7, or deny.".
+  - Without a code, or when plain "approve" is enough: "Say approve, or deny.". Never "always".
+  - `requestAction` gives "run …", "edit src/app.ts" (the last two path parts), "open example.com", or the title, cut after 90 characters with ", and more".
+  - `spokenPlain` removes markdown, code fences, emoji and link addresses.
+- `decisionText(outcome, {by, via})` gives "approved by voice", "denied by a rule", "withdrawn" and so on.
+- `client.chat(text, petId?, { via: "voice" })`.
+- The transcript's permission item keeps `via`.
+- `recentDecisions(events, limit, { known })` builds the approvals history, newest first. `known` holds requests this window saw while they were pending: a window that connected after a request was made has no event for it.
+
+**Desktop**
+
+1. **Transcripts** go to the chat with `via: "voice"` (`useVoiceTalk`).
+2. **The code chip** "say: approve 4 7" appears on every approval card while voice is on, and is hidden otherwise:
+   - where: the pet bubble's card, the Approvals view's card, and the session's confirmation card;
+   - component: `lib/VoiceCodeChip.tsx`, styled in the shared `styles/tokens.css`. The digits are 22 px, heavy and accent-coloured, so they read from a distance;
+   - "voice is on" comes from one small watcher per window: `useVoiceEnabled()` in `lib/voice.ts`, which follows the voice engine's state events;
+   - in the pet window, the bubble gets it through `BubbleEnv.voiceOn`.
+3. **Read-back.** When voice is on and "Read replies aloud" is on, a new approval arriving where the user is (`notifiesHere`) is read back with `approvalReadBack`, and the bubble opens as before. Talking (wake word, push-to-talk, mic button) stops the speech, and so does closing the bubble. Requests already pending when the window opens are not read.
+4. **"approved by voice"** appears in two places:
+   - the session view's transcript line ("Asked for approval: … approved by voice", or "denied by voice");
+   - a new "Recently answered" list in the Approvals view: the last 8 answers, each with how it was answered (a "by voice" chip in the accent colour), the session, the time, and a click through to the session.
+
+**Tests**
+
+- hub-client `test/voiceApprovals.test.ts` (8 tests): code formatting, when the code is needed, the read-back wording (local, remote, no code, fetch, never "always"), plain spoken text, long commands, the history (newest first, by voice or by a rule, withdrawn left out, requests known only from pending), labels, and the transcript keeping `via`.
+- desktop:
+  - the chip's markup, and nothing without a code;
+  - the transcript rendering "approved by voice" and "denied by voice".
+
+**Live check**
+
+Playwright ran against vite dev, the voice mock and a throwaway hub with a scripted agent. The hub does not assign voice codes yet (sde-brain), so the page's WebSocket was routed: each permission request got `voiceCode: "47"`, and after the approval the resolution was marked `via: "voice"`. 7 of 7 checks pass:
+
+- the bubble's card shows "say: approve 4 7", in light and in dark;
+- the read-back said "Claude Agent wants to run rm -rf dist on Desk PC. Say approve 4 7, or deny.";
+- with voice off, no code shows;
+- the Approvals card shows the code;
+- after the approval, "Recently answered" says "approved by voice", and so does the session view.
+
+Screenshots: `docs/screenshots/voice-approval-{light,dark}.png`.
+
+**Gates:** desktop 3 tsc configs, 146 pass, vite build ok; hub-client tsc ok, 358 pass; vscode tsc ok.
+
+**For the hub (sde-brain):**
+
+- The live `permission_resolved` server message has no `via` in the TS protocol; the UI reads `via` from the event payload, which has it.
+- Once the hub assigns `voiceCode`, nothing needs to change here.
+
+## Fix: the read-back never speaks the code (from sde-brain's review)
+
+**The risk.** The read-back said "Say approve 4 7, or deny." aloud. The microphone could hear the pet's own voice, and a transcript "approve 4 7" would then approve the request by itself.
+
+1. **No digits in the read-back.** It now says "Claude Code wants to run bun test on Desk PC. Say approve with the code on the card, or deny." When plain "approve" is enough, or the request has no code, it says "Say approve, or deny.".
+   - Denying needs no code, matching the hub's decision.
+   - **Safety net:** `stripVoiceCodes(text, codes)` (hub-client) runs on every spoken text: the read-back, and every reply read aloud (`speak` gets the codes of the waiting requests). It removes:
+     - each known code, however it is spaced or punctuated;
+     - any digits right after "approve";
+     - any space-separated digit pair, which is how codes are written for people.
+   - Other numbers stay: "12 tests", "147 files", "step 1, 2".
+2. **No listening to itself.** `lib/speech.ts` tracks when the pet speaks. `speechBusy()` is true while it speaks and for 500 ms after; only the current utterance's own end counts, since a cancelled one reports its end late. While busy:
+   - wake events are ignored (no bubble);
+   - an utterance that starts is cancelled with `voice_listen("cancel")`;
+   - a transcript that arrives is dropped for good.
+   - **Exception:** an utterance the user starts from Pawl's own UI (holding the pet, the mic button) is theirs. Starting it stops the pet's voice first, and it is marked as manual for 20 s.
+3. **Pure core.** `voiceReaction(e, seen, testing, { busy, manual })` returns none, open, send, say or cancel.
+
+**Tests**
+
+- **hub-client:** the code is never in the read-back, even when the command or title contains it ("echo 47 && sleep 4 7", "Say approve 4 7 to continue", a URL ending in 47). `stripVoiceCodes` covers every form above and leaves other numbers alone.
+- **desktop:** while the pet speaks, a wake is ignored, an utterance is cancelled, and a transcript is dropped (and not sent later). The user talking from Pawl's UI still works. `speechBusy` holds for 500 ms after the end.
+
+**Live check:** 10 of 10 pass.
+
+- The read-back is "…Say approve with the code on the card, or deny.", and no spoken text has any digit.
+- A wake plus an utterance started while the pet spoke was cancelled: the mock was back to `wake_listening`, with no listening panel.
+- The earlier checks still pass.
+
+**Gates:** desktop 3 tsc configs, 149 pass, vite build ok; hub-client tsc ok, 360 pass; vscode tsc ok.
+
+**For sde-voice (proposal).** This is a UI-side guard. Two things would make it stronger in the engine:
+
+- a `paused` flag in `voice_configure` (or `voice_pause(on)`) that the pet window sets while it speaks, so the keyword spotter does not even run;
+- the trigger on the `hearing` state event (`wake` / `ptt` / `hotkey`).
+
+Today a push-to-talk started with the global hotkey while the pet is speaking is cancelled like an echo, because the UI cannot tell it apart. Pawl's own UI buttons are not affected.

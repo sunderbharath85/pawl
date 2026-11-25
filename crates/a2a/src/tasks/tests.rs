@@ -20,6 +20,7 @@ fn req(id: &str) -> PermissionRequest {
             PermissionOption { option_id: "reject".into(), name: "Reject".into(), kind: PermissionOptionKind::RejectOnce },
         ],
         created_at: 0,
+        voice_code: None,
     }
 }
 

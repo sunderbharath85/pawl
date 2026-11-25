@@ -13,6 +13,7 @@ mod intent;
 mod llm;
 mod machines;
 mod remote;
+pub mod spoken;
 mod style;
 mod summary;
 mod understand;
@@ -174,6 +175,14 @@ pub struct BrainContext {
     /// The latest A2A task of each of this machine's owned sessions (PLAN.md "A2A orchestration":
     /// the orchestrator's status reads the tasks its delegations created), newest first.
     pub tasks: Vec<TaskBrief>,
+    /// The message is a speech transcript (`via: "voice"`): approve / deny follow the voice rules
+    /// ([`spoken`]).
+    pub spoken: bool,
+    /// The request the pet read back in its previous voice reply in this chat (the hub keeps it for one
+    /// message): "approve" right after it may answer it.
+    pub read_back: Option<RequestId>,
+    /// Too many wrong voice codes lately: approving by voice is paused (deny still works).
+    pub voice_locked: bool,
 }
 
 /// One delegation (A2A task) as the bot sees it.
@@ -227,6 +236,9 @@ impl Default for BrainContext {
             model_pending: false,
             pet_name: None,
             tasks: Vec::new(),
+            spoken: false,
+            read_back: None,
+            voice_locked: false,
         }
     }
 }
@@ -237,15 +249,17 @@ pub enum BrainAction {
     /// Start a session. `prompt` may be empty ("start codex in repo X"): start without a turn.
     StartSession { agent_id: AgentId, cwd: String, prompt: String },
     Prompt { session_id: SessionId, text: String },
-    /// `option_id: None` = cancelled outcome.
+    /// `option_id: None` = cancelled outcome. This machine's request; by voice with the request's code, also
+    /// another machine's (the hub checks the code again and forwards it as the confirmed decision).
     ResolvePermission { request_id: RequestId, option_id: Option<String> },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrainReply {
     pub text: String,
-    /// Executed by the hub. Local targets only; only the deterministic parser sets it.
+    /// Executed by the hub. Local targets only (except a voice approval with the right code, see
+    /// [`BrainAction::ResolvePermission`]); only the deterministic parser sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<BrainAction>,
     /// Commands never run by the hub: the client shows them with a confirm step (several = the bot is asking
@@ -253,6 +267,13 @@ pub struct BrainReply {
     /// brain picked it). Ids unique (uuid v4); only the deterministic parser sets them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proposals: Vec<ChatProposal>,
+    /// Voice: the request this reply read back (the hub hands it back as [`BrainContext::read_back`] with
+    /// the next message of the chat).
+    #[serde(skip)]
+    pub read_back: Option<RequestId>,
+    /// Voice: the transcript said a code that matches no request (the hub counts these).
+    #[serde(skip)]
+    pub code_miss: bool,
 }
 
 /// What a deterministic reply was about, for its icon in plain style.
@@ -372,12 +393,12 @@ pub(crate) fn context_block(body: &str) -> String {
 }
 
 fn say(text: impl Into<String>) -> BrainReply {
-    BrainReply { text: text.into(), action: None, proposals: Vec::new() }
+    BrainReply { text: text.into(), ..Default::default() }
 }
 
 /// A reply that carries a local action for the hub to execute.
 fn act(text: impl Into<String>, action: BrainAction) -> BrainReply {
-    BrainReply { text: text.into(), action: Some(action), proposals: Vec::new() }
+    BrainReply { text: text.into(), action: Some(action), ..Default::default() }
 }
 
 #[derive(Clone)]
@@ -500,7 +521,11 @@ impl Brain {
             Intent::Help => say(help_text(ctx, &voice, seed, &repos)),
             Intent::Resolve { approve, always, agent, pick, explicit } => {
                 let scope = remote::target_machine(ctx, &target);
-                resolve_request(ctx, &voice, seed, approve, always, agent, pick, explicit, scope.as_deref())
+                if ctx.spoken {
+                    spoken::resolve(ctx, &voice, seed, text, approve, always, agent, pick, explicit, scope.as_deref())
+                } else {
+                    resolve_request(ctx, &voice, seed, approve, always, agent, pick, explicit, scope.as_deref())
+                }
             }
             Intent::Command(cmd) => match remote::route(ctx, &repos, &cmd, &target) {
                 remote::Route::Local => command(ctx, &voice, seed, &repos, cmd, target.pet.as_ref(), false),
@@ -511,6 +536,11 @@ impl Brain {
                 let machines = MachineNames::from_ctx(ctx);
                 say(self.daily_inner(&ctx.sessions, &ctx.recent_events, &ctx.agents, &machines, &voice, seed, now).await)
             }
+            // A transcript that says a pending request's code never goes to a model (codes stay local).
+            Intent::SmallTalk if ctx.spoken && spoken::says_pending_code(text, ctx) => say(format!(
+                "{} To answer a request by voice, say “approve” and the code on its card, or “deny”.",
+                voice.thinking(seed)
+            )),
             Intent::SmallTalk => match self.understand(text, ctx, &voice, seed, &repos, now).await {
                 Some((r, icon)) => {
                     from_model = true;
@@ -1400,6 +1430,7 @@ fn local_proposal(
             text: task,
             summary,
         }],
+        ..Default::default()
     }
 }
 
@@ -1438,6 +1469,7 @@ fn session_proposal(ctx: &BrainContext, voice: &Voice, seed: u64, session_id: &s
             text,
             summary,
         }],
+        ..Default::default()
     }
 }
 

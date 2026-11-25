@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Item, ItemActions, ItemContent, ItemDescription, ItemFooter, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { agentName, permissionSummary } from "../../lib/format";
 import { usePanel } from "../context";
+import { useVoiceEnabled } from "../../lib/voice";
+import { VoiceCodeChip } from "../../lib/VoiceCodeChip";
 import { usePermissionAnswer } from "../usePermissionAnswer";
 import { CodeView } from "./CodeView";
 
@@ -20,6 +22,7 @@ const VARIANT: Record<PermissionOption["kind"], "default" | "outline" | "destruc
 };
 
 export function ConfirmationCard({ req }: { req: PermissionRequest }) {
+  const voiceOn = useVoiceEnabled();
   const { state } = usePanel();
   const a = usePermissionAnswer(req);
   const agent = agentName(state.agents, req.agentId, req.machineId);
@@ -48,6 +51,7 @@ export function ConfirmationCard({ req }: { req: PermissionRequest }) {
           {agent} wants to: {permissionSummary(req)}
         </ItemTitle>
         {note && <ItemDescription className={a.problem ? "text-destructive" : undefined}>{note}</ItemDescription>}
+        {voiceOn && req.voiceCode ? <VoiceCodeChip code={req.voiceCode} /> : null}
       </ItemContent>
       {input && (
         <ItemFooter className="w-full">

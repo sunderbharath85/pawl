@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import type { HubEvent, PermissionRequest, Session, ToolKind } from "@pawl/protocol";
 import {
+  decisionText,
   groupWork,
   reuseBlocks,
   reuseItems,
@@ -421,10 +422,7 @@ function PermissionLine({ item }: { item: Extract<TranscriptItem, { kind: "permi
       <TraceLine status={item.outcome === "denied" ? "error" : undefined}>
         <TraceIcon>{o.icon}</TraceIcon>
         <TraceTitle>Asked for approval: {item.title}</TraceTitle>
-        <TraceDescription>
-          {o.word}
-          {item.by === "rule" ? " by a rule" : ""}
-        </TraceDescription>
+        <TraceDescription>{item.outcome === "pending" ? o.word : decisionText(item.outcome, item)}</TraceDescription>
       </TraceLine>
     </Trace>
   );

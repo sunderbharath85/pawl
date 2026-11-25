@@ -2352,3 +2352,13 @@ input[type="range"] {
 .msg-via {
   font-weight: 800;
 }
+
+/* Approvals: recently answered (how: by you, by voice, by a rule). */
+.recent-decisions {
+  margin-top: 22px;
+}
+.chip-voice {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-weight: 800;
+}

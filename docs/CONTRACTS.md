@@ -1056,5 +1056,40 @@ the usual state event; the tray gets the same item.
 Rules: the mic is never opened while `enabled` is false or `muted` is true, and is released when the screen locks (best
 effort per OS). The UI always shows when the mic is live (listening icon on the pet and in the tray tooltip). A
 transcript is an ordinary chat message: it goes through the same parser and proposals, and can never approve anything
-by itself (voice approvals are the next step, with a spoken code for risky actions). macOS: `NSMicrophoneUsageDescription`
+by itself: spoken approvals follow "v0.2 Voice approvals" below. macOS: `NSMicrophoneUsageDescription`
 and the `com.apple.security.device.audio-input` entitlement.
+
+### v0.2 Voice approvals (sde-brain: crates/brain + crates/hub)
+
+- `ClientMsg::Chat { via?: "voice" }`: the text is a speech transcript (any other `via` is `invalid`). It goes through
+  the same parser and proposals as typed chat; only approve / deny follow the voice rules below.
+- `PermissionRequest.voiceCode`: two digits, 10 to 99, that the owning hub assigns to every request it creates (random,
+  not used by another of its pending requests; whatever the agent side sent is replaced; none while 90 are pending).
+  It travels with `permission_request`, the welcome snapshot and the mirror to peers, is never stored in event history,
+  and a mirrored code that is not exactly two digits is dropped. The UI shows it ("say: approve 4 7") and never speaks
+  it: TTS skips the reply's last line `Say: “approve 4 7” …`. It is never sent to a model.
+- Voice rules (brain `chat::spoken`; the hub checks them again before acting):
+  - approve: the pet first reads the request back (tool, command or file, machine) unless the transcript says the
+    request's code. Read, search, think and edit on this machine: "approve" or "yes, approve" after the read-back.
+    Execute, delete, fetch, move, switch_mode, other or unknown kinds, and every request of another machine: the
+    transcript must say the code ("approve 4 7", "approve 47", "approve forty seven", "approve four seven"); without
+    it the reply says `Say: “approve 4 7”`, with a wrong one "That code doesn't match", and nothing happens. A bare
+    "yes" is never enough by voice.
+  - "Always allow" is never available by voice (refused, and the pet says so).
+  - deny: acts at once, with no read-back and no code (the safe direction).
+  - A spoken number is a code and picks the request (any machine's); ordinals ("the first one") still pick.
+  - Another machine's request with its code: sent to the owner as `resolve_permission` with `confirmed: true` (the
+    code is the confirmation on this device; the owner's rules are unchanged).
+  - Requests of hook sessions are not answered by voice.
+  - Three wrong codes within 10 minutes pause approving by voice (deny still works).
+  - A transcript that says a pending request's code is never sent to a model; the context pack carries no codes.
+- Audit: the recorded `permission_resolved` event carries `PermissionResolvedPayload.via = "voice"`. Store schema v10
+  adds `via` and `transcript` (300 characters at most) to `audit_log` (this machine's requests; actor
+  `voice:chat:<client>`) and to `intent_log` (origin rows for another machine's requests). Known gap: the owner's
+  audit row of a voice approval from another machine has `via` null, because intents carry no `via`.
+- pawl-brain API: `BrainContext.spoken: bool` (the message is a transcript), `BrainContext.read_back:
+  Option<RequestId>` (the request the chat's previous voice reply read back; the hub keeps it for one message, at most
+  2 minutes), `BrainContext.voice_locked: bool` (the pause); `BrainReply.read_back: Option<RequestId>` and
+  `BrainReply.code_miss: bool` (serde-skipped; `BrainReply` derives `Default`); `BrainAction::ResolvePermission` may
+  name another machine's request (voice with its code only); `chat::spoken::{spoken_numbers, says_code,
+  is_voice_code, spell_code, needs_code}`. pawl-hub: `Hub::chat_as(pet_id, text, spoken, actor)`.

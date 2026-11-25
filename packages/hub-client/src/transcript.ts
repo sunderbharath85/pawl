@@ -60,6 +60,8 @@ export type TranscriptItem =
       toolKind: ToolKind;
       outcome: "pending" | "approved" | "denied" | "cancelled";
       by?: "user" | "rule" | "system" | undefined;
+      /** Answered by voice (v0.2). */
+      via?: "voice" | undefined;
     }
   | { kind: "notice"; id: string; ts: number; text: string; tone: NoticeTone; detail?: string | undefined };
 
@@ -465,7 +467,7 @@ class Builder {
       const kind = entry.options.find((o) => o.optionId === (p.outcome as { optionId: string }).optionId)?.kind;
       outcome = kind?.startsWith("reject") ? "denied" : "approved";
     }
-    this.items[entry.index] = { ...it, outcome, by: p.by };
+    this.items[entry.index] = p.via === "voice" ? { ...it, outcome, by: p.by, via: "voice" } : { ...it, outcome, by: p.by };
     if (outcome !== "approved" && entry.toolCallId) this.tool(entry.toolCallId, it.ts, { status: "denied" });
   }
 

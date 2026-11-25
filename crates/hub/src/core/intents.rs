@@ -259,6 +259,20 @@ impl Hub {
         confirmed: Option<bool>,
         actor: &Actor,
     ) -> Result<Value> {
+        self.resolve_remote_as(target, request_id, option_id, confirmed, actor, None).await
+    }
+
+    /// [`Hub::resolve_remote`]; `transcript`: the user spoke the decision (the intent log records
+    /// `via: "voice"` and the transcript; the owner sees an ordinary confirmed intent).
+    pub(super) async fn resolve_remote_as(
+        &self,
+        target: &str,
+        request_id: &str,
+        option_id: Option<String>,
+        confirmed: Option<bool>,
+        actor: &Actor,
+        transcript: Option<&str>,
+    ) -> Result<Value> {
         let known = self.mirror_pending().into_iter().find(|r| r.request_id == request_id);
         let approve = match (&option_id, &known) {
             (None, _) => false,
@@ -276,7 +290,7 @@ impl Hub {
         } else {
             Intent::Deny { request_id: request_id.to_string(), option_id }
         };
-        self.forward(target, actor, confirmed == Some(true), intent).await
+        self.forward_as(target, actor, confirmed == Some(true), intent, transcript).await
     }
 
     /// start_session on another machine (needs `confirmed`).
@@ -299,6 +313,11 @@ impl Hub {
     /// Send `intent` to `target` (the id's owner) and wait for its ack. A v9 owner gets start /
     /// prompt / cancel as A2A over the link instead (`core/a2a_peer.rs`); approve / deny stay intents.
     pub(super) async fn forward(&self, target: &str, actor: &Actor, confirmed: bool, intent: Intent) -> Result<Value> {
+        self.forward_as(target, actor, confirmed, intent, None).await
+    }
+
+    /// [`Hub::forward`]; `transcript`: a spoken approve / deny (kept in the intent log).
+    async fn forward_as(&self, target: &str, actor: &Actor, confirmed: bool, intent: Intent, transcript: Option<&str>) -> Result<Value> {
         let paired = self.devices().iter().any(|d| d.id == target && d.kind == DeviceKind::Hub);
         if !paired {
             return Err(AckCode::NotFound.into());
@@ -345,6 +364,8 @@ impl Hub {
             status,
             reason,
             repeats: 0,
+            via: transcript.map(|_| super::voice::VOICE.to_string()),
+            transcript: transcript.map(super::voice::cut_transcript),
         })
         .await;
         match outcome {
@@ -534,6 +555,8 @@ impl Hub {
             status: status.to_string(),
             reason: ack.reason.map(reason_name),
             repeats,
+            via: None,
+            transcript: None,
         })
         .await;
     }

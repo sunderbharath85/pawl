@@ -234,6 +234,19 @@ export {
   urlHost,
   type A2aTaskTone,
 } from "./a2a";
+export {
+  approvalReadBack,
+  decisionText,
+  formatVoiceCode,
+  READ_BACK_MAX,
+  requestAction,
+  spokenPlain,
+  stripVoiceCodes,
+  voiceCodeChipText,
+  voiceCodeNeeded,
+  type ReadBackContext,
+} from "./voice";
+export { recentDecisions, type Decision } from "./decisions";
 export { cleanTitle, folderName, parsePrompt, TITLE_MAX, type ParsedPrompt, type PromptAttachment, type PromptNotice } from "./injected";
 export {
   clipCode,

@@ -77,4 +77,18 @@ describe("transcript blocks render", () => {
     expect(html).toContain("approved by a rule");
     expect(html).toContain("Stopped: it reached its token limit");
   });
+
+  test("an approval answered by voice says so", () => {
+    const html = render(
+      [
+        acp("request_permission", { requestId: "m1:r9", toolCall: { toolCallId: "c9", title: "Run bun test", kind: "execute" }, options: [{ optionId: "y", name: "Allow", kind: "allow_once" }, { optionId: "n", name: "Deny", kind: "reject_once" }] }),
+        acp("permission_resolved", { requestId: "m1:r9", outcome: { kind: "selected", optionId: "y" }, by: "user", via: "voice" }),
+        acp("request_permission", { requestId: "m1:r10", toolCall: { toolCallId: "c10", title: "Delete dist", kind: "delete" }, options: [{ optionId: "n", name: "Deny", kind: "reject_once" }] }),
+        acp("permission_resolved", { requestId: "m1:r10", outcome: { kind: "selected", optionId: "n" }, by: "user", via: "voice" }),
+      ],
+      "owned",
+    );
+    expect(html).toContain("approved by voice");
+    expect(html).toContain("denied by voice");
+  });
 });

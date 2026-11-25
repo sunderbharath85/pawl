@@ -545,6 +545,7 @@ mod tests {
                 opt("never", PermissionOptionKind::RejectAlways),
             ],
             created_at: 0,
+            voice_code: None,
         }
     }
 

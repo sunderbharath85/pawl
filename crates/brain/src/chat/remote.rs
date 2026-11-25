@@ -456,7 +456,7 @@ pub(super) fn remote_command(
             places.join(", ")
         )
     };
-    BrainReply { text, action: None, proposals }
+    BrainReply { text, proposals, ..Default::default() }
 }
 
 /// Sessions and requests of one machine, for status questions about it. Agents of every machine are

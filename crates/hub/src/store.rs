@@ -36,6 +36,7 @@ const MIGRATIONS: &[Migration] =
         Migration::Sql(SCHEMA_V7),
         Migration::Sql(SCHEMA_V8),
         Migration::Sql(SCHEMA_V9),
+        Migration::Sql(SCHEMA_V10),
     ];
 
 const SCHEMA_V1: &str = r#"
@@ -254,6 +255,15 @@ CREATE TABLE a2a_log (
 CREATE INDEX a2a_log_ts ON a2a_log(ts);
 "#;
 
+/// v10 (approvals by voice, v0.2): how a decision was given ("voice") and the transcript (300 characters
+/// at most), for this machine's decisions (audit_log) and the approve / deny intents it sent (intent_log).
+const SCHEMA_V10: &str = r#"
+ALTER TABLE audit_log ADD COLUMN via TEXT;
+ALTER TABLE audit_log ADD COLUMN transcript TEXT;
+ALTER TABLE intent_log ADD COLUMN via TEXT;
+ALTER TABLE intent_log ADD COLUMN transcript TEXT;
+"#;
+
 /// a2a_log rows kept (oldest pruned first).
 pub const A2A_LOG_MAX_ROWS: i64 = 100_000;
 
@@ -315,6 +325,12 @@ pub struct AuditEntry {
     pub detail: Option<String>,
     /// Set when the decision came from another machine (an intent).
     pub origin: Option<AuditOrigin>,
+    /// "voice" when the user answered by speaking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    /// The spoken words (300 characters at most), with `via: "voice"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
 }
 
 /// The machine, intent and client behind a remote decision.
@@ -359,6 +375,12 @@ pub struct IntentLogEntry {
     /// Identical rejections (rate_limited / forbidden) from the same peer not logged separately
     /// since the previous entry for them.
     pub repeats: u32,
+    /// Origin role: "voice" when the user spoke the approve / deny.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    /// The spoken words (300 characters at most), with `via: "voice"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
 }
 
 /// What a pairing audit entry records.
@@ -914,8 +936,8 @@ impl Store {
         c.execute(
             "INSERT INTO audit_log (ts, request_id, session_id, agent_id, tool_call_id, tool_kind, tool_title, locations,
                                     decided_by, actor, option_id, option_kind, outcome, detail, machine_id,
-                                    origin_machine_id, origin_name, intent_id, client)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                                    origin_machine_id, origin_name, intent_id, client, via, transcript)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 a.ts,
                 a.request_id,
@@ -935,7 +957,9 @@ impl Store {
                 a.origin.as_ref().map(|o| o.machine_id.clone()),
                 a.origin.as_ref().and_then(|o| o.name.clone()),
                 a.origin.as_ref().map(|o| o.intent_id.clone()),
-                a.origin.as_ref().map(|o| o.client.clone())
+                a.origin.as_ref().map(|o| o.client.clone()),
+                a.via,
+                a.transcript
             ],
         )?;
         Ok(c.last_insert_rowid())
@@ -957,8 +981,9 @@ impl Store {
     pub fn insert_intent_log(&self, e: &IntentLogEntry) -> Result<i64> {
         let c = self.conn();
         c.execute(
-            "INSERT INTO intent_log (ts, role, intent_id, kind, peer_machine_id, peer_name, client, target, option_id, status, reason, repeats)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO intent_log (ts, role, intent_id, kind, peer_machine_id, peer_name, client, target, option_id, status, reason, repeats,
+                                     via, transcript)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 e.ts,
                 enum_str(&e.role),
@@ -971,7 +996,9 @@ impl Store {
                 e.option_id,
                 e.status,
                 e.reason,
-                e.repeats
+                e.repeats,
+                e.via,
+                e.transcript
             ],
         )?;
         Ok(c.last_insert_rowid())
@@ -1040,7 +1067,8 @@ impl Store {
     pub fn intent_log(&self, limit: u32) -> Result<Vec<IntentLogEntry>> {
         let c = self.conn();
         let mut st = c.prepare(
-            "SELECT id, ts, role, intent_id, kind, peer_machine_id, peer_name, client, target, option_id, status, reason, repeats
+            "SELECT id, ts, role, intent_id, kind, peer_machine_id, peer_name, client, target, option_id, status, reason, repeats,
+                    via, transcript
              FROM intent_log ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = st.query_map([limit], |r| {
@@ -1059,6 +1087,8 @@ impl Store {
                 status: r.get(10)?,
                 reason: r.get(11)?,
                 repeats: r.get(12)?,
+                via: r.get(13)?,
+                transcript: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1088,7 +1118,7 @@ impl Store {
         let mut st = c.prepare(
             "SELECT id, ts, request_id, session_id, agent_id, tool_call_id, tool_kind, tool_title, locations,
                     decided_by, actor, option_id, option_kind, outcome, detail, machine_id,
-                    origin_machine_id, origin_name, intent_id, client
+                    origin_machine_id, origin_name, intent_id, client, via, transcript
              FROM audit_log ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = st.query_map([limit], |r| {
@@ -1123,6 +1153,8 @@ impl Store {
                     }),
                     _ => None,
                 },
+                via: r.get(20)?,
+                transcript: r.get(21)?,
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -2487,6 +2519,8 @@ mod tests {
             outcome: AuditOutcome::Rejected,
             detail: None,
             origin: Some(AuditOrigin { machine_id: "zyxwvu987654".into(), name: Some("Mac mini".into()), intent_id: "i-1".into(), client: "desktop".into() }),
+            via: Some("voice".into()),
+            transcript: Some("approve 4 7".into()),
         };
         let id = s.insert_audit(&a).unwrap();
         let got = s.audit_log(10).unwrap();
@@ -2847,6 +2881,7 @@ mod tests {
             tool_call: Default::default(),
             options: vec![],
             created_at: 7,
+            voice_code: None,
         };
         s.mirror_put_pending(&req).unwrap();
         assert_eq!(s.mirror_pending().unwrap(), vec![req.clone()]);
@@ -3029,6 +3064,8 @@ mod tests {
             status: "rejected".into(),
             reason: Some("not_found".into()),
             repeats: 3,
+            via: None,
+            transcript: None,
         };
         let now = 100 * 86_400_000;
         s.insert_intent_log(&entry(now - INTENT_LOG_RETENTION_MS - 1, 0)).unwrap();

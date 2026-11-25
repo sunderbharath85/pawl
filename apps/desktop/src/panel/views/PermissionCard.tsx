@@ -3,6 +3,8 @@ import { TOOL_KIND_ICON, agentName, permissionSummary, sessionTitle, shortPath, 
 import { petFor, requestCommandText } from "@pawl/hub-client";
 import { usePanel } from "../context";
 import { PetAvatar } from "../PetAvatar";
+import { useVoiceEnabled } from "../../lib/voice";
+import { VoiceCodeChip } from "../../lib/VoiceCodeChip";
 import { usePermissionAnswer } from "../usePermissionAnswer";
 
 const OPTION_CLASS: Record<PermissionOption["kind"], string> = {
@@ -21,6 +23,7 @@ interface Props {
 export function PermissionCard({ req, compact = false, highlight = false }: Props) {
   const { state, navigate, now } = usePanel();
   const answer = usePermissionAnswer(req);
+  const voiceOn = useVoiceEnabled();
   const { options, remote, machineName, offline, busy, confirm, problem, answered, resolve } = answer;
   const pet = petFor(Object.values(state.pets), req.machineId, req.agentId);
   const session = state.sessions[req.sessionId];
@@ -76,6 +79,7 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
       )}
       {/* Never cut: all of what would run (the block scrolls). */}
       {!compact && rawText && <pre className="perm-raw">{rawText}</pre>}
+      {voiceOn && req.voiceCode ? <VoiceCodeChip code={req.voiceCode} /> : null}
       {!compact && renderButtons()}
     </article>
   );

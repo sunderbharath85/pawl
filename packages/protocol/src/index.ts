@@ -214,6 +214,8 @@ export interface PermissionResolvedPayload {
   by: ResolvedBy;
   /** The machine the decision came from when it was not the owner (a remote approval). */
   byMachineId?: MachineId;
+  /** How the user answered: "voice" when spoken (the audit log keeps the transcript). */
+  via?: "voice";
 }
 
 export interface HubEvent {
@@ -250,6 +252,11 @@ export interface PermissionRequest {
   toolCall: ToolCallPayload;
   options: PermissionOption[];
   createdAt: UnixMs;
+  /**
+   * Two digits ("47") the owning hub assigns to every request; the UI shows it as "say: approve 4 7". A voice approval
+   * of an execute, delete or fetch request, or of another machine's request, must include it (v0.2).
+   */
+  voiceCode?: string;
 }
 
 export type PermissionOutcome =
@@ -867,7 +874,8 @@ export type ClientMsg =
   | { type: "resolve_permission"; id: string; requestId: RequestId; optionId: string | null; confirmed?: boolean }
   | { type: "list_history"; id: string; agentId: AgentId; cwd?: string }
   | { type: "resume_session"; id: string; agentId: AgentId; acpSessionId: string; cwd: string }
-  | { type: "chat"; id: string; petId?: PetId; text: string }
+  /** `via: "voice"` = the text is a speech transcript (v0.2): voice approvals then need the spoken code for risky requests. */
+  | { type: "chat"; id: string; petId?: PetId; text: string; via?: "voice" }
   | { type: "update_pet"; id: string; petId: PetId; patch: Partial<Pick<Pet, "species" | "name" | "skin" | "personality">> }
   | { type: "set_rules"; id: string; rules: Rule[] }
   /** Rename this hub's machine (only the local machine for now). */

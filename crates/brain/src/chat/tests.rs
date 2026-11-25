@@ -73,6 +73,7 @@ fn request(id: &str, session: &str, agent: &str, title: &str, created: i64) -> P
             opt("reject-always", PermissionOptionKind::RejectAlways),
         ],
         created_at: created,
+        voice_code: None,
     }
 }
 
@@ -1346,7 +1347,10 @@ async fn without_a_model_replies_are_plain_and_hint_once() {
         ("s4", "E:\\workspace\\ai-pet", SessionStatus::Done),
         ("s5", "E:\\code\\tiny-whisper", SessionStatus::Done),
     ] {
-        c.sessions.push(session(id, "claude-code", cwd, SessionSource::Owned, status));
+        // Older than s-claude, so s-claude is the one described (same-millisecond timestamps made this flaky).
+        let mut s = session(id, "claude-code", cwd, SessionSource::Owned, status);
+        s.last_event_at = c.sessions[0].last_event_at - 1_000;
+        c.sessions.push(s);
     }
     let r = ask("what's claude doing?", &c).await;
     assert!(r.text.contains(" Also: tiny-whisper (working). 3 finished earlier: ai-pet ×2, tiny-whisper."), "{}", r.text);
@@ -1478,4 +1482,255 @@ async fn status_names_the_last_task_outcome() {
     c.tasks = vec![brief("completed")];
     let r = ask("What's Claude doing?", &c).await;
     assert!(!r.text.contains("last task"), "{}", r.text);
+}
+
+// ---------- approvals by voice (v0.2) ----------
+
+/// A request of `kind` with a voice code; a read / edit names a file, a command runs `bun test`.
+fn vreq(id: &str, session: &str, agent: &str, kind: Option<ToolKind>, code: &str) -> PermissionRequest {
+    let mut r = request(id, session, agent, "Do the thing", now_ms() - 10_000);
+    r.tool_call.kind = kind;
+    r.voice_code = Some(code.into());
+    match kind {
+        Some(ToolKind::Execute) => r.tool_call.raw_input = Some(json!({ "command": "bun test" })),
+        Some(_) => r.tool_call.locations = Some(vec![pawl_protocol::ToolLocation { path: "src/main.rs".into(), line: None }]),
+        None => {}
+    }
+    r
+}
+
+fn spoken(pending: Vec<PermissionRequest>) -> BrainContext {
+    let mut c = ctx();
+    c.spoken = true;
+    c.pending = pending;
+    c
+}
+
+fn resolved(r: &BrainReply) -> Option<(String, Option<String>)> {
+    match &r.action {
+        Some(BrainAction::ResolvePermission { request_id, option_id }) => Some((request_id.clone(), option_id.clone())),
+        _ => None,
+    }
+}
+
+fn allowed(id: &str) -> Option<(String, Option<String>)> {
+    Some((id.into(), Some("allow-once".into())))
+}
+
+#[tokio::test]
+async fn by_voice_a_local_read_or_edit_is_read_back_then_approved() {
+    for kind in [ToolKind::Read, ToolKind::Edit, ToolKind::Search, ToolKind::Think] {
+        let mut c = spoken(vec![vreq("r1", "s-claude", "codex", Some(kind), "31")]);
+        // First "approve": the pet reads the request back (tool, file, machine) and nothing happens.
+        let r = ask("approve", &c).await;
+        assert_eq!(resolved(&r), None, "{kind:?}: {}", r.text);
+        assert_eq!(r.read_back.as_deref(), Some("r1"));
+        assert!(r.text.contains("Codex on Windows PC wants to"), "{}", r.text);
+        assert!(r.text.contains("Say “approve” to allow it once"), "{}", r.text);
+        if kind == ToolKind::Read {
+            assert!(r.text.contains("read a file: src/main.rs"), "{}", r.text);
+        }
+        // After the read-back, "approve" or "yes, approve" is enough.
+        c.read_back = Some("r1".into());
+        for t in ["approve", "Yes, approve.", "approve it please"] {
+            let r = ask(t, &c).await;
+            assert_eq!(resolved(&r), allowed("r1"), "{kind:?} {t}: {}", r.text);
+            assert!(r.text.contains("Approved once"), "{}", r.text);
+        }
+        // A bare "yes" never is, read-back or not.
+        for t in ["yes", "sure", "go ahead"] {
+            let r = ask(t, &c).await;
+            assert_eq!(resolved(&r), None, "{t}");
+            assert!(r.text.contains("A plain “yes” isn't enough by voice"), "{}", r.text);
+        }
+        // A read-back of another request does not count.
+        c.read_back = Some("r-other".into());
+        assert_eq!(resolved(&ask("approve", &c).await), None);
+    }
+}
+
+#[tokio::test]
+async fn by_voice_risky_kinds_need_the_spoken_code() {
+    for kind in [Some(ToolKind::Execute), Some(ToolKind::Delete), Some(ToolKind::Fetch), Some(ToolKind::Move), Some(ToolKind::SwitchMode), Some(ToolKind::Other), None] {
+        let mut c = spoken(vec![vreq("r1", "s-claude", "claude-code", kind, "47")]);
+        let r = ask("approve", &c).await;
+        assert_eq!(resolved(&r), None, "{kind:?}");
+        assert!(r.text.contains("Say: “approve 4 7”"), "{kind:?}: {}", r.text);
+        // Even right after the read-back: no code, nothing happens.
+        c.read_back = Some("r1".into());
+        let r = ask("approve", &c).await;
+        assert_eq!(resolved(&r), None, "{kind:?}");
+        assert!(r.text.contains("Say: “approve 4 7”"), "{}", r.text);
+        c.read_back = None;
+        // The right code is enough, without a read-back, however it is said.
+        for t in ["approve 4 7", "Approve 47.", "approve forty seven", "approve four seven", "yes approve for seven"] {
+            assert_eq!(resolved(&ask(t, &c).await), allowed("r1"), "{kind:?} {t}");
+        }
+        // A wrong code: nothing happens, and the hub is told (it counts misses).
+        for t in ["approve 4 8", "approve 74", "approve 2", "approve 4 7 2"] {
+            let r = ask(t, &c).await;
+            assert_eq!(resolved(&r), None, "{t}");
+            assert!(r.text.contains("That code doesn't match"), "{t}: {}", r.text);
+            assert!(r.code_miss, "{t}");
+        }
+    }
+    // The command is read back.
+    let c = spoken(vec![vreq("r1", "s-claude", "claude-code", Some(ToolKind::Execute), "47")]);
+    let r = ask("approve", &c).await;
+    assert!(r.text.contains("Claude Code on Windows PC wants to run a command: `bun test`."), "{}", r.text);
+}
+
+#[tokio::test]
+async fn by_voice_another_machines_request_needs_its_code_and_then_is_answered() {
+    let mut c = two_machine_ctx();
+    c.spoken = true;
+    let rid = format!("{PEER}:r1");
+    c.pending[0].tool_call.kind = Some(ToolKind::Read);
+    c.pending[0].voice_code = Some("62".into());
+    let r = ask("approve", &c).await;
+    assert_eq!(resolved(&r), None);
+    assert!(r.text.contains("on Mac mini wants to"), "{}", r.text);
+    assert!(r.text.contains("Say: “approve 6 2”"), "a read on another machine needs the code too: {}", r.text);
+    c.read_back = Some(rid.clone());
+    assert_eq!(resolved(&ask("approve", &c).await), None, "the read-back is not enough");
+    // The right code: an action on the other machine's request (the hub forwards it as confirmed).
+    assert_eq!(resolved(&ask("approve 6 2", &c).await), Some((rid.clone(), Some("allow-once".into()))));
+    assert_eq!(resolved(&ask("approve sixty two", &c).await), Some((rid.clone(), Some("allow-once".into()))));
+    // Deny needs no code.
+    assert_eq!(resolved(&ask("deny", &c).await), Some((rid.clone(), Some("reject-once".into()))));
+    // Typed chat is unchanged: never decides another machine's request.
+    c.spoken = false;
+    for t in ["approve 6 2", "approve", "deny"] {
+        assert_eq!(resolved(&ask(t, &c).await), None, "typed {t}");
+    }
+}
+
+#[tokio::test]
+async fn always_allow_is_never_available_by_voice() {
+    let mut c = spoken(vec![vreq("r1", "s-claude", "codex", Some(ToolKind::Read), "31")]);
+    c.read_back = Some("r1".into());
+    for t in ["always allow", "always approve 3 1", "approve forever", "allow codex permanently"] {
+        let r = ask(t, &c).await;
+        assert_eq!(resolved(&r), None, "{t}");
+        assert!(r.text.contains("I can't “always allow” by voice"), "{t}: {}", r.text);
+    }
+    // A request that only offers "always allow" is answered on the screen.
+    c.pending[0].options.retain(|o| o.kind != PermissionOptionKind::AllowOnce);
+    let r = ask("approve 3 1", &c).await;
+    assert_eq!(resolved(&r), None);
+    assert!(r.text.contains("only offers “always allow”"), "{}", r.text);
+}
+
+#[tokio::test]
+async fn by_voice_deny_acts_at_once_without_a_read_back_or_code() {
+    let mut c = spoken(vec![vreq("r1", "s-claude", "claude-code", Some(ToolKind::Execute), "47")]);
+    for t in ["deny", "no", "reject it", "deny 4 7"] {
+        let r = ask(t, &c).await;
+        assert_eq!(resolved(&r), Some(("r1".into(), Some("reject-once".into()))), "{t}: {}", r.text);
+        assert!(r.text.contains("Denied") && r.text.contains("won't run a command: `bun test`"), "{}", r.text);
+        assert_eq!(r.read_back, None, "{t}");
+    }
+    assert_eq!(resolved(&ask("never", &c).await), Some(("r1".into(), Some("reject-always".into()))));
+    // A wrong code does not say which request: nothing happens.
+    assert!(ask("deny 4 8", &c).await.text.contains("That code doesn't match"));
+    // Several waiting: the agent named or the code picks; else the pet asks which.
+    c.pending.push(vreq("r2", "s-claude", "codex", Some(ToolKind::Read), "31"));
+    let r = ask("deny", &c).await;
+    assert_eq!(resolved(&r), None);
+    assert!(r.text.contains("Say “deny” and the code on its card"), "{}", r.text);
+    assert_eq!(resolved(&ask("deny codex", &c).await), Some(("r2".into(), Some("reject-once".into()))));
+    assert_eq!(resolved(&ask("deny 3 1", &c).await), Some(("r2".into(), Some("reject-once".into()))));
+    // Another machine's request: denied at once too (no code).
+    let mut m = two_machine_ctx();
+    m.spoken = true;
+    m.pending[0].voice_code = Some("62".into());
+    assert_eq!(resolved(&ask("deny", &m).await), Some((format!("{PEER}:r1"), Some("reject-once".into()))));
+    // While approving by voice is paused, deny still works.
+    c.pending.pop();
+    c.voice_locked = true;
+    assert_eq!(resolved(&ask("deny", &c).await), Some(("r1".into(), Some("reject-once".into()))));
+}
+
+#[tokio::test]
+async fn by_voice_the_code_picks_the_request() {
+    let mut read = vreq("r-read", "s-claude", "codex", Some(ToolKind::Read), "31");
+    read.created_at -= 5_000;
+    let exec = vreq("r-exec", "s-claude", "claude-code", Some(ToolKind::Execute), "47");
+    let mut c = spoken(vec![read, exec]);
+    let r = ask("approve", &c).await;
+    assert_eq!(resolved(&r), None);
+    assert!(r.text.contains("More than one request is waiting") && r.text.contains("the code on its card"), "{}", r.text);
+    assert_eq!(resolved(&ask("approve 4 7", &c).await), allowed("r-exec"));
+    assert_eq!(resolved(&ask("approve 3 1", &c).await), allowed("r-read"), "a code also stands for the read-back");
+    // A code that names another agent's request does not match.
+    assert!(ask("approve codex 4 7", &c).await.text.contains("That code doesn't match"));
+    // "approve" right after a read-back answers that request.
+    c.read_back = Some("r-read".into());
+    assert_eq!(resolved(&ask("approve", &c).await), allowed("r-read"));
+    // An ordinal picks one (and reads it back).
+    c.read_back = None;
+    let r = ask("approve the first one", &c).await;
+    assert_eq!((resolved(&r), r.read_back.as_deref()), (None, Some("r-read")), "{}", r.text);
+}
+
+#[tokio::test]
+async fn by_voice_too_many_wrong_codes_pause_approvals() {
+    let mut c = spoken(vec![vreq("r1", "s-claude", "claude-code", Some(ToolKind::Execute), "47")]);
+    c.voice_locked = true;
+    let r = ask("approve 4 7", &c).await;
+    assert_eq!(resolved(&r), None, "not even the right code");
+    assert!(r.text.contains("Too many wrong codes"), "{}", r.text);
+    assert!(ask("approve", &c).await.text.contains("Too many wrong codes"));
+    assert_eq!(resolved(&ask("deny 4 7", &c).await), Some(("r1".into(), Some("reject-once".into()))));
+}
+
+#[tokio::test]
+async fn by_voice_hook_session_requests_are_left_to_the_terminal() {
+    let c = spoken(vec![vreq("r1", "s-hook", "copilot", Some(ToolKind::Read), "31")]);
+    for t in ["approve", "approve 3 1", "deny"] {
+        let r = ask(t, &c).await;
+        assert_eq!(resolved(&r), None, "{t}");
+    }
+    assert!(ask("approve", &c).await.text.contains("Nothing is waiting"));
+}
+
+#[tokio::test]
+async fn by_voice_questions_are_answered_as_typed() {
+    let c = spoken(vec![vreq("r1", "s-claude", "claude-code", Some(ToolKind::Execute), "47")]);
+    let mut typed = c.clone();
+    typed.spoken = false;
+    for q in ["what is it asking?", "What's Claude doing?", "status"] {
+        let (a, b) = (ask(q, &c).await, ask(q, &typed).await);
+        assert_eq!(a.text, b.text, "{q}");
+        assert_eq!(a.action, None);
+        assert!(!a.text.contains("4 7") && !a.text.contains("47"), "{q}: {}", a.text);
+    }
+}
+
+#[tokio::test]
+async fn voice_codes_never_reach_a_model() {
+    let c = spoken(vec![vreq("r1", "s-claude", "claude-code", Some(ToolKind::Execute), "97")]);
+    // The context pack has no codes.
+    let repos = RepoIndex::build(&c.sessions, &c.repos);
+    let pack = understand::pack(&c, &repos, now_ms());
+    assert!(pack.text.contains("wants to: run bun") && !pack.text.contains("97"), "{}", pack.text);
+    let (url, bodies) = fake_llm(intent_json("smalltalk", json!({ "answer": "Hi." }))).await;
+    let b = model_brain(url);
+    b.handle("zxq frobnicate", &c).await.unwrap();
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+    assert!(!bodies.lock().unwrap()[0].contains("97"), "{}", bodies.lock().unwrap()[0]);
+    // A transcript that says a pending code is never sent to a model.
+    let r = b.handle("uh nine seven maybe", &c).await.unwrap();
+    assert_eq!(bodies.lock().unwrap().len(), 1, "no model call");
+    assert!(r.text.contains("say “approve” and the code on its card"), "{}", r.text);
+    assert_eq!(r.action, None);
+}
+
+#[tokio::test]
+async fn by_voice_the_read_back_shows_the_end_of_a_long_command() {
+    let mut r = vreq("r1", "s-claude", "claude-code", Some(ToolKind::Execute), "47");
+    let cmd = format!("cd build && {} && rm -rf ~/projects", "echo step".repeat(15));
+    r.tool_call.raw_input = Some(json!({ "command": cmd }));
+    let reply = ask("approve", &spoken(vec![r])).await;
+    assert!(reply.text.contains("&& rm -rf ~/projects`"), "{}", reply.text);
 }

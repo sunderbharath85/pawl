@@ -735,6 +735,9 @@ pub struct PermissionResolvedPayload {
     /// The machine the decision came from when it was not the owner (a remote approval).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by_machine_id: Option<MachineId>,
+    /// Some("voice") when the user answered by speaking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -781,6 +784,9 @@ pub struct PermissionRequest {
     pub tool_call: ToolCallPayload,
     pub options: Vec<PermissionOption>,
     pub created_at: UnixMs,
+    /// Two digits the owning hub assigns; a voice approval of a risky or remote request must include it (v0.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_code: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1527,7 +1533,15 @@ pub enum ClientMsg {
     },
     ListHistory { id: String, agent_id: AgentId, #[serde(default)] cwd: Option<String> },
     ResumeSession { id: String, agent_id: AgentId, acp_session_id: String, cwd: String },
-    Chat { id: String, #[serde(default)] pet_id: Option<PetId>, text: String },
+    Chat {
+        id: String,
+        #[serde(default)]
+        pet_id: Option<PetId>,
+        text: String,
+        /// Some("voice") = a speech transcript (v0.2).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<String>,
+    },
     UpdatePet { id: String, pet_id: PetId, patch: PetPatch },
     SetRules { id: String, rules: Vec<Rule> },
     /// Rename this hub's machine (local machine only for now).

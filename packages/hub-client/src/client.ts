@@ -422,8 +422,15 @@ export class HubClient {
   }
 
   /** Send a chat line; resolves with the stored user message (the pet's reply arrives as a `chat` message). */
-  async chat(text: string, petId?: string): Promise<ChatMessage> {
-    const res = await this.request<"chat">(petId === undefined ? { type: "chat", text } : { type: "chat", text, petId });
+  /**
+   * A chat message to a pet (none: the default pet). `via: "voice"` marks a speech transcript: the hub then words its
+   * answers for listening and asks for the spoken code before approving risky requests (v0.2).
+   */
+  async chat(text: string, petId?: string, opts: { via?: "voice" } = {}): Promise<ChatMessage> {
+    const msg: DistributiveOmit<Extract<ClientMsg, { type: "chat" }>, "id"> = { type: "chat", text };
+    if (petId !== undefined) msg.petId = petId;
+    if (opts.via === "voice") msg.via = "voice";
+    const res = await this.request<"chat">(msg);
     return res.message;
   }
 
