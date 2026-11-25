@@ -1068,6 +1068,78 @@ pub struct HubSettingsRelay {
     pub access_key_set: bool,
 }
 
+/// Default port of the localhost A2A server (`[a2a] port`; it only ever binds 127.0.0.1).
+pub const A2A_DEFAULT_PORT: u16 = 47802;
+
+/// `[a2a]` (PLAN.md "A2A orchestration", phase A2): Pawl as an A2A agent on 127.0.0.1. `server` = the
+/// localhost A2A server is on (off by default); `running` / `url` / `error` = its live state. Callers are
+/// outside A2A clients, each with its own bearer token (write-only: only `token_set`; `a2a_rotate_token`
+/// shows a new one once) and its own `allow_approvals` (default false: it can never answer permission
+/// requests; true: allow once or deny, never "always", never execute / delete / fetch).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsA2a {
+    pub server: bool,
+    pub port: u16,
+    #[serde(default)]
+    pub running: bool,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub callers: Vec<A2aCallerSetting>,
+}
+
+/// One outside A2A caller of the localhost server (`[[a2a.callers]]`). `id`: `[a-z0-9-]{1,40}`, unique; it
+/// appears in the audit log as `a2a:<id>`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aCallerSetting {
+    pub id: String,
+    pub name: String,
+    pub token_set: bool,
+    pub allow_approvals: bool,
+}
+
+/// `callers` replaces the whole list; a caller keeps its token while its id stays, a new id starts
+/// without one (`a2a_rotate_token`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsA2aPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callers: Option<Vec<A2aCallerPatch>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aCallerPatch {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub allow_approvals: bool,
+}
+
+/// One delegation (A2A task, one per prompt turn) of this machine's sessions (`list_tasks`).
+/// `state`: "submitted" | "working" | "input_required" | "completed" | "canceled" | "rejected" | "failed".
+/// `caller`: who started it: "local", "peer:<machineId>" or "a2a:<callerId>".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aTaskSummary {
+    pub task_id: String,
+    pub session_id: SessionId,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub caller: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<UnixMs>,
+}
+
 /// The hub's editable settings (config.toml + defaults). Secrets are never sent: only whether they are set.
 /// `overridden_by` lists keys whose effective value comes from a CLI flag or env var (e.g. "hub.port" -> "--port").
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1082,6 +1154,9 @@ pub struct HubSettings {
     pub custom_agents: Vec<CustomAgentSetting>,
     #[serde(default)]
     pub overridden_by: BTreeMap<String, String>,
+    /// The localhost A2A server and its callers (A2A phase A2). Boxed: keeps `ServerMsg` small.
+    #[serde(default)]
+    pub a2a: Box<HubSettingsA2a>,
 }
 
 /// `Some(None)` = explicit null (clear), `None` = key absent (unchanged).
@@ -1250,6 +1325,8 @@ pub struct HubSettingsPatch {
     pub relay: Option<HubSettingsRelayPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_agents: Option<Vec<CustomAgentSetting>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a2a: Option<HubSettingsA2aPatch>,
 }
 
 /// Agent hooks the hub can install (same targets as `pawl install-hooks`). copilot-vscode is per repo.
@@ -1409,6 +1486,15 @@ pub enum ClientMsg {
     /// Local only. The hub acks, starts a replacement process with the same arguments, says bye to peers and exits;
     /// running sessions end. Clients reconnect on their own. The running port is in data_dir/runtime.json.
     RestartHub { id: String },
+    /// A2A (phase A2, local only): a new bearer token for the outside A2A caller `caller_id`, returned once
+    /// (`{token}`) and never readable again; the previous token stops working at once.
+    A2aRotateToken { id: String, caller_id: String },
+    /// A2A: this machine's delegations (tasks), newest first (`{tasks: A2aTaskSummary[]}`); `session_id` filters.
+    ListTasks {
+        id: String,
+        #[serde(default)]
+        session_id: Option<SessionId>,
+    },
 }
 
 impl ClientMsg {
@@ -1438,7 +1524,9 @@ impl ClientMsg {
             | ClientMsg::HookStatus { id }
             | ClientMsg::InstallHooks { id, .. }
             | ClientMsg::OpenPanel { id, .. }
-            | ClientMsg::RestartHub { id } => id,
+            | ClientMsg::RestartHub { id }
+            | ClientMsg::A2aRotateToken { id, .. }
+            | ClientMsg::ListTasks { id, .. } => id,
         }
     }
 }

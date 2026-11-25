@@ -364,6 +364,7 @@ fn patches_build_from_typed_sections_too() {
         repos: Some(HubSettingsReposPatch { paths: Some(vec![]) }),
         relay: Some(HubSettingsRelayPatch { url: Some(None), access_key: None }),
         custom_agents: None,
+        a2a: None,
     };
     let (next, changed) = apply_patch(&HubConfig::default(), &p, &reserved()).unwrap();
     assert!(next.offline && !next.peer.accept_intents);

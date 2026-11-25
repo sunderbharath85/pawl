@@ -689,6 +689,55 @@ export interface HubSettings {
   relay: { url: string | null; accessKeySet: boolean };
   customAgents: CustomAgentSetting[];
   overriddenBy: Record<string, string>;
+  /** The localhost A2A server and its callers (A2A phase A2). Always sent by hubs that speak A2A. */
+  a2a?: A2aSettings;
+}
+
+/** Default port of the localhost A2A server (`[a2a] port`; it only ever binds 127.0.0.1). */
+export const A2A_DEFAULT_PORT = 47802;
+
+/**
+ * `[a2a]` (PLAN.md "A2A orchestration", phase A2): Pawl as an A2A agent on 127.0.0.1. `server` = the localhost A2A
+ * server is on (off by default); `running` / `url` / `error` = its live state. Callers are outside A2A clients, each
+ * with its own bearer token (write-only: only `tokenSet`; `a2a_rotate_token` shows a new one once) and its own
+ * `allowApprovals` (default false: it can never answer permission requests; true: allow once or deny, never "always",
+ * never execute / delete / fetch). Turning the server on or allowing a caller's approvals deserves an in-app confirm.
+ */
+export interface A2aSettings {
+  server: boolean;
+  port: number;
+  running: boolean;
+  url: string | null;
+  error: string | null;
+  callers: A2aCallerSetting[];
+}
+
+/** One outside A2A caller (`[[a2a.callers]]`). `id`: [a-z0-9-]{1,40}, unique; audited as `a2a:<id>`. */
+export interface A2aCallerSetting {
+  id: string;
+  name: string;
+  tokenSet: boolean;
+  allowApprovals: boolean;
+}
+
+/** `callers` replaces the whole list; a caller keeps its token while its id stays, a new id starts without one. */
+export interface A2aSettingsPatch {
+  server?: boolean;
+  port?: number;
+  callers?: Array<{ id: string; name: string; allowApprovals?: boolean }>;
+}
+
+/**
+ * One delegation (A2A task, one per prompt turn) of this machine's sessions (`list_tasks`).
+ * `caller`: who started it: "local", "peer:<machineId>" or "a2a:<callerId>".
+ */
+export interface A2aTaskSummary {
+  taskId: string;
+  sessionId: SessionId;
+  state: "submitted" | "working" | "input_required" | "completed" | "canceled" | "rejected" | "failed" | "auth_required" | "unspecified";
+  text?: string;
+  caller: string;
+  updatedAt?: UnixMs;
 }
 
 /**
@@ -707,6 +756,7 @@ export interface HubSettingsPatch {
   repos?: Partial<HubSettings["repos"]>;
   relay?: { url?: string | null; accessKey?: string | null };
   customAgents?: CustomAgentSetting[];
+  a2a?: A2aSettingsPatch;
 }
 
 /** Agent hooks the hub can install (same targets as `pawl install-hooks`). copilot-vscode is per repo. */
@@ -792,7 +842,11 @@ export type ClientMsg =
    * Local only. The hub acks, starts a replacement process with the same arguments, says bye to peers and exits;
    * running sessions end. Clients reconnect on their own. The running port is in data_dir/runtime.json.
    */
-  | { type: "restart_hub"; id: string };
+  | { type: "restart_hub"; id: string }
+  /** A2A (phase A2, local only): a new bearer token for an outside A2A caller, returned once; the old one stops working. */
+  | { type: "a2a_rotate_token"; id: string; callerId: string }
+  /** A2A: this machine's delegations (tasks), newest first; `sessionId` filters. */
+  | { type: "list_tasks"; id: string; sessionId?: SessionId };
 
 export type ClientMsgType = ClientMsg["type"];
 
@@ -824,6 +878,8 @@ export interface AckResults {
   install_hooks: { plan: string; applied: boolean; status: HookStatus };
   open_panel: { delivered: boolean };
   restart_hub: Record<string, never>;
+  a2a_rotate_token: { token: string };
+  list_tasks: { tasks: A2aTaskSummary[] };
 }
 
 // ---------- hub -> client ----------

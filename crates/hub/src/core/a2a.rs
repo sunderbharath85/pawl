@@ -35,7 +35,6 @@ pub enum A2aError {
 
 impl A2aError {
     /// The code in `e`'s chain, if any.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the localhost A2A server (phase A2) maps it"))]
     pub fn find(e: &anyhow::Error) -> Option<A2aError> {
         e.chain().find_map(|c| c.downcast_ref::<A2aError>().cloned())
     }
@@ -45,7 +44,6 @@ impl A2aError {
 /// session a start created, a start's warning).
 #[derive(Debug, Clone)]
 pub struct Delegated {
-    #[cfg_attr(not(test), expect(dead_code, reason = "the localhost A2A server (phase A2) answers with it"))]
     pub response: SendMessageResponse,
     pub session: Option<Session>,
     pub warning: Option<String>,
@@ -224,7 +222,6 @@ impl Hub {
     }
 
     /// A2A `ListTasks` for `caller`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the localhost A2A server (phase A2) serves it"))]
     pub(crate) fn a2a_list(&self, req: &ListTasksRequest, caller: &Caller) -> Result<ListTasksResponse> {
         self.tasks().list(caller, req).map_err(|e| A2aError::InvalidParams(e).into())
     }

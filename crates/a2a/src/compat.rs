@@ -421,12 +421,10 @@ pub fn stream_event_from_v03(v: Value) -> Value {
     }
 }
 
-/// Add the 0.3 card fields to a 1.0 Agent Card (1.0 readers ignore them, 0.3 readers find what they
-/// need): `protocolVersion`, `url` + `preferredTransport` (the first 0.3-capable JSON-RPC interface,
-/// else the first one), `additionalInterfaces`, `supportsAuthenticatedExtendedCard`, OpenAPI-style
-/// `securitySchemes` and `security`.
-pub fn card_to_v03(card: Value) -> Value {
-    let mut c = obj(card);
+/// The legacy 0.3 top-level card fields for a 1.0 card: `protocolVersion`, `url` +
+/// `preferredTransport` (the first JSON-RPC interface, else the first one), `additionalInterfaces`,
+/// `supportsAuthenticatedExtendedCard`.
+fn add_v03_fields(c: &mut Map<String, Value>) {
     let ifaces: Vec<Map<String, Value>> =
         c.get("supportedInterfaces").and_then(Value::as_array).map(|a| a.iter().cloned().map(obj).collect()).unwrap_or_default();
     let main = ifaces
@@ -446,8 +444,15 @@ pub fn card_to_v03(card: Value) -> Value {
     c.insert("additionalInterfaces".into(), Value::Array(extra));
     let ext = c.get("capabilities").and_then(|x| x.get("extendedAgentCard")).and_then(Value::as_bool).unwrap_or(false);
     c.insert("supportsAuthenticatedExtendedCard".into(), json!(ext));
-    // Schemes: 1.0 `{name: {httpAuthSecurityScheme: {scheme}}}` -> OpenAPI `{name: {type: "http", scheme}}`.
-    if let Some(schemes) = c.get("securitySchemes").and_then(Value::as_object).cloned() {
+}
+
+/// A 1.0 Agent Card as a 0.3 reader expects it (the 0.3 extended-card answer): the legacy
+/// top-level fields, and OpenAPI-style `securitySchemes` / `security` in place of the 1.0 tagged
+/// schemes / `securityRequirements`.
+pub fn card_to_v03(card: Value) -> Value {
+    let mut c = obj(card);
+    add_v03_fields(&mut c);
+    if let Some(schemes) = c.remove("securitySchemes").as_ref().and_then(Value::as_object) {
         let mut legacy = Map::new();
         for (name, s) in schemes {
             if let Some(h) = s.get("httpAuthSecurityScheme") {
@@ -459,59 +464,67 @@ pub fn card_to_v03(card: Value) -> Value {
                 if let Some(v) = h.get("bearerFormat") {
                     o.insert("bearerFormat".into(), v.clone());
                 }
-                legacy.insert(name, Value::Object(o));
+                legacy.insert(name.clone(), Value::Object(o));
             } else if let Some(k) = s.get("apiKeySecurityScheme") {
-                legacy.insert(name, json!({ "type": "apiKey", "in": k.get("location").cloned().unwrap_or(json!("header")), "name": k.get("name").cloned().unwrap_or(json!("")) }));
+                legacy.insert(
+                    name.clone(),
+                    json!({ "type": "apiKey", "in": k.get("location").cloned().unwrap_or(json!("header")), "name": k.get("name").cloned().unwrap_or(json!("")) }),
+                );
             }
         }
-        // 1.0 readers would choke on OpenAPI-shaped schemes under the same key, so the 0.3 shape goes
-        // into `security` requirements only when a 0.3 reader asks (see `card_from_v03`); the scheme
-        // table keeps its 1.0 shape and 0.3 readers that need it read `x-a2a-v03-securitySchemes`.
-        c.insert("x-a2a-v03-securitySchemes".into(), Value::Object(legacy));
+        c.insert("securitySchemes".into(), Value::Object(legacy));
     }
-    if let Some(reqs) = c.get("securityRequirements").and_then(Value::as_array).cloned() {
+    if let Some(reqs) = c.remove("securityRequirements").as_ref().and_then(Value::as_array) {
         let security: Vec<Value> = reqs
             .iter()
             .filter_map(|r| r.get("schemes").and_then(Value::as_object))
-            .map(|s| {
-                Value::Object(
-                    s.iter()
-                        .map(|(k, v)| (k.clone(), v.get("list").cloned().unwrap_or(json!([]))))
-                        .collect::<Map<String, Value>>(),
-                )
-            })
+            .map(|s| Value::Object(s.iter().map(|(k, v)| (k.clone(), v.get("list").cloned().unwrap_or(json!([])))).collect()))
             .collect();
         c.insert("security".into(), Value::Array(security));
     }
     Value::Object(c)
 }
 
-/// A card as an outside agent published it (0.3 or 1.0) -> the 1.0 shape. A 1.0 card is returned
-/// as is. A 0.3 card's interfaces are marked `protocolVersion: "0.3"` so the client talks 0.3 to it.
-pub fn card_from_v03(card: Value) -> Value {
-    if card.get("supportedInterfaces").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) {
-        return card;
-    }
+/// A card both 1.0 and 0.3 readers parse (the public card for clients that send no
+/// `A2A-Version`): the 1.0 card plus the legacy 0.3 fields, without the security scheme table, whose
+/// 0.3 and 1.0 shapes conflict under the same key. Authentication is still required; the strict
+/// 1.0 card (asked for with `A2A-Version: 1.0`) and the extended card declare it.
+pub fn card_dual(card: Value) -> Value {
     let mut c = obj(card);
-    let version = "0.3";
-    let mut ifaces = Vec::new();
-    if let Some(url) = c.get("url").and_then(Value::as_str) {
-        let binding = c.get("preferredTransport").and_then(Value::as_str).unwrap_or("JSONRPC");
-        ifaces.push(json!({ "url": url, "protocolBinding": binding, "protocolVersion": version }));
-    }
-    for i in c.get("additionalInterfaces").and_then(Value::as_array).cloned().unwrap_or_default() {
-        let (Some(url), Some(t)) = (i.get("url").and_then(Value::as_str), i.get("transport").and_then(Value::as_str)) else { continue };
-        if !ifaces.iter().any(|x| x["url"] == url && x["protocolBinding"] == t) {
-            ifaces.push(json!({ "url": url, "protocolBinding": t, "protocolVersion": version }));
+    add_v03_fields(&mut c);
+    c.remove("securitySchemes");
+    c.remove("securityRequirements");
+    Value::Object(c)
+}
+
+/// A card as an outside agent published it (0.3, 1.0, or both at once) -> the 1.0 shape. Cards
+/// without `supportedInterfaces` get them from the 0.3 fields, marked `protocolVersion: "0.3"` so
+/// the client talks 0.3 to them. Security schemes in the OpenAPI (0.3) shape become 1.0 tagged
+/// schemes (http and apiKey; kinds Pawl cannot use are dropped); `security` becomes
+/// `securityRequirements` when the card has none.
+pub fn card_from_v03(card: Value) -> Value {
+    let mut c = obj(card);
+    let has_v1 = c.get("supportedInterfaces").and_then(Value::as_array).is_some_and(|a| !a.is_empty());
+    if !has_v1 {
+        let version = "0.3";
+        let mut ifaces = Vec::new();
+        if let Some(url) = c.get("url").and_then(Value::as_str) {
+            let binding = c.get("preferredTransport").and_then(Value::as_str).unwrap_or("JSONRPC");
+            ifaces.push(json!({ "url": url, "protocolBinding": binding, "protocolVersion": version }));
+        }
+        for i in c.get("additionalInterfaces").and_then(Value::as_array).cloned().unwrap_or_default() {
+            let (Some(url), Some(t)) = (i.get("url").and_then(Value::as_str), i.get("transport").and_then(Value::as_str)) else { continue };
+            if !ifaces.iter().any(|x| x["url"] == url && x["protocolBinding"] == t) {
+                ifaces.push(json!({ "url": url, "protocolBinding": t, "protocolVersion": version }));
+            }
+        }
+        c.insert("supportedInterfaces".into(), Value::Array(ifaces));
+        let ext = c.get("supportsAuthenticatedExtendedCard").and_then(Value::as_bool).unwrap_or(false);
+        let caps = c.entry("capabilities").or_insert_with(|| json!({}));
+        if let Some(o) = caps.as_object_mut() {
+            o.entry("extendedAgentCard").or_insert(json!(ext));
         }
     }
-    c.insert("supportedInterfaces".into(), Value::Array(ifaces));
-    let ext = c.get("supportsAuthenticatedExtendedCard").and_then(Value::as_bool).unwrap_or(false);
-    let caps = c.entry("capabilities").or_insert_with(|| json!({}));
-    if let Some(o) = caps.as_object_mut() {
-        o.insert("extendedAgentCard".into(), json!(ext));
-    }
-    // OpenAPI-style schemes -> 1.0 tagged schemes (http and apiKey; others are dropped).
     if let Some(schemes) = c.get("securitySchemes").and_then(Value::as_object).cloned() {
         let mut out = Map::new();
         for (name, s) in schemes {
@@ -525,7 +538,7 @@ pub fn card_from_v03(card: Value) -> Value {
                         json!({ "apiKeySecurityScheme": { "location": s.get("in").cloned().unwrap_or(json!("header")), "name": s.get("name").cloned().unwrap_or(json!("")) } }),
                     );
                 }
-                _ if s.as_object().is_some_and(|o| o.keys().any(|k| k.ends_with("SecurityScheme"))) => {
+                _ if s.as_object().is_some_and(|o| o.len() == 1 && o.keys().all(|k| k.ends_with("SecurityScheme"))) => {
                     out.insert(name, s);
                 }
                 _ => {}
@@ -533,8 +546,21 @@ pub fn card_from_v03(card: Value) -> Value {
         }
         c.insert("securitySchemes".into(), Value::Object(out));
     }
-    if let Some(sec) = c.get("security").and_then(Value::as_array).cloned() {
-        c.insert("securityRequirements".into(), Value::Array(sec));
+    if !c.contains_key("securityRequirements") {
+        if let Some(sec) = c.get("security").and_then(Value::as_array).cloned() {
+            c.insert("securityRequirements".into(), Value::Array(sec));
+        }
+    }
+    // Requirements may only name schemes the card (still) has.
+    let known: Vec<String> = c.get("securitySchemes").and_then(Value::as_object).map(|o| o.keys().cloned().collect()).unwrap_or_default();
+    if let Some(reqs) = c.get_mut("securityRequirements").and_then(Value::as_array_mut) {
+        reqs.retain(|r| {
+            let names: Vec<&String> = match r.get("schemes").and_then(Value::as_object) {
+                Some(s) => s.keys().collect(),
+                None => r.as_object().map(|o| o.keys().collect()).unwrap_or_default(),
+            };
+            names.iter().all(|n| known.contains(n))
+        });
     }
     for k in ["url", "preferredTransport", "additionalInterfaces", "protocolVersion", "supportsAuthenticatedExtendedCard", "security"] {
         c.remove(k);

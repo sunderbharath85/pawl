@@ -2746,6 +2746,7 @@ async fn stored_injected_titles_are_cleaned_at_start() {
 }
 
 mod a2a;
+mod a2a_server;
 mod phones;
 
 // ---------- the "acp" bot provider: a hidden, tool-less agent session ----------

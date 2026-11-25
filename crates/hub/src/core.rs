@@ -2,6 +2,7 @@
 //! hook feeds into sessions + events; applies permission rules; answers every `ClientMsg`.
 
 pub(crate) mod a2a;
+pub(crate) mod a2a_server;
 mod brain_session;
 mod host;
 mod intents;
@@ -367,6 +368,9 @@ struct Inner {
     activity: Mutex<Activity>,
     /// The A2A view of this machine's owned sessions: one task per prompt turn (see `core/a2a.rs`).
     tasks: pawl_a2a::TaskRegistry,
+    /// The localhost A2A server (`core/a2a_server.rs`) and its live state for the settings view.
+    a2a_runtime: tokio::sync::Mutex<a2a_server::A2aRuntime>,
+    a2a_status: Mutex<a2a_server::A2aStatus>,
 }
 
 /// The hub. Cheap to clone; all clones share state.
@@ -595,6 +599,8 @@ impl Hub {
                 seen_cwds: Mutex::new(HashSet::new()),
                 activity: Mutex::new(Activity::default()),
                 tasks,
+                a2a_runtime: tokio::sync::Mutex::new(a2a_server::A2aRuntime::default()),
+                a2a_status: Mutex::new(a2a_server::A2aStatus::default()),
             }),
         };
         hub.set_mirror(mirror_sessions, mirror_pets, mirror_pending);
@@ -635,6 +641,8 @@ impl Hub {
             });
             tokio::spawn(hub.clone().watchdog_loop());
             tokio::spawn(hub.clone().daily_report_loop());
+            // The localhost A2A server, when `[a2a] server = true` (off by default).
+            hub.sync_a2a_server().await;
         }
         Ok(hub)
     }
@@ -871,6 +879,7 @@ impl Hub {
     /// every agent connection.
     pub async fn shutdown(&self) {
         let _ = self.inner.shutdown.send(true);
+        self.stop_a2a_server().await;
         self.flush_pets().await;
         self.inner.peer.shutdown().await;
         self.inner.host.shutdown().await;
@@ -975,6 +984,9 @@ impl Hub {
             ClientMsg::InstallHooks { target, repo, action, .. } => self.install_hooks(target, repo, action, actor).await?,
             ClientMsg::OpenPanel { view, .. } => self.open_panel(view),
             ClientMsg::RestartHub { .. } => self.restart_hub(actor).await?,
+            // A2A: the token is shown once; the tasks are this machine's delegations.
+            ClientMsg::A2aRotateToken { caller_id, .. } => self.a2a_rotate_token(&caller_id, actor).await?,
+            ClientMsg::ListTasks { session_id, .. } => json!({ "tasks": self.list_task_summaries(session_id.as_deref()) }),
         })
     }
 

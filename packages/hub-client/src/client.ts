@@ -2,6 +2,7 @@
 // Works with the browser/webview `WebSocket`, Node's global `WebSocket` (Node 22+) and the `ws` package
 // (pass it as `WebSocketImpl`). No DOM, Node or React imports here.
 import type {
+  A2aTaskSummary,
   AckResults,
   Agent,
   ChatMessage,
@@ -698,6 +699,23 @@ export class HubClient {
    */
   async restartHub(): Promise<void> {
     await this.request<"restart_hub">({ type: "restart_hub" });
+  }
+
+  /**
+   * A2A (local only): a new bearer token for the outside A2A caller `callerId` (Settings > A2A server). The token is
+   * returned once and never readable again; show it to the user to copy, then forget it. The old token stops working.
+   */
+  async rotateA2aToken(callerId: string): Promise<string> {
+    const res = await this.settingsRequest<"a2a_rotate_token">({ type: "a2a_rotate_token", callerId });
+    return res.token;
+  }
+
+  /** A2A: this machine's delegations (tasks, one per prompt turn), newest first; `sessionId` filters to one session. */
+  async listTasks(sessionId?: string): Promise<A2aTaskSummary[]> {
+    const msg: DistributiveOmit<Extract<ClientMsg, { type: "list_tasks" }>, "id"> = { type: "list_tasks" };
+    if (sessionId !== undefined && sessionId !== "") msg.sessionId = sessionId;
+    const res = await this.request<"list_tasks">(msg);
+    return res.tasks ?? [];
   }
 
   /** `request`, with `invalid:<field>: <reason>` turned into a `SettingsError`. */

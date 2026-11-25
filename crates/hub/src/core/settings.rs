@@ -140,9 +140,14 @@ impl Hub {
         cfgset::Overrides::with_env(self.launch().overrides)
     }
 
-    /// The effective settings (never a secret value).
+    /// The effective settings (never a secret value), with the A2A server's live state.
     pub fn settings(&self) -> HubSettings {
-        cfgset::to_settings(&self.cfg(), &self.overrides())
+        let mut s = cfgset::to_settings(&self.cfg(), &self.overrides());
+        let a2a = self.a2a_status();
+        s.a2a.running = a2a.running;
+        s.a2a.url = a2a.url;
+        s.a2a.error = a2a.error;
+        s
     }
 
     /// Settings changed since start that only a restart applies.
@@ -237,7 +242,7 @@ impl Hub {
     }
 
     /// Apply a validated change (caller holds `settings_write`). Returns the keys applied now.
-    async fn commit_settings(
+    pub(super) async fn commit_settings(
         &self,
         cur: &HubConfig,
         next: HubConfig,
@@ -251,6 +256,13 @@ impl Hub {
         if has(cfgset::HUB_PORT) && next.port != self.launch().port {
             if let Err(e) = std::net::TcpListener::bind((pawl_protocol::HUB_HOST, next.port)) {
                 return Err(InvalidSetting { field: cfgset::HUB_PORT.into(), reason: format!("is in use on this machine ({e})") }.into());
+            }
+        }
+        // The A2A server's port must be free when it turns on or moves (its own port is not "in use").
+        let a2a_moves = next.a2a.server && (!cur.a2a.server || next.a2a.port != cur.a2a.port || !self.a2a_status().running);
+        if (has(cfgset::A2A_SERVER) || has(cfgset::A2A_PORT)) && a2a_moves {
+            if let Err(e) = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, next.a2a.port)) {
+                return Err(InvalidSetting { field: cfgset::A2A_PORT.into(), reason: format!("is in use on this machine ({e})") }.into());
             }
         }
         let listener_before = self.inner.peer.listening();
@@ -296,6 +308,10 @@ impl Hub {
     /// Settings the running hub reads at use time need nothing here; the others are rebuilt.
     async fn apply_runtime(&self, next: &HubConfig, changed: &[&'static str]) {
         let has = |k: &str| changed.contains(&k);
+        if cfgset::A2A_KEYS.iter().any(|k| has(k)) {
+            // Start, stop, move, or replace the callers (a removed or rotated token stops at once).
+            self.sync_a2a_server().await;
+        }
         if cfgset::BRAIN_KEYS.iter().any(|k| has(k)) {
             self.rebuild_brain();
             if has(cfgset::BOT_ACP_AGENT) || has(cfgset::BOT_ACP_MODEL) || has(cfgset::BOT_PROVIDER) {

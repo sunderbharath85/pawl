@@ -44,3 +44,5 @@ tracing-appender = "0.2.5"
 
 [dev-dependencies]
 tempfile = "3"
+# Drives the A2A server's router without a socket in tests (already in the tree through axum).
+tower = { version = "0.5", features = ["util"] }

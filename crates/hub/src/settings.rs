@@ -15,12 +15,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use pawl_discovery::CustomAgent;
 use pawl_protocol::{
-    BotProvider, BotStyle, CustomAgentSetting, HubSettings, HubSettingsBot, HubSettingsHub, HubSettingsPatch, HubSettingsPeer, HubSettingsRelay,
-    HubSettingsRepos, HubSettingsWatchdog,
+    A2aCallerPatch, A2aCallerSetting, BotProvider, BotStyle, CustomAgentSetting, HubSettings, HubSettingsA2a, HubSettingsBot, HubSettingsHub,
+    HubSettingsPatch, HubSettingsPeer, HubSettingsRelay, HubSettingsRepos, HubSettingsWatchdog,
 };
 use toml_edit::{DocumentMut, Item, TableLike, Value as TVal};
 
-use crate::config::{parse_peer_listen, HubConfig, CONFIG_TEMPLATE};
+use crate::config::{parse_peer_listen, A2aCaller, HubConfig, CONFIG_TEMPLATE};
 use crate::repos;
 
 // ---------------------------------------------------------------- keys
@@ -57,6 +57,11 @@ pub const REPOS_PATHS: &str = "repos.paths";
 pub const RELAY_URL: &str = "relay.url";
 pub const RELAY_KEY: &str = "relay.accessKey";
 pub const CUSTOM_AGENTS: &str = "customAgents";
+pub const A2A_SERVER: &str = "a2a.server";
+pub const A2A_PORT: &str = "a2a.port";
+pub const A2A_CALLERS: &str = "a2a.callers";
+/// The callers' tokens (changed by `a2a_rotate_token` only; a secret key, never in a patch).
+pub const A2A_TOKENS: &str = "a2a.callerTokens";
 
 /// Every settable key, in the order changes are reported.
 pub const ALL_KEYS: &[&str] = &[
@@ -92,10 +97,17 @@ pub const ALL_KEYS: &[&str] = &[
     RELAY_URL,
     RELAY_KEY,
     CUSTOM_AGENTS,
+    A2A_SERVER,
+    A2A_PORT,
+    A2A_CALLERS,
+    A2A_TOKENS,
 ];
 
 /// Keys holding secrets: reported as changed, never with a value.
-pub const SECRET_KEYS: &[&str] = &[BOT_KEY, BOT_OPENAI_KEY, BOT_GEMINI_KEY, RELAY_KEY];
+pub const SECRET_KEYS: &[&str] = &[BOT_KEY, BOT_OPENAI_KEY, BOT_GEMINI_KEY, RELAY_KEY, A2A_TOKENS];
+
+/// Settings of the localhost A2A server (the server is restarted or its callers replaced when one changes).
+pub const A2A_KEYS: &[&str] = &[A2A_SERVER, A2A_PORT, A2A_CALLERS, A2A_TOKENS];
 
 /// Settings that change which model the pet uses or how (the brain is rebuilt when one changes).
 pub const BRAIN_KEYS: &[&str] = &[
@@ -120,6 +132,8 @@ pub const RESTART_KEYS: &[&str] = &[HUB_PORT];
 // ---------------------------------------------------------------- limits
 
 pub const MAX_CUSTOM_AGENTS: usize = 16;
+pub const MAX_A2A_CALLERS: usize = 32;
+pub const MAX_A2A_CALLER_NAME_CHARS: usize = 60;
 pub const MAX_START_ROOTS: usize = 64;
 pub const MAX_REPO_PATHS: usize = 200;
 pub const MAX_PATH_CHARS: usize = 1024;
@@ -268,6 +282,25 @@ pub fn to_settings(cfg: &HubConfig, overrides: &Overrides) -> HubSettings {
             .map(|a| CustomAgentSetting { id: a.id.clone(), name: a.name.clone(), command: a.command.clone() })
             .collect(),
         overridden_by,
+        // `running` / `url` / `error` are the live server's (the hub fills them in).
+        a2a: Box::new(HubSettingsA2a {
+            server: cfg.a2a.server,
+            port: cfg.a2a.port,
+            running: false,
+            url: None,
+            error: None,
+            callers: cfg
+                .a2a
+                .callers
+                .iter()
+                .map(|c| A2aCallerSetting {
+                    id: c.id.clone(),
+                    name: c.name.clone(),
+                    token_set: nonblank(&c.token).is_some(),
+                    allow_approvals: c.allow_approvals,
+                })
+                .collect(),
+        }),
     }
 }
 
@@ -309,6 +342,13 @@ pub fn changed_keys(a: &HubConfig, b: &HubConfig) -> Vec<&'static str> {
             RELAY_URL => x.relay.url != y.relay.url,
             RELAY_KEY => nonblank(&a.relay.access_key) != nonblank(&b.relay.access_key),
             CUSTOM_AGENTS => x.custom_agents != y.custom_agents,
+            A2A_SERVER => x.a2a.server != y.a2a.server,
+            A2A_PORT => x.a2a.port != y.a2a.port,
+            A2A_CALLERS => x.a2a.callers != y.a2a.callers,
+            A2A_TOKENS => {
+                let tokens = |c: &HubConfig| c.a2a.callers.iter().map(|x| (x.id.clone(), nonblank(&x.token))).collect::<Vec<_>>();
+                tokens(a) != tokens(b)
+            }
             _ => false,
         }
     };
@@ -600,6 +640,42 @@ fn check_custom_agents(list: &[CustomAgentSetting], cur: &[CustomAgent], reserve
     Ok(out)
 }
 
+/// An A2A caller id: `[a-z0-9-]{1,40}` (audited as `a2a:<id>`).
+pub fn valid_a2a_caller_id(id: &str) -> bool {
+    (1..=40).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Characters a caller name may not contain: controls, and invisible or direction-changing ones.
+fn bad_name_char(ch: char) -> bool {
+    ch.is_control() || matches!(ch, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
+}
+
+/// The callers list of a patch. Ids unique and valid, names 1-60 printable characters; a caller
+/// whose id stays keeps its token, a new id starts without one.
+fn check_a2a_callers(list: &[A2aCallerPatch], cur: &[A2aCaller]) -> Result<Vec<A2aCaller>, InvalidSetting> {
+    if list.len() > MAX_A2A_CALLERS {
+        return Err(invalid(A2A_CALLERS, format!("at most {MAX_A2A_CALLERS} callers")));
+    }
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for (i, c) in list.iter().enumerate() {
+        let id = c.id.trim();
+        if !valid_a2a_caller_id(id) {
+            return Err(invalid(format!("{A2A_CALLERS}[{i}].id"), "must be 1-40 characters of a-z, 0-9 and -"));
+        }
+        if !seen.insert(id.to_string()) {
+            return Err(invalid(format!("{A2A_CALLERS}[{i}].id"), "is used twice"));
+        }
+        let name = c.name.trim();
+        if name.is_empty() || name.chars().count() > MAX_A2A_CALLER_NAME_CHARS || name.chars().any(bad_name_char) {
+            return Err(invalid(format!("{A2A_CALLERS}[{i}].name"), format!("must be 1-{MAX_A2A_CALLER_NAME_CHARS} printable characters")));
+        }
+        let token = cur.iter().find(|x| x.id == id).and_then(|x| x.token.clone());
+        out.push(A2aCaller { id: id.to_string(), name: name.to_string(), token, allow_approvals: c.allow_approvals });
+    }
+    Ok(out)
+}
+
 /// The peer listener address: an IP literal with an optional port (default 47801), port
 /// 1024-65535, never the hub's own API port on loopback / every interface.
 fn check_listen(v: &str, hub_port: u16) -> Result<Option<String>, InvalidSetting> {
@@ -756,6 +832,35 @@ pub fn apply_patch(cur: &HubConfig, patch: &HubSettingsPatch, reserved: &[String
     if let Some(list) = &patch.custom_agents {
         next.custom_agents = check_custom_agents(list, &cur.custom_agents, reserved)?;
     }
+    if let Some(a) = &patch.a2a {
+        if let Some(on) = a.server {
+            next.a2a.server = on;
+        }
+        if let Some(p) = a.port {
+            if p < 1024 {
+                return Err(invalid(A2A_PORT, "must be 1024-65535"));
+            }
+            next.a2a.port = p;
+        }
+        if let Some(list) = &a.callers {
+            next.a2a.callers = check_a2a_callers(list, &cur.a2a.callers)?;
+        }
+    }
+    // The A2A server, the API and the peer listener never share a port on loopback.
+    let a2a_touched = patch.a2a.as_ref().is_some_and(|a| a.port.is_some());
+    let hub_touched = patch.hub.as_ref().is_some_and(|h| h.port.is_some());
+    let listen_touched = patch.peer.as_ref().is_some_and(|p| p.listen.is_some());
+    if a2a_touched || hub_touched || listen_touched {
+        let field = if a2a_touched { A2A_PORT } else if hub_touched { HUB_PORT } else { PEER_LISTEN };
+        if next.a2a.port == next.port {
+            return Err(invalid(field, "the A2A server and the hub cannot share a port"));
+        }
+        if let Ok(Some(addr)) = next.peer.listen_addr() {
+            if addr.port() == next.a2a.port && (addr.ip().is_loopback() || addr.ip().is_unspecified()) {
+                return Err(invalid(field, "the A2A server and the peer listener cannot share a port"));
+            }
+        }
+    }
     let known: Vec<&str> = reserved.iter().map(String::as_str).chain(next.custom_agents.iter().map(|a| a.id.as_str())).collect();
     match patch.bot.as_ref().and_then(|b| b.acp_agent.as_deref()) {
         Some(id) if !id.trim().is_empty() => next.brain.acp_agent = Some(check_acp_agent(id)?),
@@ -881,6 +986,41 @@ fn write_custom_agents(doc: &mut DocumentMut, agents: &[CustomAgent]) -> Result<
     Ok(())
 }
 
+/// `[[a2a.callers]]` = `callers`, in order; a table whose id stays keeps its comments and other keys.
+fn write_a2a_callers(doc: &mut DocumentMut, callers: &[A2aCaller]) -> Result<()> {
+    let a2a = section(doc, "a2a")?;
+    let mut old: Vec<toml_edit::Table> = match a2a.get("callers") {
+        Some(Item::ArrayOfTables(a)) => a.iter().cloned().collect(),
+        Some(Item::Value(TVal::Array(a))) => a.iter().filter_map(|v| v.as_inline_table()).map(|t| t.clone().into_table()).collect(),
+        Some(_) => bail!("`a2a.callers` in config.toml is not a list of tables"),
+        None => Vec::new(),
+    };
+    if callers.is_empty() {
+        remove_key(a2a, "callers");
+        return Ok(());
+    }
+    let mut aot = toml_edit::ArrayOfTables::new();
+    for c in callers {
+        let found = old.iter().position(|t| t.get("id").and_then(Item::as_str) == Some(c.id.as_str()));
+        let mut t = match found {
+            Some(i) => old.remove(i),
+            None => toml_edit::Table::new(),
+        };
+        set_value(&mut t, "id", c.id.as_str());
+        set_value(&mut t, "name", c.name.as_str());
+        set_opt(&mut t, "token", nonblank(&c.token).as_deref());
+        set_value(&mut t, "allow_approvals", c.allow_approvals);
+        aot.push(t);
+    }
+    match a2a.get_mut("callers") {
+        Some(item) => *item = Item::ArrayOfTables(aot),
+        None => {
+            a2a.insert("callers", Item::ArrayOfTables(aot));
+        }
+    }
+    Ok(())
+}
+
 /// config.toml text with the `changed` keys of `next` written in place. `old` = the current file
 /// (None = missing: start from the commented template). Everything else (comments, unknown keys,
 /// formatting) stays as it was. The result is parsed back and must give `next` for every key.
@@ -933,6 +1073,9 @@ pub fn edit_config(old: Option<&str>, next: &HubConfig, changed: &[&str]) -> Res
             RELAY_URL => set_opt(section(&mut doc, "relay")?, "url", next.relay.url.as_deref()),
             RELAY_KEY => set_opt(section(&mut doc, "relay")?, "access_key", next.relay.access_key.as_deref()),
             CUSTOM_AGENTS => write_custom_agents(&mut doc, &next.custom_agents)?,
+            A2A_SERVER => set_value(section(&mut doc, "a2a")?, "server", next.a2a.server),
+            A2A_PORT => set_value(section(&mut doc, "a2a")?, "port", i64::from(next.a2a.port)),
+            A2A_CALLERS | A2A_TOKENS => write_a2a_callers(&mut doc, &next.a2a.callers)?,
             other => bail!("unknown setting {other:?}"),
         }
     }
@@ -1023,8 +1166,14 @@ pub fn masked_lines(s: &HubSettings, restart_required: &[String]) -> Vec<String>
         "[relay]".to_string(),
         format!("url                       {}", opt(&s.relay.url)),
         format!("access key                {}", set(s.relay.access_key_set)),
-        "[custom agents]".to_string(),
+        "[a2a]".to_string(),
+        format!("server                    {}{}", s.a2a.server, if s.a2a.running { "   [running]" } else { "" }),
+        format!("port                      {}", s.a2a.port),
     ];
+    for c in &s.a2a.callers {
+        v.push(format!("caller {:<18} {} (token {}, approvals {})", c.id, c.name, set(c.token_set), if c.allow_approvals { "allowed" } else { "never" }));
+    }
+    v.push("[custom agents]".to_string());
     if s.custom_agents.is_empty() {
         v.push("(none)".into());
     }

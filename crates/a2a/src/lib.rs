@@ -16,13 +16,20 @@
 //! The SDK crates are pre-1.0 and pinned exactly; the rest of Pawl uses the types re-exported here
 //! ([`spec`]) and the functions of this crate, so an SDK upgrade stays local.
 
+pub mod card;
+pub mod compat;
 pub mod ext;
 pub mod mapping;
+pub mod server;
 pub mod structured_input;
 pub mod tasks;
 
 /// The A2A v1 wire types (crate `a2a-lf`, pinned).
 pub use a2a as spec;
+/// The SDK's server side (crate `a2a-server-lf`, pinned): `RequestHandler`, `ServiceParams`.
+pub use a2a_server as server_sdk;
+/// For implementing [`server_sdk::RequestHandler`].
+pub use async_trait::async_trait;
 
 pub use ext::{DelegateParams, DELEGATE_EXT, STRUCTURED_INPUT_EXT};
 pub use tasks::{Caller, TaskRegistry, TaskUpdate};
