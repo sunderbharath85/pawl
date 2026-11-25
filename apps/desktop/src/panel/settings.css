@@ -667,3 +667,89 @@
     color: var(--sky);
   }
 }
+
+/* Settings > Voice */
+.voice-intro {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
+}
+.voice-intro ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.voice-download,
+.voice-meter-row,
+.voice-mic-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.voice-mic-row > .input {
+  flex: 1;
+  min-width: 180px;
+}
+.voice-progress,
+.voice-meter {
+  flex: 1;
+  min-width: 160px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+.voice-progress > span,
+.voice-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.1s linear;
+}
+.voice-meter > span {
+  background: var(--sage);
+}
+.voice-mic-state {
+  align-self: start;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.voice-mic-state.is-live {
+  background: color-mix(in srgb, var(--berry) 16%, transparent);
+  color: var(--berry);
+}
+.voice-mic-state.is-muted {
+  background: var(--paper);
+  color: var(--ink-soft);
+}
+.voice-hotkey {
+  min-width: 180px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.voice-hotkey.is-recording {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.voice-read {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) minmax(160px, 1fr);
+  gap: 10px 16px;
+  align-items: end;
+}
+.voice-read .form-actions {
+  grid-column: 1 / -1;
+}
+.voice-credit {
+  font-size: 11.5px;
+}

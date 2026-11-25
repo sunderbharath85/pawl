@@ -75,7 +75,9 @@ export const native = {
   /** Start moving the pet with the mouse (call while the button is down). */
   petStartDrag: () => invoke<void>("pet_start_drag"),
   /** The pet's right-click menu: its name, Open hub, Rename… (enabled by `canRename`), Reset position, Settings, Quit. */
-  petContextMenu: (name: string, canRename: boolean) => invoke<void>("pet_context_menu", { name, canRename }),
+  petContextMenu: (name: string, canRename: boolean, voiceMuted?: boolean) =>
+    // voiceMuted: voice is on (the menu shows "Mute microphone" / "Unmute microphone"); omitted while voice is off.
+    invoke<void>("pet_context_menu", voiceMuted === undefined ? { name, canRename } : { name, canRename, voiceMuted }),
   /** Put the pet back at its default spot (bottom-right of the main monitor). */
   resetPetPosition: () => invoke<void>("reset_pet_position"),
   setPetsPaused: (paused: boolean) => invoke<void>("set_pets_paused", { paused }),

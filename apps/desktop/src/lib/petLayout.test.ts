@@ -156,5 +156,37 @@ describe("click vs drag", () => {
 
   test("moves without a press do nothing", () => {
     expect(new PressTracker().move(100, 100)).toBe(false);
+    expect(new PressTracker().hold(10_000)).toBe(false);
+    expect(new PressTracker().up()).toBe(false);
+  });
+
+  test("press and hold 400 ms without moving is push-to-talk: once; the release stops it; no click after it", () => {
+    const p = new PressTracker();
+    p.down(100, 100, 1000);
+    expect(p.hold(1399)).toBe(false);
+    expect(p.move(102, 101)).toBe(false);
+    expect(p.hold(1400)).toBe(true);
+    expect(p.hold(1500)).toBe(false);
+    // Moving while listening does not start a drag.
+    expect(p.move(140, 100)).toBe(false);
+    expect(p.up()).toBe(true);
+    expect(p.click()).toBe(false);
+    // The next press is a fresh click.
+    p.down(10, 10, 5000);
+    expect(p.up()).toBe(false);
+    expect(p.click()).toBe(true);
+  });
+
+  test("a drag before 400 ms stays a drag (no hold after it); a quick click stays a click", () => {
+    const p = new PressTracker();
+    p.down(0, 0, 0);
+    expect(p.move(6, 0)).toBe(true);
+    expect(p.hold(1000)).toBe(false);
+    expect(p.up()).toBe(false);
+    expect(p.click()).toBe(false);
+    p.down(0, 0, 2000);
+    expect(p.hold(2100)).toBe(false);
+    expect(p.up()).toBe(false);
+    expect(p.click()).toBe(true);
   });
 });

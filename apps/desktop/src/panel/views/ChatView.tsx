@@ -8,6 +8,7 @@ import * as I from "../icons";
 import { PetAvatar } from "../PetAvatar";
 import { ChatProposals } from "./ChatProposals";
 import { PetReplyText } from "../../lib/ReactionIcon";
+import { useVoiceSentIds } from "../../lib/voiceShared";
 import { useSettings } from "../../lib/settings";
 import { useDefaultPetName } from "../../lib/usePetName";
 
@@ -22,6 +23,7 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const voiceIds = useVoiceSentIds();
   const realPet = pet && state.pets[pet.id] ? pet : undefined;
   // Replies without a pet id are the default pet's (it orchestrates every agent): its own name, from the hub.
   const [settings] = useSettings();
@@ -90,7 +92,10 @@ export function ChatView({ initialPetId }: { initialPetId?: string }) {
           const fromSpecies = m.petId ? (from?.species ?? "dog") : settings.defaultPetSpecies;
           return m.role === "user" ? (
             <div key={m.id} className="msg msg-user">
-              <div className="msg-bubble">{m.text}</div>
+              <div className="msg-bubble">
+                {voiceIds.has(m.id) ? <span className="msg-via">You (voice): </span> : null}
+                {m.text}
+              </div>
               <time>{clockTime(m.ts)}</time>
             </div>
           ) : (

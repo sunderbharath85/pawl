@@ -2347,3 +2347,8 @@ input[type="range"] {
     color: var(--sage);
   }
 }
+
+/* A chat message that was spoken (Settings > Voice): "You (voice): …". */
+.msg-via {
+  font-weight: 800;
+}

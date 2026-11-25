@@ -34,6 +34,9 @@ export interface DesktopSettings {
   setupOffered: boolean;
   /** The first-run setup was finished (not just skipped). */
   setupDone: boolean;
+  /** "Read replies aloud": the system voice (its voiceURI; "" = the system default) and the speaking rate (0.5-2). */
+  speechVoice: string;
+  speechRate: number;
 }
 
 const KEY = "pawl.desktop.settings.v1";
@@ -54,6 +57,8 @@ export const DEFAULT_SETTINGS: DesktopSettings = {
   lastAgentId: "",
   setupOffered: false,
   setupDone: false,
+  speechVoice: "",
+  speechRate: 1,
 };
 
 /** Stored settings merged over the defaults; keys that are missing (older versions) or malformed get the default. */
@@ -74,6 +79,8 @@ export function normalizeSettings(stored: Partial<DesktopSettings> | null | unde
   if (!Object.prototype.hasOwnProperty.call(SPECIES_META, s.defaultPetSpecies)) s.defaultPetSpecies = DEFAULT_SETTINGS.defaultPetSpecies;
   if (typeof s.petSize !== "number" || !Number.isFinite(s.petSize)) s.petSize = DEFAULT_SETTINGS.petSize;
   s.petSize = Math.min(168, Math.max(72, s.petSize));
+  if (!Number.isFinite(s.speechRate)) s.speechRate = DEFAULT_SETTINGS.speechRate;
+  s.speechRate = Math.min(2, Math.max(0.5, s.speechRate));
   return s;
 }
 

@@ -104,6 +104,37 @@ body.pet-body,
   text-align: center;
   box-shadow: var(--shadow-s);
 }
+/* Voice: the mic marker (static). On the pet: bottom-left, above the name tag; in the bubble: after the name. */
+.mic-marker {
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  border: 2px solid var(--card);
+  box-shadow: var(--shadow-s);
+}
+.mic-marker.is-live {
+  background: var(--berry);
+  color: var(--on-accent);
+}
+.mic-marker.is-muted {
+  background: var(--paper);
+  color: var(--ink-soft);
+}
+.mic-marker.on-pet {
+  position: absolute;
+  bottom: 24px;
+  left: 4px;
+  width: 22px;
+  height: 22px;
+}
+.mic-marker.on-head {
+  width: 20px;
+  height: 20px;
+  margin-left: 6px;
+  vertical-align: -3px;
+  border-width: 1.5px;
+}
+
 .pet-more {
   position: absolute;
   appearance: none;
@@ -393,6 +424,91 @@ body.pet-body,
 .pb-chip:disabled {
   opacity: 0.55;
   cursor: default;
+}
+
+/* Voice: "Listening…" with the level, then "Transcribing…"; the composer's mic button. */
+.pb-voice {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 8px;
+  padding: 9px 10px;
+  border-radius: 12px;
+  border: 1.5px solid var(--berry);
+  background: color-mix(in srgb, var(--berry) 10%, var(--card));
+  color: var(--ink);
+}
+.pb-voice.is-transcribing {
+  border-color: var(--line-strong);
+  background: var(--paper);
+}
+.pb-voice-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--berry);
+  color: var(--on-accent);
+}
+.pb-voice.is-transcribing .pb-voice-icon {
+  background: var(--ink-soft);
+}
+.pb-voice-text {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  font-size: 13px;
+}
+.pb-voice-level {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+.pb-voice-level > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--berry);
+}
+.pb-voice-hint {
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.pb-voice-actions {
+  display: flex;
+  gap: 5px;
+}
+.pb-mic {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-strong);
+  background: var(--card);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.pb-mic:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.pb-mic.is-on {
+  border-color: var(--berry);
+  background: var(--berry);
+  color: var(--on-accent);
+}
+.pb-mic:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.pb-msg-via {
+  font-weight: 800;
 }
 
 .pb-composer {

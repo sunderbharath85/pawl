@@ -23,6 +23,9 @@ import { agentName, clockTime, errorText, sessionTitle } from "../lib/format";
 import { draftFor, DEFAULT_TARGET, exampleChips, isNotSureReply, type Draft } from "../lib/bubble";
 import { PetReplyText } from "../lib/ReactionIcon";
 import type { RenameResult } from "../lib/usePetName";
+import type { ListenPhase, MicMarker as Marker } from "../lib/voice";
+import { useVoiceSentIds } from "../lib/voiceShared";
+import { ListeningPanel, MicButton, MicMarker } from "./VoiceBits";
 import { BUBBLE_W, type BubblePlace } from "../lib/petLayout";
 import { repoName, type DefaultPetState, type SessionPet } from "../lib/petScreen";
 import { answerErrorText } from "../lib/where";
@@ -203,9 +206,11 @@ interface ComposerProps {
   disabledReason: string | null;
   autoFocus: boolean;
   onSend(text: string): Promise<unknown>;
+  /** Another control before Send (the default pet's mic button). */
+  extra?: ReactNode;
 }
 
-function Composer({ target, placeholder, disabledReason, autoFocus, onSend }: ComposerProps) {
+function Composer({ target, placeholder, disabledReason, autoFocus, onSend, extra }: ComposerProps) {
   const [draft, setDraft] = useState<Draft>({ target, text: "" });
   const text = draftFor(draft, target);
   const setText = (t: string) => setDraft({ target, text: t });
@@ -246,6 +251,7 @@ function Composer({ target, placeholder, disabledReason, autoFocus, onSend }: Co
           }
         }}
       />
+      {extra}
       <button type="submit" className="pill pill-primary" disabled={!text.trim() || sending || !!disabledReason}>
         {sending ? "…" : "Send"}
       </button>
@@ -278,7 +284,22 @@ export interface DefaultBubbleProps {
   renaming?: boolean;
   onRename?(raw: string): Promise<RenameResult>;
   onRenameDone?(): void;
+  /** Voice (Settings > Voice): the mic marker, the listening panel and the mic button. */
+  voice?: BubbleVoice;
   onClose(): void;
+}
+
+export interface BubbleVoice {
+  marker: Marker;
+  phase: ListenPhase;
+  level: number;
+  /** Voice is on (the mic button shows). */
+  enabled: boolean;
+  /** Why talking is unavailable right now (null: it works). */
+  unavailable: string | null;
+  /** The mic button: start talking, or stop and send. */
+  onMic(): void;
+  onCancel(): void;
 }
 
 /** The default pet's rename field (from "Rename…" in its menu): Enter saves through the hub, Esc cancels. */
@@ -349,7 +370,8 @@ export function RenameField({ name, onRename, onDone }: { name: string; onRename
   );
 }
 
-export function DefaultBubble({ env, place, windowHeight, name, main, pending, setupDone, focusInput, note, renaming, onRename, onRenameDone, onClose }: DefaultBubbleProps) {
+export function DefaultBubble({ env, place, windowHeight, name, main, pending, setupDone, focusInput, note, renaming, onRename, onRenameDone, voice, onClose }: DefaultBubbleProps) {
+  const voiceIds = useVoiceSentIds();
   const { client, state, now, connected } = env;
   const chat = useMemo(() => state.chat.filter((m) => !m.petId).slice(-CHAT_SHOWN), [state.chat]);
   const last = chat[chat.length - 1];
@@ -392,7 +414,12 @@ export function DefaultBubble({ env, place, windowHeight, name, main, pending, s
       place={place}
       windowHeight={windowHeight}
       label={`${name}, your default pet`}
-      title={name}
+      title={
+        <>
+          {name}
+          {voice && <MicMarker marker={voice.marker} where="head" />}
+        </>
+      }
       sub={main.line}
       note={note}
       onClose={onClose}
@@ -401,11 +428,15 @@ export function DefaultBubble({ env, place, windowHeight, name, main, pending, s
           target={DEFAULT_TARGET}
           placeholder={`Tell ${name} what to do, or ask what's going on…`}
           disabledReason={connected ? null : "The hub is not connected."}
-          autoFocus={focusInput && pending.length === 0 && !renaming}
+          autoFocus={focusInput && pending.length === 0 && !renaming && !voice?.phase}
           onSend={send}
+          extra={
+            voice?.enabled ? <MicButton listening={voice.phase === "listening"} disabledReason={connected ? voice.unavailable : "The hub is not connected."} onClick={voice.onMic} /> : null
+          }
         />
       }
     >
+      {voice?.phase ? <ListeningPanel phase={voice.phase} level={voice.level} onStop={voice.onMic} onCancel={voice.onCancel} /> : null}
       {renaming && onRename && onRenameDone ? <RenameField name={name} onRename={onRename} onDone={onRenameDone} /> : null}
       {pending.map((req) => (
         <ApprovalCard key={req.requestId} req={req} env={env} />
@@ -423,7 +454,10 @@ export function DefaultBubble({ env, place, windowHeight, name, main, pending, s
           {chat.map((m) =>
             m.role === "user" ? (
               <div key={m.id} className="pb-msg is-user">
-                <div className="pb-msg-text">{m.text}</div>
+                <div className="pb-msg-text">
+                  {voiceIds.has(m.id) ? <span className="pb-msg-via">You (voice): </span> : null}
+                  {m.text}
+                </div>
               </div>
             ) : (
               <div key={m.id} className="pb-msg is-pet">

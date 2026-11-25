@@ -5,8 +5,13 @@ import "./panel.css";
 import "./settings.css";
 import "./ai.css";
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <PanelApp />
-  </StrictMode>,
+// `vite dev` in a browser tab: ?voice=mock / ?voice=ready installs a stand-in voice engine (never in a build).
+const devVoice = import.meta.env.DEV ? import("../lib/voiceMock").then((m) => m.installVoiceMockFromUrl()) : Promise.resolve();
+
+void devVoice.finally(() =>
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      <PanelApp />
+    </StrictMode>,
+  ),
 );

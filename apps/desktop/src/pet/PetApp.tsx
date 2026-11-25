@@ -12,7 +12,7 @@ import { ErrorBoundary } from "../lib/ErrorBoundary";
 import { errorText } from "../lib/format";
 import { isTauri, native, onNative } from "../lib/native";
 import { attachNotifications } from "../lib/notifications";
-import { layoutPetWindow, petFrame, placeBubble, PressTracker, type PetSpace, type Rect } from "../lib/petLayout";
+import { HOLD_MS, layoutPetWindow, petFrame, placeBubble, PressTracker, type PetSpace, type Rect } from "../lib/petLayout";
 import { autoOpenBubble, clickBubble, DEFAULT_TARGET as DEFAULT, setupLooksDone, type OpenBubble } from "../lib/bubble";
 import { chatPhase, petPose, sessionPhase } from "../lib/petMotion";
 import { activeSessionPets, defaultPetState, newRequestIds, type SessionPet } from "../lib/petScreen";
@@ -20,7 +20,10 @@ import { usePetViews } from "../lib/pets";
 import { useSettings } from "../lib/settings";
 import { useSprites } from "../lib/sprites";
 import { useConnection } from "../lib/useConnection";
-import { renameDefaultPet, useDefaultPetName } from "../lib/usePetName";
+import { hubPetName, renameDefaultPet, useDefaultPetName } from "../lib/usePetName";
+import type { MicMarker as MicMark } from "../lib/voice";
+import { useVoiceTalk } from "./useVoiceTalk";
+import { MicMarker } from "./VoiceBits";
 import { useNow } from "../lib/useNow";
 import { notifiesHere } from "../lib/where";
 import { DefaultBubble, SayBubble, SessionBubble, SleepyBubble, type BubbleEnv } from "./Bubble";
@@ -180,7 +183,10 @@ export function PetApp() {
   // Esc or clicking outside (the window loses focus) closes the bubble.
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(null);
+      if (e.key !== "Escape") return;
+      // While talking, Esc drops what was said (nothing is sent); otherwise it closes the bubble.
+      if (voiceNow.current.phase === "listening") voiceNow.current.cancel();
+      else setOpen(null);
     };
     const onBlur = () => setOpen(null);
     // No webview context menu here: right-click is the pet's own menu.
@@ -204,23 +210,66 @@ export function PetApp() {
     [client, state, now, connected, say, dismiss, chatSent, promptSent],
   );
 
+  // Voice (Settings > Voice): wake word, push-to-talk, transcripts to the chat, replies read aloud.
+  const voice = useVoiceTalk({
+    client,
+    state,
+    now,
+    hubName: hubPetName(state),
+    bubbleOpen: open?.target === DEFAULT,
+    openBubble: () => setOpen((o) => (o?.target === DEFAULT ? o : { target: DEFAULT, by: "auto" })),
+    say,
+    chatSent,
+    speech: { voiceURI: settings.speechVoice, rate: settings.speechRate },
+  });
+  const voiceNow = useRef(voice);
+  voiceNow.current = voice;
+
   const toggle = useCallback((target: string) => setOpen((o) => clickBubble(o, target)), []);
+  const menuMuted = voice.menuMuted;
   const menu = useCallback(() => {
-    native.petContextMenu(name, canRename).catch((err) => setNote(errorText(err)));
-  }, [name, canRename]);
+    native.petContextMenu(name, canRename, menuMuted).catch((err) => setNote(errorText(err)));
+  }, [name, canRename, menuMuted]);
   const rename = useCallback((raw: string) => renameDefaultPet(client, state, raw), [client, state]);
 
+  // Press: a click toggles the bubble, moving 4 px drags the pet, and (voice on) holding the default pet still for
+  // 400 ms talks until the release.
   const press = useRef(new PressTracker());
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const holding = useRef(false);
+  const endHold = useCallback(() => {
+    if (holdTimer.current) clearTimeout(holdTimer.current);
+    holdTimer.current = null;
+    if (!holding.current) return;
+    holding.current = false;
+    voiceNow.current.stop();
+  }, []);
   const petHandlers = (target: string): PetHandlers => ({
     onPointerDown: (e: PointerEvent<HTMLDivElement>) => {
       if (e.button !== 0) return;
-      press.current.down(e.screenX, e.screenY);
+      press.current.down(e.screenX, e.screenY, Date.now());
+      if (target !== DEFAULT || !voiceNow.current.ready) return;
+      holdTimer.current = setTimeout(() => {
+        holdTimer.current = null;
+        if (!press.current.hold(Date.now())) return;
+        holding.current = true;
+        voiceNow.current.start();
+        // The release may happen off the pet.
+        window.addEventListener("pointerup", endHold, { once: true });
+      }, HOLD_MS);
     },
     onPointerMove: (e: PointerEvent<HTMLDivElement>) => {
       if ((e.buttons & 1) === 0) return;
-      if (press.current.move(e.screenX, e.screenY)) native.petStartDrag().catch((err) => console.warn("[desktop] drag failed", err));
+      if (press.current.move(e.screenX, e.screenY)) {
+        if (holdTimer.current) clearTimeout(holdTimer.current);
+        holdTimer.current = null;
+        native.petStartDrag().catch((err) => console.warn("[desktop] drag failed", err));
+      }
     },
-    onPointerUp: () => press.current.up(),
+    onPointerUp: () => {
+      press.current.up();
+      endHold();
+    },
     onClick: (e: MouseEvent<HTMLDivElement>) => {
       // A drag is not a click; the second click of a double-click does nothing (double-click opens nothing).
       if (!press.current.click() || e.detail > 1) return;
@@ -248,7 +297,8 @@ export function PetApp() {
     mode: settings.petAnimation,
     reducedMotion,
     agentActivity: connected ? main.activity : sleepyActivity(meta.phase),
-    phase: chatPhase(defaultChat, sentChat, now),
+    // Talking to it counts as chatting: it thinks while it listens and transcribes, then still again.
+    phase: voice.phase ? "waiting" : chatPhase(defaultChat, sentChat, now),
   });
   const mainActivity = mainPose.activity;
   const needsYou = connected && main.mood === "needs_you";
@@ -290,6 +340,15 @@ export function PetApp() {
         renaming={renaming}
         onRename={rename}
         onRenameDone={() => setRenaming(false)}
+        voice={{
+          marker: voice.marker,
+          phase: voice.phase,
+          level: voice.level,
+          enabled: voice.enabled,
+          unavailable: voice.unavailable,
+          onMic: () => (voice.phase === "listening" ? voice.stop() : voice.start()),
+          onCancel: voice.cancel,
+        }}
         onClose={() => setOpen(null)}
       />
     );
@@ -312,6 +371,7 @@ export function PetApp() {
           still={!mainPose.animate}
           pressed={open?.target === DEFAULT}
           handlers={petHandlers(DEFAULT)}
+          mic={voice.marker}
         >
           <PetSprite species={settings.defaultPetSpecies} activity={mainActivity} size={layout.main.w} facing={facing} sprites={sprites} title={mainLabel} />
         </PetBox>
@@ -375,6 +435,8 @@ interface PetBoxProps {
   badge: number;
   /** A small static "!" (it needs you, with no count to show). */
   mark?: boolean;
+  /** Voice: a static mic marker while the mic is live, a crossed one while muted. */
+  mic?: MicMark;
   /** Drawn without any animation. */
   still?: boolean;
   pressed: boolean;
@@ -383,7 +445,7 @@ interface PetBoxProps {
   children: ReactNode;
 }
 
-function PetBox({ rect, label, name, badge, mark, still, pressed, session, handlers, children }: PetBoxProps) {
+function PetBox({ rect, label, name, badge, mark, mic, still, pressed, session, handlers, children }: PetBoxProps) {
   return (
     <div
       className={`pet-box${session ? " is-session" : ""}${still ? " is-still" : ""}`}
@@ -404,6 +466,7 @@ function PetBox({ rect, label, name, badge, mark, still, pressed, session, handl
           {badge}
         </span>
       )}
+      <MicMarker marker={mic ?? null} where="pet" />
       {mark && (
         <span className="pet-mark" aria-label="needs you">
           !

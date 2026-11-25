@@ -989,3 +989,72 @@ tweetnacl. Nothing else without asking t13.
   intro (relay `not_allowed`); the phone retries hello with backoff (1 s, 2 s, 5 s, then every 30 s).
 - **Notifications:** intro accepted / conflict / ignored use `ServerMsg notification` (HubNotification) plus a `devices`
   broadcast; text like "Mac mini added iPhone".
+
+## v0.2 Voice (wake word + speech to text), contract between sde-voice and fe-settings
+
+Everything runs in the desktop app (apps/desktop), never in the hub. Audio stays in memory (a ring buffer of about 2 s);
+nothing is recorded to disk. Models are never bundled (not in the repo, the installer or tests); each user downloads
+them from Settings > Voice on first enable from the k2-fsa GitHub releases, verified against
+pinned SHA-256 hashes, and stored under `<app data dir>/voice-models/`. Voice is off by default.
+
+Engine (sde-voice, `apps/desktop/src-tauri/src/voice/`): `sherpa-onnx` 2.0.x (static) for keyword spotting, Silero VAD
+and offline ASR; `kitoken` turns the pet's name into model tokens at runtime; `cpal` captures the microphone; mono,
+16 kHz. Pipeline: the keyword spotter runs while wake word is on; a hit (or push-to-talk) starts an utterance with
+about 1 s of audio from just before; VAD ends it on silence (or after 15 s); the offline recognizer returns the text.
+
+Models: wake word `kws-zipformer-gigaspeech-3.3M-2024-01-01` (int8 files only), VAD `silero_vad.onnx`, ASR "fast" =
+Moonshine tiny en quantized (default, about 30 MB, MIT), ASR "accurate" = Parakeet TDT 110M int8 (about 108 MB,
+CC-BY-4.0, attribution in the About text).
+
+Tauri commands (camelCase JSON):
+- `voice_status() -> VoiceStatus`
+- `voice_configure(config: VoiceConfig) -> VoiceStatus` (persisted by Rust in `<app config dir>/voice.json`)
+- `voice_download(models: "default" | "accurate") -> ()` (progress via events; idempotent)
+- `voice_cancel_download() -> ()` (stops a running download; partial files are removed)
+- `voice_delete_models(models: "default" | "accurate" | "all") -> VoiceStatus`
+- `voice_listen(action: "start" | "stop" | "cancel") -> ()` (push-to-talk from the pet, the bubble's mic button, or
+  the hotkey; "stop" ends the utterance and transcribes, "cancel" drops it)
+- `voice_mic_test(on: bool) -> ()` (level events while on; for the Settings meter)
+
+```ts
+type VoiceState = "off" | "missing_models" | "downloading" | "loading" | "idle" | "wake_listening" | "hearing"
+  | "transcribing" | "muted" | "error";
+interface VoiceConfig {
+  enabled: boolean;            // master switch (off by default)
+  wakeWord: boolean;           // listen for the pet's name
+  keyword: string;             // the pet's name (from hub bot.petName); updated on rename
+  spokenAs: string | null;     // optional "say it like" spelling for odd names
+  sensitivity: number;         // 0..1 -> keyword threshold/boost
+  micId: string | null;        // null = system default
+  asrModel: "fast" | "accurate";
+  hotkey: string | null;       // push-to-talk, e.g. "Ctrl+Alt+Space"; null = none
+  muted: boolean;              // tray / right-click "Mute microphone"
+  readReplies: boolean;        // speak pet replies (webview speechSynthesis; UI-side only)
+}
+interface VoiceStatus {
+  state: VoiceState; config: VoiceConfig; error: string | null;
+  models: { default: { installed: boolean; bytes: number }; accurate: { installed: boolean; bytes: number } };
+  mics: { id: string; name: string; isDefault: boolean }[];
+}
+```
+
+Events (`voice` channel), throttled:
+- `{ type: "state", state }`
+- `{ type: "wake", keyword, score }` (the pet perks up and its bubble opens in listening mode)
+- `{ type: "level", rms }` (only while hearing or during a mic test; at most 20/s)
+- `{ type: "transcript", id, text }` (final; `id` is unique per utterance; only the PET window sends it to the default
+  pet's chat, once per id, as a normal message shown as "You (voice): …")
+- `{ type: "download", models, received, total }`, `{ type: "error", message }`
+
+Glue (orchestrator decisions 2026-11-24): events go to both windows. The push-to-talk hotkey is a global shortcut that
+Rust registers from `config.hotkey` (press = start, release = stop); any trigger that starts an utterance moves the state
+to `hearing`, and the pet opens its listening bubble on `wake` or on `hearing`. `voice_mic_test` does not change the
+state. The pet's right-click menu (`pet_context_menu`) takes an optional `voiceMuted: bool` (absent = no voice item) and
+shows "Mute microphone" / "Unmute microphone" with id `pet_voice_mute`, which toggles `config.muted` in Rust and emits
+the usual state event; the tray gets the same item.
+
+Rules: the mic is never opened while `enabled` is false or `muted` is true, and is released when the screen locks (best
+effort per OS). The UI always shows when the mic is live (listening icon on the pet and in the tray tooltip). A
+transcript is an ordinary chat message: it goes through the same parser and proposals, and can never approve anything
+by itself (voice approvals are the next step, with a spoken code for risky actions). macOS: `NSMicrophoneUsageDescription`
+and the `com.apple.security.device.audio-input` entitlement.

@@ -55,6 +55,14 @@ describe("every stored field is coerced to its type", () => {
     }
   });
 
+  test("read-aloud voice and speed: system default and 1x; the speed stays between 0.5x and 2x", () => {
+    expect(normalizeSettings({}).speechVoice).toBe("");
+    expect(normalizeSettings({}).speechRate).toBe(1);
+    expect(normalizeSettings({ speechRate: 9 }).speechRate).toBe(2);
+    expect(normalizeSettings({ speechRate: 0.1 }).speechRate).toBe(0.5);
+    expect(normalizeSettings({ speechRate: Number.NaN }).speechRate).toBe(1);
+  });
+
   test("garbage instead of an object gives the defaults", () => {
     expect(normalizeSettings("nope" as unknown as Partial<DesktopSettings>)).toEqual(DEFAULT_SETTINGS);
     expect(normalizeSettings([] as unknown as Partial<DesktopSettings>)).toEqual(DEFAULT_SETTINGS);

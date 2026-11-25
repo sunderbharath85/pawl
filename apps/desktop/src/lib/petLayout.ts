@@ -194,47 +194,68 @@ export function petFrame(layout: PetLayout): PetFrame {
   return { width: layout.width, height: layout.height, petX: layout.main.x, petY: layout.main.y, petW: layout.main.w, petH: layout.main.h };
 }
 
-// ---------------------------------------------------------------- press: click vs drag
+// ---------------------------------------------------------------- press: click vs drag vs hold
 
 /** A press that moves farther than this (px) drags the pet; less is a click. */
 export const DRAG_THRESHOLD_PX = 4;
+/** A press held this long without moving is push-to-talk (voice on): listening starts, and the release stops it. */
+export const HOLD_MS = 400;
 
 export function pastDragThreshold(dx: number, dy: number, threshold = DRAG_THRESHOLD_PX): boolean {
   return Math.hypot(dx, dy) >= threshold;
 }
 
 /**
- * Tells a click from a drag for one pointer: `down`, then `move` returns true once (start the native drag) when the
- * pointer moved past the threshold; `click` says whether the click that follows counts (not after a drag).
+ * Tells a click from a drag from a hold for one pointer: `down`, then `move` returns true once (start the native
+ * drag) when the pointer moved past the threshold; `hold` returns true once when the press lasted `HOLD_MS` without
+ * moving (start listening); `up` returns true when it ends a hold (stop listening); `click` says whether the click
+ * that follows counts (not after a drag or a hold).
  */
 export class PressTracker {
-  private start: { x: number; y: number } | null = null;
+  private start: { x: number; y: number; at: number } | null = null;
   private dragged = false;
+  private held = false;
 
-  constructor(private readonly threshold = DRAG_THRESHOLD_PX) {}
+  constructor(
+    private readonly threshold = DRAG_THRESHOLD_PX,
+    private readonly holdMs = HOLD_MS,
+  ) {}
 
-  down(x: number, y: number): void {
-    this.start = { x, y };
+  down(x: number, y: number, at = 0): void {
+    this.start = { x, y, at };
     this.dragged = false;
+    this.held = false;
   }
 
-  /** True exactly once per press, when it becomes a drag. */
+  /** True exactly once per press, when it becomes a drag (never once it is a hold: the pet stays put while listening). */
   move(x: number, y: number): boolean {
-    if (!this.start || this.dragged) return false;
+    if (!this.start || this.dragged || this.held) return false;
     if (!pastDragThreshold(x - this.start.x, y - this.start.y, this.threshold)) return false;
     this.dragged = true;
     this.start = null;
     return true;
   }
 
-  up(): void {
-    this.start = null;
+  /** True exactly once per press, when it has lasted `holdMs` without becoming a drag. */
+  hold(at: number): boolean {
+    if (!this.start || this.dragged || this.held) return false;
+    if (at - this.start.at < this.holdMs) return false;
+    this.held = true;
+    return true;
   }
 
-  /** Whether a click counts: false right after a drag (then forgotten, so the next click counts again). */
+  /** The press ends: true when it was a hold (stop listening). */
+  up(): boolean {
+    const wasHold = this.held && this.start !== null;
+    this.start = null;
+    return wasHold;
+  }
+
+  /** Whether a click counts: false right after a drag or a hold (then forgotten, so the next click counts again). */
   click(): boolean {
-    const ok = !this.dragged;
+    const ok = !this.dragged && !this.held;
     this.dragged = false;
+    this.held = false;
     return ok;
   }
 }
