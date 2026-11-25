@@ -1,6 +1,8 @@
-// The pet's chat bubble (opened by a click on the pet, or by itself when an approval arrives). The default pet's
-// bubble is the orchestrator: every pending approval on top, then the chat with the general bot (no pet id) and its
-// proposals. A session pet's bubble is that session's: its approvals, its recent messages and a prompt box.
+// The pet's chat bubble (opened by a click on the pet, or by itself when an approval arrives). There is one pet on
+// screen, the default pet, and its bubble talks to one thing at a time, picked in the switcher on top:
+// - "Pawl-wide" (the default): the orchestrator. Every pending approval, then the chat with the general bot (no pet
+//   id) and its proposals.
+// - One session: its approvals, its recent messages and a prompt box (sessions never get pets of their own).
 // There is deliberately no "open the panel" button: the panel opens from the pet's right-click menu or the tray.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
@@ -27,7 +29,7 @@ import type { ListenPhase, MicMarker as Marker } from "../lib/voice";
 import { useVoiceSentIds } from "../lib/voiceShared";
 import { ListeningPanel, MicButton, MicMarker } from "./VoiceBits";
 import { BUBBLE_W, type BubblePlace } from "../lib/petLayout";
-import { repoName, type DefaultPetState, type SessionPet } from "../lib/petScreen";
+import { repoName, type DefaultPetState, type SessionChip } from "../lib/petScreen";
 import { answerErrorText } from "../lib/where";
 import { buildFeed } from "../panel/feed";
 import { ChatProposalsView, type ProposalEnv } from "../panel/views/ChatProposals";
@@ -43,7 +45,7 @@ export interface BubbleEnv {
   dismiss(requestId: string): void;
   /** The person sent this chat message from the default pet's bubble (the pet animates until the reply). */
   chatSent(messageId: string): void;
-  /** The person prompted this session from its pet's bubble (that pet animates until the agent's first reply). */
+  /** The person prompted this session from the bubble (the pet animates until the agent's first reply). */
   promptSent(sessionId: string, at: number): void;
 }
 
@@ -280,6 +282,10 @@ export interface DefaultBubbleProps {
   setupDone: boolean;
   focusInput: boolean;
   note: string | null;
+  /** The sessions the bubble can switch to, and the one it talks to now (null: Pawl-wide, the orchestrator). */
+  switcher: { chips: SessionChip[]; more: SessionChip[] };
+  focus: SessionChip | null;
+  onFocus(sessionId: string | null): void;
   /** "Rename…" was picked in the pet's menu: show the rename field on top. */
   renaming?: boolean;
   onRename?(raw: string): Promise<RenameResult>;
@@ -370,7 +376,82 @@ export function RenameField({ name, onRename, onDone }: { name: string; onRename
   );
 }
 
-export function DefaultBubble({ env, place, windowHeight, name, main, pending, setupDone, focusInput, note, renaming, onRename, onRenameDone, voice, onClose }: DefaultBubbleProps) {
+/** The switcher on top of the bubble: "Pawl-wide" + up to five sessions (needs-you first) + "more". */
+export function SessionSwitcher({ switcher, focus, onFocus }: { switcher: DefaultBubbleProps["switcher"]; focus: SessionChip | null; onFocus(id: string | null): void }) {
+  const { chips, more } = switcher;
+  if (chips.length === 0 && !focus) return null;
+  return (
+    <div className="pb-switch" role="tablist" aria-label="Talk to">
+      <button type="button" role="tab" aria-selected={!focus} className={`pb-switch-chip is-all${focus ? "" : " is-active"}`} onClick={() => onFocus(null)}>
+        Pawl-wide
+      </button>
+      {chips.map((c) => {
+        const active = focus?.sessionId === c.sessionId;
+        return (
+          <button
+            key={c.sessionId}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            className={`pb-switch-chip${active ? " is-active" : ""}${c.needsYou ? " needs-you" : ""}`}
+            title={`${c.label}${c.needsYou ? " (needs you)" : c.running ? " (working)" : ""}`}
+            onClick={() => onFocus(c.sessionId)}
+          >
+            {c.needsYou && <span className="pb-switch-dot" aria-label="needs you" />}
+            <span className="pb-switch-name">{c.name}</span>
+            <span className="pb-switch-repo">{c.repo}</span>
+            {c.pending.length > 0 && <span className="pb-switch-count">{c.pending.length}</span>}
+          </button>
+        );
+      })}
+      {more.length > 0 && (
+        <select className="pb-switch-more" value="" aria-label={`${more.length} more sessions`} onChange={(e) => e.target.value && onFocus(e.target.value)}>
+          <option value="">+{more.length} more</option>
+          {more.map((c) => (
+            <option key={c.sessionId} value={c.sessionId}>
+              {c.label}
+              {c.needsYou ? " (needs you)" : ""}
+            </option>
+          ))}
+        </select>
+      )}
+    </div>
+  );
+}
+
+function sessionLine(chip: SessionChip, pendingCount: number, session: Session | undefined, state: HubState): string {
+  const status =
+    pendingCount > 0
+      ? "Needs you"
+      : session?.status === "waiting_permission"
+        ? "Waiting for you"
+        : session?.status === "thinking"
+          ? "Thinking"
+          : session?.status === "working"
+            ? "Working"
+            : "Quiet";
+  return `${status} · ${session ? sessionTitle(session, state.agents) : chip.label}`;
+}
+
+export function DefaultBubble({
+  env,
+  place,
+  windowHeight,
+  name,
+  main,
+  pending,
+  setupDone,
+  focusInput,
+  note,
+  switcher,
+  focus,
+  onFocus,
+  renaming,
+  onRename,
+  onRenameDone,
+  voice,
+  onClose,
+}: DefaultBubbleProps) {
   const voiceIds = useVoiceSentIds();
   const { client, state, now, connected } = env;
   const chat = useMemo(() => state.chat.filter((m) => !m.petId).slice(-CHAT_SHOWN), [state.chat]);
@@ -408,36 +489,46 @@ export function DefaultBubble({ env, place, windowHeight, name, main, pending, s
     });
   }, [last, state.sessions, state.agents, pending.length]);
   const end = useStickToBottom(`${chat.length}:${pending.length}:${waitingReply}`);
+  const focusPending = useMemo(() => (focus ? pending.filter((p) => p.sessionId === focus.sessionId) : []), [focus, pending]);
 
   return (
     <BubbleShell
       place={place}
       windowHeight={windowHeight}
-      label={`${name}, your default pet`}
+      label={focus ? `${name}: ${focus.label} session` : `${name}, your default pet`}
       title={
         <>
           {name}
           {voice && <MicMarker marker={voice.marker} where="head" />}
         </>
       }
-      sub={main.line}
+      sub={focus ? sessionLine(focus, focusPending.length, state.sessions[focus.sessionId], state) : main.line}
       note={note}
       onClose={onClose}
       footer={
-        <Composer
-          target={DEFAULT_TARGET}
-          placeholder={`Tell ${name} what to do, or ask what's going on…`}
-          disabledReason={connected ? null : "The hub is not connected."}
-          autoFocus={focusInput && pending.length === 0 && !renaming && !voice?.phase}
-          onSend={send}
-          extra={
-            voice?.enabled ? <MicButton listening={voice.phase === "listening"} disabledReason={connected ? voice.unavailable : "The hub is not connected."} onClick={voice.onMic} /> : null
-          }
-        />
+        focus ? (
+          <SessionComposer key={focus.sessionId} env={env} chip={focus} autoFocus={focusInput && focusPending.length === 0 && !renaming && !voice?.phase} />
+        ) : (
+          <Composer
+            target={DEFAULT_TARGET}
+            placeholder={`Tell ${name} what to do, or ask what's going on…`}
+            disabledReason={connected ? null : "The hub is not connected."}
+            autoFocus={focusInput && pending.length === 0 && !renaming && !voice?.phase}
+            onSend={send}
+            extra={
+              voice?.enabled ? <MicButton listening={voice.phase === "listening"} disabledReason={connected ? voice.unavailable : "The hub is not connected."} onClick={voice.onMic} /> : null
+            }
+          />
+        )
       }
     >
       {voice?.phase ? <ListeningPanel phase={voice.phase} level={voice.level} onStop={voice.onMic} onCancel={voice.onCancel} /> : null}
+      <SessionSwitcher switcher={switcher} focus={focus} onFocus={onFocus} />
       {renaming && onRename && onRenameDone ? <RenameField name={name} onRename={onRename} onDone={onRenameDone} /> : null}
+      {focus ? (
+        <SessionPane key={focus.sessionId} env={env} chip={focus} pending={focusPending} />
+      ) : (
+        <>
       {pending.map((req) => (
         <ApprovalCard key={req.requestId} req={req} env={env} />
       ))}
@@ -488,6 +579,8 @@ export function DefaultBubble({ env, place, windowHeight, name, main, pending, s
         </div>
       )}
       <div ref={end} />
+        </>
+      )}
     </BubbleShell>
   );
 }
@@ -504,23 +597,13 @@ function WaitingNote({ session, state }: { session: Session; state: HubState }) 
   );
 }
 
-// ---------------------------------------------------------------- a session pet
+// ---------------------------------------------------------------- a session (picked in the switcher)
 
-export interface SessionBubbleProps {
-  env: BubbleEnv;
-  place: BubblePlace;
-  windowHeight: number;
-  pet: SessionPet;
-  pending: PermissionRequest[];
-  focusInput: boolean;
-  note: string | null;
-  onClose(): void;
-}
-
-export function SessionBubble({ env, place, windowHeight, pet, pending, focusInput, note, onClose }: SessionBubbleProps) {
+/** One session in the default pet's bubble: its approvals, a waiting note and its recent messages. */
+function SessionPane({ env, chip, pending }: { env: BubbleEnv; chip: SessionChip; pending: PermissionRequest[] }) {
   const { client, state, connected } = env;
-  const session = state.sessions[pet.sessionId];
-  const events = state.events[pet.sessionId] ?? EMPTY_EVENTS;
+  const session = state.sessions[chip.sessionId];
+  const events = state.events[chip.sessionId] ?? EMPTY_EVENTS;
   const lines = useMemo(
     () =>
       buildFeed(events)
@@ -533,47 +616,11 @@ export function SessionBubble({ env, place, windowHeight, pet, pending, focusInp
   // Load the session's recent events (they are not all mirrored up front).
   useEffect(() => {
     if (!connected) return;
-    sessionBackfill.sync(client, pet.sessionId).catch(() => {});
-  }, [client, pet.sessionId, connected]);
-
-  const remoteName = pet.remote ? ownerName(state, pet.machineId) : null;
-  const canPrompt = !!session && session.source === "owned" && !session.endedAt;
-  const disabledReason = !connected
-    ? "The hub is not connected."
-    : !canPrompt
-      ? "Started outside Pawl: type in its own terminal or editor."
-      : offlineReason(state, pet.machineId);
-  const status = pending.length > 0 ? "Needs you" : session?.status === "waiting_permission" ? "Waiting for you" : session?.status === "thinking" ? "Thinking" : "Working";
-  const sub = `${status} · ${session ? sessionTitle(session, state.agents) : pet.label}`;
+    sessionBackfill.sync(client, chip.sessionId).catch(() => {});
+  }, [client, chip.sessionId, connected]);
 
   return (
-    <BubbleShell
-      place={place}
-      windowHeight={windowHeight}
-      label={`${pet.label} session`}
-      title={pet.label}
-      sub={sub}
-      note={note}
-      onClose={onClose}
-      footer={
-        <Composer
-          target={pet.sessionId}
-          placeholder={`Tell ${pet.name} what to do next…`}
-          disabledReason={disabledReason}
-          autoFocus={focusInput && pending.length === 0}
-          onSend={(t) => {
-            const at = Date.now();
-            return client.prompt(pet.sessionId, t).then(
-              () => env.promptSent(pet.sessionId, at),
-              (err: unknown) => {
-                env.say(remoteName ? intentErrorText(err, remoteName, "prompt") : errorText(err));
-                throw err;
-              },
-            );
-          }}
-        />
-      }
-    >
+    <>
       {pending.map((req) => (
         <ApprovalCard key={req.requestId} req={req} env={env} />
       ))}
@@ -590,7 +637,38 @@ export function SessionBubble({ env, place, windowHeight, pet, pending, focusInp
         </div>
       )}
       <div ref={end} />
-    </BubbleShell>
+    </>
+  );
+}
+
+/** The prompt box for the session the bubble talks to (only Pawl's own sessions take prompts from here). */
+function SessionComposer({ env, chip, autoFocus }: { env: BubbleEnv; chip: SessionChip; autoFocus: boolean }) {
+  const { client, state, connected } = env;
+  const session = state.sessions[chip.sessionId];
+  const remoteName = chip.remote ? ownerName(state, chip.machineId) : null;
+  const canPrompt = !!session && session.source === "owned" && !session.endedAt;
+  const disabledReason = !connected
+    ? "The hub is not connected."
+    : !canPrompt
+      ? "Started outside Pawl: type in its own terminal or editor."
+      : offlineReason(state, chip.machineId);
+  return (
+    <Composer
+      target={chip.sessionId}
+      placeholder={`Tell ${chip.name} (${chip.repo}) what to do next…`}
+      disabledReason={disabledReason}
+      autoFocus={autoFocus}
+      onSend={(t) => {
+        const at = Date.now();
+        return client.prompt(chip.sessionId, t).then(
+          () => env.promptSent(chip.sessionId, at),
+          (err: unknown) => {
+            env.say(remoteName ? intentErrorText(err, remoteName, "prompt") : errorText(err));
+            throw err;
+          },
+        );
+      }}
+    />
   );
 }
 

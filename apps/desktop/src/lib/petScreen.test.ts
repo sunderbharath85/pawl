@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { initialHubState, type HubState } from "@pawl/hub-client";
 import type { PetView } from "@pawl/pet-engine";
 import type { Machine, PermissionRequest, Pet, Session } from "@pawl/protocol";
-import { activeSessionPets, defaultPetState, newRequestIds, repoName } from "./petScreen";
+import { defaultPetState, MAX_SWITCHER_CHIPS, newRequestIds, RECENT_SESSION_MS, repoName, switcherSessions } from "./petScreen";
 
 const ME = "winpc0000001";
 const MAC = "macmini00002";
@@ -132,31 +132,45 @@ describe("default pet state: needs you > working > done / snag > idle > napping"
   });
 });
 
-describe("session pets: one per active session, never for idle agents", () => {
+describe("the bubble's session switcher: one pet, sessions one at a time", () => {
   const pets: Record<string, Pet> = {
     [`${ME}:p1`]: { id: `${ME}:p1`, machineId: ME, agentId: "claude-code", species: "cat", skin: "default", name: "Mochi", personality: "", mood: 70, xp: 0 },
   };
 
-  test("running or needing you; oldest first; labelled with pet name and repo (+ machine)", () => {
-    const idle = session({ status: "idle" });
-    const done = session({ status: "done" });
+  test("needs-you first, then running, then recent; labelled with pet name and repo (+ machine); ended, stale and offline left out", () => {
+    const stale = session({ status: "idle", lastEventAt: NOW - RECENT_SESSION_MS - 1 });
+    const recent = session({ status: "idle", lastEventAt: NOW - 60_000, cwd: "E:/work/docs" });
     const ended = session({ status: "working", endedAt: NOW });
-    const a = session({ status: "working", startedAt: NOW - 50 });
-    const b = session({ status: "idle", startedAt: NOW - 90, machineId: MAC, agentId: "codex", cwd: "/srv/web" });
-    const rb = request(b);
-    const { pets: list, hidden } = activeSessionPets(state({ sessions: bySession([idle, done, ended, a, b]), pending: byRequest([rb]), pets }), []);
-    expect(list.map((p) => p.sessionId)).toEqual([b.id, a.id]);
-    expect(hidden).toBe(0);
-    expect(list[0]).toMatchObject({ name: "codex", label: "codex · web · Mac mini", activity: "alert", remote: true, species: "dog" });
-    expect(list[0]!.pending.map((p) => p.requestId)).toEqual([rb.requestId]);
-    expect(list[1]).toMatchObject({ name: "Mochi", label: "Mochi · api", activity: "working", remote: false, species: "cat" });
+    const offline = session({ status: "working", machineId: OFF });
+    const running = session({ status: "working", lastEventAt: NOW - 5000 });
+    const asks = session({ status: "idle", machineId: MAC, agentId: "codex", cwd: "/srv/web", lastEventAt: NOW - 90_000 });
+    const waiting = session({ status: "waiting_permission", lastEventAt: NOW - 70_000, cwd: "E:/work/cli" });
+    const rq = request(asks);
+    const { chips, more } = switcherSessions(
+      state({ sessions: bySession([stale, recent, ended, offline, running, asks, waiting]), pending: byRequest([rq]), pets }),
+      NOW,
+    );
+    expect(chips.map((c) => c.sessionId)).toEqual([waiting.id, asks.id, running.id, recent.id]);
+    expect(more).toEqual([]);
+    expect(chips[1]).toMatchObject({ name: "codex", label: "codex · web · Mac mini", needsYou: true, remote: true });
+    expect(chips[1]!.pending.map((p) => p.requestId)).toEqual([rq.requestId]);
+    expect(chips[0]).toMatchObject({ name: "Mochi", repo: "cli", needsYou: true, pending: [] });
+    expect(chips[2]).toMatchObject({ label: "Mochi · api", running: true, needsYou: false });
   });
 
-  test("offline machines are left out; extra sessions are counted as hidden", () => {
-    const list = [session({ status: "working" }), session({ status: "thinking" }), session({ status: "working", machineId: OFF })];
-    const r = activeSessionPets(state({ sessions: bySession(list) }), [], 1);
-    expect(r.pets).toHaveLength(1);
-    expect(r.hidden).toBe(1);
+  test("at most 5 chips, the rest under more; the focused session always gets a chip", () => {
+    const list = Array.from({ length: 8 }, (_, i) => session({ status: "working", lastEventAt: NOW - 1000 * (i + 1) }));
+    const s = state({ sessions: bySession(list) });
+    const plain = switcherSessions(s, NOW);
+    expect(plain.chips).toHaveLength(MAX_SWITCHER_CHIPS);
+    expect(plain.more.map((c) => c.sessionId)).toEqual(list.slice(5).map((x) => x.id));
+    const focused = switcherSessions(s, NOW, { focus: list[7]!.id });
+    expect(focused.chips.map((c) => c.sessionId)).toEqual([...list.slice(0, 4), list[7]!].map((x) => x.id));
+    expect(focused.more.map((c) => c.sessionId)).toEqual([list[4]!, list[5]!, list[6]!].map((x) => x.id));
+    // A focused session that went quiet stays in the switcher while it is focused.
+    const quiet = session({ status: "idle", lastEventAt: NOW - RECENT_SESSION_MS * 2 });
+    expect(switcherSessions(state({ sessions: bySession([quiet]) }), NOW, { focus: quiet.id }).chips.map((c) => c.sessionId)).toEqual([quiet.id]);
+    expect(switcherSessions(state({ sessions: bySession([quiet]) }), NOW).chips).toEqual([]);
   });
 });
 

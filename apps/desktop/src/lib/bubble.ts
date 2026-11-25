@@ -1,7 +1,8 @@
-// Which pet's bubble is open, and its draft (pure). A bubble belongs to one target (the default pet, or a session
-// pet keyed by its session id): what the user typed for one target is never shown in, or sent to, another.
+// Whether the pet's bubble is open, and its drafts (pure). The bubble talks to one target at a time (the default
+// pet's orchestrator chat, or a session picked in its switcher, keyed by the session id): what the user typed for one
+// target is never shown in, or sent to, another.
 
-/** The default pet's bubble; a session pet's bubble is keyed by its session id. */
+/** The orchestrator chat ("Pawl-wide"); a session in the switcher is keyed by its session id. */
 export const DEFAULT_TARGET = "default";
 
 export interface OpenBubble {

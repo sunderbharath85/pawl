@@ -7,7 +7,7 @@ import type { Species } from "@pawl/protocol";
 import { isTauri, native, onNative, type HubCredentials } from "../../../lib/native";
 import { notify } from "../../../lib/notifications";
 import { PET_ANIMATION_LABEL, type PetAnimationMode } from "../../../lib/petMotion";
-import { checkDefaultPetName, PETS_ON_SCREEN_LABEL, type PetsOnScreen } from "../../../lib/petScreen";
+import { checkDefaultPetName } from "../../../lib/petScreen";
 import { useSettings, type DesktopSettings } from "../../../lib/settings";
 import { renameDefaultPet, useDefaultPetName } from "../../../lib/usePetName";
 import { usePanel } from "../../context";
@@ -149,7 +149,7 @@ export function NotificationsSection() {
   );
 }
 
-/** The pets on screen: the default pet (its name and species), how many pets show, their size, and where they are. */
+/** The pet on screen (there is only one: the default pet): its name and species, animation, size, and where it is. */
 export function PetSection() {
   const { meta, toast } = usePanel();
   const [settings, setSettings] = useSettings();
@@ -163,25 +163,9 @@ export function PetSection() {
     <SettingsSection
       id="pet"
       title="Pet on screen"
-      description="Your default pet keeps an eye on every agent on every machine. Drag it anywhere, click it to chat, right-click it to open the hub."
+      description="One pet on screen keeps an eye on every agent on every machine. Drag it anywhere, click it to chat (its bubble switches between sessions), right-click it to open the hub."
     >
       <DefaultPetForm />
-      <fieldset className="field choice-group">
-        <legend className="field-label">Pets on screen</legend>
-        {(Object.keys(PETS_ON_SCREEN_LABEL) as PetsOnScreen[]).map((value) => (
-          <label key={value} className="choice">
-            <input type="radio" name="pets-on-screen" value={value} checked={settings.petsOnScreen === value} onChange={() => setSettings({ petsOnScreen: value })} />
-            <span className="choice-text">
-              <strong>{PETS_ON_SCREEN_LABEL[value]}</strong>
-              <span className="hint">
-                {value === "default"
-                  ? "One pet that shows what matters most: an approval, then running work, then naps."
-                  : "Plus a small pet beside it for every session that is running or needs you, with its own chat."}
-              </span>
-            </span>
-          </label>
-        ))}
-      </fieldset>
       <fieldset className="field choice-group">
         <legend className="field-label">Pet animation</legend>
         {(Object.keys(PET_ANIMATION_LABEL) as PetAnimationMode[]).map((value) => (
@@ -191,15 +175,15 @@ export function PetSection() {
               <strong>{PET_ANIMATION_LABEL[value]}</strong>
               <span className="hint">
                 {value === "chat"
-                  ? "Pets stay still. They move only while you chat with them in their bubble; approvals show as a badge and the bubble opens."
-                  : "Pets act out what the agents are doing: thinking, digging, barking for approvals, napping."}
+                  ? "The pet stays still. It moves only while you chat with it in its bubble; approvals show as a badge and the bubble opens."
+                  : "The pet acts out what the agents are doing: thinking, digging, barking for approvals, napping."}
               </span>
             </span>
           </label>
         ))}
-        <span className="hint">With “reduce motion” on in your system settings, pets always stay still.</span>
+        <span className="hint">With “reduce motion” on in your system settings, the pet always stays still.</span>
       </fieldset>
-      <Toggle label="Show pet names" hint="A name tag under every pet on screen." checked={settings.showPetNames} onChange={() => setSettings({ showPetNames: !settings.showPetNames })} />
+      <Toggle label="Show the pet's name" hint="A name tag under the pet on screen." checked={settings.showPetNames} onChange={() => setSettings({ showPetNames: !settings.showPetNames })} />
       <label className="field">
         <span className="field-label">
           Pet size <span className="muted">{settings.petSize}px</span>
@@ -207,8 +191,8 @@ export function PetSection() {
         <input type="range" min={72} max={168} step={8} value={settings.petSize} onChange={(e) => setSettings({ petSize: Number(e.target.value) })} />
       </label>
       <Toggle
-        label="Pause pets"
-        hint="Hide the pets. Notifications keep coming."
+        label="Pause the pet"
+        hint="Hide the pet. Notifications keep coming."
         checked={paused}
         onChange={() => native.setPetsPaused(!paused).catch((err) => toast(String(err), "error"))}
         disabled={!isTauri}

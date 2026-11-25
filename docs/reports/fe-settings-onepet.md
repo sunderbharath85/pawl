@@ -470,3 +470,57 @@ Screenshots: `docs/screenshots/pet-name-{light,dark}.png`.
 The native menu and its rename event need the Tauri app, so they were not driven here. Unit tests and a render test cover them instead.
 
 **Gates:** hub-client 337 pass; desktop 3 tsc configs, 109 pass, vite build ok; vscode tsc ok, 23 pass; src-tauri cargo test 27 pass, clippy `-D warnings` clean.
+
+## Hotfix: one pet, always
+
+The user said: "Any new session that comes, a pet shows up; we do not need that many pets, one pet should orchestrate everything." There is now exactly one pet on screen: the default pet.
+
+**Pet window**
+
+- The "Pets on screen" choice and every session-pet code path are gone:
+  - `petsOnScreen` (`normalizeSettings` drops the old key);
+  - `activeSessionPets` / `SessionPet`;
+  - the session pets' layout (`sessions`, `more`, `side`, `sessionSide`);
+  - `SessionBubble`, the "+N" chip and the `.is-session` / `.pet-more` styles.
+- The window holds only the pet and its bubble. Paired machines' (visitor) pets never appear on screen either.
+
+**The bubble's session switcher** (`SessionSwitcher` in `pet/Bubble.tsx`, `switcherSessions` in `lib/petScreen.ts`)
+
+- The chips are "Pawl-wide" (the default, the orchestrator chat) followed by up to 5 sessions, then "+N more" as a select.
+- **Which sessions:** every live session that needs you, is running, or was active in the last 30 min. That covers this machine's and online paired machines' sessions; ended ones and offline machines are left out.
+- **Order:** needs-you first (with a dot and the approval count), then running, then most recent.
+- **Chip label:** the agent pet's name and the repo (with the machine in the tooltip for remote sessions).
+- **The focused session:**
+  - It always gets a chip, even while it would sit under "more" or has gone quiet.
+  - If it ends or goes out of reach, the bubble goes back to Pawl-wide.
+- **Picking a session** shows what a session pet's bubble used to: its approvals, a waiting note, its recent messages, and a prompt box ("Tell Toffee (api) what to do next…") with its own draft. The header line becomes that session's status and title.
+- **Pawl-wide** lists every approval and the orchestrator chat.
+- **A new approval** opens the bubble on Pawl-wide (or stays on the focused session if the approval is that session's). It never replaces an open bubble.
+- **Animation:** the pet animates while waiting for the orchestrator's reply or for a session prompted from the bubble, then stays still.
+
+**Panel: no crowd of dogs**
+
+- **Home:** the hero shows only the default pet: its name, its state line, a click to open Chat.
+- **Sidebar:** the pet card shows the default pet: no "+N", no cycling through pets, no mood bar.
+- **Chat:** always with the default pet (no pet chips). Older replies that came from an agent pet keep that pet's name.
+- **Session rows and lists:** they keep the agent pet names as text. The small static avatars already there (session header, permission card, new-session picker) stay.
+- **Pets view → Settings > Pets (advanced):** the Pets view and its nav item are gone. Renaming agent pets (with species and personality) moved there as a compact list with no sprites. `open_panel` "pets" now opens that section.
+- **Settings > Pet on screen:** copy is in the singular ("the pet").
+
+**Tests**
+
+- The switcher order, cap, focus pinning and the quiet focused session (`lib/petScreen.test.ts`).
+- The switcher's markup (`pet/switcher.test.ts`).
+- The one-pet layout, the old key being dropped, and the "pets" route.
+- The session-pet tests were removed.
+
+**Live check (Playwright)** ran against a throwaway hub with 3 sessions (one asking), using a stored `petsOnScreen: "sessions"`. In light and dark, all of these hold:
+
+- One pet on screen.
+- The switcher shows Pawl-wide + 3 sessions, with the asking session first and its count.
+- Pawl-wide lists the approval.
+- Picking "api" shows its messages and an api prompt box.
+
+Screenshots: `docs/screenshots/pet-switcher-{light,dark}.png`.
+
+**Gates:** desktop 3 tsc configs, 112 pass, vite build ok; hub-client 337 pass; vscode tsc ok.

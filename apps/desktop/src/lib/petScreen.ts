@@ -1,17 +1,10 @@
-// What the desktop pet window shows (pure, no DOM): the default pet that orchestrates every agent and mirrors the
-// most important state across all sessions and machines, plus (in "sessions" mode) one pet per active session.
+// What the desktop pet window shows (pure, no DOM): ONE pet, the default pet, that orchestrates every agent and
+// mirrors the most important state across all sessions and machines. Sessions (this machine's and paired machines')
+// never get pets of their own on screen: the default pet's bubble switches between them, one at a time.
 import { checkPetName, deviceNameProblem, isLocal, machineDisplayName, PET_NAME_MAX, petFor, type HubState, type PetNameCheck } from "@pawl/hub-client";
 import { activityForStatus, type PetActivity, type PetView } from "@pawl/pet-engine";
-import type { PermissionRequest, Pet, Session, SessionStatus, Species } from "@pawl/protocol";
+import type { PermissionRequest, Pet, Session, SessionStatus } from "@pawl/protocol";
 import { agentName } from "./format";
-
-/** "Pets on screen": the default pet only, or the default pet plus one pet per active session. */
-export type PetsOnScreen = "default" | "sessions";
-
-export const PETS_ON_SCREEN_LABEL: Record<PetsOnScreen, string> = {
-  default: "Default pet only",
-  sessions: "Default pet + one per active session",
-};
 
 /** Most important first: needs you > working > just finished / hit a snag > idle > napping. */
 export type DefaultPetMood = "needs_you" | "working" | "done" | "oops" | "idle" | "napping";
@@ -103,33 +96,45 @@ export function defaultPetState(state: ScreenState, views: readonly PetView[]): 
   return { ...base, mood: "napping", activity: "napping", line: "Napping. Click me to chat." };
 }
 
-export interface SessionPet {
+/** One session the default pet's bubble can switch to (its chip in the switcher). */
+export interface SessionChip {
   sessionId: string;
   machineId: string;
-  species: Species;
-  skin?: string | undefined;
-  /** The session's agent's pet name (else the agent's name). */
+  /** The session's agent's pet name (else the agent's name): sessions are individuals. */
   name: string;
-  /** Name tag: "Rex · api" (+ " · Mac mini" for another machine's session). */
+  repo: string;
+  /** "Rex · api" (+ " · Mac mini" for another machine's session). */
   label: string;
-  activity: PetActivity;
+  /** An approval to answer here, or the session waits for the user in its terminal. */
+  needsYou: boolean;
   /** This session's answerable approvals, oldest first. */
   pending: PermissionRequest[];
+  running: boolean;
   remote: boolean;
+  lastEventAt: number;
 }
 
-/** At most this many session pets line up beside the default pet; the rest become a "+N" chip. */
-export const MAX_SESSION_PETS = 6;
+/** At most this many session chips in the bubble's switcher; the rest go under "more". */
+export const MAX_SWITCHER_CHIPS = 5;
+/** A session that is not running and needs nothing still shows this long after its last event. */
+export const RECENT_SESSION_MS = 30 * 60_000;
+
+function chipOrder(a: SessionChip, b: SessionChip): number {
+  return Number(b.needsYou) - Number(a.needsYou) || Number(b.running) - Number(a.running) || b.lastEventAt - a.lastEventAt || a.sessionId.localeCompare(b.sessionId);
+}
 
 /**
- * One pet per active session (running, or needing you), never for idle agents with no session. Oldest session
- * first so pets keep their places; offline machines are left out.
+ * The sessions the default pet's bubble can talk to, one at a time: every live session (not ended, its machine
+ * reachable; this machine's and paired machines') that needs you, is running, or was active in the last
+ * `RECENT_SESSION_MS`. Needs-you first, then running, then most recent. The first `max` are chips, the rest "more";
+ * the focused session is always a chip (it takes the last place when it would be under "more").
  */
-export function activeSessionPets(
+export function switcherSessions(
   state: ScreenState,
-  views: readonly PetView[],
-  max = MAX_SESSION_PETS,
-): { pets: SessionPet[]; hidden: number } {
+  now: number,
+  opts: { focus?: string | null; max?: number } = {},
+): { chips: SessionChip[]; more: SessionChip[] } {
+  const max = Math.max(1, opts.max ?? MAX_SWITCHER_CHIPS);
   const pendingBy = new Map<string, PermissionRequest[]>();
   for (const p of Object.values(state.pending)) {
     if (!reachable(state, p.machineId)) continue;
@@ -137,19 +142,40 @@ export function activeSessionPets(
     list.push(p);
     pendingBy.set(p.sessionId, list);
   }
-  const active = Object.values(state.sessions)
-    .filter((s) => live(state, s) && (RUNNING.has(s.status) || s.status === "waiting_permission" || pendingBy.has(s.id)))
-    .sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
-  const pets = active.slice(0, Math.max(0, max)).map((s): SessionPet => {
-    const pet = petFor(Object.values(state.pets), s.machineId, s.agentId);
-    const name = pet?.name ?? agentName(state.agents, s.agentId, s.machineId);
-    const remote = !isLocal(state, s.machineId);
-    const pending = (pendingBy.get(s.id) ?? []).sort((a, b) => a.createdAt - b.createdAt);
-    const label = `${name} · ${repoName(s.cwd)}${remote ? ` · ${machineDisplayName(state.machines[s.machineId])}` : ""}`;
-    const activity = pending.length > 0 || s.status === "waiting_permission" ? "alert" : runningActivity(s, views);
-    return { sessionId: s.id, machineId: s.machineId, species: pet?.species ?? "dog", skin: pet?.skin, name, label, activity, pending, remote };
-  });
-  return { pets, hidden: Math.max(0, active.length - pets.length) };
+  const all = Object.values(state.sessions)
+    .filter((s) => live(state, s))
+    .filter((s) => RUNNING.has(s.status) || s.status === "waiting_permission" || pendingBy.has(s.id) || now - s.lastEventAt < RECENT_SESSION_MS || s.id === opts.focus)
+    .map((s): SessionChip => {
+      const pet = petFor(Object.values(state.pets), s.machineId, s.agentId);
+      const name = pet?.name ?? agentName(state.agents, s.agentId, s.machineId);
+      const remote = !isLocal(state, s.machineId);
+      const repo = repoName(s.cwd);
+      const pending = (pendingBy.get(s.id) ?? []).sort((a, b) => a.createdAt - b.createdAt);
+      return {
+        sessionId: s.id,
+        machineId: s.machineId,
+        name,
+        repo,
+        label: `${name} · ${repo}${remote ? ` · ${machineDisplayName(state.machines[s.machineId])}` : ""}`,
+        needsYou: pending.length > 0 || s.status === "waiting_permission",
+        pending,
+        running: RUNNING.has(s.status),
+        remote,
+        lastEventAt: s.lastEventAt,
+      };
+    })
+    .sort(chipOrder);
+  const chips = all.slice(0, max);
+  const more = all.slice(max);
+  const i = opts.focus ? more.findIndex((c) => c.sessionId === opts.focus) : -1;
+  if (i >= 0) {
+    const [focused] = more.splice(i, 1);
+    const bumped = chips.pop()!;
+    chips.push(focused!);
+    more.unshift(bumped);
+    more.sort(chipOrder);
+  }
+  return { chips, more };
 }
 
 /** Request ids that just appeared (for opening the bubble by itself when an approval arrives). */

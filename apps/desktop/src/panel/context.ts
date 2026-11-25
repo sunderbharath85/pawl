@@ -9,7 +9,6 @@ export type Route =
   | { view: "new" }
   | { view: "chat"; petId?: string }
   | { view: "approvals"; requestId?: string }
-  | { view: "pets"; petId?: string }
   | { view: "rules" }
   | { view: "settings"; section?: string | undefined }
   | { view: "machines" }

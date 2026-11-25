@@ -8,6 +8,7 @@ import { AgentsSection } from "./settings/AgentsSection";
 import { AppSection, MachineSection, NotificationsSection, PetSection } from "./settings/AppSections";
 import { PairingSection } from "./settings/PairingSection";
 import { VoiceSection } from "./settings/VoiceSection";
+import { PetsSection } from "./settings/PetsSection";
 import { BotSection, HubSection, NudgesSection, RelaySection, RemoteSection, ReposSection } from "./settings/sections";
 import { useHubSettings, useRestartHub, type HubSettingsView } from "./settings/shared";
 
@@ -24,6 +25,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{ id: string; label: string; hub: 
   { id: "relay", label: "Relay", hub: true },
   { id: "pet", label: "Pet on screen", hub: false },
   { id: "voice", label: "Voice", hub: false },
+  { id: "pets", label: "Pets (advanced)", hub: false },
   { id: "app", label: "This app", hub: false },
 ];
 
@@ -83,6 +85,7 @@ export function SettingsView({ section }: { section?: string | undefined }) {
           {props && <RelaySection {...props} />}
           <PetSection />
           <VoiceSection />
+          <PetsSection />
           <AppSection configPath={hs.configPath} />
         </div>
       </div>

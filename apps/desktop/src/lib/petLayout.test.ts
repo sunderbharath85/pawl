@@ -13,7 +13,6 @@ import {
   placeBubble,
   PressTracker,
   SCREEN_EDGE,
-  sessionSide,
   type PetSpace,
 } from "./petLayout";
 
@@ -21,7 +20,7 @@ const roomy: PetSpace = { left: 900, right: 900, above: 900, below: 900 };
 
 describe("pet window layout", () => {
   test("one pet, plenty of room: bubble above, centred, window = pet + bubble room", () => {
-    const l = layoutPetWindow({ petSize: 112, showNames: true, sessionCount: 0, space: roomy });
+    const l = layoutPetWindow({ petSize: 112, showNames: true, space: roomy });
     expect(l.vertical).toBe("above");
     expect(l.main).toEqual({ x: FRAME_PAD + (BUBBLE_W - 112) / 2, y: FRAME_PAD + BUBBLE_GAP + BUBBLE_MAX_H, w: 112, h: 112 + NAME_H });
     expect(l.width).toBe(BUBBLE_W + 2 * FRAME_PAD);
@@ -34,7 +33,7 @@ describe("pet window layout", () => {
   });
 
   test("near the top of the screen the bubble flips below", () => {
-    const l = layoutPetWindow({ petSize: 112, showNames: false, sessionCount: 0, space: { ...roomy, above: 40 } });
+    const l = layoutPetWindow({ petSize: 112, showNames: false, space: { ...roomy, above: 40 } });
     expect(l.vertical).toBe("below");
     expect(l.main.y).toBe(FRAME_PAD);
     expect(placeBubble(l, l.main).anchorY).toBe(FRAME_PAD + 112 + BUBBLE_GAP);
@@ -45,22 +44,22 @@ describe("pet window layout", () => {
     expect(bubbleVertical({ ...roomy, above: 300, below: 200 })).toBe("above");
     expect(bubbleVertical({ ...roomy, above: 200, below: 300 })).toBe("below");
     expect(bubbleVertical(null)).toBe("above");
-    const l = layoutPetWindow({ petSize: 112, showNames: false, sessionCount: 0, space: { ...roomy, above: 300, below: 200 } });
+    const l = layoutPetWindow({ petSize: 112, showNames: false, space: { ...roomy, above: 300, below: 200 } });
     expect(l.bubbleMaxH).toBe(300 - BUBBLE_GAP - SCREEN_EDGE);
     // Neither side has much room: the bubble fits the roomier side (above: 150 px) instead of overflowing the screen.
-    const short = layoutPetWindow({ petSize: 112, showNames: false, sessionCount: 0, space: { ...roomy, above: 150, below: 40 } });
+    const short = layoutPetWindow({ petSize: 112, showNames: false, space: { ...roomy, above: 150, below: 40 } });
     expect(short.vertical).toBe("above");
     expect(short.bubbleMaxH).toBe(150 - BUBBLE_GAP - SCREEN_EDGE);
     expect(short.bubbleMaxH + BUBBLE_GAP).toBeLessThanOrEqual(150);
     // Its room in the window matches (the window does not reach past the screen for it).
     expect(short.main.y).toBe(FRAME_PAD + BUBBLE_GAP + short.bubbleMaxH);
     // No room at all: zero, never negative.
-    const none = layoutPetWindow({ petSize: 112, showNames: false, sessionCount: 0, space: { ...roomy, above: 0, below: 0 } });
+    const none = layoutPetWindow({ petSize: 112, showNames: false, space: { ...roomy, above: 0, below: 0 } });
     expect(none.bubbleMaxH).toBe(0);
   });
 
   test("near the right edge the bubble shifts left to stay on screen (and the tail still points at the pet)", () => {
-    const l = layoutPetWindow({ petSize: 100, showNames: false, sessionCount: 0, space: { ...roomy, right: 20 } });
+    const l = layoutPetWindow({ petSize: 100, showNames: false, space: { ...roomy, right: 20 } });
     const b = placeBubble(l, l.main);
     // Bubble's right edge = pet's right edge + 20 px of space - the screen margin.
     expect(b.left - l.main.x + BUBBLE_W).toBe(100 + 20 - SCREEN_EDGE);
@@ -69,7 +68,7 @@ describe("pet window layout", () => {
   });
 
   test("near the left edge the bubble shifts right", () => {
-    const l = layoutPetWindow({ petSize: 100, showNames: false, sessionCount: 0, space: { ...roomy, left: 0 } });
+    const l = layoutPetWindow({ petSize: 100, showNames: false, space: { ...roomy, left: 0 } });
     const b = placeBubble(l, l.main);
     expect(b.left - l.main.x).toBe(SCREEN_EDGE);
     expect(b.tailX).toBeLessThan(BUBBLE_W / 2);
@@ -77,39 +76,19 @@ describe("pet window layout", () => {
   });
 
   test("a screen narrower than the bubble pins it to the left edge", () => {
-    const l = layoutPetWindow({ petSize: 100, showNames: false, sessionCount: 0, space: { left: 10, right: 10, above: 900, below: 0 } });
+    const l = layoutPetWindow({ petSize: 100, showNames: false, space: { left: 10, right: 10, above: 900, below: 0 } });
     expect(placeBubble(l, l.main).left - l.main.x).toBe(-10 + SCREEN_EDGE);
   });
 
-  test("session pets line up right of the default pet, or left when the right has no room", () => {
-    const right = layoutPetWindow({ petSize: 100, showNames: true, sessionCount: 2, more: true, space: roomy });
-    expect(right.side).toBe("right");
-    expect(right.sessions).toHaveLength(2);
-    expect(right.sessions[0]!.x).toBeGreaterThan(right.main.x + right.main.w);
-    expect(right.sessions[1]!.x).toBeGreaterThan(right.sessions[0]!.x);
-    // Bottom-aligned with the default pet, smaller.
-    expect(right.sessions[0]!.y + right.sessions[0]!.h).toBe(right.main.y + right.main.h);
-    expect(right.sessions[0]!.w).toBe(75);
-    expect(right.more!.x).toBeGreaterThan(right.sessions[1]!.x);
-    // Every session pet's bubble fits in the window.
-    for (const s of right.sessions) {
-      const b = placeBubble(right, s);
-      expect(b.left).toBeGreaterThanOrEqual(0);
-      expect(b.left + BUBBLE_W).toBeLessThanOrEqual(right.width);
-    }
-
-    const left = layoutPetWindow({ petSize: 100, showNames: true, sessionCount: 2, space: { ...roomy, right: 30 } });
-    expect(left.side).toBe("left");
-    expect(left.sessions[0]!.x + left.sessions[0]!.w).toBeLessThan(left.main.x);
-    expect(left.sessions[1]!.x).toBeLessThan(left.sessions[0]!.x);
-    expect(Math.min(...left.sessions.map((s) => s.x))).toBeGreaterThanOrEqual(FRAME_PAD);
-    expect(sessionSide({ ...roomy, right: 30, left: 20 }, 200)).toBe("right");
-    expect(sessionSide(null, 200)).toBe("right");
+  test("one pet only: the window holds the pet and its bubble, nothing else", () => {
+    const l = layoutPetWindow({ petSize: 100, showNames: true, space: roomy });
+    expect(Object.keys(l).sort()).toEqual(["bubbleMaxH", "bubbleRange", "height", "main", "origin", "vertical", "width"]);
+    expect(l.width).toBe(BUBBLE_W + 2 * FRAME_PAD);
   });
 
   test("opening a bubble needs no window change: the layout does not depend on it", () => {
-    const a = layoutPetWindow({ petSize: 112, showNames: true, sessionCount: 1, space: roomy });
-    const b = layoutPetWindow({ petSize: 112, showNames: true, sessionCount: 1, space: roomy });
+    const a = layoutPetWindow({ petSize: 112, showNames: true, space: roomy });
+    const b = layoutPetWindow({ petSize: 112, showNames: true, space: roomy });
     expect(petFrame(a)).toEqual(petFrame(b));
   });
 });

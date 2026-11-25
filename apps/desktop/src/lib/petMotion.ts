@@ -1,4 +1,4 @@
-// When the pets on screen move (pure). By default they stay still in a calm pose: agent activity shows as a static
+// When the pet on screen moves (pure). By default they stay still in a calm pose: agent activity shows as a static
 // badge or "!" marker, the bubble and notifications, never as walking, digging or barking. A pet animates only while
 // the person talks to it in its own bubble: a thinking pose while the reply is on its way, one short happy reaction
 // when it arrives, then still again. "Always" brings back the old behaviour (the pose follows what agents do).
@@ -53,7 +53,7 @@ export function chatPhase(
 const REPLY_EVENTS = new Set(["agent_message_chunk", "stop", "error"]);
 
 /**
- * A session pet: the person prompted the session from its bubble at `sentAt`; the agent's first reply after it ends
+ * A session picked in the bubble's switcher: the person prompted it from the bubble at `sentAt`; the agent's first reply after it ends
  * the wait. (A small allowance for clock differences between this machine and the session's.)
  */
 export function sessionPhase(events: readonly { type: string; ts: number }[], sentAt: number | undefined, now: number): ChatPhase {

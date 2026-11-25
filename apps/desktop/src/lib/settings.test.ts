@@ -7,7 +7,6 @@ describe("desktop settings", () => {
   test("existing users (no new keys stored) get one default pet named Pawl", () => {
     const old = { notifyPermissions: false, petSize: 96, showPetNames: true, setupOffered: true } as Partial<DesktopSettings>;
     const s = normalizeSettings(old);
-    expect(s.petsOnScreen).toBe("default");
     expect(s.petAnimation).toBe("chat");
     expect(s.lastPetName).toBe("");
     expect(s.petNameMigrated).toBe(false);
@@ -18,12 +17,11 @@ describe("desktop settings", () => {
   });
 
   test("malformed values fall back to the defaults", () => {
-    const bad = { petsOnScreen: "all", defaultPetSpecies: "dragon", petSize: 9000 } as unknown as Partial<DesktopSettings>;
+    const bad = { defaultPetSpecies: "dragon", petSize: 9000 } as unknown as Partial<DesktopSettings>;
     const s = normalizeSettings(bad);
-    expect(s.petsOnScreen).toBe("default");
     expect(s.defaultPetSpecies).toBe("dog");
     expect(s.petSize).toBe(168);
-    expect(normalizeSettings({ petsOnScreen: "sessions", defaultPetSpecies: "cat" }).petsOnScreen).toBe("sessions");
+    expect(normalizeSettings({ defaultPetSpecies: "cat" }).defaultPetSpecies).toBe("cat");
     expect(normalizeSettings({ petAnimation: "always" }).petAnimation).toBe("always");
     expect(normalizeSettings({ petAnimation: "wiggly" } as unknown as Partial<DesktopSettings>).petAnimation).toBe("chat");
     expect(normalizeSettings({ petSize: Number.NaN }).petSize).toBe(DEFAULT_SETTINGS.petSize);
@@ -61,6 +59,12 @@ describe("every stored field is coerced to its type", () => {
     expect(normalizeSettings({ speechRate: 9 }).speechRate).toBe(2);
     expect(normalizeSettings({ speechRate: 0.1 }).speechRate).toBe(0.5);
     expect(normalizeSettings({ speechRate: Number.NaN }).speechRate).toBe(1);
+  });
+
+  test("one pet on screen, always: the old \"Pets on screen\" choice is ignored and dropped", () => {
+    const s = normalizeSettings({ petsOnScreen: "sessions" } as unknown as Partial<DesktopSettings>);
+    expect("petsOnScreen" in s).toBe(false);
+    expect(s).toEqual(DEFAULT_SETTINGS);
   });
 
   test("garbage instead of an object gives the defaults", () => {
