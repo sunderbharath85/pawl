@@ -26,9 +26,7 @@ pub mod tasks;
 
 /// The A2A v1 wire types (crate `a2a-lf`, pinned).
 pub use a2a as spec;
-/// The SDK's server side (crate `a2a-server-lf`, pinned): `RequestHandler`, `ServiceParams`.
-pub use a2a_server as server_sdk;
-/// For implementing [`server_sdk::RequestHandler`].
+/// For implementing [`server::A2aHandler`].
 pub use async_trait::async_trait;
 
 pub use ext::{DelegateParams, DELEGATE_EXT, STRUCTURED_INPUT_EXT};

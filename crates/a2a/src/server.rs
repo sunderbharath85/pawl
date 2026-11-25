@@ -1,10 +1,13 @@
 //! The localhost A2A server (PLAN.md "Pawl as an A2A agent", phase A2): transport and security.
 //!
 //! - Binds 127.0.0.1 only. Off unless the hub starts it (`[a2a] server = true`).
-//! - JSON-RPC at `POST /` and HTTP+JSON (REST) under `/` (the SDK's routers, A2A 1.0), streaming
-//!   over SSE, no push notifications. A JSON-RPC request without an `A2A-Version` header (or with
-//!   `0.3`) is an A2A 0.3 request (spec 3.6.2) and goes through [`crate::compat`] to the same
-//!   handler; other versions get `VersionNotSupported`.
+//! - JSON-RPC at `POST /` ([`rpc`]) and HTTP+JSON (REST) under `/` ([`rest`]), A2A 1.0 (spec sections
+//!   9 and 11), streaming over SSE, no push notifications (every push method answers
+//!   `PushNotificationNotSupported`). Pawl's own dispatcher over the `a2a-lf` types: the SDK's server
+//!   crate is not used (its protobuf build pulled in a vendored protoc and tonic/prost).
+//! - A JSON-RPC request without an `A2A-Version` header (or with `0.3`) is an A2A 0.3 request (spec
+//!   3.6.2): [`crate::compat`] converts it to 1.0 for the same handler and the answer back. REST is
+//!   1.0; other versions get `VersionNotSupported`.
 //! - Every request: the `Host` header must name this loopback server (`127.0.0.1`, `localhost` or
 //!   `[::1]` with the bound port): a DNS-rebinding page reaches the socket with its own host name and
 //!   is refused. An `Origin` header must be this server's own origin (browsers send one; other
@@ -16,33 +19,55 @@
 //!   `Authorization` header is removed before the handler sees the request. Tokens are never logged.
 //! - Bodies over [`BODY_MAX_BYTES`] are refused.
 
+pub mod rest;
+pub mod rpc;
+
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use a2a::jsonrpc::methods as m;
 use a2a::{
-    A2AError, AgentCard, CancelTaskRequest, GetExtendedAgentCardRequest, GetTaskRequest, JsonRpcId, JsonRpcRequest, JsonRpcResponse,
-    ListTasksRequest, SendMessageRequest, SubscribeToTaskRequest,
+    A2AError, AgentCard, CancelTaskRequest, GetExtendedAgentCardRequest, GetTaskRequest, ListTasksRequest, ListTasksResponse, SendMessageRequest,
+    SendMessageResponse, StreamResponse, SubscribeToTaskRequest, Task,
 };
-use a2a_server::{RequestHandler, ServiceParams};
-use axum::body::Bytes;
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::routing::get;
+use axum::Router;
 use futures::stream::BoxStream;
 use futures::StreamExt;
-use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
-use tower::ServiceExt;
 
 use crate::card;
-use crate::compat;
+
+/// Request headers as the handler sees them (lower-case names; the guard has removed
+/// `Authorization` and set [`CALLER_HEADER`]).
+pub type ServiceParams = HashMap<String, Vec<String>>;
+
+/// A task's updates as a stream (`SendStreamingMessage`, `SubscribeToTask`).
+pub type EventStream = BoxStream<'static, Result<StreamResponse, A2AError>>;
+
+/// The A2A operations Pawl serves (spec 3.1), binding-independent. Push notification configuration
+/// is not among them: the server answers those methods itself (`PushNotificationNotSupported`,
+/// spec 3.3.4).
+#[async_trait::async_trait]
+pub trait A2aHandler: Send + Sync + 'static {
+    async fn send_message(&self, params: &ServiceParams, req: SendMessageRequest) -> Result<SendMessageResponse, A2AError>;
+    async fn send_streaming_message(&self, params: &ServiceParams, req: SendMessageRequest) -> Result<EventStream, A2AError>;
+    async fn get_task(&self, params: &ServiceParams, req: GetTaskRequest) -> Result<Task, A2AError>;
+    async fn list_tasks(&self, params: &ServiceParams, req: ListTasksRequest) -> Result<ListTasksResponse, A2AError>;
+    async fn cancel_task(&self, params: &ServiceParams, req: CancelTaskRequest) -> Result<Task, A2AError>;
+    async fn subscribe_to_task(&self, params: &ServiceParams, req: SubscribeToTaskRequest) -> Result<EventStream, A2AError>;
+    async fn get_extended_agent_card(&self, params: &ServiceParams, req: GetExtendedAgentCardRequest) -> Result<AgentCard, A2AError>;
+}
+
+/// Interval of SSE keep-alive comments.
+pub const SSE_KEEP_ALIVE: Duration = Duration::from_secs(15);
 
 /// The caller id the guard hands to the handler (never trusted from the client).
 pub const CALLER_HEADER: &str = "x-pawl-a2a-caller";
@@ -333,18 +358,7 @@ async fn card_handler(State(st): State<Arc<ServerState>>, req: Request) -> Respo
     r
 }
 
-struct Dispatch<H: RequestHandler> {
-    handler: Arc<H>,
-    jsonrpc: Router,
-}
-
-impl<H: RequestHandler> Clone for Dispatch<H> {
-    fn clone(&self) -> Self {
-        Self { handler: self.handler.clone(), jsonrpc: self.jsonrpc.clone() }
-    }
-}
-
-fn service_params(headers: &HeaderMap) -> ServiceParams {
+pub(crate) fn service_params(headers: &HeaderMap) -> ServiceParams {
     let mut p = ServiceParams::new();
     for (name, value) in headers {
         if let Ok(v) = value.to_str() {
@@ -354,122 +368,23 @@ fn service_params(headers: &HeaderMap) -> ServiceParams {
     p
 }
 
-fn rpc_error(id: JsonRpcId, e: A2AError) -> Response {
-    (StatusCode::OK, Json(JsonRpcResponse::error(id, e.to_jsonrpc_error()))).into_response()
-}
-
-/// `POST /`: 1.x -> the SDK's JSON-RPC router; none or 0.3 -> the 0.3 path; else VersionNotSupported.
-async fn jsonrpc_dispatch<H: RequestHandler>(State(d): State<Dispatch<H>>, mut req: Request) -> Response {
-    let version = requested_version(req.headers(), req.uri().query());
-    match version.as_deref() {
-        None => {}
-        Some(v) if v.trim() == "0.3" || v.trim().starts_with("0.3.") => {}
-        Some(v) if card::major(v) == Some(1) => {
-            if !req.headers().contains_key("a2a-version") {
-                if let Ok(hv) = HeaderValue::from_str(v) {
-                    req.headers_mut().insert("a2a-version", hv);
-                }
-            }
-            return match d.jsonrpc.clone().oneshot(req).await {
-                Ok(r) => r,
-                Err(never) => match never {},
-            };
-        }
-        Some(v) => return rpc_error(JsonRpcId::Null, A2AError::version_not_supported(v)),
-    }
-    let params = service_params(req.headers());
-    let body = match axum::body::to_bytes(req.into_body(), BODY_MAX_BYTES).await {
-        Ok(b) => b,
-        Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "request too large"),
-    };
-    legacy(&*d.handler, &params, &body).await
-}
-
-fn typed<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, A2AError> {
-    serde_json::from_value(v).map_err(|e| A2AError::invalid_params(format!("invalid params: {e}")))
-}
-
-fn as_value<T: serde::Serialize>(v: &T) -> Result<Value, A2AError> {
-    serde_json::to_value(v).map_err(|e| A2AError::internal(format!("serialize: {e}")))
-}
-
-/// One A2A 0.3 JSON-RPC request, answered in 0.3 shapes by the 1.0 handler.
-async fn legacy<H: RequestHandler>(handler: &H, params: &ServiceParams, body: &Bytes) -> Response {
-    let raw: Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(e) => return rpc_error(JsonRpcId::Null, A2AError::parse_error(format!("parse error: {e}"))),
-    };
-    let id: JsonRpcId = raw.get("id").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or(JsonRpcId::Null);
-    let request: JsonRpcRequest = match serde_json::from_value(raw) {
-        Ok(r) => r,
-        Err(e) => return rpc_error(id, A2AError::invalid_request(format!("invalid request: {e}"))),
-    };
-    if request.jsonrpc != "2.0" {
-        return rpc_error(id, A2AError::invalid_request("invalid jsonrpc version"));
-    }
-    let Some(method) = compat::method_from_v03(&request.method) else {
-        return rpc_error(id, A2AError::method_not_found(&request.method));
-    };
-    let p = compat::params_from_v03(method, request.params.unwrap_or(Value::Null));
-    let p = if p.is_null() { json!({}) } else { p };
-    if m::is_streaming(method) {
-        let stream: Result<BoxStream<'static, Result<a2a::StreamResponse, A2AError>>, A2AError> = match method {
-            m::SEND_STREAMING_MESSAGE => match typed::<SendMessageRequest>(p) {
-                Ok(r) => handler.send_streaming_message(params, r).await,
-                Err(e) => Err(e),
-            },
-            _ => match typed::<SubscribeToTaskRequest>(p) {
-                Ok(r) => handler.subscribe_to_task(params, r).await,
-                Err(e) => Err(e),
-            },
-        };
-        return match stream {
-            Ok(s) => {
-                let s = s.map(|item| item.and_then(|ev| as_value(&ev)).map(compat::stream_event_to_v03)).boxed();
-                a2a_server::sse::sse_jsonrpc_stream(id, s).into_response()
-            }
-            Err(e) => rpc_error(id, e),
-        };
-    }
-    let result: Result<Value, A2AError> = match method {
-        m::SEND_MESSAGE => match typed::<SendMessageRequest>(p) {
-            Ok(r) => handler.send_message(params, r).await.and_then(|v| as_value(&v)),
-            Err(e) => Err(e),
-        },
-        m::GET_TASK => match typed::<GetTaskRequest>(p) {
-            Ok(r) => handler.get_task(params, r).await.and_then(|v| as_value(&v)),
-            Err(e) => Err(e),
-        },
-        m::LIST_TASKS => match typed::<ListTasksRequest>(p) {
-            Ok(r) => handler.list_tasks(params, r).await.and_then(|v| as_value(&v)),
-            Err(e) => Err(e),
-        },
-        m::CANCEL_TASK => match typed::<CancelTaskRequest>(p) {
-            Ok(r) => handler.cancel_task(params, r).await.and_then(|v| as_value(&v)),
-            Err(e) => Err(e),
-        },
-        m::GET_EXTENDED_AGENT_CARD => match typed::<GetExtendedAgentCardRequest>(p) {
-            Ok(r) => handler.get_extended_agent_card(params, r).await.and_then(|v| as_value(&v)),
-            Err(e) => Err(e),
-        },
-        _ => Err(A2AError::push_notification_not_supported()),
-    };
-    match result {
-        Ok(v) => Json(JsonRpcResponse::success(id, compat::result_to_v03(method, v))).into_response(),
-        Err(e) => rpc_error(id, e),
-    }
+/// An SSE response: one `data:` line of JSON per item, numbered ids, keep-alive comments.
+pub(crate) fn sse(items: BoxStream<'static, serde_json::Value>) -> Response {
+    let mut n = 0u64;
+    let events = items.map(move |v| {
+        n += 1;
+        Ok::<_, std::convert::Infallible>(Event::default().id(n.to_string()).data(serde_json::to_string(&v).unwrap_or_default()))
+    });
+    Sse::new(events).keep_alive(KeepAlive::new().interval(SSE_KEEP_ALIVE)).into_response()
 }
 
 /// The whole server: card, JSON-RPC (1.0 + 0.3), REST (1.0), behind the guard.
-pub fn router<H: RequestHandler>(handler: Arc<H>, state: Arc<ServerState>) -> Router {
-    let dispatch = Dispatch { handler: handler.clone(), jsonrpc: a2a_server::jsonrpc::jsonrpc_router(handler.clone()) };
-    let rpc = Router::new().route("/", post(jsonrpc_dispatch::<H>)).with_state(dispatch);
+pub fn router<H: A2aHandler>(handler: Arc<H>, state: Arc<ServerState>) -> Router {
     let card = Router::new().route(WELL_KNOWN_CARD, get(card_handler)).with_state(state.clone());
     Router::new()
         .merge(card)
-        .merge(rpc)
-        .merge(a2a_server::rest::rest_router(handler))
-        .layer(axum::extract::DefaultBodyLimit::max(BODY_MAX_BYTES))
+        .merge(rpc::router(handler.clone()))
+        .merge(rest::router(handler))
         .layer(middleware::from_fn_with_state(state, guard))
 }
 
@@ -493,7 +408,7 @@ impl RunningServer {
 }
 
 /// Bind `127.0.0.1:port` (0 = any free port) and serve `router(handler, state)`.
-pub async fn serve<H: RequestHandler>(handler: Arc<H>, state: Arc<ServerState>, port: u16) -> std::io::Result<RunningServer> {
+pub async fn serve<H: A2aHandler>(handler: Arc<H>, state: Arc<ServerState>, port: u16) -> std::io::Result<RunningServer> {
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
     let addr = listener.local_addr()?;
     state.port.store(addr.port(), Ordering::SeqCst);
@@ -512,10 +427,12 @@ pub async fn serve<H: RequestHandler>(handler: Arc<H>, state: Arc<ServerState>, 
 
 /// Tests: a router whose Host / Origin checks expect `port` (no socket).
 #[doc(hidden)]
-pub fn router_for_port<H: RequestHandler>(handler: Arc<H>, state: Arc<ServerState>, port: u16) -> Router {
+pub fn router_for_port<H: A2aHandler>(handler: Arc<H>, state: Arc<ServerState>, port: u16) -> Router {
     state.port.store(port, Ordering::SeqCst);
     router(handler, state)
 }
 
+#[cfg(test)]
+mod conformance;
 #[cfg(test)]
 mod tests;

@@ -537,9 +537,12 @@ impl TaskRegistry {
     pub fn list(&self, caller: &Caller, req: &ListTasksRequest) -> Result<ListTasksResponse, String> {
         let page = match req.page_size {
             None | Some(0) => LIST_PAGE_DEFAULT,
-            Some(n) if n < 0 => return Err("pageSize must be positive".into()),
-            Some(n) => (n as usize).min(LIST_PAGE_MAX),
+            Some(n) if n < 0 || n as usize > LIST_PAGE_MAX => return Err(format!("pageSize must be between 1 and {LIST_PAGE_MAX}, got {n}")),
+            Some(n) => n as usize,
         };
+        if let Some(n) = req.history_length.filter(|n| *n < 0) {
+            return Err(format!("historyLength must not be negative, got {n}"));
+        }
         let after: Option<u64> = match req.page_token.as_deref().filter(|t| !t.is_empty()) {
             Some(t) => Some(t.parse().map_err(|_| "invalid pageToken".to_string())?),
             None => None,

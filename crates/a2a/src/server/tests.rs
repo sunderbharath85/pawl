@@ -1,12 +1,10 @@
 use super::*;
-use a2a::{
-    DeleteTaskPushNotificationConfigRequest, GetTaskPushNotificationConfigRequest, ListTaskPushNotificationConfigsRequest,
-    ListTaskPushNotificationConfigsResponse, ListTasksResponse, Message, Part, Role, SendMessageResponse, StreamResponse, Task, TaskPushNotificationConfig,
-    TaskState, TaskStatus, TaskStatusUpdateEvent,
-};
+use a2a::{Message, Part, Role, TaskState, TaskStatus, TaskStatusUpdateEvent};
 use crate::async_trait;
 use axum::body::Body;
 use axum::http::Request as HttpRequest;
+use serde_json::{json, Value};
+use tower::ServiceExt;
 
 const PORT: u16 = 47999;
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -35,14 +33,14 @@ impl Fake {
 }
 
 #[async_trait]
-impl RequestHandler for Fake {
+impl A2aHandler for Fake {
     async fn send_message(&self, params: &ServiceParams, req: SendMessageRequest) -> Result<SendMessageResponse, A2AError> {
         self.record("send_message", params);
         let mut t = task(TaskState::Completed);
         t.history = Some(vec![req.message]);
         Ok(SendMessageResponse::Task(t))
     }
-    async fn send_streaming_message(&self, params: &ServiceParams, _req: SendMessageRequest) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
+    async fn send_streaming_message(&self, params: &ServiceParams, _req: SendMessageRequest) -> Result<EventStream, A2AError> {
         self.record("send_streaming_message", params);
         let events = vec![
             Ok(StreamResponse::Task(task(TaskState::Working))),
@@ -70,21 +68,9 @@ impl RequestHandler for Fake {
         self.record("cancel_task", params);
         Ok(task(TaskState::Canceled))
     }
-    async fn subscribe_to_task(&self, params: &ServiceParams, _req: SubscribeToTaskRequest) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
+    async fn subscribe_to_task(&self, params: &ServiceParams, _req: SubscribeToTaskRequest) -> Result<EventStream, A2AError> {
         self.record("subscribe_to_task", params);
         Ok(futures::stream::iter(vec![Ok(StreamResponse::Task(task(TaskState::Working)))]).boxed())
-    }
-    async fn create_push_config(&self, _p: &ServiceParams, _r: TaskPushNotificationConfig) -> Result<TaskPushNotificationConfig, A2AError> {
-        Err(A2AError::push_notification_not_supported())
-    }
-    async fn get_push_config(&self, _p: &ServiceParams, _r: GetTaskPushNotificationConfigRequest) -> Result<TaskPushNotificationConfig, A2AError> {
-        Err(A2AError::push_notification_not_supported())
-    }
-    async fn list_push_configs(&self, _p: &ServiceParams, _r: ListTaskPushNotificationConfigsRequest) -> Result<ListTaskPushNotificationConfigsResponse, A2AError> {
-        Err(A2AError::push_notification_not_supported())
-    }
-    async fn delete_push_config(&self, _p: &ServiceParams, _r: DeleteTaskPushNotificationConfigRequest) -> Result<(), A2AError> {
-        Err(A2AError::push_notification_not_supported())
     }
     async fn get_extended_agent_card(&self, params: &ServiceParams, _r: GetExtendedAgentCardRequest) -> Result<AgentCard, A2AError> {
         self.record("get_extended_agent_card", params);

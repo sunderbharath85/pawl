@@ -135,14 +135,15 @@ Docs read before coding (2026-11-24):
   logged, audited as the key `a2a.callerTokens` without a value. A rotated or removed token stops working at
   once. A new caller has no token until the user makes one.
 - Transport and security (`crates/a2a/src/server.rs`, generic over the SDK's `RequestHandler`):
-  - JSON-RPC at `POST /`, HTTP+JSON (REST) under `/` (the SDK's 1.0 routers), SSE streaming, no push
-    notifications (every push method answers `PushNotificationNotSupported`).
-  - Version: `A2A-Version` header or `?A2A-Version=` (spec 3.6.1). 1.x -> the SDK router; none or 0.3 -> Pawl's
-    0.3 path (`compat.rs` converts methods, `kind` shapes, enums, `blocking`, stream events with `final`,
-    the card) to the same handler; anything else -> `VersionNotSupported` (-32009). REST is 1.0 only.
+  - JSON-RPC at `POST /`, HTTP+JSON (REST) under `/`, SSE streaming, no push notifications (every push
+    method answers `PushNotificationNotSupported`). Pawl's own dispatcher over the `a2a-lf` types since the
+    server swap below (`server/rpc.rs`, `server/rest.rs`).
+  - Version: `A2A-Version` header or `?A2A-Version=` (spec 3.6.1). JSON-RPC: 1.x -> 1.0; none or 0.3 -> 0.3
+    (`compat.rs` converts methods, `kind` shapes, enums, `blocking`, stream events with `final`, the card) to
+    the same handler; anything else -> `VersionNotSupported` (-32009). REST is 1.0 only (none or 1.x).
   - Every request: `Host` must be `127.0.0.1`, `localhost` or `[::1]` **with the bound port** (DNS rebinding
     defence); an `Origin` must be this server's own origin; `OPTIONS` is refused; no CORS headers ever;
-    bodies over 1 MiB are refused (the guard buffers with a limit, because the SDK routers set 10 MiB).
+    bodies over 1 MiB are refused (the guard buffers every body with that limit).
   - Everything but the public card needs `Authorization: Bearer <token>`: constant-time compare against
     every caller's token; `WWW-Authenticate: Bearer` on 401. 30 failed attempts a minute (all clients) ->
     every attempt gets 429 for the rest of the minute. 20 calls/s per caller (burst 40). The public card:
@@ -200,17 +201,11 @@ Docs read before coding (2026-11-24):
 
 ### Dependencies (A2)
 
-- `a2a-server-lf = "=0.5.3"` with `default-features = false` (no TLS, no push sender), plus `axum 0.8.9` (the
-  hub's), `tower 0.5` (util), `subtle 2.6.1` (the hub's) and `async-trait 0.1` (the SDK trait needs it;
-  re-exported as `pawl_a2a::async_trait`). All already in the tree or pulled in by the SDK.
-- **Flag for t13:** `a2a-server-lf` (and `a2a-client-lf`) depend on `a2a-pb`, whose build script runs a vendored
-  `protoc` binary (`protoc-bin-vendored`) and generates prost/tonic code, so the build now compiles `tonic`,
-  `prost`, `pbjson` and ~40 crates although Pawl uses no gRPC (Cargo.lock: a2a-pb, prost*, tonic*, pbjson*,
-  protoc-bin-vendored-*, tower-http, petgraph, regex, ...). Pawl uses only the SDK's JSON-RPC and REST routers.
-  Alternative if that weight or a build-time binary is unwanted: route 1.0 JSON-RPC through the same dispatcher
-  the 0.3 path already uses (typed `a2a-lf` structs) and add the REST routes ourselves (about 150 lines); then
-  only `a2a-lf` stays and all of the above leaves the build. Trade-off: the SDK's ProtoJSON parsing also accepts
-  snake_case names and numeric enums; `a2a-lf`'s serde accepts the canonical JSON only.
+- First version: `a2a-server-lf = "=0.5.3"`. Its `a2a-pb` dependency has a build script that runs a vendored
+  `protoc` and compiles tonic / prost / pbjson (~40 crates) although Pawl uses no gRPC; flagged to t13, who
+  decided to drop it (see "A2 server swap").
+- Now: `axum 0.8.9` (the hub's), `subtle 2.6.1` (the hub's), `async-trait 0.1` (re-exported as
+  `pawl_a2a::async_trait` for `A2aHandler`), dev-dependency `tower 0.5` (util; in the tree through axum).
 
 ### Commands and results (A2)
 
@@ -238,3 +233,37 @@ Docs read before coding (2026-11-24):
 
 - No per-caller cap on open SSE streams (the rate limit bounds how fast they open).
 - The desktop Settings UI for the A2A section is another worker's (everything is in the hub API).
+
+## A2 server swap (t13's decision: drop `a2a-server-lf`) (done)
+
+- `crates/a2a/src/server.rs` defines Pawl's `A2aHandler` trait (the seven A2A operations; push configuration
+  is not part of it: the dispatcher answers those methods `PushNotificationNotSupported` itself, spec 3.3.4),
+  `ServiceParams`, `EventStream`, and its own SSE writer (numbered events, 15 s keep-alive). Guard, auth, rate
+  limits, card negotiation and the 1 MiB cap are unchanged.
+- `server/rpc.rs`: one JSON-RPC dispatcher for 1.0 and 0.3 (`Wire::V1 | V03`) over typed `a2a-lf` requests.
+  `rpc::call(handler, params, body, wire)` returns a JSON-RPC response or a stream of them, so the HTTP route
+  (JSON or SSE) and the encrypted peer link (phase A4) share it. Checks: JSON (-32700), object with `"jsonrpc":
+  "2.0"`, an `id` and a method (-32600), known method of that version (-32601), object params and typed
+  parsing (-32602); errors carry the `ErrorInfo` detail (`a2a-lf`'s `to_jsonrpc_error`).
+- `server/rest.rs`: HTTP+JSON per spec 11.3 (`/message:send`, `/message:stream`, `GET /tasks/{id}`,
+  `GET /tasks` with query parameters per 11.5, `POST /tasks/{id}:cancel`, `POST /tasks/{id}:subscribe`, push
+  config routes -> not supported, `GET /extendedAgentCard`); answers `application/a2a+json`; errors are the
+  11.6 `google.rpc.Status` JSON with the 5.4 HTTP status and gRPC status name and the `ErrorInfo` detail.
+  `:cancel` / `:subscribe` come off the end of the id segment (Pawl task ids contain `:`).
+- ListTasks now refuses `pageSize` over 100 and negative `historyLength` (spec 6.5 validation example)
+  instead of clamping.
+- Conformance tests (`server/conformance.rs`, 9 tests) send the spec's own requests through the router and
+  check the replies: 6.1 basic task (exact JSON), 6.2 streaming (task, artifactUpdate, statusUpdate), 6.3
+  multi-turn (INPUT_REQUIRED, follow-up with `taskId`), 6.4 version error, 6.5 listing (exact JSON, query
+  mapping, pagination token, validation example refused before the handler), 6.9 extended card, 9.4.1-9.4.8
+  every JSON-RPC method (SSE responses carry the request id), 9.5 errors (-32700, -32600 x3, -32601, -32602 x2,
+  TaskNotFound with ErrorInfo), 11.6 HTTP error shape. Spec inconsistency noted: the 6.4 and 6.5 examples show
+  `application/problem+json` bodies while the normative 11.6 defines `google.rpc.Status`; Pawl follows 11.6.
+- Cargo.lock lost: a2a-pb, a2a-server-lf, tonic, tonic-build, tonic-prost, tonic-prost-build, prost,
+  prost-build, prost-derive, prost-types, pbjson, pbjson-build, pbjson-types, protoc-bin-vendored (+8 platform
+  binaries), tower-http 0.7, petgraph, regex, pulldown-cmark(-to-cmark), prettyplease, multimap, itertools,
+  hyper-timeout, axum-macros, tokio-stream, wasm-streams, unicase, either, foldhash, hashbrown (457 lines).
+  Against the A2 commit only `a2a-lf`, `async-trait` and the A1 entries stay added.
+- Results: `cargo test -p pawl-a2a` 62 passed (53 + 9 conformance); `cargo test --workspace --no-fail-fast` exit 0
+  (pawl-a2a 62, pawl-acp 25, pawl-brain 111, pawl-discovery 39, pawl-hub 227, pawl-peer 105 + 1 ignored,
+  pawl-protocol 4); `cargo clippy --workspace --all-targets -- -D warnings` clean. No wire change.

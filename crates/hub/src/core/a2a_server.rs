@@ -19,15 +19,12 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use anyhow::Result;
-use futures::stream::BoxStream;
 use futures::StreamExt;
 use pawl_a2a::card::{self, CardInfo};
-use pawl_a2a::server::{self as srv, CallerAuth, RunningServer, ServerState};
-use pawl_a2a::server_sdk::{RequestHandler, ServiceParams};
+use pawl_a2a::server::{self as srv, A2aHandler, CallerAuth, EventStream, RunningServer, ServerState, ServiceParams};
 use pawl_a2a::spec::{
-    error_code, A2AError, AgentCard, CancelTaskRequest, DeleteTaskPushNotificationConfigRequest, GetExtendedAgentCardRequest, GetTaskPushNotificationConfigRequest,
-    GetTaskRequest, ListTaskPushNotificationConfigsRequest, ListTaskPushNotificationConfigsResponse, ListTasksRequest, ListTasksResponse, SendMessageRequest,
-    SendMessageResponse, StreamResponse, SubscribeToTaskRequest, Task, TaskPushNotificationConfig, TaskState,
+    error_code, A2AError, AgentCard, CancelTaskRequest, GetExtendedAgentCardRequest, GetTaskRequest, ListTasksRequest, ListTasksResponse, SendMessageRequest,
+    SendMessageResponse, StreamResponse, SubscribeToTaskRequest, Task, TaskState,
 };
 use pawl_a2a::{Caller, DelegateParams};
 use pawl_protocol::{A2aTaskSummary, IntentRejectReason};
@@ -241,7 +238,7 @@ fn interrupted_or_final(s: &TaskState) -> bool {
     s.is_terminal() || matches!(s, TaskState::InputRequired | TaskState::AuthRequired)
 }
 
-/// The SDK's request handler over the hub (weak: the server never keeps a stopped hub alive).
+/// The server's request handler over the hub (weak: the server never keeps a stopped hub alive).
 struct HubHandler {
     hub: Weak<Inner>,
 }
@@ -325,7 +322,7 @@ impl HubHandler {
 
     /// A task's stream: its snapshot, then its updates until it ends (a lagging reader gets a fresh
     /// snapshot instead of the updates it missed).
-    fn follow(hub: Hub, caller: Caller, task_id: String) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
+    fn follow(hub: Hub, caller: Caller, task_id: String) -> EventStream {
         let Some((snapshot, rx)) = hub.tasks().subscribe(&task_id) else {
             return futures::stream::iter(vec![Err(A2AError::task_not_found(&task_id))]).boxed();
         };
@@ -357,7 +354,7 @@ fn target_of(req: &SendMessageRequest) -> Option<String> {
 }
 
 #[pawl_a2a::async_trait]
-impl RequestHandler for HubHandler {
+impl A2aHandler for HubHandler {
     async fn send_message(&self, params: &ServiceParams, req: SendMessageRequest) -> Result<SendMessageResponse, A2AError> {
         let w = self.who(params)?;
         let target = target_of(&req);
@@ -377,7 +374,7 @@ impl RequestHandler for HubHandler {
         r
     }
 
-    async fn send_streaming_message(&self, params: &ServiceParams, req: SendMessageRequest) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
+    async fn send_streaming_message(&self, params: &ServiceParams, req: SendMessageRequest) -> Result<EventStream, A2AError> {
         let w = self.who(params)?;
         let target = target_of(&req);
         let r = self.send(&w, req).await;
@@ -409,7 +406,7 @@ impl RequestHandler for HubHandler {
         r
     }
 
-    async fn subscribe_to_task(&self, params: &ServiceParams, req: SubscribeToTaskRequest) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
+    async fn subscribe_to_task(&self, params: &ServiceParams, req: SubscribeToTaskRequest) -> Result<EventStream, A2AError> {
         let w = self.who(params)?;
         let r = w.hub.a2a_get(&req.id, None, &w.caller).map_err(|e| to_a2a(&e)).and_then(|t| {
             if t.status.state.is_terminal() {
@@ -421,22 +418,6 @@ impl RequestHandler for HubHandler {
         w.hub.log_a2a(&w.id, "SubscribeToTask", Some(req.id.clone()), &r.as_ref().map(|_| ()).map_err(Clone::clone)).await;
         let t = r?;
         Ok(Self::follow(w.hub.clone(), w.caller.clone(), t.id))
-    }
-
-    async fn create_push_config(&self, _p: &ServiceParams, _r: TaskPushNotificationConfig) -> Result<TaskPushNotificationConfig, A2AError> {
-        Err(A2AError::push_notification_not_supported())
-    }
-
-    async fn get_push_config(&self, _p: &ServiceParams, _r: GetTaskPushNotificationConfigRequest) -> Result<TaskPushNotificationConfig, A2AError> {
-        Err(A2AError::push_notification_not_supported())
-    }
-
-    async fn list_push_configs(&self, _p: &ServiceParams, _r: ListTaskPushNotificationConfigsRequest) -> Result<ListTaskPushNotificationConfigsResponse, A2AError> {
-        Err(A2AError::push_notification_not_supported())
-    }
-
-    async fn delete_push_config(&self, _p: &ServiceParams, _r: DeleteTaskPushNotificationConfigRequest) -> Result<(), A2AError> {
-        Err(A2AError::push_notification_not_supported())
     }
 
     async fn get_extended_agent_card(&self, params: &ServiceParams, _r: GetExtendedAgentCardRequest) -> Result<AgentCard, A2AError> {
