@@ -627,3 +627,67 @@ and pixel statistics, and was removed afterwards.
    - `cargo test`: **113 passed** (110 lib + 3), with `PAWL_SCREEN_TEST=1` and the voice models.
    - `cargo clippy --all-targets -- -D warnings`: clean.
    - `bunx tauri build --debug --no-bundle`: OK.
+
+## Bug: `cargo test --lib` crashed with STATUS_ACCESS_VIOLATION (t13's report)
+
+1. **Root cause: cpal 0.18.2 (WASAPI host) keeps a COM object after COM may have shut down.**
+   - `src/host/wasapi/device.rs` keeps one `IMMDeviceEnumerator` for the whole process (`static ENUMERATOR:
+     OnceLock<Enumerator>`). It is created in a single-threaded apartment of whichever thread first touches audio.
+   - `src/host/com.rs` keeps COM initialized per thread (a `thread_local!` guard) and calls `CoUninitialize` when
+     that thread exits.
+   - If no other thread has COM initialized at that moment, COM shuts down for the process and unloads
+     MMDevApi.dll. The cached enumerator then points into an unloaded DLL. The next `list_mics` or `open` from any
+     thread crashes the process in `IMMDeviceEnumerator::GetDefaultAudioEndpoint`.
+   - Proven with a temporary vectored exception handler in the crashing test (removed afterwards):
+     - The access violation is a read of `0x7fff04122ed0`, an address in no loaded module.
+     - MMDevApi.dll was already unloaded (`GetModuleHandleW` gave null) when the test started.
+     - Stack: `GetDefaultAudioEndpoint` ← `cpal::host::wasapi::device::current_default_endpoint` ←
+       `default_input_device` ← `capture::list_mics` ← `Inner::mics` ← `Inner::status` ← the test.
+   - The enumerator's class is registered with `ThreadingModel=both`, so the pointer stays usable while the DLL is
+     loaded. Only the unload breaks it.
+   - cpal's master has the same code. I found no upstream issue.
+2. **Why `voice::tests` triggered it, and why it passed earlier.**
+   - In the tests, `Inner::status()` lists the mics through real cpal on the test's own thread. The libtest
+     thread ends with the test.
+   - `a_panicking_engine_reports_an_error_instead_of_a_stale_state` (added with the unwind change) was the first
+     test to do that. Its thread exit took COM down. The next test that listed mics (`mute_works_…`) crashed.
+   - The panic had nothing to do with it. It only made this the first test, in name order, to call
+     `status()`.
+   - The crash only happens when no other thread has COM up at that moment, so parallel runs were a race:
+     - With the unfixed binary and `PAWL_SCREEN_TEST=1` (the env of my earlier gates): 3 of 3 passed, because the
+       real screen capture test holds COM at the same time.
+     - Without it: 1 of 2 crashed.
+3. **The real app.** It should not crash, but that was luck rather than design. The webview's main thread
+   initializes COM (wry's `CoInitializeEx`, tao's `OleInitialize`) and never uninitializes it, so COM never goes
+   to zero while Pawl runs. Still, the first mic listing usually runs on a tokio blocking-pool thread, which exits
+   after it has been idle.
+4. **Fix (`src/voice/capture.rs`).**
+   - Every cpal use now goes through `host()`. It first calls `keep_com_loaded()`.
+   - `keep_com_loaded()` runs once (`Once`). It takes an MTA usage with `CoIncrementMTAUsage` and never gives it
+     back, so COM, and with it MMDevApi.dll, stays loaded until the process exits.
+   - It runs on a short-lived thread of its own (`pawl-com`, MTA init, then uninit). The docs say the call moves a
+     thread that has no apartment yet into the MTA, and the caller's thread must keep its own choice: tao, wry and
+     the dialogs need single-threaded apartments.
+   - If it fails, only `[pawl] could not keep COM loaded for audio (HRESULT …)` is logged, and audio works as
+     before.
+   - No other platform changes (no-op there).
+   - No new dependency: three `ole32` imports.
+   - Proposed upstream fix for cpal (not filed): either take an MTA usage, or create the enumerator on a COM thread
+     that stays alive, before caching it in the static.
+5. **Regression test.** `voice::capture::tests::audio_keeps_working_after_the_first_audio_thread_exits` (Windows
+   only):
+   - A thread lists the mics and exits.
+   - The test asserts MMDevApi.dll is still loaded, then lists the mics from a second thread.
+   - It then checks that a new thread can still enter a single-threaded apartment (`S_OK`).
+   - With the fix disabled, the test fails every time when run alone: "COM unloaded the audio DLL under cpal's
+     cached enumerator".
+6. **Gates** (plain env, as t13 ran them):
+   - `cargo test`: 5 runs in a row, each 114 passed (111 lib + 3).
+   - `cargo test --lib voice:: -- --test-threads=1`: 59 passed.
+   - `cargo test --lib -- --test-threads=1`: 111 passed.
+   - The crashing pair (`a_panicking…` then `mute_works_when_the_settings…`): passes.
+   - `cargo clippy --all-targets -- -D warnings`: clean.
+7. **Docs used:**
+   - https://learn.microsoft.com/windows/win32/api/combaseapi/nf-combaseapi-coincrementmtausage
+   - https://learn.microsoft.com/windows/win32/api/combaseapi/nf-combaseapi-couninitialize
+   - cpal 0.18.2 source (`src/host/com.rs`, `src/host/wasapi/device.rs`) and its master on GitHub.

@@ -24,9 +24,70 @@ pub struct MicInfo {
     pub is_default: bool,
 }
 
+/// The audio host. Every cpal use goes through here, so COM is kept loaded first (see [`keep_com_loaded`]).
+fn host() -> cpal::Host {
+    keep_com_loaded();
+    cpal::default_host()
+}
+
+/// cpal keeps one `IMMDeviceEnumerator` for the whole process (`static ENUMERATOR` in cpal 0.18.2's
+/// `src/host/wasapi/device.rs`, unchanged on its master). It is created in the COM apartment of whichever thread
+/// touches audio first, and that thread uninitializes COM when it exits (`src/host/com.rs`). If no other thread has
+/// COM up at that moment, COM shuts down and unloads MMDevApi.dll under the cached enumerator, and the next audio
+/// call from any thread crashes the process (STATUS_ACCESS_VIOLATION in `GetDefaultAudioEndpoint`). In the app
+/// the webview's main thread usually holds COM, but nothing guarantees it: the status call that lists mics runs on
+/// a pool thread that ends after a while. Holding an MTA usage for the life of the process keeps COM, and so the
+/// DLL, loaded. It is taken once, on a short-lived thread of its own, because `CoIncrementMTAUsage` moves a thread
+/// that has no apartment yet into the MTA, and the caller's thread must keep its own choice (tao, wry and the
+/// dialogs need single-threaded ones).
+/// https://learn.microsoft.com/windows/win32/api/combaseapi/nf-combaseapi-coincrementmtausage
+#[cfg(windows)]
+fn keep_com_loaded() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let held = std::thread::Builder::new().name("pawl-com".into()).spawn(|| {
+            // SAFETY: plain COM calls on a fresh thread. The cookie is never given back (`CoDecrementMTAUsage`), so
+            // the usage lasts until the process exits; the thread's own initialization is undone before it ends.
+            unsafe {
+                let init = com::CoInitializeEx(std::ptr::null(), com::COINIT_MULTITHREADED);
+                let mut cookie = std::ptr::null_mut();
+                let hr = com::CoIncrementMTAUsage(&mut cookie);
+                if init >= 0 {
+                    com::CoUninitialize();
+                }
+                hr
+            }
+        });
+        match held.map(|t| t.join()) {
+            Ok(Ok(hr)) if hr >= 0 => {}
+            Ok(Ok(hr)) => eprintln!("[pawl] could not keep COM loaded for audio (HRESULT {hr:#010x})"),
+            _ => eprintln!("[pawl] could not keep COM loaded for audio (no thread)"),
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn keep_com_loaded() {}
+
+#[cfg(windows)]
+mod com {
+    use std::ffi::c_void;
+
+    pub const COINIT_MULTITHREADED: u32 = 0x0;
+    #[cfg(test)]
+    pub const COINIT_APARTMENTTHREADED: u32 = 0x2;
+
+    #[link(name = "ole32")]
+    extern "system" {
+        pub fn CoInitializeEx(reserved: *const c_void, coinit: u32) -> i32;
+        pub fn CoIncrementMTAUsage(cookie: *mut *mut c_void) -> i32;
+        pub fn CoUninitialize();
+    }
+}
+
 /// The input devices of the default audio host. Never opens a stream.
 pub fn list_mics() -> Vec<MicInfo> {
-    let host = cpal::default_host();
+    let host = host();
     let default_id = host.default_input_device().and_then(|d| d.id().ok()).map(|id| id.to_string());
     let Ok(devices) = host.input_devices() else {
         return Vec::new();
@@ -63,7 +124,7 @@ fn friendly(err: &cpal::Error) -> String {
 
 /// Open `mic_id` (a cpal device id; `None`, or a device that is gone, means the system default input).
 pub fn open(mic_id: Option<&str>, generation: u64, tx: SyncSender<super::engine::Msg>) -> Result<Capture, String> {
-    let host = cpal::default_host();
+    let host = host();
     let chosen = mic_id.and_then(|id| id.parse::<cpal::DeviceId>().ok()).and_then(|id| host.device_by_id(&id));
     let device = chosen.or_else(|| host.default_input_device()).ok_or("No microphone found.")?;
     let supported = device.default_input_config().map_err(|e| friendly(&e))?;
@@ -138,5 +199,42 @@ mod tests {
         let m = downmix(&[i16::MAX, i16::MAX, i16::MIN, i16::MIN], 2);
         assert!((m[0] - 1.0).abs() < 1e-3 && (m[1] + 1.0).abs() < 1e-3, "{m:?}");
         assert_eq!(downmix::<f32>(&[], 2), Vec::<f32>::new());
+    }
+
+    /// Is `name` loaded in this process?
+    #[cfg(windows)]
+    fn module_loaded(name: &str) -> bool {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetModuleHandleW(name: *const u16) -> *mut std::ffi::c_void;
+        }
+        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        // SAFETY: a NUL-terminated name; the handle is only compared, not used or freed.
+        !unsafe { GetModuleHandleW(wide.as_ptr()) }.is_null()
+    }
+
+    /// The thread that first touches audio creates cpal's process-wide device enumerator and ends COM when it exits.
+    /// Before the fix COM then unloaded MMDevApi.dll, and the next call crashed the whole test process
+    /// (STATUS_ACCESS_VIOLATION); run alone, this test reproduced that every time.
+    #[cfg(windows)]
+    #[test]
+    fn audio_keeps_working_after_the_first_audio_thread_exits() {
+        std::thread::spawn(list_mics).join().unwrap();
+        assert!(module_loaded("mmdevapi.dll"), "COM unloaded the audio DLL under cpal's cached enumerator");
+        std::thread::spawn(list_mics).join().unwrap();
+        // Holding the MTA leaves other threads their own choice: a new one can still be single-threaded.
+        let sta = std::thread::spawn(|| {
+            // SAFETY: plain COM calls on a fresh thread, undone before it ends.
+            unsafe {
+                let hr = com::CoInitializeEx(std::ptr::null(), com::COINIT_APARTMENTTHREADED);
+                if hr >= 0 {
+                    com::CoUninitialize();
+                }
+                hr
+            }
+        })
+        .join()
+        .unwrap();
+        assert_eq!(sta, 0, "S_OK: the new thread got its own single-threaded apartment");
     }
 }
