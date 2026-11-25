@@ -567,3 +567,5 @@ async fn the_default_agent_is_saved_shown_and_refused_when_unknown() {
     assert_eq!(v["settings"]["bot"]["defaultAgent"], json!(null));
     assert!(!key_line(&f.hub), "{}", config_text(&f.hub));
 }
+
+mod connect;

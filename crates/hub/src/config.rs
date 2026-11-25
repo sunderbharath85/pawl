@@ -291,6 +291,21 @@ pub struct A2aCaller {
     /// execute / delete / fetch). Default false.
     #[serde(default)]
     pub allow_approvals: bool,
+    /// The coding agent "Connect coding agents" made (or took over) this caller for. Its token sits in
+    /// that agent's own MCP config, so it never answers approvals, whatever `allow_approvals` says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_target: Option<pawl_protocol::HookTargetName>,
+    /// Connect added the servers object to that agent's config itself, so Remove may take it away
+    /// again once it is empty (one the user had stays).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub connect_added_servers: bool,
+}
+
+impl A2aCaller {
+    /// What the A2A server goes by: approvals allowed and not a connected coding agent.
+    pub fn may_answer_approvals(&self) -> bool {
+        self.allow_approvals && self.connect_target.is_none()
+    }
 }
 
 impl fmt::Debug for A2aCaller {
@@ -300,6 +315,8 @@ impl fmt::Debug for A2aCaller {
             .field("name", &self.name)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
             .field("allow_approvals", &self.allow_approvals)
+            .field("connect_target", &self.connect_target)
+            .field("connect_added_servers", &self.connect_added_servers)
             .finish()
     }
 }

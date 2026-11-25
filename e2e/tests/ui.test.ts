@@ -6,6 +6,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Server } from "bun";
 import { type Browser, type Page, chromium } from "playwright";
+import type { A2aCallerSetting, A2aConnectStatus, HubSettings } from "@pawl/protocol";
 import { REPO, tempRoot, transcript, waitFor } from "../lib/env";
 import { DEMO_AGENT_ID, TestHub } from "../lib/hub";
 
@@ -288,7 +289,7 @@ describe("desktop UI: Settings never blanks the window", () => {
     expect(await card.innerText()).toContain("Something went wrong in this section.");
     expect(await card.locator(".crash-message").innerText()).toMatch(/default/);
     // Every other section and the sidebar still render.
-    expect(await p.locator("#settings-a2a .a2a-part").count()).toBe(3);
+    expect(await p.locator("#settings-a2a .a2a-status").count()).toBe(1);
     expect(await p.locator(".sidebar").count()).toBe(1);
 
     // Reload renders the section again (the voice engine answers properly now).
@@ -298,4 +299,365 @@ describe("desktop UI: Settings never blanks the window", () => {
     expect(await p.locator("#settings-voice .crash-card").count()).toBe(0);
     await p.close();
   }, 60_000);
+});
+
+// ---------------------------------------------------------------- Settings > A2A > Connect coding agents
+
+/** What a 0.1.1 hub answers to a message it does not know (captured). */
+const OLD_HUB_ERROR = "invalid message: unknown variant `a2a_connect_status`, expected one of `hello`, `list_agents`, `list_tasks` at line 1 column 28";
+
+/**
+ * The hub's a2a_connect_status / a2a_connect, faked on the panel's socket (everything else goes to the real hub), so
+ * the test never writes a real agent config. Connect and Remove change the real hub's A2A settings the way the hub
+ * does (server on, the agent's caller added / removed), so the server part and the callers must follow.
+ */
+function fakeConnectHub(opts: { old?: boolean; rows?: (rows: A2aConnectStatus[]) => A2aConnectStatus[]; serverError?: string } = {}) {
+  const base: A2aConnectStatus[] = [
+    { target: "claude", name: "Claude Code", agentInstalled: true, state: "missing", configPath: "C:\\Users\\e2e\\.claude.json", callerId: "claude-code", callerExists: false },
+    { target: "codex", name: "Codex", agentInstalled: false, state: "missing", configPath: "C:\\Users\\e2e\\.codex\\config.toml", callerId: "codex", callerExists: false },
+    { target: "copilot-cli", name: "Copilot CLI", agentInstalled: true, state: "missing", configPath: "C:\\Users\\e2e\\.copilot\\mcp-config.json", callerId: "copilot-cli", callerExists: false },
+    {
+      target: "copilot-vscode",
+      name: "Copilot in VS Code",
+      agentInstalled: true,
+      state: "missing",
+      configPath: "C:\\Users\\e2e\\AppData\\Roaming\\Code\\User\\mcp.json",
+      callerId: "copilot-vscode",
+      callerExists: false,
+    },
+  ];
+  const rows = opts.rows ? opts.rows(base) : base;
+  const seen: string[] = [];
+  /** Callers Connect made (id -> target): the hub marks them with `connectTarget` in every settings it sends. */
+  const made = new Map<string, A2aConnectStatus["target"]>();
+  const mark = (raw: string | Buffer): string | Buffer => {
+    if (typeof raw !== "string" || !raw.includes('"callers"')) return raw;
+    const msg = JSON.parse(raw) as { settings?: HubSettings; result?: { settings?: HubSettings } };
+    const a2a = (msg.settings ?? msg.result?.settings)?.a2a;
+    for (const c of a2a?.callers ?? []) {
+      const target = made.get(c.id);
+      if (target) c.connectTarget = target;
+    }
+    // The A2A server on but not running (as the hub reports a port taken after it started).
+    if (a2a && opts.serverError) Object.assign(a2a, { server: true, running: false, url: null, error: opts.serverError });
+    return JSON.stringify(msg);
+  };
+  const a2a = async () => (await hub.client.getSettings()).settings.a2a!;
+  const callers = (list: A2aCallerSetting[]) => list.map((c) => ({ id: c.id, name: c.name, allowApprovals: c.allowApprovals }));
+
+  // Rows that start with a caller Connect made (callerMarked).
+  for (const r of rows) if (r.callerMarked) made.set(r.callerId, r.target);
+  /** A row as the hub reports it: callerMarked = the caller is one Connect made. */
+  const withMark = (r: A2aConnectStatus, callerExists = r.callerExists) => ({ ...r, callerExists, callerMarked: callerExists && made.has(r.callerId) });
+
+  async function answer(msg: { type: string; id: string; target?: string; action?: string }): Promise<object> {
+    if (opts.old) return { type: "ack", id: msg.id, ok: false, error: OLD_HUB_ERROR };
+    if (msg.type === "a2a_connect_status") return { type: "ack", id: msg.id, ok: true, result: { targets: rows.map((r) => withMark(r)) } };
+    const i = rows.findIndex((r) => r.target === msg.target);
+    const row = rows[i]!;
+    seen.push(`${msg.action}:${msg.target}`);
+    const now = await a2a();
+    // Like the hub: the caller exists when it is in the settings; Connect always makes a new token.
+    const callerExists = now.callers.some((c) => c.id === row.callerId);
+    if (msg.action === "preview") {
+      const plan = `${now.server ? "" : "turn on the A2A server (127.0.0.1 only)\n"}caller ${row.callerId}: ${callerExists ? "new token" : "new"}\n+ ${row.configPath}: "pawl" entry (token <new token>)`;
+      return { type: "ack", id: msg.id, ok: true, result: { plan, applied: false, status: withMark(row, callerExists), startsServer: !now.server, newToken: true } };
+    }
+    if (msg.action === "apply") {
+      made.set(row.callerId, row.target);
+      const list = callerExists ? callers(now.callers) : [...callers(now.callers), { id: row.callerId, name: row.name }];
+      await hub.client.updateSettings({ a2a: { server: true, callers: list } });
+      rows[i] = { ...row, state: "connected", callerExists: true };
+      return { type: "ack", id: msg.id, ok: true, result: { plan: "", applied: true, status: withMark(rows[i]!), startsServer: !now.server, newToken: true } };
+    }
+    // Like the hub: Remove deletes only a caller Connect made; one the user added by hand stays.
+    const marked = callerExists && made.has(row.callerId);
+    if (marked) await hub.client.updateSettings({ a2a: { callers: callers(now.callers.filter((c) => c.id !== row.callerId)) } });
+    made.delete(row.callerId);
+    // A config Pawl cannot read: the caller (token) goes, the file stays as it is.
+    const warning =
+      row.state === "unsupported" && marked ? `Revoked ${row.name}'s token, but could not edit ${row.configPath}: take the "pawl" entry out by hand.` : undefined;
+    rows[i] = { ...row, state: row.state === "unsupported" ? "unsupported" : "missing", callerExists: callerExists && !marked };
+    return {
+      type: "ack",
+      id: msg.id,
+      ok: true,
+      result: { plan: "", applied: marked || row.state !== "missing", status: withMark(rows[i]!), startsServer: false, newToken: false, ...(warning ? { warning } : {}) },
+    };
+  }
+
+  async function route(p: Page): Promise<void> {
+    await p.routeWebSocket(/\/ws$/, (ws) => {
+      const server = ws.connectToServer();
+      ws.onMessage((raw) => {
+        const msg = JSON.parse(String(raw)) as { type: string; id: string };
+        if (msg.type === "a2a_connect_status" || msg.type === "a2a_connect") void answer(msg).then((ack) => ws.send(JSON.stringify(ack)));
+        else server.send(raw);
+      });
+      server.onMessage((raw) => ws.send(mark(raw)));
+    });
+  }
+  return { route, seen };
+}
+
+/** The panel (vite build, plain browser) on Settings > A2A, with the connect messages faked. */
+async function openConnect(fake: ReturnType<typeof fakeConnectHub>): Promise<Page> {
+  const p = await browser.newPage({ viewport: { width: 1180, height: 900 } });
+  await fake.route(p);
+  await p.addInitScript((token) => {
+    localStorage.setItem("pawl.devToken", token);
+    localStorage.setItem("pawl.desktop.settings.v1", JSON.stringify({ setupOffered: true, setupDone: true }));
+  }, hub.token);
+  await p.goto(appUrl("panel.html"));
+  await p.locator(".nav-item", { hasText: "Settings" }).click();
+  await p.locator("#settings-a2a .a2a-connect").waitFor({ state: "visible", timeout: 20_000 });
+  return p;
+}
+
+describe("desktop UI: Settings > A2A > Connect coding agents", () => {
+  test("preview, connect (asks first; turns the server on), the row turns Connected, remove (asks first)", async () => {
+    await hub.client.updateSettings({ a2a: { port: freePort(), server: false } });
+    const fake = fakeConnectHub();
+    const p = await openConnect(fake);
+    const part = p.locator("#settings-a2a .a2a-connect");
+    const claude = part.locator(".a2a-connect-row", { hasText: "Claude Code" });
+    await claude.waitFor({ state: "visible", timeout: 10_000 });
+    expect(await part.locator(".a2a-connect-row").count()).toBe(4);
+    expect(await claude.locator(".status-pill").textContent()).toBe("Not connected");
+    expect(await claude.locator(".hook-path").innerText()).toBe("C:\\Users\\e2e\\.claude.json");
+    expect(await part.locator(".a2a-connect-row", { hasText: "Codex" }).locator(".chip", { hasText: "not found" }).count()).toBe(1);
+
+    // Preview: the plan, nothing written.
+    await claude.getByRole("button", { name: "Preview" }).click();
+    await claude.locator(".plan-preview").waitFor({ state: "visible", timeout: 10_000 });
+    expect(await claude.locator(".plan-preview").innerText()).toContain('"pawl" entry');
+    expect((await hub.client.getSettings()).settings.a2a?.callers.some((c) => c.id === "claude-code")).toBe(false);
+
+    // Connect asks first: the file, the agent's own token in it, and the server going on.
+    await claude.getByRole("button", { name: "Connect", exact: true }).click();
+    const dialog = p.locator(".confirm-dialog");
+    await dialog.waitFor({ state: "visible", timeout: 10_000 });
+    const asked = (await dialog.innerText()).replace(/\s+/g, " ");
+    expect(asked).toContain("Connect Claude Code to Pawl?");
+    expect(asked).toContain('Pawl adds a "pawl" entry to C:\\Users\\e2e\\.claude.json.');
+    expect(asked).toContain("Claude Code gets its own token, stored in that file.");
+    expect(asked).toContain("This turns on Pawl's A2A server, on 127.0.0.1 only.");
+    await dialog.getByRole("button", { name: "Connect", exact: true }).click();
+    await claude.locator(".status-pill", { hasText: "Connected" }).waitFor({ timeout: 10_000 });
+    expect(fake.seen).toEqual(["preview:claude", "preview:claude", "apply:claude"]);
+    // The server part and the callers follow (fetched again after Connect).
+    await p.locator("#settings-a2a .a2a-status", { hasText: "Running at" }).waitFor({ timeout: 15_000 });
+    await p.locator("#settings-a2a .a2a-item", { hasText: "claude-code" }).waitFor({ timeout: 10_000 });
+
+    // Remove asks first (danger), then the row is back to Not connected and the caller is gone.
+    await claude.getByRole("button", { name: "Remove" }).click();
+    await dialog.waitFor({ state: "visible", timeout: 10_000 });
+    const removing = (await dialog.innerText()).replace(/\s+/g, " ");
+    expect(removing).toContain("Disconnect Claude Code from Pawl?");
+    expect(removing).toContain("its token stops working at once");
+    await dialog.getByRole("button", { name: "Remove", exact: true }).click();
+    await claude.locator(".status-pill", { hasText: "Not connected" }).waitFor({ timeout: 10_000 });
+    await waitFor(async () => !(await hub.client.getSettings()).settings.a2a?.callers.some((c) => c.id === "claude-code"), "the caller removed", 10_000);
+    expect(await p.locator("#settings-a2a .a2a-item", { hasText: "claude-code" }).count()).toBe(0);
+    expect(fake.seen.at(-1)).toBe("remove:claude");
+
+    await hub.client.updateSettings({ a2a: { server: false } });
+    await p.close();
+  }, 60_000);
+
+  test("a caller Connect made: a hint instead of the approvals switch; its Remove disconnects the agent too", async () => {
+    await hub.client.updateSettings({ a2a: { port: freePort(), server: false, callers: [{ id: "zed", name: "Zed" }] } });
+    const fake = fakeConnectHub();
+    const p = await openConnect(fake);
+    const row = p.locator("#settings-a2a .a2a-connect-row", { hasText: "Copilot CLI" });
+    await row.getByRole("button", { name: "Connect", exact: true }).click();
+    const dialog = p.locator(".confirm-dialog");
+    await dialog.getByRole("button", { name: "Connect", exact: true }).click();
+    await row.locator(".status-pill", { hasText: "Connected" }).waitFor({ timeout: 10_000 });
+
+    const caller = p.locator("#settings-a2a .a2a-item", { hasText: "copilot-cli" });
+    await caller.locator(".a2a-connect-note").waitFor({ timeout: 10_000 });
+    expect(await caller.locator(".a2a-connect-note").innerText()).toBe("Connected by Pawl for Copilot CLI. It can never answer approvals.");
+    expect(await caller.locator("label.toggle", { hasText: "Can answer approvals" }).count()).toBe(0);
+    // Its token lives in the agent's config: renewed by Connect's Update, never made here.
+    expect(await caller.getByRole("button", { name: /token/ }).count()).toBe(0);
+    // A caller added by hand keeps its switch and its token button.
+    const zed = p.locator("#settings-a2a .a2a-item", { hasText: "Zed" });
+    expect(await zed.locator("label.toggle", { hasText: "Can answer approvals" }).count()).toBe(1);
+    expect(await zed.getByRole("button", { name: /token/ }).count()).toBe(1);
+
+    // Remove in Callers = Connect's Remove: the same danger confirm, then the entry and the caller go.
+    await caller.getByRole("button", { name: "Remove" }).click();
+    await dialog.waitFor({ state: "visible", timeout: 10_000 });
+    const asked = (await dialog.innerText()).replace(/\s+/g, " ");
+    expect(asked).toContain("Disconnect Copilot CLI from Pawl?");
+    expect(asked).toContain('takes its "pawl" entry out of C:\\Users\\e2e\\.copilot\\mcp-config.json');
+    await dialog.getByRole("button", { name: "Remove", exact: true }).click();
+    await row.locator(".status-pill", { hasText: "Not connected" }).waitFor({ timeout: 10_000 });
+    expect(fake.seen).toEqual(["preview:copilot-cli", "apply:copilot-cli", "remove:copilot-cli"]);
+    await waitFor(async () => !(await hub.client.getSettings()).settings.a2a?.callers.some((c) => c.id === "copilot-cli"), "the caller removed", 10_000);
+    expect(await p.locator("#settings-a2a .a2a-item", { hasText: "copilot-cli" }).count()).toBe(0);
+    expect(await zed.count()).toBe(1);
+
+    await hub.client.updateSettings({ a2a: { server: false, callers: [] } });
+    await p.close();
+  }, 60_000);
+
+  test("Connect takes over a caller you added (said so in the confirm, with the new token)", async () => {
+    await hub.client.updateSettings({ a2a: { port: freePort(), server: true, callers: [{ id: "codex", name: "My Codex" }] } });
+    const p = await openConnect(fakeConnectHub());
+    const row = p.locator("#settings-a2a .a2a-connect-row", { hasText: "Codex" });
+    await row.getByRole("button", { name: "Connect", exact: true }).click();
+    const dialog = p.locator(".confirm-dialog");
+    await dialog.waitFor({ state: "visible", timeout: 10_000 });
+    const asked = (await dialog.innerText()).replace(/\s+/g, " ");
+    expect(asked).toContain('It takes over the caller "codex" you added: Codex uses it from now on, with a new token stored in that file; its old token stops working.');
+    // The server is already on: no word about turning it on.
+    expect(asked).not.toContain("This turns on Pawl's A2A server");
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await hub.client.updateSettings({ a2a: { server: false, callers: [] } });
+    await p.close();
+  }, 30_000);
+
+  test("Copilot in VS Code: the confirm mentions Settings Sync", async () => {
+    const p = await openConnect(fakeConnectHub());
+    const row = p.locator("#settings-a2a .a2a-connect-row", { hasText: "Copilot in VS Code" });
+    await row.getByRole("button", { name: "Connect", exact: true }).click();
+    const dialog = p.locator(".confirm-dialog");
+    await dialog.waitFor({ state: "visible", timeout: 10_000 });
+    expect((await dialog.innerText()).replace(/\s+/g, " ")).toContain("If VS Code's Settings Sync is on, it can copy mcp.json, token included, to your other computers.");
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await p.close();
+  }, 30_000);
+
+  test("an unsupported config can still be removed: the token is revoked, the file warning shows as a warning", async () => {
+    await hub.client.updateSettings({ a2a: { callers: [{ id: "copilot-vscode", name: "Copilot in VS Code" }] } });
+    const fake = fakeConnectHub({
+      rows: (rows) =>
+        rows.map((r) =>
+          r.target === "copilot-vscode"
+            ? { ...r, state: "unsupported", callerExists: true, callerMarked: true, detail: "mcp.json is not valid JSON; fix it or add the entry by hand" }
+            : r,
+        ),
+    });
+    const p = await openConnect(fake);
+    const row = p.locator("#settings-a2a .a2a-connect-row", { hasText: "Copilot in VS Code" });
+    await row.locator(".status-pill", { hasText: "Not supported" }).waitFor({ timeout: 10_000 });
+    expect(await row.getByRole("button", { name: "Preview" }).count()).toBe(0);
+    await row.getByRole("button", { name: "Remove" }).click();
+    const dialog = p.locator(".confirm-dialog");
+    await dialog.waitFor({ state: "visible", timeout: 10_000 });
+    const asked = (await dialog.innerText()).replace(/\s+/g, " ");
+    // Pawl cannot read the file: it tries, and may not manage; the token goes either way.
+    expect(asked).toContain('Pawl tries to take its "pawl" entry out of');
+    expect(asked).toContain("but it may not be able to: it cannot read that file.");
+    expect(asked).toContain("Either way it removes Copilot in VS Code's caller: its token stops working at once");
+    await dialog.getByRole("button", { name: "Remove", exact: true }).click();
+    const warning = row.locator(".a2a-connect-warning");
+    await warning.waitFor({ state: "visible", timeout: 10_000 });
+    expect(await warning.innerText()).toContain("take the \"pawl\" entry out by hand");
+    // A warning, not an error; and the toast says what did happen.
+    expect(await row.locator(".field-error").count()).toBe(0);
+    await p.locator(".toast", { hasText: "Token revoked" }).waitFor({ timeout: 5000 });
+    await waitFor(async () => !(await hub.client.getSettings()).settings.a2a?.callers.some((c) => c.id === "copilot-vscode"), "the caller revoked", 10_000);
+    await p.close();
+  }, 30_000);
+
+  test("Remove of an entry whose caller is already gone: no word about a token", async () => {
+    const fake = fakeConnectHub({ rows: (rows) => rows.map((r) => (r.target === "claude" ? { ...r, state: "outdated", callerExists: false } : r)) });
+    const p = await openConnect(fake);
+    const row = p.locator("#settings-a2a .a2a-connect-row", { hasText: "Claude Code" });
+    await row.getByRole("button", { name: "Remove" }).click();
+    const dialog = p.locator(".confirm-dialog");
+    await dialog.waitFor({ state: "visible", timeout: 10_000 });
+    const asked = (await dialog.innerText()).replace(/\s+/g, " ");
+    expect(asked).toContain('Pawl takes its "pawl" entry out of C:\\Users\\e2e\\.claude.json (a backup is made first).');
+    expect(asked).not.toContain("token");
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await p.close();
+  }, 30_000);
+
+  test("a connected row shows the A2A server's error (its port is taken)", async () => {
+    const error = "port 47802 is in use";
+    // Claude Code: a row without a detail (a hub from before it named the server there); Codex: the newer hub's detail.
+    const detail = `Pawl's A2A server is not running: ${error}`;
+    const fake = fakeConnectHub({
+      serverError: error,
+      rows: (rows) =>
+        rows.map((r) =>
+          r.target === "claude"
+            ? { ...r, state: "connected", callerExists: true }
+            : r.target === "codex"
+              ? { ...r, state: "connected", callerExists: true, agentInstalled: true, detail }
+              : r,
+        ),
+    });
+    const p = await openConnect(fake);
+    const claude = p.locator("#settings-a2a .a2a-connect-row", { hasText: "Claude Code" });
+    const problem = claude.locator(".a2a-connect-server");
+    await problem.waitFor({ state: "visible", timeout: 10_000 });
+    expect(await problem.innerText()).toBe("Claude Code cannot reach Pawl: the A2A server is not running (port 47802 is in use).");
+    // The hub's detail is shown once, as the row's error (not again as a hint).
+    const codex = p.locator("#settings-a2a .a2a-connect-row", { hasText: "Codex" });
+    expect(await codex.locator(".a2a-connect-server").innerText()).toBe(detail);
+    expect(await codex.getByText(detail).count()).toBe(1);
+    // Only the connected rows say so; the server part shows the same error.
+    expect(await p.locator("#settings-a2a .a2a-connect-server").count()).toBe(2);
+    expect(await p.locator("#settings-a2a .a2a-status").innerText()).toContain(error);
+    await p.close();
+  }, 30_000);
+
+  test("a caller you added with an agent's id is never offered for removal there; Connect's own caller is", async () => {
+    // copilot-cli: added by hand (not marked); codex: made by Connect, its entry since deleted by hand (marked).
+    await hub.client.updateSettings({ a2a: { callers: [{ id: "copilot-cli", name: "My script" }, { id: "codex", name: "Codex" }] } });
+    const fake = fakeConnectHub({
+      rows: (rows) =>
+        rows.map((r) =>
+          r.target === "copilot-cli" ? { ...r, callerExists: true } : r.target === "codex" ? { ...r, callerExists: true, callerMarked: true, agentInstalled: true } : r,
+        ),
+    });
+    const p = await openConnect(fake);
+    const mine = p.locator("#settings-a2a .a2a-connect-row", { hasText: "Copilot CLI" });
+    await mine.locator(".status-pill", { hasText: "Not connected" }).waitFor({ timeout: 10_000 });
+    expect(await mine.getByRole("button", { name: "Remove" }).count()).toBe(0);
+    expect(await mine.getByRole("button", { name: "Connect", exact: true }).count()).toBe(1);
+    // In Callers it is an ordinary caller: its approvals switch and its own Remove.
+    const caller = p.locator("#settings-a2a .a2a-item", { hasText: "My script" });
+    expect(await caller.locator("label.toggle", { hasText: "Can answer approvals" }).count()).toBe(1);
+
+    const codex = p.locator("#settings-a2a .a2a-connect-row", { hasText: "Codex" });
+    await codex.getByRole("button", { name: "Remove" }).click();
+    const dialog = p.locator(".confirm-dialog");
+    await dialog.waitFor({ state: "visible", timeout: 10_000 });
+    expect((await dialog.innerText()).replace(/\s+/g, " ")).toContain("removes Codex's caller: its token stops working at once");
+    await dialog.getByRole("button", { name: "Remove", exact: true }).click();
+    await waitFor(async () => !(await hub.client.getSettings()).settings.a2a?.callers.some((c) => c.id === "codex"), "Connect's caller removed", 10_000);
+    // The hand-added caller is untouched.
+    expect((await hub.client.getSettings()).settings.a2a?.callers.some((c) => c.id === "copilot-cli")).toBe(true);
+    await hub.client.updateSettings({ a2a: { callers: [] } });
+    await p.close();
+  }, 30_000);
+
+  test("Cancel in the confirm connects nothing", async () => {
+    const fake = fakeConnectHub();
+    const p = await openConnect(fake);
+    const row = p.locator("#settings-a2a .a2a-connect-row", { hasText: "Copilot CLI" });
+    await row.getByRole("button", { name: "Connect", exact: true }).click();
+    const dialog = p.locator(".confirm-dialog");
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await dialog.waitFor({ state: "detached", timeout: 5000 });
+    expect(fake.seen).toEqual(["preview:copilot-cli"]);
+    expect(await row.locator(".status-pill").textContent()).toBe("Not connected");
+    await p.close();
+  }, 30_000);
+
+  test("an older hub: a hint to update Pawl instead of the list", async () => {
+    const p = await openConnect(fakeConnectHub({ old: true }));
+    const part = p.locator("#settings-a2a .a2a-connect");
+    await part.getByText("Update Pawl to connect coding agents").waitFor({ state: "visible", timeout: 10_000 });
+    expect(await part.locator(".a2a-connect-row").count()).toBe(0);
+    // The rest of the A2A section still works.
+    expect(await p.locator("#settings-a2a .a2a-status").count()).toBe(1);
+    await p.close();
+  }, 30_000);
 });

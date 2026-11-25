@@ -12,12 +12,22 @@ use tower::ServiceExt;
 const PORT: u16 = 47998;
 const CI: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
 const OPS: &str = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
+const CODEX: &str = "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c";
 
 async fn a2a_fixture() -> Fixture {
     fixture_config(|c| {
         c.a2a.callers = vec![
-            A2aCaller { id: "ci".into(), name: "CI bot".into(), token: Some(CI.into()), allow_approvals: false },
-            A2aCaller { id: "ops".into(), name: "Ops".into(), token: Some(OPS.into()), allow_approvals: true },
+            A2aCaller { id: "ci".into(), name: "CI bot".into(), token: Some(CI.into()), allow_approvals: false, connect_target: None, connect_added_servers: false },
+            A2aCaller { id: "ops".into(), name: "Ops".into(), token: Some(OPS.into()), allow_approvals: true, connect_target: None, connect_added_servers: false },
+            // A connected coding agent whose config.toml was hand-edited to allow approvals.
+            A2aCaller {
+                id: "codex".into(),
+                name: "Codex".into(),
+                token: Some(CODEX.into()),
+                allow_approvals: true,
+                connect_target: Some(pawl_protocol::HookTargetName::Codex),
+                connect_added_servers: false,
+            },
         ];
     })
     .await
@@ -570,4 +580,18 @@ async fn a_caller_added_again_under_the_same_id_is_a_new_caller() {
     assert_eq!(v["error"]["code"], -32001, "the old ci's task is not the new ci's: {v}");
     let v = call(&app, &token, Some("1.0"), "ListTasks", json!({})).await;
     assert_eq!(v["result"]["tasks"].as_array().map_or(0, Vec::len), 0, "{v}");
+}
+
+#[tokio::test]
+async fn a_connected_coding_agent_never_answers_approvals_even_if_its_config_says_so() {
+    let f = a2a_fixture().await;
+    let app = test_router(&f.hub, PORT);
+    let (task, ctx) = outside_start(&f, &app, CODEX).await;
+    let req = permission(&ctx, ToolKind::Read);
+    f.hub.on_host_event(HostEvent::PermissionRequest(req.clone())).await;
+    for option in ["allow", "reject"] {
+        let v = call(&app, CODEX, Some("1.0"), "SendMessage", answer_params(&task, &req.request_id, option)).await;
+        assert!(v.get("result").is_none() && v.get("error").is_some(), "{option}: {v}");
+    }
+    assert!(f.hub.pending_permissions().iter().any(|r| r.request_id == req.request_id), "still waits for a person");
 }

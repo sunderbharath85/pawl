@@ -801,6 +801,12 @@ export interface A2aCallerSetting {
   name: string;
   tokenSet: boolean;
   allowApprovals: boolean;
+  /**
+   * Set for a caller "Connect coding agents" made for that agent. Its token sits in the agent's own config, so it can
+   * never answer approvals: the hub refuses allowApprovals=true for it ("A coding agent connected by Pawl can never
+   * answer approvals."), and the UI should lock that toggle. Missing from hubs before Connect.
+   */
+  connectTarget?: A2aConnectTargetName;
 }
 
 /** `callers` replaces the whole list; a caller keeps its token while its id stays, a new id starts without one. */
@@ -857,6 +863,35 @@ export interface HookStatus {
   state: "installed" | "outdated" | "missing" | "unsupported";
   /** The agent config file the hooks live in. */
   configPath: string;
+  detail?: string;
+}
+
+/** Coding agents Settings > A2A can connect through `pawl mcp` (the hook target names; copilot-vscode = VS Code's user MCP config). */
+export type A2aConnectTargetName = HookTargetName;
+
+/**
+ * One row of Settings > A2A > "Connect coding agents" (`a2a_connect_status`). connected: the "pawl" MCP entry runs this
+ * Pawl with the current A2A URL and the caller's current token; outdated: an entry is there but stale (Connect fixes it);
+ * missing: none; unsupported: the config cannot be read or merged (`detail`).
+ */
+export interface A2aConnectStatus {
+  target: A2aConnectTargetName;
+  /** "Claude Code" | "Codex" | "Copilot CLI" | "Copilot in VS Code" */
+  name: string;
+  /** The agent itself was found on this machine (false: show "not found"). */
+  agentInstalled: boolean;
+  state: "connected" | "outdated" | "missing" | "unsupported";
+  /** The agent config file the entry lives in. */
+  configPath: string;
+  /** The A2A caller this agent uses ("claude-code" | "codex" | "copilot-cli" | "copilot-vscode"). */
+  callerId: string;
+  callerExists: boolean;
+  /**
+   * That caller was made (or taken over) by Connect for this agent (its `connectTarget` is this target). A caller with
+   * this id that the user added by hand is not marked: Remove leaves it alone (only the "pawl" entry goes). Missing
+   * from hubs before review round 3.
+   */
+  callerMarked?: boolean;
   detail?: string;
 }
 
@@ -935,7 +970,14 @@ export type ClientMsg =
   /** A2A (phase A2, local only): a new bearer token for an outside A2A caller, returned once; the old one stops working. */
   | { type: "a2a_rotate_token"; id: string; callerId: string }
   /** A2A: this machine's delegations (tasks), newest first; `sessionId` filters. */
-  | { type: "list_tasks"; id: string; sessionId?: SessionId };
+  | { type: "list_tasks"; id: string; sessionId?: SessionId }
+  /** Local only: the coding agents Connect can wire to the A2A server (`pawl mcp`). */
+  | { type: "a2a_connect_status"; id: string }
+  /**
+   * Local only. preview: the plan, nothing written (`startsServer`: Connect would turn the A2A server on, 127.0.0.1 only;
+   * the confirm must say so). apply: Connect. remove: delete the entry and the caller (its token stops working); confirm first.
+   */
+  | { type: "a2a_connect"; id: string; target: A2aConnectTargetName; action: "preview" | "apply" | "remove" };
 
 export type ClientMsgType = ClientMsg["type"];
 
@@ -969,6 +1011,13 @@ export interface AckResults {
   restart_hub: Record<string, never>;
   a2a_rotate_token: { token: string };
   list_tasks: { tasks: A2aTaskSummary[] };
+  a2a_connect_status: { targets: A2aConnectStatus[] };
+  /**
+   * `newToken`: Connect makes (preview: would make) a new token, so the agent's old one stops working; false when it only
+   * turns the server on for a current entry. `warning`: remove revoked the token but could not edit the agent's file
+   * ("Token revoked. Take the pawl entry out of <path> by hand (...)."); show it to the user.
+   */
+  a2a_connect: { plan: string; applied: boolean; status: A2aConnectStatus; startsServer: boolean; newToken: boolean; warning?: string };
   start_browser_task: { sessionId: SessionId };
 }
 

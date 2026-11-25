@@ -99,7 +99,7 @@ fn callers_of(cfg: &crate::config::A2aSection) -> Vec<CallerAuth> {
 }
 
 /// A fresh caller token: 32 random bytes, hex.
-fn new_token() -> Result<String> {
+pub(super) fn new_token() -> Result<String> {
     let mut b = [0u8; 32];
     getrandom::fill(&mut b).map_err(|e| anyhow::anyhow!("no randomness for a token: {e}"))?;
     Ok(hex::encode(b))
@@ -123,6 +123,30 @@ impl Hub {
             hex::encode(b)
         });
         format!("{id}~{gen}")
+    }
+
+    /// Take caller `id`'s task-owner generation away (its next call starts a new owner). Returns the
+    /// old one, for [`Self::put_a2a_generation`] if what needed the change fails.
+    pub(super) fn take_a2a_generation(&self, id: &str) -> Option<String> {
+        self.a2a_book().gens.remove(id)
+    }
+
+    /// Tests: the task-owner key caller `id` has now.
+    #[cfg(test)]
+    pub(crate) fn a2a_owner_key(&self, id: &str) -> String {
+        self.caller_key(id)
+    }
+
+    pub(super) fn put_a2a_generation(&self, id: &str, gen: Option<String>) {
+        let mut book = self.a2a_book();
+        match gen {
+            Some(g) => {
+                book.gens.insert(id.to_string(), g);
+            }
+            None => {
+                book.gens.remove(id);
+            }
+        }
     }
 
     fn a2a_status_lock(&self) -> std::sync::MutexGuard<'_, A2aStatus> {
@@ -402,7 +426,7 @@ impl HubHandler {
         let revoked = self.state.revocation(&id);
         let allow = {
             let cfg = hub.cfg();
-            cfg.a2a.callers.iter().find(|c| c.id == id).map(|c| c.allow_approvals)
+            cfg.a2a.callers.iter().find(|c| c.id == id).map(|c| c.may_answer_approvals())
         };
         let Some(allow) = allow else {
             let h = hub.clone();

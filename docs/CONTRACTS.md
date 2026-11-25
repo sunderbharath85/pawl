@@ -1128,3 +1128,152 @@ software" banner. Every browser tool call is an approval card by default (user's
 `allowSites` may go without asking; typing, submitting, uploads and dialogs always ask and show exactly what will be
 typed. Page text is data: the task prompt tells the agent never to follow instructions found on pages and never to type
 passwords or payment details. The task ends when the session ends (the MCP server exits, Chrome's banner goes).
+
+## v0.2 A2A: connect coding agents (sde-a2a, 2026-11-25)
+
+Settings > A2A gets a "Connect coding agents" list, like "Install hooks" in Agents & hooks: one row per coding agent
+with Preview / Connect / Remove. Coding agents speak MCP, not A2A, so Connect puts a small MCP server, `pawl mcp`, into
+the agent's own user-level MCP config; it is a thin client of Pawl's localhost A2A server (127.0.0.1 only). Every action
+still goes through Pawl's normal approval cards, and the connected agent can never answer approvals.
+
+Protocol (additive, still v9; reuses `HookTargetName` and `HookAction`):
+
+```ts
+/** Same names as the hook targets; "copilot-vscode" here is VS Code's user-level MCP config (no repo). */
+export type A2aConnectTargetName = HookTargetName;
+
+export interface A2aConnectStatus {
+  target: A2aConnectTargetName;
+  /** "Claude Code" | "Codex" | "Copilot CLI" | "Copilot in VS Code" */
+  name: string;
+  /** The agent itself was found on this machine (false: show "not found"; Connect still works). */
+  agentInstalled: boolean;
+  /**
+   * connected: the "pawl" entry runs this Pawl, with the current A2A URL and the caller's current token;
+   * outdated: an entry is there but stale (another pawl path, another port, an old token, its caller removed): Connect fixes it;
+   * missing: no entry; unsupported: the config cannot be read or merged (detail says why; nothing is written).
+   */
+  state: "connected" | "outdated" | "missing" | "unsupported";
+  /** The agent config file the entry lives in. */
+  configPath: string;
+  /** The A2A caller this agent uses: "claude-code" | "codex" | "copilot-cli" | "copilot-vscode". */
+  callerId: string;
+  /** That caller is in [[a2a.callers]] now. */
+  callerExists: boolean;
+  /** That caller was made (or taken over) by Connect for this agent (`connectTarget` is this target). A caller with
+   *  this id the user added by hand is not marked: Remove leaves it alone. Optional: missing from older hubs. */
+  callerMarked?: boolean;
+  detail?: string;
+}
+
+// ClientMsg (local only, like the other settings messages):
+| { type: "a2a_connect_status"; id: string }
+| { type: "a2a_connect"; id: string; target: A2aConnectTargetName; action: "preview" | "apply" | "remove" }
+
+// Ack results:
+a2a_connect_status: { targets: A2aConnectStatus[] };   // always the four targets, in this order: claude, codex, copilot-cli, copilot-vscode
+a2a_connect: { plan: string; applied: boolean; status: A2aConnectStatus; startsServer: boolean; newToken: boolean; warning?: string };
+```
+
+- `preview`: nothing is written, no caller or token is made. `plan` is plain text: whether the A2A server will be
+  turned on, the caller that will be created, taken over or kept, the file and the exact entry (the token shown as
+  `<new token>`), the backup that will be made, and two notes (below). `startsServer: true` when Connect would turn the
+  A2A server on: the UI's Connect confirm must say so ("This turns on Pawl's A2A server, on 127.0.0.1 only").
+  `newToken: true` when Connect would make a new token (the agent's old one stops working); false when it only turns
+  the server on for an entry that is already current.
+- `apply` (Connect): turns the A2A server on if it is off (audited like any settings change), creates the caller (or
+  takes over one with that id) with `allowApprovals = false` and `connectTarget` set, makes it a new token unless the
+  entry is already current, then writes the entry with a timestamped `.bak` of the file first. Taking over a caller the
+  user added by hand always makes a new token and gives the caller a new task-owner generation: its open tasks stay
+  with the old owner, so the coding agent cannot list, read, prompt or cancel them (the plan says "Takes over the
+  caller "<id>" you added; its open tasks stay with the old owner and its token stops working"). Already connected:
+  nothing changes, `applied: false`, `newToken: false`. If the agent rewrote its file in between, Pawl reads it again
+  and retries once; if the write still fails, Pawl's A2A settings are put back and an error comes back.
+- `remove` (needs an in-app confirm): removes the caller FIRST, but only a caller Connect made or took over for this
+  agent (`callerMarked`; its token stops working at once; its open A2A streams end). A caller with that id the user
+  added by hand stays, and the plan says "Leaves the A2A caller "<id>" alone: you added it, Connect did not make it".
+  Then it deletes the entry (backup first), retrying once if the agent rewrote the file in between. A file Pawl
+  cannot edit (malformed, too large, not UTF-8, changed twice) does not stop the revocation: `applied: true` and
+  `warning: "Token revoked. Take the pawl entry out of <path> by hand (<why>)."`. The A2A server is left as it is.
+  Nothing to remove: `applied: false`; no caller and a file Pawl cannot edit: an error, nothing changed.
+- Every apply / remove is audited (settings audit `a2a.connect.<target>`, detail "apply" / "remove") and logged without
+  the token. Errors are ordinary error acks; nothing is changed when one comes back (for example a malformed config:
+  "<path> is not valid JSON (<what> at line L, column C); fix it or add the entry by hand"). Errors never quote the
+  file's content.
+- Callers Connect makes (or takes over) are marked: `A2aCallerSetting.connectTarget?: A2aConnectTargetName` (Rust
+  `connect_target: Option<HookTargetName>`, config.toml `connect_target = "claude"`). Such a caller can NEVER answer
+  approvals: its token sits in the agent's own config, so the agent could call A2A directly. `update_settings` that
+  sets `allowApprovals: true` on it is refused with `invalid:a2a.callers[<i>].allowApprovals: A coding agent connected
+  by Pawl can never answer approvals.`; the A2A server treats it as "never" even if config.toml says otherwise, and
+  `get_settings` reports `allowApprovals: false` for it. The mark stays while the id stays (renames keep it); a caller
+  removed and added again by hand is an ordinary caller. The UI locks the "Can answer approvals" toggle for marked
+  callers.
+- "Can never answer approvals" holds for the A2A token. Pawl's local API token in its data folder can be read by any
+  program running as the user, so an agent with shell access is only as contained as the user's OS account (every plan
+  says this in one line).
+- Status details: an entry that is current while the A2A server is off is `outdated` with detail "Pawl's A2A server is
+  off; Connect turns it on (127.0.0.1 only), no new token"; while the server is on but not running (its port taken) a
+  connected row's detail is "Pawl's A2A server is not running: <error>". An entry that is there twice is `outdated`.
+- Writers keep every other byte of the file: JSON and JSONC files are edited in place (only the `pawl` member is
+  inserted, replaced or removed, with its own line and comma; comments above it, at the end of the previous member's
+  line and elsewhere stay; a new member follows the object's style: a trailing comma if the last member has one, and a
+  comment at the end of the last member's line stays on that line). A `pawl` key that is there more than once: Connect
+  keeps one, Remove takes every copy. A servers object Remove leaves empty goes too only if Connect added it to that
+  file: the hub records that on the caller (`connect_added_servers = true` in config.toml, not shown in settings);
+  one the user had stays byte for byte. Codex TOML: only the text of Pawl's `[mcp_servers.pawl]` tables is cut out of
+  or spliced into the original bytes (CRLF kept; comments above Pawl's table stay; a new table goes after the other
+  `[mcp_servers.*]` tables with one blank line above it, and Remove takes exactly that blank line again; a file without
+  a final newline keeps having none; a table at the very top takes the blank line after it along), so Connect then
+  Remove gives the original bytes back; an entry written as an inline table, dotted keys or an array of tables is left
+  to the user. Every edit is read back and
+  refused if it would change more than Pawl's entry. A file that changed between reading and writing is not
+  overwritten. The file keeps its permissions; new files, temp files and backups are created private to the user
+  (0600 on Unix) before anything is written to them; temp files a crash left behind (they may hold a token) are
+  deleted on the next status or Connect. Only the 3 newest of Pawl's own backups of a file
+  (`<name>.<YYYYMMDD-HHMMSS>[-<n>].bak`) are kept; older ones of that pattern are deleted (the hooks installer does the
+  same); other files are never touched.
+
+Entries Connect writes (formats checked 2026-11-25 against each agent's docs, URLs in docs/reports/sde-a2a.md). `<pawl>`
+is the absolute path of the running Pawl executable; `<url>` is `http://127.0.0.1:<a2a port>`. Paths are as the hub
+process sees them: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `APPDATA`, `XDG_CONFIG_HOME` come from the hub's
+own environment (a desktop-launched hub may not see variables set only in the user's shell); the plan always shows the
+resolved path:
+
+| Target | File | Entry |
+|---|---|---|
+| claude | `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` when set), top-level `mcpServers` (user scope) | `"pawl": {"type": "stdio", "command": "<pawl>", "args": ["mcp"], "env": {"PAWL_A2A_URL": "<url>", "PAWL_A2A_TOKEN": "<token>"}}` |
+| codex | `~/.codex/config.toml` (`$CODEX_HOME/config.toml`) | `[mcp_servers.pawl]` `command = "<pawl>"`, `args = ["mcp"]`, and `[mcp_servers.pawl.env]` `PAWL_A2A_URL`, `PAWL_A2A_TOKEN` |
+| copilot-cli | `~/.copilot/mcp-config.json` (`$COPILOT_HOME/mcp-config.json`), `mcpServers` | `"pawl": {"type": "local", "command": "<pawl>", "args": ["mcp"], "env": {...same...}, "tools": ["*"]}` |
+| copilot-vscode | stable VS Code's user profile `mcp.json`: Windows `%APPDATA%\Code\User\mcp.json`, macOS `~/Library/Application Support/Code/User/mcp.json`, Linux `$XDG_CONFIG_HOME/Code/User/mcp.json` (default `~/.config`), `servers` | `"pawl": {"type": "stdio", "command": "<pawl>", "args": ["mcp"], "env": {...same...}}` |
+
+`agentInstalled` for copilot-vscode means the stable `code` launcher is on PATH (VS Code Insiders keeps its config
+elsewhere and is not a target). VS Code Settings Sync can copy `mcp.json` between machines, and then each machine's
+Connect replaces the other's token; the copilot-vscode plan says so.
+
+The token sits in the agent's own config file (that is how these agents pass secrets to a local MCP server); the hub
+keeps only what it keeps for every caller now. The A2A server port moving makes the rows "outdated" until Connect is
+pressed again.
+
+`pawl mcp` (crates/a2a `mcp` module, wired in crates/hub cli): a stdio MCP server, newline-delimited JSON-RPC 2.0 on
+stdin / stdout, logs on stderr only. MCP is hand-written (initialize, ping, server/discover, tools/list, tools/call):
+no new dependency (the official `rmcp` 3.11.0 would add schemars, rmcp-macros/pastey and its own transport stack for
+five methods). It serves MCP `2026-07-28` (per-request `_meta` `io.modelcontextprotocol/protocolVersion`,
+`server/discover`, `resultType` / `ttlMs` / `cacheScope` on results, `-32022` for an unsupported version) and the
+legacy `initialize` era (`2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`).
+- Env: `PAWL_A2A_URL` must be `http://127.0.0.1:<port>`, `http://[::1]:<port>` or `http://localhost:<port>`; any other
+  URL (another host, https, a path with credentials) is refused at start: an error on stderr, exit code 2, nothing
+  sent. `PAWL_A2A_TOKEN` is required and never printed. No proxy is used.
+- Tools (all calls go to Pawl's A2A JSON-RPC endpoint as caller `<callerId>`; results are short text plus
+  `structuredContent`; A2A refusals come back as `isError: true` with Pawl's own sentence):
+
+| Tool | Arguments | A2A call | Annotations |
+|---|---|---|---|
+| `pawl_status` | none | `ListTasks` (this agent's own delegations, newest first: state, text, what waits for the user) | readOnly |
+| `pawl_agents` | none | `GetExtendedAgentCard` (agent ids that can be started, repo names Pawl knows) | readOnly |
+| `pawl_start` | `agent` (agent id), `folder` (absolute path of a folder Pawl works in), `prompt` | `SendMessage` with delegate metadata, `returnImmediately` | not readOnly, not destructive |
+| `pawl_prompt` | `session` (contextId from `pawl_start`), `prompt` | `SendMessage` with that contextId, `returnImmediately` | not readOnly, not destructive |
+| `pawl_task` | `task` (task id) | `GetTask` | readOnly |
+| `pawl_cancel` | `task` | `CancelTask` (only this agent's own tasks) | not readOnly, destructive false, idempotent |
+
+  There is no tool to answer an approval; tool calls a started agent wants to make become approval cards on this
+  machine as usual ("Ask the pet" has no A2A skill yet, so it has no tool).

@@ -478,3 +478,135 @@ Every finding fixed, each with tests. No wire change (protocol stays v9).
   `update_settings` `a2a`, `a2a_rotate_token`, `list_tasks`, agents `a2a:<id>`), and showing
   `signature: unverified` honestly.
 - A JWS library decision if card signatures should be verified.
+
+## v0.2 A2A: connect coding agents (done)
+
+Contract: docs/CONTRACTS.md "v0.2 A2A: connect coding agents" (written first; t13 OK'd it; `connectTarget` added on t13's
+decision). Worktree E:\workspace\ai-pet-voice, branch fix/settings-blank; nothing under apps/desktop or the hub-client UI
+touched (those are fe-settings').
+
+What it does: Settings > A2A > "Connect coding agents" (UI by fe-settings) lists Claude Code, Codex, Copilot CLI and
+Copilot in VS Code. Connect turns the localhost A2A server on if it is off (preview says so: `startsServer`), creates or
+takes over the caller (`claude-code`, `codex`, `copilot-cli`, `copilot-vscode`) with approvals off and a fresh token,
+and writes a `pawl` MCP entry that runs `<abs pawl> mcp` with `PAWL_A2A_URL` / `PAWL_A2A_TOKEN` into the agent's own
+user-level MCP config (backup first). Remove deletes the entry and the caller (its token stops at once). Every apply /
+remove is audited (`a2a_connect` rows, keys `a2a.connect.<target>`) and logged without the token.
+
+Pieces:
+- `crates/discovery/src/mcp_config/` (new): per-agent paths and entries, plan / apply / check, and `jsonc.rs`, a small
+  span-keeping JSON / JSONC reader: only the `pawl` member is inserted, replaced or removed, every other byte stays
+  (comments, key order, indentation, CRLF, one-line files); an edit is read back and refused if anything but Pawl's
+  entry would change. Codex TOML through `toml_edit` (our table updated in place, so the user's own keys on it stay).
+  Malformed files are refused ("... fix it or add the entry by hand"); a file that changed between read and write is
+  not overwritten; a link is written through to its target; new files are 0600 on Unix. The hooks installer's backup /
+  temp-file helpers are shared (`hooks::install` items made `pub(crate)`).
+- `crates/a2a/src/mcp/` (new): `pawl mcp`, a hand-written stdio MCP server (newline-delimited JSON-RPC): `initialize`
+  (2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05), `ping`, `server/discover` + per-request `_meta` version, `-32022`
+  for unknown versions, `resultType` / `ttlMs` / `cacheScope` (2026-07-28), `tools/list`, `tools/call`. Tools:
+  `pawl_status` (ListTasks), `pawl_agents` (GetExtendedAgentCard), `pawl_start` (SendMessage with delegate metadata,
+  returnImmediately), `pawl_prompt`, `pawl_task` (GetTask), `pawl_cancel` (CancelTask). No approval tool. Talks only to
+  http://127.0.0.1 / [::1] / localhost (mapped to 127.0.0.1) with a port, no proxy, no redirects; anything else exits 2
+  before sending. A2A refusals become `isError` results with Pawl's sentence; 401 / unreachable get plain advice.
+- `crates/hub`: `pawl mcp` subcommand (stdout is MCP only: no logging set up); `core/a2a_connect.rs` (new) for
+  `a2a_connect_status` / `a2a_connect` (Hub config changes go through `commit_settings`: validated, written, audited,
+  the A2A server synced; if the file write fails the A2A settings are put back); `SettingsAuditKind::A2aConnect`.
+- Callers Connect made or took over carry `connect_target` (`A2aCallerSetting.connectTarget`): `update_settings` refuses
+  `allowApprovals: true` for them ("A coding agent connected by Pawl can never answer approvals."), and the A2A server
+  goes by `A2aCaller::may_answer_approvals()` (false for them even if config.toml was edited by hand), because the token
+  sits in the agent's own config and the agent could call A2A directly.
+- Protocol (additive, v9 stays): `A2aConnectStatus`, `A2aConnectState`, ClientMsg `a2a_connect_status`, `a2a_connect`,
+  `A2aCallerSetting.connectTarget?`, in packages/protocol and crates/protocol.
+
+MCP library decision (recorded in CONTRACTS.md): hand-written, no new dependency. The official `rmcp` 3.11.0
+(https://github.com/modelcontextprotocol/rust-sdk, `default = ["base64", "macros", "server"]`, stdio needs
+`transport-io`) would add schemars, rmcp-macros / pastey and its own transport stack for five methods, and supporting
+both MCP eras is simpler by hand. Cargo.lock is unchanged.
+
+Formats and docs checked 2026-11-25 (plus the structure, never the values, of this machine's real files):
+- Claude Code: https://code.claude.com/docs/en/mcp, https://code.claude.com/docs/en/settings. User scope lives in
+  `~/.claude.json`; stdio entry `{type: "stdio", command, args, env}`. The docs do not name the top-level key; this
+  machine's `~/.claude.json` has user servers under top-level `mcpServers` (project ones under `projects.<path>`), so
+  that is what Connect writes. `$CLAUDE_CONFIG_DIR/.claude.json` when that variable is set (Claude Code's behaviour; the
+  docs only say the variable moves "settings, session history, and plugins").
+- Codex: https://developers.openai.com/codex/mcp (now https://learn.chatgpt.com/docs/extend/mcp?surface=cli) and
+  https://learn.chatgpt.com/codex/config-file/config-reference: `[mcp_servers.<name>]` `command`, `args`, `env` table
+  (also `env_vars`, `startup_timeout_sec`, `tool_timeout_sec`, `enabled`, which Pawl leaves to the user).
+- Copilot CLI: https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers and
+  https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-copilot-cli: `~/.copilot/mcp-config.json`
+  (`$COPILOT_HOME`), `mcpServers`, `{type: "local", command, args, env, tools: ["*"]}` (GitHub's own example uses
+  "local"; VS Code's portable reference says "stdio" for the same file).
+- VS Code: https://code.visualstudio.com/docs/copilot/customization/mcp-servers and
+  https://code.visualstudio.com/docs/agents/reference/mcp-configuration: user-profile `mcp.json`, `servers`,
+  `{type: "stdio", command, args, env}`. The docs do not print the path; this machine's file is
+  `%APPDATA%\Code\User\mcp.json` (with `servers` and `inputs`). macOS `~/Library/Application Support/Code/User`,
+  Linux `$XDG_CONFIG_HOME/Code/User`. VS Code Insiders is not covered (stable Code only).
+- MCP: https://modelcontextprotocol.io/specification/2026-07-28 (versioning, server/discover, stdio transport, tools,
+  changelog: `ttlMs` / `cacheScope` required, `ping` removed in that era) and
+  https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle (initialize, version negotiation).
+
+Tests (all new ones pass):
+- pawl-discovery `mcp_config` (14): JSONC reader spans and strict-vs-JSONC; fresh file per JSON target (0600 on Unix);
+  `~/.claude.json` with other servers and CRLF keeps every other byte and round-trips to the exact original on remove,
+  neighbours' secrets never in the plan, backup made; servers key added to a tab-indented file; one-line file stays
+  one line; VS Code comments and trailing commas kept; empty object / empty file; stale entry replaced, user keys on
+  the entry tolerated; malformed files (6 cases incl. TOML) refused with nothing written; file changed after the plan
+  not overwritten; env overrides; Debug / plan never show the token; Codex TOML keeps the rest, updates in place
+  (`startup_timeout_sec` kept), removes cleanly.
+- pawl-a2a `mcp` (7): loopback-only config (10 refused URLs), initialize negotiation, modern-era discover / `_meta`
+  / `-32022` / `-32602`, tool list (6 tools, no approval tool, annotations), every tool against a fake A2A server
+  (bearer token, `A2A-Version`, delegate metadata, returnImmediately, contextId), argument errors, wrong token,
+  stopped Pawl, `serve()` framing (parse error, oversize line, notification, last line without newline).
+- pawl-hub `settings::tests::connect` (8): status lists four targets; preview writes nothing then Connect turns the
+  server on, creates the caller, writes the entry with the caller's token, is idempotent, follows a rotated token, and
+  Remove deletes entry and caller (audit rows, no token anywhere); takeover of an existing caller turns approvals off
+  and marks it; malformed config changes nothing; a connected agent's `pawl mcp` (env read back from the written file)
+  talks to Pawl's own A2A server until Remove, then gets "refused this agent's token"; `connectTarget` refuses
+  approvals, survives renames, and a hand-re-added caller is ordinary; env names agree between writer and bridge.
+- pawl-hub `a2a_server` (+1): a marked caller with `allow_approvals = true` in config still cannot answer.
+- pawl-hub `tests/mcp_cli.rs` (2, the real binary): `pawl mcp` exits 2 with nothing on stdout for other hosts / https /
+  missing env; over real stdin / stdout it answers initialize, tools/list and a tool call and exits when stdin closes.
+- Protocol: Rust round-trip of `a2a_connect` / `a2a_connect_status` / `A2aConnectStatus`.
+
+Gates: `cargo test --workspace --no-fail-fast` exit 0 (pawl-a2a 78, pawl-acp 27, pawl-brain 134, pawl-discovery 53,
+pawl-hub 295 + 2 integration, pawl-peer 105 + 1 ignored, pawl-protocol 4); `cargo clippy --workspace --all-targets --
+-D warnings` clean; `tsc --noEmit` clean for packages/protocol and packages/hub-client.
+
+Files: new `crates/discovery/src/mcp_config/{mod.rs,jsonc.rs,tests.rs}`, `crates/a2a/src/mcp/{mod.rs,tests.rs}`,
+`crates/hub/src/core/a2a_connect.rs`, `crates/hub/src/core/settings/tests/connect.rs`, `crates/hub/tests/mcp_cli.rs`;
+changed `crates/discovery/src/{lib.rs,hooks/mod.rs,hooks/install.rs}`, `crates/a2a/src/lib.rs`,
+`crates/hub/src/{cli.rs,core.rs,config.rs,settings.rs,store.rs}`, `crates/hub/src/core/{a2a_server.rs,settings.rs}`,
+`crates/hub/src/core/settings/tests.rs`, `crates/hub/src/core/tests/a2a_server.rs`, `crates/protocol/src/lib.rs`,
+`packages/protocol/src/index.ts`, `docs/CONTRACTS.md`, this report.
+
+
+### Connect: independent review fixes (t13, round 2) (done)
+
+| # | Finding | Fix | Tests |
+|---|---|---|---|
+| 1 | Remove failed on a file problem before revoking the caller | Remove revokes the caller first (token dead, streams end), then edits the file best-effort, retrying once on "changed while Pawl was editing it" (typed `mcp_config::ChangedWhileEditing`); a file failure is `warning: "Token revoked. Take the pawl entry out of <path> by hand (<why>)."` with `applied: true`. Connect retries the write once too. | `remove_revokes_the_token_even_when_the_agents_file_is_broken`, `a_changed_file_error_can_be_told_apart` |
+| 2 | Codex writers turned CRLF into LF | Connect / Remove splice only the text of Pawl's `[mcp_servers.pawl]` tables into / out of the original bytes (toml_edit spans; CRLF kept; new tables after the other `[mcp_servers.*]` tables), then verify the rest of the document is unchanged. The hooks writer (separate code) keeps CRLF via `keep_newlines`. | `codex_keeps_crlf_comments_and_every_byte_outside_pawls_tables`, `codex_hooks_keep_crlf_too`, `codex_toml_keeps_the_rest_and_updates_in_place` (now exact round trip) |
+| 3 | Remove ate comments | JSONC: a member goes from the start of its line (only whitespace before the key) through its comma and the rest of its line; the last member through its value and line plus only the previous comma byte. TOML: cut from the header's line through the line of the last value (and the blank lines right above), so comment blocks and commented-out tables above stay. | `remove_keeps_the_users_comments_around_pawl`, the TOML test above |
+| 4 | Duplicate `pawl` keys | Connect removes earlier copies and keeps one; Remove takes every copy; status reports a duplicate as stale. | `repeated_pawl_members_are_all_handled` |
+| 5 | Takeover kept the old owner generation | Taking over a hand-made caller (no `connectTarget` yet) always makes a new token and drops the caller's task-owner generation (restored if the commit or write fails), so the agent starts as a new owner; the plan says "Takes over the caller "<id>" you added; its open tasks stay with the old owner and its token stops working". A marked caller keeps its generation across reconnects. | `connect_takes_over_a_hand_made_caller_as_a_new_owner` |
+| 6 | Backups / temps created 0644 | `hooks::install::create_new` opens with mode 0600 (Unix) before anything is written; permissions of the source are copied once the copy is complete. | `backups_and_temp_files_are_private_from_the_start` (Unix) |
+
+Nits: `newToken` in the ack (preview and apply; an entry that is current with the server off: "Keeps the A2A caller ... no new token", file "up to date; nothing written"); parser and TOML errors name line and column only, never file text; lone surrogate escapes accepted (bytes kept); marked callers report `allowApprovals: false` (settings view and `pawl settings`); `pawl mcp` fails closed if its HTTP client cannot be built; a connected row names a stopped / unbound A2A server in `detail`; an emptied `mcpServers` object goes on Remove (VS Code's own `"servers": {}` stays: VS Code writes it itself); comment-only objects get no blank line; a comment at the end of the last member's line stays there; stale `.pawl-tmp` files (older than 60 s) next to a config are deleted on status / Connect; copilot-vscode `agentInstalled` = stable `code` only, and its plan mentions Settings Sync; CONTRACTS says paths are the hub process's view of the env vars; every plan has the one-line note on the local API token.
+
+Not covered by a direct test: the single retry after a concurrent rewrite (the error type it keys on is tested), and the fail-closed HTTP client build (reqwest offers no way to make it fail in a test).
+
+Gates: `cargo test --workspace --no-fail-fast` exit 0 (pawl-a2a 78, pawl-acp 27, pawl-brain 134, pawl-discovery 64, pawl-hub 299 + 2 integration, pawl-peer 105 + 1 ignored, pawl-protocol 4); clippy `-D warnings` clean; tsc clean for packages/protocol and packages/hub-client. fe-settings adopted `newToken` / `warning`.
+
+
+### Connect: review round 3 (done)
+
+| # | Finding | Fix | Tests |
+|---|---|---|---|
+| 1 | Remove deleted any caller with the agent's id, including a hand-made one | Remove deletes only a caller marked for this agent (`connect_target == Some(target)`); a hand-made caller with that id stays and the plan says "Leaves the A2A caller "<id>" alone: you added it, Connect did not make it". New `A2aConnectStatus.callerMarked` (Rust `caller_marked`, TS optional for older hubs, CONTRACTS). | `remove_leaves_a_hand_made_caller_with_that_id_alone` (missing row: nothing changes, token still valid; hand-written entry: only the entry goes; after a takeover Remove deletes it) |
+| 2 | Takeover race | The task-owner generation is dropped after `commit_settings` returns (the old token is revoked by then), and put back if the file write fails. | `connect_takes_over_a_hand_made_caller_as_a_new_owner` (still passes; the race itself is not reproducible in a test) |
+| 3 | Remove deleted an empty `mcpServers` the user had | Connect reports `McpPlan::added_servers` when it adds the servers object itself (or creates the file); the hub records it on the marked caller (`connect_added_servers = true` in config.toml, kept across renames and reconnects). `McpChange::Remove { drop_empty_servers }` drops an emptied object only then; otherwise it stays byte for byte. | `an_empty_servers_object_the_user_had_stays_and_one_pawl_added_goes`, `remove_takes_away_only_a_servers_object_connect_added` |
+| 4 | TOML round trips gained / lost blank lines | Connect puts exactly one blank line above Pawl's tables (none at the top of an empty file), keeps a missing final newline missing, and adds nothing after them; Remove (`toml_cuts`) takes exactly that blank line, the newline before a final table without a newline, and at the top the blank line after. | `codex_connect_then_remove_is_byte_identical` (8 cases: no final newline x2, trailing comment with / without a blank line, a comment before the next table, CRLF with extra blank lines, a trailing blank line, empty), `codex_remove_of_a_table_at_the_top_leaves_no_blank_line_there` |
+| 5 | Backups piled up | `prune_backups` keeps the 3 newest of Pawl's own backups per file (`<name>.<YYYYMMDD-HHMMSS>[-<n>].bak`), deleting older ones of that pattern only; used by Connect / Remove and the hooks installer. | `only_the_newest_backups_stay` (other `.bak` names untouched) |
+
+Gates: `cargo test --workspace --no-fail-fast` exit 0 (pawl-a2a 78, pawl-acp 27, pawl-brain 134, pawl-discovery 68, pawl-hub 301 + 2 integration, pawl-peer 105 + 1 ignored, pawl-protocol 4); clippy `-D warnings` clean; tsc clean for packages/protocol and packages/hub-client. fe-settings adopted `callerMarked`.
+
+Open: "ask the pet" has no A2A skill, so no MCP tool (t13: keep scope). VS Code Insiders' user folder is not a target.

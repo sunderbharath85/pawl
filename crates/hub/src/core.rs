@@ -3,6 +3,7 @@
 
 pub(crate) mod a2a;
 pub(crate) mod a2a_agents;
+mod a2a_connect;
 pub(crate) mod a2a_peer;
 pub(crate) mod a2a_server;
 mod brain_session;
@@ -1044,6 +1045,9 @@ impl Hub {
             // A2A: the token is shown once; the tasks are this machine's delegations.
             ClientMsg::A2aRotateToken { caller_id, .. } => self.a2a_rotate_token(&caller_id, actor).await?,
             ClientMsg::ListTasks { session_id, .. } => json!({ "tasks": self.list_task_summaries(session_id.as_deref()) }),
+            // Connect coding agents (Settings > A2A): local only like every settings message.
+            ClientMsg::A2aConnectStatus { .. } => json!({ "targets": self.a2a_connect_status().await? }),
+            ClientMsg::A2aConnect { target, action, .. } => self.a2a_connect(target, action, actor).await?,
         })
     }
 

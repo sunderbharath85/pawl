@@ -311,7 +311,9 @@ pub fn to_settings(cfg: &HubConfig, overrides: &Overrides) -> HubSettings {
                     id: c.id.clone(),
                     name: c.name.clone(),
                     token_set: nonblank(&c.token).is_some(),
-                    allow_approvals: c.allow_approvals,
+                    // What the A2A server goes by: never for a connected coding agent.
+                    allow_approvals: c.may_answer_approvals(),
+                    connect_target: c.connect_target,
                 })
                 .collect(),
             // `card` / `error` are the live fetch's (the hub fills them in).
@@ -688,6 +690,16 @@ fn bad_name_char(ch: char) -> bool {
 
 /// The callers list of a patch. Ids unique and valid, names 1-60 printable characters; a caller
 /// whose id stays keeps its token, a new id starts without one.
+/// `connect_target` in config.toml: the hook target names.
+fn connect_target_name(t: pawl_protocol::HookTargetName) -> &'static str {
+    match t {
+        pawl_protocol::HookTargetName::Claude => "claude",
+        pawl_protocol::HookTargetName::Codex => "codex",
+        pawl_protocol::HookTargetName::CopilotCli => "copilot-cli",
+        pawl_protocol::HookTargetName::CopilotVscode => "copilot-vscode",
+    }
+}
+
 fn check_a2a_callers(list: &[A2aCallerPatch], cur: &[A2aCaller]) -> Result<Vec<A2aCaller>, InvalidSetting> {
     if list.len() > MAX_A2A_CALLERS {
         return Err(invalid(A2A_CALLERS, format!("at most {MAX_A2A_CALLERS} callers")));
@@ -706,8 +718,16 @@ fn check_a2a_callers(list: &[A2aCallerPatch], cur: &[A2aCaller]) -> Result<Vec<A
         if name.is_empty() || name.chars().count() > MAX_A2A_CALLER_NAME_CHARS || name.chars().any(bad_name_char) {
             return Err(invalid(format!("{A2A_CALLERS}[{i}].name"), format!("must be 1-{MAX_A2A_CALLER_NAME_CHARS} printable characters")));
         }
-        let token = cur.iter().find(|x| x.id == id).and_then(|x| x.token.clone());
-        out.push(A2aCaller { id: id.to_string(), name: name.to_string(), token, allow_approvals: c.allow_approvals });
+        let old = cur.iter().find(|x| x.id == id);
+        let token = old.and_then(|x| x.token.clone());
+        // A caller Connect made keeps that mark while its id stays, and never answers approvals: its
+        // token sits in the coding agent's own config, so the agent could call A2A directly.
+        let connect_target = old.and_then(|x| x.connect_target);
+        if connect_target.is_some() && c.allow_approvals {
+            return Err(invalid(format!("{A2A_CALLERS}[{i}].allowApprovals"), "A coding agent connected by Pawl can never answer approvals."));
+        }
+        let connect_added_servers = old.is_some_and(|x| x.connect_added_servers);
+        out.push(A2aCaller { id: id.to_string(), name: name.to_string(), token, allow_approvals: c.allow_approvals, connect_target, connect_added_servers });
     }
     Ok(out)
 }
@@ -1132,6 +1152,12 @@ fn write_a2a_callers(doc: &mut DocumentMut, callers: &[A2aCaller]) -> Result<()>
         set_value(&mut t, "name", c.name.as_str());
         set_opt(&mut t, "token", nonblank(&c.token).as_deref());
         set_value(&mut t, "allow_approvals", c.allow_approvals);
+        set_opt(&mut t, "connect_target", c.connect_target.map(connect_target_name));
+        if c.connect_added_servers {
+            set_value(&mut t, "connect_added_servers", true);
+        } else {
+            t.remove("connect_added_servers");
+        }
         aot.push(t);
     }
     match a2a.get_mut("callers") {

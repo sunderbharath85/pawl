@@ -1,10 +1,26 @@
-// Settings > A2A (PLAN.md "A2A orchestration"): Pawl as an A2A agent for programs on this PC (off by default, on
-// 127.0.0.1 only, each caller with its own token, shown once), and outside A2A agents Pawl hands work to. Everything
-// goes through the hub's settings (update_settings `a2a`) and `a2a_rotate_token`; risky changes ask first.
-import { useEffect, useState } from "react";
-import type { A2aAgentSetting, A2aCallerSetting, A2aSettings } from "@pawl/protocol";
+// Settings > A2A (PLAN.md "A2A orchestration"): coding agents connected to Pawl in one click (a "pawl" MCP entry in
+// their own config, docs/CONTRACTS.md "v0.2 A2A: connect coding agents"), Pawl as an A2A agent for programs on this
+// PC (off by default, on 127.0.0.1 only, each caller with its own token, shown once), and outside A2A agents Pawl
+// hands work to. Everything goes through the hub (update_settings `a2a`, `a2a_rotate_token`, `a2a_connect`); risky
+// changes ask first.
+import { useCallback, useEffect, useState } from "react";
+import type { A2aAgentSetting, A2aCallerSetting, A2aConnectStatus, A2aSettings } from "@pawl/protocol";
 import {
   A2A_AGENTS_MAX,
+  A2A_CONNECT_STATE_LABEL,
+  A2A_CONNECT_STATE_TONE,
+  a2aConnectAction,
+  a2aConnectConfirm,
+  a2aConnectDoneText,
+  a2aConnectName,
+  a2aConnectPreviewable,
+  a2aConnectRemovable,
+  a2aConnectRemoveConfirm,
+  a2aConnectServerProblem,
+  callerConnectTarget,
+  connectCallerHint,
+  connectFacts,
+  hubLacksMessage,
   a2aCardUrl,
   a2aServerPatch,
   a2aServerStatus,
@@ -23,7 +39,7 @@ import {
   urlHost,
 } from "@pawl/hub-client";
 import { timeAgo } from "../../../lib/format";
-import { useConfirm } from "../../Confirm";
+import { useConfirm, withCode } from "../../Confirm";
 import { usePanel } from "../../context";
 import { CopyField } from "../../CopyField";
 import { SettingsSection, Toggle, useSaveSettings, type SaveOutcome } from "./shared";
@@ -42,19 +58,236 @@ export function A2aSection({ settings, live }: SectionProps) {
       {!a2a ? (
         <p className="hint">This hub does not speak A2A yet. Update pawl on this machine and restart the hub.</p>
       ) : (
-        <>
-          <ServerPart a2a={a2a} live={live} />
-          <CallersPart a2a={a2a} live={live} />
-          <AgentsPart a2a={a2a} live={live} />
-        </>
+        <A2aParts a2a={a2a} live={live} />
       )}
     </SettingsSection>
+  );
+}
+
+function A2aParts({ a2a, live }: { a2a: A2aSettings; live: boolean }) {
+  const connect = useConnectAgents(a2a, live);
+  return (
+    <>
+      <ConnectPart connect={connect} a2a={a2a} live={live} />
+      <ServerPart a2a={a2a} live={live} />
+      <CallersPart a2a={a2a} live={live} connect={connect} />
+      <AgentsPart a2a={a2a} live={live} />
+    </>
   );
 }
 
 function outcomeError(out: SaveOutcome): string | null {
   if (out.ok || out.cancelled) return null;
   return out.fieldError ? out.fieldError.reason : out.message;
+}
+
+// ---------------------------------------------------------------- connect coding agents (`pawl mcp`)
+
+/**
+ * The coding agents' rows and what can be done with them, shared by the Connect list and the Callers list (a caller
+ * Connect made is removed the same way: entry and caller together). Connect gives the agent its own caller and token
+ * and may turn the A2A server on, so the settings (server part, callers) are fetched again afterwards.
+ */
+function useConnectAgents(a2a: A2aSettings, live: boolean) {
+  const { client, toast } = usePanel();
+  const confirm = useConfirm();
+  const [rows, setRows] = useState<A2aConnectStatus[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  /** The hub is older than this feature. */
+  const [old, setOld] = useState(false);
+  const [plans, setPlans] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [rowError, setRowError] = useState<Record<string, string>>({});
+  /** Remove revoked the token but could not edit the agent's file: a warning, not an error. */
+  const [rowWarning, setRowWarning] = useState<Record<string, string>>({});
+
+  const load = useCallback(async () => {
+    try {
+      setRows(await client.a2aConnectStatus());
+      setOld(false);
+      setLoadError(null);
+    } catch (err) {
+      if (hubLacksMessage(err, "a2a_connect_status")) setOld(true);
+      else setLoadError(settingsErrorText(err));
+    }
+  }, [client]);
+
+  // Again when the server's port or the callers change: either can make a row outdated.
+  const signature = `${a2a.port}|${a2a.callers.map((c) => `${c.id}:${c.tokenSet}`).join(",")}`;
+  useEffect(() => {
+    if (live) void load();
+  }, [live, load, signature]);
+
+  const replace = (status: A2aConnectStatus) => setRows((list) => (list ?? []).map((r) => (r.target === status.target ? status : r)));
+  const failed = (key: string, err: unknown, type: string) => {
+    if (hubLacksMessage(err, type)) setOld(true);
+    else setRowError((e) => ({ ...e, [key]: settingsErrorText(err) }));
+  };
+  const begin = (key: string) => {
+    setBusy(key);
+    setRowError(({ [key]: _gone, ...rest }) => rest);
+    setRowWarning(({ [key]: _gone, ...rest }) => rest);
+  };
+  /** The A2A server and the callers changed on the hub: fetch the settings again. */
+  const refreshSettings = () => client.getSettings().catch(() => {});
+
+  const preview = async (r: A2aConnectStatus) => {
+    begin(r.target);
+    try {
+      const res = await client.a2aConnect(r.target, "preview");
+      setPlans((p) => ({ ...p, [r.target]: res.plan }));
+    } catch (err) {
+      failed(r.target, err, "a2a_connect");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const connect = async (r: A2aConnectStatus) => {
+    begin(r.target);
+    try {
+      // The confirm says whether Connect turns the A2A server on: a fresh preview tells (nothing is written).
+      const plan = await client.a2aConnect(r.target, "preview");
+      const c = a2aConnectConfirm(r, connectFacts(plan, a2a.callers));
+      if (!(await confirm.ask({ title: c.title, body: withCode(c.body), confirmLabel: c.confirm, tone: "primary" }))) return;
+      const res = await client.a2aConnect(r.target, "apply");
+      replace(res.status);
+      setPlans(({ [r.target]: _gone, ...rest }) => rest);
+      toast(a2aConnectDoneText(r, "apply", res.applied));
+      await refreshSettings();
+    } catch (err) {
+      failed(r.target, err, "a2a_connect");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Remove (asks first, danger): the entry and the caller. From a row, or from a Connect caller in Callers. */
+  const remove = async (
+    r: Pick<A2aConnectStatus, "target"> & { name?: string; configPath?: string; state?: A2aConnectStatus["state"]; callerExists?: boolean; callerMarked?: boolean },
+  ) => {
+    const c = a2aConnectRemoveConfirm(r);
+    if (!(await confirm.ask({ title: c.title, body: withCode(c.body), confirmLabel: c.confirm, tone: "danger" }))) return;
+    begin(r.target);
+    try {
+      const res = await client.a2aConnect(r.target, "remove");
+      replace(res.status);
+      setPlans(({ [r.target]: _gone, ...rest }) => rest);
+      if (res.warning) setRowWarning((w) => ({ ...w, [r.target]: res.warning! }));
+      toast(a2aConnectDoneText(r, "remove", res.applied, res.warning));
+      await refreshSettings();
+    } catch (err) {
+      failed(r.target, err, "a2a_connect");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const hidePlan = (target: string) => setPlans(({ [target]: _gone, ...rest }) => rest);
+  return { rows, loadError, old, plans, busy, rowError, rowWarning, load, preview, connect, remove, hidePlan };
+}
+
+type ConnectAgents = ReturnType<typeof useConnectAgents>;
+
+/**
+ * One row per coding agent (Claude Code, Codex, Copilot CLI, Copilot in VS Code), like the hook rows in Agents & hooks:
+ * Preview shows the exact plan (nothing written); Connect / Update and Remove ask first.
+ */
+function ConnectPart({ connect: agents, a2a, live }: { connect: ConnectAgents; a2a: A2aSettings; live: boolean }) {
+  const { rows, loadError, old, plans, busy, rowError, rowWarning, load, preview, connect, remove, hidePlan } = agents;
+  let body;
+  if (!live) body = <p className="hint">Connect the hub to see the coding agents on this PC.</p>;
+  else if (old) body = <p className="hint a2a-connect-old">Update Pawl to connect coding agents.</p>;
+  else if (loadError)
+    body = (
+      <p className="field-error" role="alert">
+        {loadError}{" "}
+        <button className="link" onClick={() => void load()}>
+          Try again
+        </button>
+      </p>
+    );
+  else if (!rows) body = <p className="hint">Checking the coding agents…</p>;
+  else
+    body = (
+      <div className="hooks a2a-connect-rows">
+        {rows.map((r) => {
+          const key = r.target;
+          const plan = plans[key];
+          const next = a2aConnectAction(r);
+          const rowBusy = busy === key;
+          const serverProblem = a2aConnectServerProblem(r, a2a);
+          return (
+            <div key={key} className={`hook-row a2a-connect-row${r.agentInstalled ? "" : " is-absent"}`} data-target={key}>
+              <div className="hook-row-main">
+                <div className="hook-row-title">
+                  <strong>{a2aConnectName(r)}</strong>
+                  <span className={`status-pill tone-${A2A_CONNECT_STATE_TONE[r.state]}`}>{A2A_CONNECT_STATE_LABEL[r.state]}</span>
+                  {!r.agentInstalled && <span className="chip chip-soft">not found</span>}
+                </div>
+                <span className="mono muted hook-path" title={r.configPath}>
+                  {r.configPath}
+                </span>
+                {r.detail && !serverProblem && <span className="hint">{r.detail}</span>}
+                {serverProblem && (
+                  <span className="field-error a2a-connect-server" role="alert">
+                    {serverProblem}
+                  </span>
+                )}
+                {rowWarning[key] && <span className="field-warning a2a-connect-warning">{rowWarning[key]}</span>}
+                {rowError[key] && (
+                  <span className="field-error" role="alert">
+                    {rowError[key]}
+                  </span>
+                )}
+              </div>
+              <div className="hook-row-actions">
+                {a2aConnectPreviewable(r) &&
+                  (plan === undefined ? (
+                    <button className="pill" disabled={busy !== null} onClick={() => void preview(r)}>
+                      {rowBusy ? "Checking…" : "Preview"}
+                    </button>
+                  ) : (
+                    <button className="pill pill-ghost" disabled={rowBusy} onClick={() => hidePlan(key)}>
+                      Hide preview
+                    </button>
+                  ))}
+                {next && (
+                  <button className="pill pill-primary" disabled={busy !== null} onClick={() => void connect(r)}>
+                    {rowBusy ? "Working…" : next === "update" ? "Update" : "Connect"}
+                  </button>
+                )}
+                {a2aConnectRemovable(r) && (
+                  <button className="pill pill-ghost" disabled={busy !== null} onClick={() => void remove(r)}>
+                    Remove
+                  </button>
+                )}
+              </div>
+              {plan !== undefined && (
+                <div className="hook-plan">
+                  <span className="hint">What Connect would do. Nothing is written until you connect.</span>
+                  <pre className="plan-preview">{plan || "(no change needed)"}</pre>
+                </div>
+              )}
+            </div>
+          );
+        })}
+        <button className="link" onClick={() => void load()}>
+          Check again
+        </button>
+      </div>
+    );
+
+  return (
+    <div className="a2a-part a2a-connect">
+      <h3 className="a2a-heading">Connect coding agents</h3>
+      <p className="hint">
+        Let Claude Code, Codex or Copilot talk to Pawl: they can start work in folders Pawl knows and check on it. Everything they do still asks you
+        here.
+      </p>
+      {body}
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------- the localhost server
@@ -146,7 +379,7 @@ function ServerPart({ a2a, live }: { a2a: A2aSettings; live: boolean }) {
 
 // ---------------------------------------------------------------- callers (programs that talk to Pawl)
 
-function CallersPart({ a2a, live }: { a2a: A2aSettings; live: boolean }) {
+function CallersPart({ a2a, live, connect }: { a2a: A2aSettings; live: boolean; connect: ConnectAgents }) {
   const { client } = usePanel();
   const save = useSaveSettings();
   const confirm = useConfirm();
@@ -239,44 +472,63 @@ function CallersPart({ a2a, live }: { a2a: A2aSettings; live: boolean }) {
         <p className="hint">No callers yet.</p>
       ) : (
         <ul className="a2a-list">
-          {a2a.callers.map((c) => (
-            <li key={c.id} className="a2a-item">
-              <div className="a2a-item-head">
-                <span className="a2a-item-title">
-                  <strong>{c.name}</strong> <span className="mono muted">{c.id}</span>
-                </span>
-                <span className={`chip ${c.tokenSet ? "chip-good" : "chip-warn"}`}>{c.tokenSet ? "Token set" : "No token yet"}</span>
-              </div>
-              <Toggle
-                label="Can answer approvals"
-                hint="Allow once or deny, only in sessions it started. Never “always”, never running commands, deleting files or network access."
-                checked={c.allowApprovals}
-                disabled={!live || busy !== null}
-                onChange={() => void setApprovals(c)}
-              />
-              {fresh?.callerId === c.id && (
-                <div className="a2a-token" role="alert">
-                  <strong>Copy this token now: Pawl never shows it again.</strong>
-                  <span className="hint">Paste it into {c.name}'s A2A settings as a bearer token. Anyone who has it can use Pawl as {c.name}.</span>
-                  <CopyField label={`Token for ${c.name}`} text={fresh.token} primary />
-                  <div className="form-actions">
-                    <button type="button" className="pill" onClick={() => setFresh(null)}>
-                      Done, I copied it
-                    </button>
-                  </div>
+          {a2a.callers.map((c) => {
+            // A caller Connect made for a coding agent: never answers approvals; its token lives in the agent's config,
+            // so it is renewed with Connect's Update and removed with the entry (Connect's Remove).
+            const target = callerConnectTarget(c);
+            const row = target ? connect.rows?.find((r) => r.target === target) : undefined;
+            const anyBusy = busy !== null || connect.busy !== null;
+            return (
+              <li key={c.id} className={`a2a-item${target ? " is-connect" : ""}`}>
+                <div className="a2a-item-head">
+                  <span className="a2a-item-title">
+                    <strong>{c.name}</strong> <span className="mono muted">{c.id}</span>
+                  </span>
+                  <span className={`chip ${c.tokenSet ? "chip-good" : "chip-warn"}`}>{c.tokenSet ? "Token set" : "No token yet"}</span>
                 </div>
-              )}
-              {rowError?.callerId === c.id && <span className="field-error">{rowError.text}</span>}
-              <div className="form-actions">
-                <button type="button" className="pill" disabled={!live || busy !== null} onClick={() => void makeToken(c, c.tokenSet)}>
-                  {busy === c.id ? "…" : c.tokenSet ? "Make new token" : "Create token"}
-                </button>
-                <button type="button" className="pill pill-ghost" disabled={!live || busy !== null} onClick={() => void remove(c)}>
-                  Remove
-                </button>
-              </div>
-            </li>
-          ))}
+                {target ? (
+                  <p className="hint a2a-connect-note">{connectCallerHint(target, row?.name)}</p>
+                ) : (
+                  <Toggle
+                    label="Can answer approvals"
+                    hint="Allow once or deny, only in sessions it started. Never “always”, never running commands, deleting files or network access."
+                    checked={c.allowApprovals}
+                    disabled={!live || anyBusy}
+                    onChange={() => void setApprovals(c)}
+                  />
+                )}
+                {fresh?.callerId === c.id && (
+                  <div className="a2a-token" role="alert">
+                    <strong>Copy this token now: Pawl never shows it again.</strong>
+                    <span className="hint">Paste it into {c.name}'s A2A settings as a bearer token. Anyone who has it can use Pawl as {c.name}.</span>
+                    <CopyField label={`Token for ${c.name}`} text={fresh.token} primary />
+                    <div className="form-actions">
+                      <button type="button" className="pill" onClick={() => setFresh(null)}>
+                        Done, I copied it
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {rowError?.callerId === c.id && <span className="field-error">{rowError.text}</span>}
+                {target && connect.rowError[target] && <span className="field-error">{connect.rowError[target]}</span>}
+                <div className="form-actions">
+                  {!target && (
+                    <button type="button" className="pill" disabled={!live || anyBusy} onClick={() => void makeToken(c, c.tokenSet)}>
+                      {busy === c.id ? "…" : c.tokenSet ? "Make new token" : "Create token"}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="pill pill-ghost"
+                    disabled={!live || anyBusy}
+                    onClick={() => void (target ? connect.remove({ ...(row ?? { target, name: c.name }), callerExists: true, callerMarked: true }) : remove(c))}
+                  >
+                    {target && connect.busy === target ? "…" : "Remove"}
+                  </button>
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
       <form

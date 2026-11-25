@@ -3,6 +3,8 @@
 // (pass it as `WebSocketImpl`). No DOM, Node or React imports here.
 import type {
   ChatImage,
+  A2aConnectStatus,
+  A2aConnectTargetName,
   A2aTaskSummary,
   AckResults,
   Agent,
@@ -44,6 +46,7 @@ import { MACHINE_NAME_MAX, normalizeMachineName } from "./machine";
 import { isPhoneInvite, PHONE_PROTOCOL_VERSION, type IntroducedDevice, type RevokeManyResult } from "./devices";
 import { INVITE_TTL_MAX_SECS, INVITE_TTL_MIN_SECS, parseInviteUri } from "./peer";
 import { toHubWsUrl } from "./url";
+import type { A2aConnectResult } from "./a2aConnect";
 import { isEmptyPatch, isPanelView, parseSettingsError, settingsFieldLabel } from "./settings";
 
 export interface HubClientOptions {
@@ -742,6 +745,26 @@ export class HubClient {
     if (sessionId !== undefined && sessionId !== "") msg.sessionId = sessionId;
     const res = await this.request<"list_tasks">(msg);
     return res.tasks ?? [];
+  }
+
+  /**
+   * A2A "Connect coding agents" (local only): the four targets in order (claude, codex, copilot-cli, copilot-vscode),
+   * each with its state, config file and caller. An older hub rejects it (see `hubLacksMessage`).
+   */
+  async a2aConnectStatus(): Promise<A2aConnectStatus[]> {
+    const res = await this.settingsRequest<"a2a_connect_status">({ type: "a2a_connect_status" });
+    return res.targets ?? [];
+  }
+
+  /**
+   * preview: the plan (`plan`, token shown as `<new token>`), nothing written; `startsServer` when Connect would turn
+   * the A2A server on. apply (Connect): server on if needed, the agent's caller with a new token, the "pawl" entry
+   * written (backup first). remove: the entry and the caller go (its token stops working). Confirm apply / remove
+   * with the user first. `applied: false` when there was nothing to do; `warning` when Remove revoked the token but could
+   * not edit the file; `newToken` when Connect makes (or made) a new token.
+   */
+  async a2aConnect(target: A2aConnectTargetName, action: "preview" | "apply" | "remove"): Promise<A2aConnectResult> {
+    return this.settingsRequest<"a2a_connect">({ type: "a2a_connect", target, action });
   }
 
   /** `request`, with `invalid:<field>: <reason>` turned into a `SettingsError`. */

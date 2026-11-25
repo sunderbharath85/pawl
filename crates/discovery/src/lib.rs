@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 pub mod detect;
 pub mod hooks;
+pub mod mcp_config;
 pub mod registry;
 
 use detect::{package_basename, package_bins, package_name, HostEnv};

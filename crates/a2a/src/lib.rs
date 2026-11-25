@@ -21,6 +21,7 @@ pub mod client;
 pub mod compat;
 pub mod ext;
 pub mod mapping;
+pub mod mcp;
 pub mod server;
 pub mod structured_input;
 pub mod tasks;

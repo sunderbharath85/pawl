@@ -12,7 +12,7 @@ use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-mod install;
+pub(crate) mod install;
 mod normalize;
 
 pub use install::{change_with_home, config_path_with_home, install_with_home, status_with_home, HookChange, HookCheck, HookOutcome, InstallEnv};

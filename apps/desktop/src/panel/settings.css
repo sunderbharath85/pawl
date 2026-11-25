@@ -1021,3 +1021,8 @@
     color: var(--honey);
   }
 }
+/* Settings > A2A > Connect coding agents: the hook rows' look; the buttons wrap on a narrow window. */
+.a2a-connect-rows .hook-row-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}

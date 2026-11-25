@@ -456,6 +456,8 @@ pub enum SettingsAuditKind {
     Pairing,
     /// `restart_hub` (keys = the restart-only keys that were pending, if any).
     Restart,
+    /// `a2a_connect` apply / remove (keys = `a2a.connect.<target>`).
+    A2aConnect,
 }
 
 /// One settings change. Holds key names only, never values (secrets included).

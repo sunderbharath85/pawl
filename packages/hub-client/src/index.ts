@@ -236,6 +236,27 @@ export {
   type A2aTaskTone,
 } from "./a2a";
 export {
+  A2A_CONNECT_STATE_LABEL,
+  A2A_CONNECT_STATE_TONE,
+  A2A_CONNECT_TARGETS,
+  A2A_SERVER_STARTS,
+  a2aConnectAction,
+  a2aConnectCallerMarked,
+  a2aConnectConfirm,
+  a2aConnectDoneText,
+  a2aConnectName,
+  a2aConnectPreviewable,
+  a2aConnectRemovable,
+  a2aConnectRemoveConfirm,
+  a2aConnectServerProblem,
+  callerConnectTarget,
+  connectCallerHint,
+  connectFacts,
+  hubLacksMessage,
+  type A2aConnectResult,
+  type ConnectFacts,
+} from "./a2aConnect";
+export {
   approvalReadBack,
   decisionText,
   formatVoiceCode,

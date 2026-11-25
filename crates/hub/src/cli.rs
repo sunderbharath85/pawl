@@ -134,6 +134,9 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
         args: Vec<String>,
     },
+    /// MCP server for coding agents (stdin/stdout), a client of Pawl's local A2A server.
+    /// Settings > A2A > Connect sets it up; it reads PAWL_A2A_URL and PAWL_A2A_TOKEN.
+    Mcp,
     /// Install the hub's hook into an agent's config (dry run unless --apply)
     InstallHooks {
         target: HookTargetArg,
@@ -209,8 +212,29 @@ pub enum HookTargetArg {
     CopilotVscode,
 }
 
+/// `pawl mcp`: stdout carries MCP only (no logging is set up); problems go to stderr.
+async fn run_mcp() -> ExitCode {
+    let cfg = match pawl_a2a::mcp::BridgeConfig::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("pawl mcp: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    match pawl_a2a::mcp::run_stdio(cfg).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("pawl mcp: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 pub async fn run() -> ExitCode {
     let cli = Cli::parse();
+    if matches!(cli.command, Command::Mcp) {
+        return run_mcp().await;
+    }
     let paths = match Paths::resolve(cli.data_dir.clone()) {
         Ok(p) => p,
         Err(e) => {
@@ -227,6 +251,7 @@ pub async fn run() -> ExitCode {
             run_hook(&paths, cli.port, &source, args).await;
             return ExitCode::SUCCESS;
         }
+        Command::Mcp => unreachable!("handled above"),
         Command::Serve { peer_listen } => run_serve(paths, cli.port, peer_listen).await,
         Command::Agents { refresh, json } => run_agents(&paths, cli.port, refresh, json).await,
         Command::Sessions { json } => run_sessions(&paths, cli.port, json).await,

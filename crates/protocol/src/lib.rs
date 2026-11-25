@@ -1236,6 +1236,10 @@ pub struct A2aCallerSetting {
     pub name: String,
     pub token_set: bool,
     pub allow_approvals: bool,
+    /// Set for a caller "Connect coding agents" made for that agent: its token sits in the agent's
+    /// own config, so it can never answer approvals (the hub refuses `allowApprovals: true`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_target: Option<HookTargetName>,
 }
 
 /// `callers` replaces the whole list; a caller keeps its token while its id stays, a new id starts
@@ -1515,6 +1519,40 @@ pub enum HookAction {
     Remove,
 }
 
+/// Is a coding agent connected to Pawl's A2A server through `pawl mcp` (`a2a_connect_status`)?
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum A2aConnectState {
+    /// The `pawl` entry runs this Pawl with the current A2A URL and the caller's current token.
+    Connected,
+    /// An entry is there but stale (another pawl path, port or token, or its caller was removed).
+    Outdated,
+    Missing,
+    /// The config cannot be read or merged (`detail` says why).
+    Unsupported,
+}
+
+/// One coding agent in Settings > A2A > "Connect coding agents". `target` uses the hook target names;
+/// `copilot-vscode` is VS Code's user-level MCP config here (no repo).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aConnectStatus {
+    pub target: HookTargetName,
+    pub name: String,
+    pub agent_installed: bool,
+    pub state: A2aConnectState,
+    pub config_path: String,
+    /// The A2A caller this agent uses (`[[a2a.callers]]` id).
+    pub caller_id: String,
+    pub caller_exists: bool,
+    /// That caller was made (or taken over) by Connect for this agent (`connectTarget`). A caller with
+    /// this id the user added by hand is not: Remove leaves it alone.
+    #[serde(default)]
+    pub caller_marked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// Views the desktop panel can be asked to show (`open_panel`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1657,6 +1695,12 @@ pub enum ClientMsg {
         #[serde(default)]
         session_id: Option<SessionId>,
     },
+    /// Local only: the coding agents Connect can wire to the A2A server through `pawl mcp` (`{targets}`).
+    A2aConnectStatus { id: String },
+    /// Local only. preview = the plan, nothing written; apply = Connect (may turn the A2A server on, makes the
+    /// caller and its token, writes the agent's MCP config); remove = delete the entry and the caller.
+    /// Ack `{plan, applied, status, startsServer}`.
+    A2aConnect { id: String, target: HookTargetName, action: HookAction },
 }
 
 impl ClientMsg {
@@ -1688,7 +1732,9 @@ impl ClientMsg {
             | ClientMsg::OpenPanel { id, .. }
             | ClientMsg::RestartHub { id }
             | ClientMsg::A2aRotateToken { id, .. }
-            | ClientMsg::ListTasks { id, .. } => id,
+            | ClientMsg::ListTasks { id, .. }
+            | ClientMsg::A2aConnectStatus { id }
+            | ClientMsg::A2aConnect { id, .. } => id,
             ClientMsg::StartBrowserTask { id, .. } => id,
         }
     }
@@ -1833,6 +1879,25 @@ mod tests {
         assert_eq!(p.bot.unwrap().anthropic_api_key, None);
         let m: ClientMsg = serde_json::from_str(r#"{"type":"install_hooks","id":"8","target":"copilot-vscode","repo":"/r","action":"preview"}"#).unwrap();
         assert_eq!(m.id(), "8");
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"a2a_connect","id":"9","target":"codex","action":"apply"}"#).unwrap();
+        assert_eq!(m, ClientMsg::A2aConnect { id: "9".into(), target: HookTargetName::Codex, action: HookAction::Apply });
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"a2a_connect_status","id":"10"}"#).unwrap();
+        assert_eq!(m.id(), "10");
+        let st = A2aConnectStatus {
+            target: HookTargetName::CopilotVscode,
+            name: "Copilot in VS Code".into(),
+            agent_installed: false,
+            state: A2aConnectState::Missing,
+            config_path: "/u/mcp.json".into(),
+            caller_id: "copilot-vscode".into(),
+            caller_exists: false,
+            caller_marked: false,
+            detail: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&st).unwrap(),
+            serde_json::json!({"target":"copilot-vscode","name":"Copilot in VS Code","agentInstalled":false,"state":"missing","configPath":"/u/mcp.json","callerId":"copilot-vscode","callerExists":false,"callerMarked":false})
+        );
         let s = ServerMsg::MachineRemoved { machine_id: "abcdef012345".into() };
         assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::json!({"type":"machine_removed","machineId":"abcdef012345"}));
     }

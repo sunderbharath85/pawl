@@ -69,7 +69,7 @@ fn target_name(t: &HookTarget) -> HookTargetName {
     }
 }
 
-fn target_label(t: HookTargetName) -> &'static str {
+pub(super) fn target_label(t: HookTargetName) -> &'static str {
     match t {
         HookTargetName::Claude => "claude",
         HookTargetName::Codex => "codex",
@@ -132,7 +132,7 @@ impl Hub {
         *self.inner.hooks_home.lock().unwrap_or_else(|p| p.into_inner()) = Some(home);
     }
 
-    fn hooks_home(&self) -> Option<PathBuf> {
+    pub(super) fn hooks_home(&self) -> Option<PathBuf> {
         self.inner.hooks_home.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
@@ -381,7 +381,7 @@ impl Hub {
         self.inner.bus.send_local(ServerMsg::Settings { settings: self.settings(), restart_required: self.restart_required() });
     }
 
-    async fn audit_settings(&self, actor: &Actor, kind: SettingsAuditKind, keys: Vec<String>, detail: Option<String>) {
+    pub(super) async fn audit_settings(&self, actor: &Actor, kind: SettingsAuditKind, keys: Vec<String>, detail: Option<String>) {
         let entry = SettingsAuditEntry {
             id: 0,
             ts: pawl_protocol::now_ms(),
@@ -478,7 +478,7 @@ impl Hub {
 
     // ------------------------------------------------------------ hooks
 
-    fn hook_exe() -> Result<PathBuf> {
+    pub(super) fn hook_exe() -> Result<PathBuf> {
         std::env::current_exe().context("locate the pawl executable")
     }
 

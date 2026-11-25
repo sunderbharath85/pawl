@@ -332,7 +332,7 @@ fn json_change(label: &'static str, path: PathBuf, old: Option<String>, doc: &Va
         None => None,
     };
     let changed = before.as_ref() != Some(doc);
-    let new = if changed { Some(to_pretty(doc)) } else { old.clone() };
+    let new = if changed { Some(keep_newlines(old.as_deref(), to_pretty(doc))) } else { old.clone() };
     Ok(FileChange { label, path, old, new, changed, confine: None })
 }
 
@@ -350,7 +350,7 @@ fn tval_to_json(v: &TVal) -> Value {
     }
 }
 
-fn item_to_json(item: &Item) -> Value {
+pub(crate) fn item_to_json(item: &Item) -> Value {
     match item {
         Item::None => Value::Null,
         Item::Value(v) => tval_to_json(v),
@@ -550,7 +550,7 @@ impl FileChange {
 
 type Plan = (Vec<FileChange>, Vec<String>);
 
-fn read_opt(path: &Path) -> anyhow::Result<Option<String>> {
+pub(crate) fn read_opt(path: &Path) -> anyhow::Result<Option<String>> {
     match std::fs::read(path) {
         Ok(b) => Ok(Some(String::from_utf8(b).with_context(|| format!("{} is not UTF-8", path.display()))?)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -660,7 +660,7 @@ fn codex_plan(cmd: &HubCmd, codex_home: PathBuf) -> anyhow::Result<Plan> {
     } else {
         merge_codex_toml_hooks(&mut doc, &desired, &is_ours)?;
     }
-    let new = doc.to_string();
+    let new = keep_newlines(old.as_deref(), doc.to_string());
     changes.insert(0, FileChange::text("Codex config.toml", cfg_path, old, new));
     Ok((changes, notes))
 }
@@ -677,7 +677,7 @@ fn codex_remove_plan(cmd: &HubCmd, codex_home: PathBuf) -> anyhow::Result<Plan> 
             doc.remove("notify");
         }
         merge_codex_toml_hooks(&mut doc, &[], &is_ours)?;
-        let new = doc.to_string();
+        let new = keep_newlines(Some(&old), doc.to_string());
         changes.push(FileChange::text("Codex config.toml", cfg_path, Some(old), new));
     }
     let hooks_json = codex_home.join("hooks.json");
@@ -740,7 +740,7 @@ fn copilot_remove_plan(cmd: &HubCmd, path: PathBuf, label: &'static str) -> anyh
 // ---------- apply / render ----------
 
 /// `YYYYMMDD-HHMMSS` (UTC) for backup names.
-fn utc_stamp(unix_secs: i64) -> String {
+pub(crate) fn utc_stamp(unix_secs: i64) -> String {
     let days = unix_secs.div_euclid(86_400);
     let secs = unix_secs.rem_euclid(86_400);
     // Howard Hinnant's civil_from_days.
@@ -757,7 +757,7 @@ fn utc_stamp(unix_secs: i64) -> String {
     format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
 }
 
-fn backup_path(path: &Path, stamp: &str) -> PathBuf {
+pub(crate) fn backup_path(path: &Path, stamp: &str) -> PathBuf {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "config".into());
     let mut candidate = path.with_file_name(format!("{name}.{stamp}.bak"));
     let mut n = 1;
@@ -786,7 +786,7 @@ pub(crate) fn refuse_symlinks_below(root: &Path, path: &Path) -> anyhow::Result<
 }
 
 /// A temp-file suffix nobody can predict (per-process random keys of the std hasher + the clock).
-fn random_suffix() -> u64 {
+pub(crate) fn random_suffix() -> u64 {
     use std::hash::{BuildHasher, Hasher};
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
     h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
@@ -795,13 +795,65 @@ fn random_suffix() -> u64 {
 }
 
 /// Create `path` exclusively (O_EXCL: never through an existing file or link).
-fn create_new(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new().write(true).create_new(true).open(path)
+/// Private to the user from the start on Unix (0600): a backup or temp copy of a config file may
+/// hold secrets, and a write that fails halfway must not leave a readable copy. Callers give it the
+/// source's permissions once it is complete.
+pub(crate) fn create_new(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(path)
+}
+
+/// How many of Pawl's backups of one config file are kept (each may hold secrets).
+pub(crate) const KEEP_BACKUPS: usize = 3;
+
+/// Keep the `keep` newest of Pawl's own backups of `path` (`<name>.<YYYYMMDD-HHMMSS>[-<n>].bak`, the
+/// names [`backup_path`] makes) and delete the older ones. Other files are never touched. Returns
+/// how many went.
+pub(crate) fn prune_backups(path: &Path, keep: usize) -> usize {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().map(|n| n.to_string_lossy().into_owned())) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(if dir.as_os_str().is_empty() { Path::new(".") } else { dir }) else { return 0 };
+    let prefix = format!("{name}.");
+    let mut ours: Vec<((String, u32), PathBuf)> = Vec::new();
+    for e in entries.flatten() {
+        let file = e.file_name().to_string_lossy().into_owned();
+        let Some(mid) = file.strip_prefix(&prefix).and_then(|r| r.strip_suffix(".bak")) else { continue };
+        let (stamp, n) = match mid.get(15..) {
+            Some("") => (mid, 0),
+            Some(rest) => match rest.strip_prefix('-').and_then(|n| n.parse::<u32>().ok()) {
+                Some(n) => (&mid[..15], n),
+                None => continue,
+            },
+            None => continue,
+        };
+        let b = stamp.as_bytes();
+        let stamp_ok = b.len() == 15 && b[8] == b'-' && b.iter().enumerate().all(|(i, c)| i == 8 || c.is_ascii_digit());
+        if stamp_ok && e.file_type().is_ok_and(|t| t.is_file()) {
+            ours.push(((stamp.to_string(), n), e.path()));
+        }
+    }
+    ours.sort();
+    let old = ours.len().saturating_sub(keep);
+    ours.into_iter().take(old).filter(|(_, p)| std::fs::remove_file(p).is_ok()).count()
+}
+
+/// `new` (rendered with `\n`) in the line endings `old` uses: CRLF files stay CRLF.
+pub(crate) fn keep_newlines(old: Option<&str>, new: String) -> String {
+    if old.is_some_and(|o| o.contains("\r\n")) {
+        new.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        new
+    }
 }
 
 /// Unix: give `dst` the permission bits of `src` (a settings file stays as private as it was).
 /// Windows: the new file keeps the folder's inherited ACL.
-fn copy_permissions(src: &Path, dst: &Path) -> anyhow::Result<()> {
+pub(crate) fn copy_permissions(src: &Path, dst: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     if let Ok(m) = std::fs::metadata(src) {
         std::fs::set_permissions(dst, m.permissions()).with_context(|| format!("setting permissions on {}", dst.display()))?;
@@ -812,7 +864,7 @@ fn copy_permissions(src: &Path, dst: &Path) -> anyhow::Result<()> {
 }
 
 /// Back `src` up to `dst`, created exclusively with `src`'s permissions.
-fn backup_copy(src: &Path, dst: &Path) -> anyhow::Result<()> {
+pub(crate) fn backup_copy(src: &Path, dst: &Path) -> anyhow::Result<()> {
     let data = std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
     let mut f = create_new(dst).with_context(|| format!("creating {}", dst.display()))?;
     std::io::Write::write_all(&mut f, &data)?;
@@ -896,6 +948,7 @@ fn run(changes: Vec<FileChange>, notes: Vec<String>, apply: bool, change: HookCh
                         refuse_symlinks_below(root, &c.path)?;
                     }
                     backup_copy(&c.path, &bak).with_context(|| format!("backing up {} to {}", c.path.display(), bak.display()))?;
+                    prune_backups(&c.path, KEEP_BACKUPS);
                     Some(bak)
                 }
                 None => None,
