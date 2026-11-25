@@ -1,6 +1,7 @@
 //! Hub core: in-memory cache over the store; merges the ACP host feed (owned sessions) and agent
 //! hook feeds into sessions + events; applies permission rules; answers every `ClientMsg`.
 
+pub(crate) mod a2a;
 mod brain_session;
 mod host;
 mod intents;
@@ -58,6 +59,8 @@ pub const ACTIVITY_STEP_MS: i64 = 30_000;
 const MAX_PROPOSALS: usize = 5;
 /// Events handed to the brain: up to this many of this machine's, plus up to half as many mirrored.
 const BRAIN_EVENTS: u32 = 400;
+/// A2A tasks handed to the brain (the latest one of each session, newest first).
+const BRAIN_TASKS: usize = 100;
 /// Longest a chat reply waits for a configured pet model that is still starting (agent discovery at start).
 const MODEL_WAIT: Duration = Duration::from_secs(5);
 
@@ -362,6 +365,8 @@ struct Inner {
     /// Session folders seen since startup (a new one triggers an index rebuild).
     seen_cwds: Mutex<HashSet<String>>,
     activity: Mutex<Activity>,
+    /// The A2A view of this machine's owned sessions: one task per prompt turn (see `core/a2a.rs`).
+    tasks: pawl_a2a::TaskRegistry,
 }
 
 /// The hub. Cheap to clone; all clones share state.
@@ -552,6 +557,7 @@ impl Hub {
         let (peer, peer_rx) = Self::new_peer_node(&paths, machine.local_machine(), &store)?;
         let (shutdown, _) = watch::channel(false);
         let (restart, _) = watch::channel(false);
+        let tasks = pawl_a2a::TaskRegistry::new(machine_id.clone());
         let hub = Hub {
             inner: Arc::new(Inner {
                 brain: RwLock::new(Brain::new(config.brain.to_brain_config())),
@@ -588,6 +594,7 @@ impl Hub {
                 repos: Mutex::new(Vec::new()),
                 seen_cwds: Mutex::new(HashSet::new()),
                 activity: Mutex::new(Activity::default()),
+                tasks,
             }),
         };
         hub.set_mirror(mirror_sessions, mirror_pets, mirror_pending);
@@ -1020,28 +1027,18 @@ impl Hub {
             .await
     }
 
-    /// Start an owned ACP session. `prompt` (if any) is logged and sent right after `session/new`.
-    /// Start an owned ACP session, then send `prompt` (if any). A first prompt that cannot be sent
-    /// leaves the session running and is reported as a warning instead of failing the start.
+    /// Start an owned ACP session, then send `prompt` (if any) as its first task. The orchestrator
+    /// delegates through A2A (`SendMessage` with delegate metadata, see `core/a2a.rs`). A first
+    /// prompt that cannot be sent leaves the session running and is reported as a warning instead of
+    /// failing the start.
     pub async fn start_session(&self, agent_id: &str, cwd: &str, prompt: Option<String>) -> Result<(Session, Option<String>)> {
-        let session = self.launch_session(agent_id, cwd).await?;
-        let warning = self.first_prompt(&session.id, prompt).await;
-        Ok((self.session(&session.id).unwrap_or(session), warning))
+        let req = a2a::start_request(agent_id, cwd, prompt.as_deref());
+        let d = self.a2a_send(req, &pawl_a2a::Caller::Local, &Actor::internal("orchestrator"), a2a::Answers::Any).await?;
+        let session = d.session.ok_or_else(|| anyhow!("the start did not report a session"))?;
+        Ok((session, d.warning))
     }
 
-    /// The first prompt of a session just started; Some(warning) if it could not be sent.
-    pub(super) async fn first_prompt(&self, session_id: &str, prompt: Option<String>) -> Option<String> {
-        let p = prompt.filter(|p| !p.trim().is_empty())?;
-        match self.prompt(session_id, p).await {
-            Ok(()) => None,
-            Err(e) => {
-                tracing::warn!("session {session_id} started, but its first prompt was not sent: {e:#}");
-                Some(format!("the session started, but its first prompt was not sent: {e:#}"))
-            }
-        }
-    }
-
-    /// Start an owned ACP session without a prompt.
+    /// Start an owned ACP session without a prompt (the ACP executor behind the A2A facade).
     pub(super) async fn launch_session(&self, agent_id: &str, cwd: &str) -> Result<Session> {
         let agent = self.find_agent(agent_id).await?;
         let cwd = resolve_cwd(cwd)?;
@@ -1079,15 +1076,19 @@ impl Hub {
         Ok(s)
     }
 
+    /// Prompt one of this machine's owned sessions: a new A2A task in its context (`core/a2a.rs`).
     pub async fn prompt(&self, session_id: &str, text: String) -> Result<()> {
-        self.owned_open_session(session_id)?;
-        intents::validate_prompt(&text)?;
-        // The ACP host emits the `user_message` event for every prompt it sends; recording it here
-        // too would log (and print) the prompt twice.
-        self.inner.host.prompt(session_id, text).await
+        let req = a2a::prompt_request(session_id, &text);
+        self.a2a_send(req, &pawl_a2a::Caller::Local, &Actor::internal("orchestrator"), a2a::Answers::Any).await.map(|_| ())
     }
 
+    /// Stop the running turn of an owned session (A2A `CancelTask` on its task, `core/a2a.rs`).
     pub async fn cancel(&self, session_id: &str, actor: &Actor) -> Result<()> {
+        self.cancel_as(session_id, actor, &pawl_a2a::Caller::Local).await
+    }
+
+    /// `session/cancel` to the agent of an owned session (the ACP executor behind the A2A facade).
+    pub(super) async fn acp_cancel(&self, session_id: &str, actor: &Actor) -> Result<()> {
         self.owned_open_session(session_id)?;
         self.inner.host.cancel(session_id).await?;
         // ACP: after session/cancel the client answers every pending permission request with `cancelled`.
@@ -1451,6 +1452,9 @@ impl Hub {
             let stale = if finished { st.take_pending_for_session(&m.id) } else { Vec::new() };
             (m, stale)
         };
+        if merged.ended_at.is_some() {
+            self.inner.tasks.on_session_ended(&merged.id);
+        }
         self.persist_and_broadcast_session(&merged).await;
         self.ensure_pet(&merged.agent_id).await;
         for req in stale {
@@ -1477,12 +1481,14 @@ impl Hub {
         let sid = session_id.to_string();
         let p = payload.clone();
         let event = self.inner.store.run(move |s| s.insert_event(&sid, kind, &p, ts)).await?;
-        {
+        let owned = {
             let mut st = self.st();
             let owner = st.sessions.get_mut(session_id).map(|s| {
                 s.last_event_at = s.last_event_at.max(ts);
-                (s.machine_id.clone(), s.agent_id.clone())
+                (s.machine_id.clone(), s.agent_id.clone(), s.source == SessionSource::Owned)
             });
+            let owned = owner.as_ref().is_some_and(|(m, _, owned)| *owned && *m == self.inner.machine_id);
+            let owner = owner.map(|(m, a, _)| (m, a));
             if let Some((machine_id, agent_id)) = owner {
                 if let Some(pet) = st.pet_for_mut(&machine_id, &agent_id) {
                     if pawl_brain::growth::on_event(pet, kind, &payload) {
@@ -1491,6 +1497,11 @@ impl Hub {
                     }
                 }
             }
+            owned
+        };
+        // The A2A view of the session (its tasks) follows every event, in the order recorded.
+        if owned {
+            self.inner.tasks.on_event(&event);
         }
         self.inner.bus.send(ServerMsg::Event { event: event.clone() });
         Ok(event)
@@ -2059,6 +2070,20 @@ impl Hub {
             default_agent: self.cfg().brain.default_agent.clone().filter(|a| !a.trim().is_empty()),
             model_pending: false,
             pet_name: self.default_pet_name(),
+            // The orchestrator's status reads the A2A tasks its delegations created.
+            tasks: self
+                .inner
+                .tasks
+                .latest_per_context()
+                .into_iter()
+                .take(BRAIN_TASKS)
+                .map(|t| pawl_brain::chat::TaskBrief {
+                    session_id: t.context_id.clone(),
+                    task_id: t.id.clone(),
+                    state: pawl_a2a::mapping::state_name(&t.status.state).to_string(),
+                    text: t.status.message.as_ref().and_then(|m| m.text()).map(|s| s.chars().take(200).collect()),
+                })
+                .collect(),
         }
     }
 

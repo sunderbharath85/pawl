@@ -17,6 +17,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
+use pawl_a2a::Caller;
 use pawl_peer::SendError;
 #[cfg(not(test))]
 use pawl_protocol::INTENT_TIMEOUT_MS;
@@ -563,14 +564,17 @@ impl Hub {
                 owned(session_id)?;
                 validate_prompt(text).map_err(|e| reason_of(&e))?;
                 self.owned_open_session(session_id).map_err(|e| reason_of(&e))?;
-                // From now on a human answers every request of this session (rules never auto-approve).
-                self.mark_remote_driven(session_id).await;
-                self.prompt(session_id, text.clone()).await.map_err(|e| reason_of(&e))?;
+                // A2A delegation for the peer: from now on a human answers every request of this
+                // session (the facade marks it remote-driven; rules never auto-approve).
+                let req = super::a2a::prompt_request(session_id, text);
+                self.a2a_send(req, &Caller::Peer(from.to_string()), &actor, super::a2a::Answers::Never)
+                    .await
+                    .map_err(|e| reason_of(&e))?;
                 Ok(json!({}))
             }
             Intent::Cancel { session_id } => {
                 owned(session_id)?;
-                self.cancel(session_id, &actor).await.map_err(|e| reason_of(&e))?;
+                self.cancel_as(session_id, &actor, &Caller::Peer(from.to_string())).await.map_err(|e| reason_of(&e))?;
                 Ok(json!({}))
             }
             Intent::Start { agent_id, cwd, prompt } => {
@@ -585,14 +589,14 @@ impl Hub {
                 if let Some(t) = prompt.as_deref().filter(|t| !t.trim().is_empty()) {
                     validate_prompt(t).map_err(|e| reason_of(&e))?;
                 }
-                let session = self.launch_session(agent_id, &dir.to_string_lossy()).await.map_err(|e| {
+                // A2A delegation for the peer: the facade marks the session remote-driven before its
+                // first prompt can raise a request.
+                let caller = Caller::Peer(from.to_string());
+                let d = self.a2a_start(agent_id, &dir.to_string_lossy(), prompt.clone(), &caller).await.map_err(|e| {
                     tracing::warn!(device = %from, "remote start of {agent_id} failed: {e:#}");
                     IntentRejectReason::Invalid
                 })?;
-                // Remote-driven before its first prompt can raise a request.
-                self.mark_remote_driven(&session.id).await;
-                let warning = self.first_prompt(&session.id, prompt.clone()).await;
-                let session = self.session(&session.id).unwrap_or(session);
+                let (session, warning) = (d.session.ok_or(IntentRejectReason::Invalid)?, d.warning);
                 Ok(match warning {
                     Some(w) => json!({ "session": session, "warning": w }),
                     None => json!({ "session": session }),

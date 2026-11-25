@@ -2745,6 +2745,7 @@ async fn stored_injected_titles_are_cleaned_at_start() {
     assert_eq!(stored("d").as_deref(), Some("Fix login"), "clean titles are left alone");
 }
 
+mod a2a;
 mod phones;
 
 // ---------- the "acp" bot provider: a hidden, tool-less agent session ----------

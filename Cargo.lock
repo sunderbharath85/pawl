@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "a2a-lf"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9bdc39f79399c01ec4df5da3b653e31b3bac52214ca3d8331d6f059c273b5b8"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1651,6 +1665,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pawl-a2a"
+version = "0.1.1"
+dependencies = [
+ "a2a-lf",
+ "anyhow",
+ "chrono",
+ "futures",
+ "pawl-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "pawl-acp"
 version = "0.1.1"
 dependencies = [
@@ -1715,6 +1746,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "hex",
+ "pawl-a2a",
  "pawl-acp",
  "pawl-brain",
  "pawl-discovery",

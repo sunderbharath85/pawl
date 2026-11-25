@@ -1463,3 +1463,19 @@ async fn the_default_pet_answers_as_its_name() {
     c.pet = Some(pet("p1", "Biscuit", ME, "claude-code"));
     assert!(brain().handle("hi!", &c).await.unwrap().text.contains("Biscuit here"));
 }
+
+/// A2A: the status of an agent names how its last delegation (task) ended when that was not success.
+#[tokio::test]
+async fn status_names_the_last_task_outcome() {
+    let mut c = ctx();
+    c.sessions[0].status = SessionStatus::Done;
+    let brief = |state: &str| TaskBrief { session_id: "s-claude".into(), task_id: format!("{ME}:t1"), state: state.into(), text: None };
+    c.tasks = vec![brief("canceled")];
+    let r = ask("What's Claude doing?", &c).await;
+    assert!(r.text.contains("Its last task was canceled."), "{}", r.text);
+    c.tasks = vec![brief("rejected")];
+    assert!(ask("What's Claude doing?", &c).await.text.contains("The agent refused its last task."));
+    c.tasks = vec![brief("completed")];
+    let r = ask("What's Claude doing?", &c).await;
+    assert!(!r.text.contains("last task"), "{}", r.text);
+}

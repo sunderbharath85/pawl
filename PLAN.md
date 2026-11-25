@@ -303,6 +303,38 @@ Each step can ship and be tested on its own.
    - The session view is a conversation built with shadcn/ui AI Elements (Tailwind v4 without preflight, scoped): messages, grouped tool calls, diffs, plans and approvals. Hook events, harness-injected text (task notifications, system reminders, terminal messages) and pasted blocks become readable notices instead of raw lines; session titles are cleaned in the hub and in the client. Approval cards always show the full command. Thin themed scrollbars, and no sideways scrolling.
 8. **Later:** cat, bird and robot polish, moods and XP, chat-app bots, an MCP server, and the Zed/JetBrains wrapper.
 
+## A2A orchestration (requested 2026-11-24: "the orchestrator should use A2A to communicate")
+
+Decision (the user, 2026-11-24): the default pet (the orchestrator) uses A2A everywhere it delegates. A2A v1.0.1
+(Linux Foundation / Agentic AI Foundation), official Rust SDK `a2a-lf` / `a2a-client-lf` / `a2a-server-lf` (pinned with
+`=`, pre-1.0). ACP stays underneath for the coding agents (Claude Code, Codex and Copilot speak only ACP); MCP stays for
+tools; the end-to-end encrypted peer link stays the only way between machines.
+
+- **Model:** every sub-agent is an A2A peer of the orchestrator. One A2A `contextId` per session, one Task per
+  delegation (prompt turn). Mapping for ACP agents (an in-process A2A facade in the hub, no HTTP):
+  `session/update` -> status and artifact updates (diffs as artifacts); `request_permission` -> `INPUT_REQUIRED` with a
+  Structured Input schema whose enum is the ACP option ids; `session/cancel` <-> `CancelTask`; stop reasons
+  end_turn -> COMPLETED, cancelled -> CANCELED, refusal -> REJECTED, errors -> FAILED.
+- **Outside A2A agents** (Gemini CLI's A2A server, ADK or cloud agents): the user adds one by URL in Settings > Agents;
+  Pawl fetches the Agent Card, shows its skills, stores a write-only bearer token, verifies card signatures when present,
+  and caches the card. They appear as agents next to the ACP ones and their tasks show as sessions.
+- **Between machines:** orchestrators delegate to each other with A2A JSON-RPC carried inside the encrypted peer link
+  (a custom binding, spec section 12): no LAN port, no TLS-only trust. The step-4/5 owner rules keep applying (the
+  owning machine decides; remote allow needs a confirmation on the user's device). Old peers keep the intent messages
+  until both sides speak the new protocol version.
+- **Pawl as an A2A agent:** an A2A server on 127.0.0.1 only (JSON-RPC and HTTP+JSON, streaming on, push notifications
+  off), off by default, bearer token rotated in Settings, loopback Host/Origin checks (DNS-rebinding defence), rate
+  limits. Its Agent Card lists orchestrator skills (status, delegate a task to an agent in a repo, prompt a session),
+  not raw ACP methods; the full list only on the authenticated extended card.
+- **Approvals:** `INPUT_REQUIRED` from any sub-agent becomes the same approval card as today; the hard floor and the
+  audit log apply; nothing from an outside A2A caller is ever auto-approved; an outside caller cannot answer approvals
+  unless the user turns that on per caller.
+- **Risks:** pre-1.0 crates and the v1.1 spec in progress (pin and wrap behind our own types); mixed 0.3/1.0 clients
+  (accept both on the server); context injection between agents (bind contextIds to the caller, treat all agent text
+  as data); localhost attack surface (token + loopback checks + off by default).
+- **Phases:** A1 internal facade for ACP agents and the orchestrator using it; A2 the localhost A2A server; A3 outside
+  A2A agents as sub-agents; A4 machine-to-machine A2A over the encrypted link (protocol v9).
+
 ## Next release (v0.2): voice, screen and browser (requested 2026-11-24)
 
 Rules for all five features:

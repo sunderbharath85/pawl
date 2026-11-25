@@ -19,6 +19,8 @@ pawl-acp = { workspace = true }
 pawl-discovery = { workspace = true }
 pawl-brain = { workspace = true }
 pawl-peer = { workspace = true }
+# The root Cargo.toml is the orchestrator's; the A2A crate is referenced by path.
+pawl-a2a = { path = "../a2a" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
