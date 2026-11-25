@@ -26,6 +26,7 @@ Also, all off by default and set up in Settings:
 - **Look at the screen:** "Show my screen" in the pet's bubble lets you pick a screen or window, preview it and send it to your pet's model, one picture at a time; Pawl keeps no copy.
 - **Browser:** the pet can run a browser task in your own Chrome (Chrome 144+, auto-connect); every click and every typed text is an approval card first.
 - **A2A:** the pet delegates through the Agent2Agent protocol; other tools on your PC can talk to Pawl over A2A with a token, and you can add outside A2A agents.
+- **Connect coding agents:** one click in Settings > A2A lets Claude Code, Codex or Copilot talk to Pawl (through a small `pawl mcp` tool server): they can start work in folders Pawl knows and check on it. Everything they do still asks you, and they can never answer approvals.
 
 Pawl covers all of your machines: a session on a Windows PC shows up as a visiting dog on a Mac, and you can approve it from either one or from the phone.
 
