@@ -20,6 +20,13 @@ You see the pets in three places:
 - **Pawl for VS Code:** pets in the status bar and a webview, approvals, commands, and opening the files an agent edited.
 - **Phone:** an Expo app for iOS and Android that pairs by QR code and reaches every machine through your relay. Approving or starting an agent needs biometrics or the device passcode.
 
+Also, all off by default and set up in Settings:
+
+- **Voice:** say your pet's name, then talk to it. Wake word, speech to text and voice activity run on your PC (sherpa-onnx; about 50 MB of models you download from Settings, never bundled). Approve by voice: risky actions and other machines' requests need the two-digit code shown on the card, and "always allow" is never offered by voice.
+- **Look at the screen:** "Show my screen" in the pet's bubble lets you pick a screen or window, preview it and send it to your pet's model, one picture at a time; Pawl keeps no copy.
+- **Browser:** the pet can run a browser task in your own Chrome (Chrome 144+, auto-connect); every click and every typed text is an approval card first.
+- **A2A:** the pet delegates through the Agent2Agent protocol; other tools on your PC can talk to Pawl over A2A with a token, and you can add outside A2A agents.
+
 Pawl covers all of your machines: a session on a Windows PC shows up as a visiting dog on a Mac, and you can approve it from either one or from the phone.
 
 ## Screenshots

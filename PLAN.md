@@ -4,7 +4,7 @@ Named dog pets that watch and drive your coding agents over ACP (Agent Client Pr
 
 - Whiteboard: https://claude.ai/artifact/E8zVPktys5q8qKw5AjmjtB
 - Last updated: 2026-11-23
-- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto then Pawl (2026-11-24), step 1 (machine identity), step 2 (pairing + LAN presence, protocol v3), step 3 (mirror events + visitors, protocol v4), step 4 (intents + acks, protocol v5), step 5 (remote commands by machine + repo, protocol v6), step 5b (settings in the UI, protocol v7), step 6 (relay, deployed), step 7 (phone, protocol v8), step 7b (one orchestrator pet). Next: v0.2 (voice, screen and browser; see "Next release") and step 8 (later polish).
+- Status: migration path approved 2026-11-23. Done: step 0 (baseline + security floor), rename to Krypto then Pawl (2026-11-24), step 1 (machine identity), step 2 (pairing + LAN presence, protocol v3), step 3 (mirror events + visitors, protocol v4), step 4 (intents + acks, protocol v5), step 5 (remote commands by machine + repo, protocol v6), step 5b (settings in the UI, protocol v7), step 6 (relay, deployed), step 7 (phone, protocol v8), step 7b (one orchestrator pet), A2A orchestration (A1-A4, protocol v9), v0.2 (voice: wake word, speech to text, voice approvals; screen look with approval; browser use in the user's Chrome; 2026-11-25). Next: step 8 (later polish) and the open items in each section.
 
 ## Decisions
 
@@ -335,7 +335,11 @@ tools; the end-to-end encrypted peer link stays the only way between machines.
 - **Phases:** A1 internal facade for ACP agents and the orchestrator using it; A2 the localhost A2A server; A3 outside
   A2A agents as sub-agents; A4 machine-to-machine A2A over the encrypted link (protocol v9).
 
-## Next release (v0.2): voice, screen and browser (requested 2026-11-24)
+## v0.2: voice, screen and browser (requested 2026-11-24, built 2026-11-25)
+
+Status: all five items built, reviewed (one independent security review per item) and tested; see docs/CONTRACTS.md
+"v0.2 Voice", "v0.2 Voice approvals" and "v0.2 Screen and Browser" for what shipped. Not yet tried by hand: the wake
+word with the user's own voice and microphone, browser tasks against the user's real Chrome, macOS and Linux.
 
 Rules for all five features:
 - Off by default; turned on and configured in Settings (desktop UI, like every other setting).
