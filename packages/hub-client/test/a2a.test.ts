@@ -118,6 +118,17 @@ describe("Settings > A2A: checks and labels", () => {
     expect(settingsFieldLabel("a2a.port")).toBe("A2A port");
   });
 
+  test("the real hub's a2a settings around the server toggle (0.1.1, captured from update_settings acks)", () => {
+    // Exactly as a fresh hub sends them: no callers, `agents` always present, the url only while running.
+    const off: A2aSettings = { server: false, port: 48870, running: false, url: null, error: null, callers: [], agents: [] };
+    const on: A2aSettings = { server: true, port: 48870, running: true, url: "http://127.0.0.1:48870", error: null, callers: [], agents: [] };
+    expect(a2aServerPatch(off, { server: !off.server })).toEqual({ a2a: { server: true } });
+    expect(a2aServerStatus(off)).toEqual({ tone: "off", text: "Off" });
+    expect(a2aServerStatus(on).text).toBe("Running at http://127.0.0.1:48870 (this PC only)");
+    expect(a2aCardUrl(on.url!)).toBe("http://127.0.0.1:48870/.well-known/agent-card.json");
+    expect(a2aServerPatch(on, { server: !on.server })).toEqual({ a2a: { server: false } });
+  });
+
   test("an outside agent's session shows the agent's host where a folder would be", () => {
     expect(folderName("https://agents.example.com/a2a")).toBe("agents.example.com");
     expect(folderName("http://127.0.0.1:41242")).toBe("127.0.0.1:41242");

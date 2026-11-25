@@ -144,3 +144,158 @@ describe("desktop UI", () => {
     await pet.close();
   }, 60_000);
 });
+
+// ---------------------------------------------------------------- the app's shell, faked for the panel
+
+/**
+ * `voice_status` as the real app answers it (0.1.1, captured from the Tauri app on a PC without the models), except
+ * that the default models count as downloaded, so turning voice on needs no 50 MB download here.
+ */
+const REAL_VOICE_STATUS = {
+  state: "off",
+  config: { enabled: false, wakeWord: true, keyword: "Biscotti", spokenAs: null, sensitivity: 0.5, micId: null, asrModel: "fast", hotkey: null, muted: false, readReplies: false },
+  error: null,
+  models: { default: { installed: true, bytes: 52_000_000 }, accurate: { installed: false, bytes: 0 } },
+  mics: [],
+};
+
+/**
+ * Runs in the page before the app: a stand-in for the desktop app's IPC (`__TAURI_INTERNALS__`), so the production
+ * build takes its Tauri paths (hub credentials from the app, the home folder, the voice engine) in plain Chromium.
+ * Voice answers with the real payload shapes; `window.__voiceBroken = true` makes voice_status drop `models`.
+ */
+function fakeTauriShell(o: { url: string; token: string; voice: unknown }): void {
+  const w = window as unknown as Record<string, unknown> & { __voiceBroken?: boolean };
+  const callbacks = new Map<number, (data: unknown) => void>();
+  const listeners = new Map<string, number[]>();
+  let seq = 0;
+  let voice = JSON.parse(JSON.stringify(o.voice)) as { state: string; config: { enabled: boolean; muted: boolean; wakeWord: boolean } };
+  const emit = (event: string, payload: unknown) => {
+    for (const id of listeners.get(event) ?? []) callbacks.get(id)?.({ event, id, payload });
+  };
+  const commands: Record<string, (a: Record<string, unknown>) => unknown> = {
+    hub_credentials: () => ({ url: o.url, wsUrl: `${o.url.replace(/^http/, "ws")}/ws`, token: o.token, tokenSource: "env", dataDir: null }),
+    hub_health: () => ({ ok: true, version: null, error: null }),
+    "plugin:event|listen": (a) => {
+      listeners.set(String(a.event), [...(listeners.get(String(a.event)) ?? []), Number(a.handler)]);
+      return a.handler;
+    },
+    "plugin:event|unlisten": (a) => {
+      listeners.set(String(a.event), (listeners.get(String(a.event)) ?? []).filter((h) => h !== a.eventId));
+      return null;
+    },
+    "plugin:path|resolve_directory": () => "C:\\Users\\e2e",
+    voice_status: () => (w.__voiceBroken ? { ...voice, models: undefined } : voice),
+    voice_configure: (a) => {
+      const config = a.config as typeof voice.config;
+      const state = !config.enabled ? "off" : config.muted ? "muted" : config.wakeWord ? "wake_listening" : "idle";
+      voice = { ...voice, config, state };
+      setTimeout(() => emit("voice", { type: "state", state }), 50);
+      return voice;
+    },
+  };
+  w.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: "panel" }, currentWebview: { windowLabel: "panel", label: "panel" } },
+    transformCallback: (cb: (d: unknown) => void, once = false) => {
+      const id = ++seq;
+      callbacks.set(id, (d) => {
+        if (once) callbacks.delete(id);
+        cb(d);
+      });
+      return id;
+    },
+    unregisterCallback: (id: number) => callbacks.delete(id),
+    runCallback: (id: number, d: unknown) => callbacks.get(id)?.(d),
+    callbacks,
+    invoke: async (cmd: string, args?: Record<string, unknown>) => (commands[cmd] ? commands[cmd](args ?? {}) : null),
+    convertFileSrc: (path: string) => path,
+  };
+  w.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+  localStorage.setItem("pawl.desktop.settings.v1", JSON.stringify({ setupOffered: true, setupDone: true }));
+}
+
+/** The panel as the desktop app shows it (through the fake shell), at the app's default size. Page errors are collected. */
+async function openAppPanel(errors: string[], voiceBroken = false): Promise<Page> {
+  const p = await browser.newPage({ viewport: { width: 1120, height: 740 } });
+  p.on("pageerror", (e) => errors.push(e.message));
+  if (voiceBroken) await p.addInitScript(() => ((window as unknown as { __voiceBroken: boolean }).__voiceBroken = true));
+  await p.addInitScript(fakeTauriShell, { url: `http://127.0.0.1:${hub.port}`, token: hub.token, voice: REAL_VOICE_STATUS });
+  await p.goto(`${ORIGIN}/panel.html`);
+  await p.locator(".nav-item", { hasText: "Settings" }).click();
+  await p.locator("#settings-a2a .a2a-part").first().waitFor({ state: "visible", timeout: 20_000 });
+  return p;
+}
+
+/**
+ * Is the whole panel on screen? The 0.1.1 bug: clicking a toggle far down Settings scrolled the window itself, the app
+ * went out of view and the window looked blank (the DOM was all there).
+ */
+async function panelOnScreen(p: Page): Promise<{ windowScrollY: number; appTop: number; sidebar: boolean }> {
+  // Two frames first: the browser fires scroll events (and the panel's pin answers them) in the next frame.
+  await p.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  return p.evaluate(() => ({
+    windowScrollY: Math.round(window.scrollY),
+    appTop: Math.round(document.querySelector(".app")?.getBoundingClientRect().top ?? -1),
+    sidebar: !!document.querySelector(".sidebar"),
+  }));
+}
+const ON_SCREEN = { windowScrollY: 0, appTop: 0, sidebar: true };
+
+function freePort(): number {
+  const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() });
+  const port = s.port!;
+  s.stop(true);
+  return port;
+}
+
+describe("desktop UI: Settings never blanks the window", () => {
+  test("turning on the A2A server and voice (far down Settings) keeps the panel on screen", async () => {
+    // A port of its own: a real Pawl on this machine may hold the default.
+    await hub.client.updateSettings({ a2a: { port: freePort() } });
+    const errors: string[] = [];
+    const p = await openAppPanel(errors);
+
+    const a2a = p.locator("#settings-a2a");
+    await a2a.locator("label.toggle", { hasText: "Let other tools talk to Pawl" }).click();
+    await p.locator(".confirm-dialog").getByRole("button", { name: "Turn on A2A server" }).click();
+    await waitFor(async () => (await hub.client.getSettings()).settings.a2a?.running === true, "the A2A server running", 15_000);
+    await a2a.locator(".a2a-status", { hasText: "Running at" }).waitFor({ timeout: 10_000 });
+    expect(await panelOnScreen(p)).toEqual(ON_SCREEN);
+
+    const voice = p.locator("#settings-voice");
+    await voice.locator("label.toggle", { hasText: "Talk to" }).click();
+    await voice.getByText("Sensitivity").waitFor({ state: "visible", timeout: 10_000 });
+    expect(await panelOnScreen(p)).toEqual(ON_SCREEN);
+
+    // Even with a hidden checkbox positioned against the window again (the 0.1.1 CSS), the window snaps back.
+    await p.addStyleTag({ content: ".toggle { position: static !important; } .toggle input { inset: auto !important; }" });
+    await voice.locator("label.toggle", { hasText: "Wake word" }).click();
+    await p.waitForTimeout(300);
+    expect(await panelOnScreen(p)).toEqual(ON_SCREEN);
+
+    await a2a.locator("label.toggle", { hasText: "Let other tools talk to Pawl" }).click();
+    await waitFor(async () => (await hub.client.getSettings()).settings.a2a?.server === false, "the A2A server off again", 15_000);
+    expect(await panelOnScreen(p)).toEqual(ON_SCREEN);
+    expect(errors).toEqual([]);
+    await p.close();
+  }, 60_000);
+
+  test("a section that crashes shows a card with the error and Reload; the rest of the panel keeps working", async () => {
+    const errors: string[] = [];
+    const p = await openAppPanel(errors, true);
+    const card = p.locator("#settings-voice .crash-card");
+    await card.waitFor({ state: "visible", timeout: 20_000 });
+    expect(await card.innerText()).toContain("Something went wrong in this section.");
+    expect(await card.locator(".crash-message").innerText()).toMatch(/default/);
+    // Every other section and the sidebar still render.
+    expect(await p.locator("#settings-a2a .a2a-part").count()).toBe(3);
+    expect(await p.locator(".sidebar").count()).toBe(1);
+
+    // Reload renders the section again (the voice engine answers properly now).
+    await p.evaluate(() => ((window as unknown as { __voiceBroken: boolean }).__voiceBroken = false));
+    await card.getByRole("button", { name: "Reload" }).click();
+    await p.locator("#settings-voice label.toggle", { hasText: "Talk to" }).waitFor({ state: "visible", timeout: 10_000 });
+    expect(await p.locator("#settings-voice .crash-card").count()).toBe(0);
+    await p.close();
+  }, 60_000);
+});

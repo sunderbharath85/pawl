@@ -12,7 +12,7 @@ import { VoiceSection } from "./settings/VoiceSection";
 import { BrowserSection } from "./settings/BrowserSection";
 import { PetsSection } from "./settings/PetsSection";
 import { BotSection, HubSection, NudgesSection, RelaySection, RemoteSection, ReposSection } from "./settings/sections";
-import { useHubSettings, useRestartHub, type HubSettingsView } from "./settings/shared";
+import { SectionGuard, useHubSettings, useRestartHub, type HubSettingsView } from "./settings/shared";
 
 export const SETTINGS_SECTIONS: ReadonlyArray<{ id: string; label: string; hub: boolean }> = [
   { id: "hub", label: "Hub", hub: true },
@@ -32,6 +32,16 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{ id: string; label: string; hub: 
   { id: "pets", label: "Pets (advanced)", hub: false },
   { id: "app", label: "This app", hub: false },
 ];
+
+/** A section in its own error boundary (a crash shows a card there, never a blank window). */
+function guard(id: string, section: ReactNode): ReactNode {
+  const title = SETTINGS_SECTIONS.find((s) => s.id === id)?.label ?? id;
+  return (
+    <SectionGuard key={id} id={id} title={title}>
+      {section}
+    </SectionGuard>
+  );
+}
 
 function scrollToSection(id: string): void {
   document.getElementById(`settings-${id}`)?.scrollIntoView({ block: "start", behavior: "smooth" });
@@ -73,26 +83,26 @@ export function SettingsView({ section }: { section?: string | undefined }) {
           ))}
         </nav>
         <div className="settings-sections">
-          {props && <HubSection {...props} configPath={hs.configPath} />}
-          <MachineSection />
+          {props && guard("hub", <HubSection {...props} configPath={hs.configPath} />)}
+          {guard("machine", <MachineSection />)}
           {props && (
             <>
-              <PairingSection {...props} />
-              <RemoteSection {...props} />
-              <ReposSection {...props} />
-              <AgentsSection {...props} />
-              <A2aSection {...props} />
-              <BotSection {...props} />
-              <BrowserSection {...props} />
-              <NudgesSection {...props} />
+              {guard("pairing", <PairingSection {...props} />)}
+              {guard("remote", <RemoteSection {...props} />)}
+              {guard("repos", <ReposSection {...props} />)}
+              {guard("agents", <AgentsSection {...props} />)}
+              {guard("a2a", <A2aSection {...props} />)}
+              {guard("bot", <BotSection {...props} />)}
+              {guard("browser", <BrowserSection {...props} />)}
+              {guard("nudges", <NudgesSection {...props} />)}
             </>
           )}
-          <NotificationsSection />
-          {props && <RelaySection {...props} />}
-          <PetSection />
-          <VoiceSection />
-          <PetsSection />
-          <AppSection configPath={hs.configPath} />
+          {guard("notifications", <NotificationsSection />)}
+          {props && guard("relay", <RelaySection {...props} />)}
+          {guard("pet", <PetSection />)}
+          {guard("voice", <VoiceSection />)}
+          {guard("pets", <PetsSection />)}
+          {guard("app", <AppSection configPath={hs.configPath} />)}
         </div>
       </div>
     </section>

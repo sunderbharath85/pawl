@@ -1969,6 +1969,10 @@ textarea.input {
   align-self: flex-start;
 }
 .toggle {
+  /* The hidden checkbox is positioned against the toggle itself. Without this its containing block was the window:
+     it sat at its unscrolled place far down the Settings page, and clicking a toggle (which focuses the checkbox)
+     scrolled the whole window to it, pushing the app out of view (a blank window). */
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1980,6 +1984,8 @@ textarea.input {
 }
 .toggle input {
   position: absolute;
+  inset: 0;
+  margin: 0;
   opacity: 0;
   pointer-events: none;
 }
@@ -2387,4 +2393,31 @@ input[type="range"] {
   font-size: 11px;
   font-weight: 800;
   vertical-align: 1px;
+}
+
+/* A crashed part of the panel (ErrorBoundary): a small card in its place, never a blank window. */
+.crash-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-color: var(--berry);
+  background: var(--berry-soft);
+}
+.crash-card .form-actions {
+  margin-top: 2px;
+}
+.crash-message {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+.crash-window {
+  display: grid;
+  place-items: center;
+  height: 100vh;
+  padding: 24px;
+}
+.crash-window .crash-card {
+  max-width: 560px;
 }

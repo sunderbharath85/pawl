@@ -18,9 +18,11 @@ import {
   type SettingsFieldError,
 } from "@pawl/hub-client";
 import type { HubSettings, HubSettingsPatch } from "@pawl/protocol";
+import { ErrorBoundary } from "../../../lib/ErrorBoundary";
 import { homeFolder, isTauri } from "../../../lib/native";
 import type { FormErrors } from "../../../lib/settingsForms";
 import { useConfirm } from "../../Confirm";
+import { CrashCard } from "../../CrashCard";
 import { usePanel } from "../../context";
 
 // ---------------------------------------------------------------- loading
@@ -260,6 +262,25 @@ export function SettingsSection(props: { id: string; title: string; description?
       </header>
       {props.children}
     </section>
+  );
+}
+
+/**
+ * One settings section in its own error boundary: if it crashes, the section shows a card with the error and a
+ * Reload (under its own title and anchor, so the section list still jumps to it); every other section keeps working.
+ */
+export function SectionGuard({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+  return (
+    <ErrorBoundary
+      label={`settings:${id}`}
+      fallback={(error, reset) => (
+        <SettingsSection id={id} title={title}>
+          <CrashCard where="this section" error={error} onReload={reset} />
+        </SettingsSection>
+      )}
+    >
+      {children}
+    </ErrorBoundary>
   );
 }
 

@@ -148,3 +148,39 @@ describe("push-to-talk hotkey", () => {
     expect(hotkeyLabel("Alt+Super+K", "MacIntel")).toBe("Option + Cmd + K");
   });
 });
+
+describe("real payloads from the app's voice commands (0.1.1, captured from the Tauri app)", () => {
+  // voice_status on a PC that never downloaded the models: no microphones listed yet, everything off.
+  const real: VoiceStatus = {
+    state: "off",
+    config: { enabled: false, wakeWord: true, keyword: "Pickles", spokenAs: null, sensitivity: 0.5, micId: null, asrModel: "fast", hotkey: null, muted: false, readReplies: false },
+    error: null,
+    models: { default: { installed: false, bytes: 0 }, accurate: { installed: false, bytes: 0 } },
+    mics: [],
+  };
+
+  test("voice_status folds in as is: off, no marker, no talking", () => {
+    const m = voiceReduce(INITIAL_VOICE, { type: "status", status: real });
+    expect(m.state).toBe("off");
+    expect(m.status?.mics).toEqual([]);
+    expect(micMarker(m, 1000)).toBeNull();
+    expect(canTalk(m)).toBe(false);
+  });
+
+  test("voice_configure answers with the whole status (the config as saved)", () => {
+    const configured: VoiceStatus = { ...real, config: { ...real.config, sensitivity: 0.55 } };
+    const m = voiceReduce(voiceReduce(INITIAL_VOICE, { type: "status", status: real }), { type: "status", status: configured });
+    expect(m.status?.config.sensitivity).toBe(0.55);
+    expect(m.status?.models.default.installed).toBe(false);
+  });
+
+  test("state events after turning it on keep the rest of the status", () => {
+    let m = voiceReduce(INITIAL_VOICE, { type: "status", status: { ...real, config: { ...real.config, enabled: true }, state: "loading" } });
+    m = voiceReduce(m, { type: "state", state: "wake_listening", at: 1 });
+    expect(m.status?.config.enabled).toBe(true);
+    expect(m.status?.mics).toEqual([]);
+    expect(micMarker(m, 2)).toBe("live");
+    m = voiceReduce(m, { type: "state", state: "hearing", trigger: "ui", at: 3 });
+    expect(m.state).toBe("hearing");
+  });
+});

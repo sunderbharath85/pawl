@@ -7,6 +7,7 @@ import { useSprites } from "../lib/sprites";
 import { useConnection } from "../lib/useConnection";
 import { useNow } from "../lib/useNow";
 import { ConfirmProvider } from "./Confirm";
+import { ViewGuard } from "./CrashCard";
 import { PanelContext, type PanelCtx, type Route } from "./context";
 import { routeForView } from "./routes";
 import { Sidebar } from "./Sidebar";
@@ -140,7 +141,8 @@ export function PanelApp() {
             <HubBanner />
             {route.view !== "approvals" && <PendingStrip />}
             <div className="main-scroll" key={route.view === "session" ? `s:${route.sessionId}` : route.view}>
-              {renderRoute(route)}
+              {/* Keyed with the route: another view starts with a fresh boundary. */}
+              <ViewGuard>{renderRoute(route)}</ViewGuard>
             </div>
           </main>
           <div className="toasts" aria-live="polite">
