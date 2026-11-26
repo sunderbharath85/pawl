@@ -83,8 +83,10 @@ jobs:
           case "${{ runner.os }}" in
             Windows) grep -q 'pawl.exe' "$B/nsis/x64/installer.nsi" && grep -qi 'pawl.exe' "$B/wix/x64/main.wxs" ;;
             macOS)   test -x "$B/bundle/macos/Pawl.app/Contents/MacOS/pawl" ;;
-            Linux)   dpkg -c dist/release/*.deb | grep -i pawl
-                     dpkg -c dist/release/*.deb | grep -qE '(^|[[:space:]]|\./)usr/bin/pawl$' ;;
+            # List to a file first: grep -q stops at the first match, dpkg's tar then fails on a closed pipe.
+            Linux)   dpkg -c dist/release/*.deb > deb-files.txt
+                     grep -i pawl deb-files.txt
+                     grep -qE '(^|[[:space:]]|\./)usr/bin/pawl$' deb-files.txt ;;
           esac
       - uses: actions/upload-artifact@v7
         with:
