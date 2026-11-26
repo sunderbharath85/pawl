@@ -86,7 +86,22 @@ export const native = {
   openPanel: (focus?: PanelFocus) => invoke<void>("open_panel", { focus: focus ?? null }),
   /** The view the panel was opened for before it was listening (once). */
   takePanelFocus: () => invoke<PanelFocus | null>("take_panel_focus"),
+  /**
+   * Show a folder in Explorer, Finder or the file manager (an absolute path to an existing folder on this computer).
+   * Rejects with a short message to show as-is (see `OPEN_FOLDER_ERRORS`).
+   */
+  openFolder: (path: string) => invoke<void>("open_folder", { path }),
 };
+
+/** What `open_folder` says when it can't open the folder: short, for the user. Anything else means the command is missing. */
+export const OPEN_FOLDER_ERRORS: readonly string[] = [
+  "Use the folder's full path.",
+  "That folder doesn't exist.",
+  "That's a file, not a folder.",
+  "Pawl can't read that folder.",
+  "Use a folder on this computer.",
+  "Couldn't open the file manager.",
+];
 
 export interface NativeEvents {
   "hub-started": StartHubResult;

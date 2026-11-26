@@ -9,6 +9,7 @@
 //! output is only ever reply text. With no model configured, or when a call fails, replies fall
 //! back to deterministic text.
 
+pub mod assistant;
 pub mod browse;
 mod intent;
 mod llm;
@@ -188,6 +189,9 @@ pub struct BrainContext {
     /// Browser use is on (`[browser] enabled`) and its agent is installed here: web tasks become `browse`
     /// proposals ([`browse`]).
     pub browser: bool,
+    /// Assistant mode is off (`[assistant] enabled = false`): the default pet's model prompt says it can be
+    /// turned on in Settings > Assistant so the pet does the work itself.
+    pub assistant_off: bool,
 }
 
 /// One delegation (A2A task) as the bot sees it.
@@ -245,6 +249,7 @@ impl Default for BrainContext {
             read_back: None,
             voice_locked: false,
             browser: false,
+            assistant_off: false,
         }
     }
 }
@@ -508,6 +513,7 @@ impl Brain {
         if ctx.pet.is_none() {
             voice.name = ctx.pet_name.as_deref().map(clean_name).filter(|n| !n.is_empty());
         }
+        voice.assistant_off = ctx.pet.is_none() && ctx.assistant_off;
         let seed = fnv1a(text);
         let agents = remote::all_agents(ctx);
         let catalog = AgentCatalog::build(&agents, &ctx.sessions, |m| is_local(ctx, m));
@@ -1678,6 +1684,8 @@ fn command_for(
                 s.agent_id == agent_id
                     && is_local(ctx, &s.machine_id)
                     && s.source == SessionSource::Owned
+                    // A browser task or the assistant is driven by the hub, never a target for "tell claude to ...".
+                    && s.purpose.is_none()
                     && s.ended_at.is_none()
                     && s.status != SessionStatus::Error
                     && path_key(&s.cwd) == key

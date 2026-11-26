@@ -496,6 +496,116 @@ pub fn pick_option(req: &PermissionRequest, action: RuleAction) -> Option<String
     }
 }
 
+// ---------- agent config and hook paths (shared by the hub's guards and the brain's chat rules) ----------
+
+/// Folders whose contents configure an agent or its hooks (compared without case). `.git` is one too
+/// for [`is_agent_config_path`]; the hub's start check has its own rules for it (a plain repository
+/// starts, a planted hook or config does not).
+pub const AGENT_CONFIG_DIRS: &[&str] = &[".claude", ".codex", ".gemini", ".vscode", ".github", ".opencode", ".copilot", ".agents"];
+/// Files that configure an agent, git, or carry an agent's instructions (compared without case).
+pub const AGENT_CONFIG_FILES: &[&str] = &[
+    ".mcp.json", "mcp.json", "opencode.json", "opencode.jsonc", "claude.md", "claude.local.md", "agents.md", "agents.override.md", "gemini.md",
+    ".gitmodules", ".gitattributes",
+];
+/// Git's own folder: anything in it (or a `.git` file pointing elsewhere) is git config or hooks.
+const GIT_DIR: &str = ".git";
+
+/// One path component as a file system may read it: lower case, an alternate data stream cut off
+/// (`CLAUDE.md::$DATA`), trailing dots and spaces dropped (Windows ignores them). On every system:
+/// the path may be Windows-shaped whatever the hub runs on.
+fn plain_component(c: &str) -> String {
+    c.split(':').next().unwrap_or_default().trim_end_matches(['.', ' ']).to_lowercase()
+}
+
+/// A Windows 8.3 short name (`CLAUDE~1.MD`): it could be any long name, so it counts as config.
+fn is_short_name(c: &str) -> bool {
+    let b = c.as_bytes();
+    b.windows(2).any(|w| w[0] == b'~' && w[1].is_ascii_digit())
+}
+
+/// Is a file or folder called `name` an agent's config ([`AGENT_CONFIG_DIRS`] or
+/// [`AGENT_CONFIG_FILES`], whichever kind of entry it is)? Without case.
+pub fn is_agent_config_name(name: &str) -> bool {
+    let n = plain_component(name);
+    AGENT_CONFIG_DIRS.contains(&n.as_str()) || AGENT_CONFIG_FILES.contains(&n.as_str())
+}
+
+/// Path components of `p` as [`plain_component`]s (separators and `.` / `..` normalized; a relative
+/// path is taken from `cwd`).
+fn agent_config_components(p: &str, cwd: Option<&str>) -> Vec<String> {
+    let n = normalize_path(p);
+    let full = match cwd {
+        Some(c) if !is_absolute(&n) => normalize_path(&format!("{}/{n}", c.trim_end_matches(['/', '\\']))),
+        _ => n,
+    };
+    full.split('/').map(plain_component).filter(|c| !c.is_empty()).collect()
+}
+
+/// Is `p` an agent's config, instructions, hook or git path: inside one of [`AGENT_CONFIG_DIRS`] or
+/// `.git` (anywhere: modules, worktree config, hooks, info, a `.git` file), one of
+/// [`AGENT_CONFIG_FILES`], or with a Windows short-name component? Relative paths are taken from `cwd`;
+/// compared without case, alternate data streams and trailing dots / spaces ignored, on every system.
+pub fn is_agent_config_path(p: &str, cwd: Option<&str>) -> bool {
+    let c = agent_config_components(p, cwd);
+    let in_dir = c.iter().any(|x| AGENT_CONFIG_DIRS.contains(&x.as_str()) || x == GIT_DIR);
+    let file = c.last().is_some_and(|x| AGENT_CONFIG_FILES.contains(&x.as_str()));
+    in_dir || file || c.iter().any(|x| is_short_name(x))
+}
+
+/// Every path a request names: [`request_paths`], any nested field named like a path or file, keys
+/// that look like paths and every key of a `changes` object, `file:` or path-like `uri` / `url`
+/// values, and the files of a patch (`*** Update File: x`, `+++ b/x`).
+fn every_request_path(req: &PermissionRequest) -> Vec<String> {
+    fn path_like(s: &str) -> bool {
+        s.to_ascii_lowercase().starts_with("file:") || (!s.contains("://") && (s.contains('/') || s.contains('\\')))
+    }
+    fn walk(v: &Value, key: Option<&str>, out: &mut Vec<String>) {
+        match v {
+            Value::String(s) => {
+                let k = key.unwrap_or_default().to_ascii_lowercase();
+                if ["path", "file", "dir", "destination", "target", "source"].iter().any(|w| k.contains(w)) {
+                    out.push(s.clone());
+                }
+                if (k.contains("uri") || k.contains("url")) && path_like(s) || s.to_ascii_lowercase().starts_with("file:") {
+                    out.push(s.clone());
+                }
+                for line in s.lines() {
+                    let l = line.trim();
+                    for pre in ["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: ", "+++ b/", "--- a/", "+++ ", "--- "] {
+                        if let Some(rest) = l.strip_prefix(pre) {
+                            out.push(rest.trim().to_string());
+                        }
+                    }
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, key, out)),
+            Value::Object(m) => {
+                let changes = key.is_some_and(|k| k.eq_ignore_ascii_case("changes"));
+                for (k, x) in m {
+                    if changes || k.contains('/') || k.contains('\\') {
+                        out.push(k.clone());
+                    }
+                    walk(x, Some(k), out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = request_paths(req);
+    if let Some(v) = &req.tool_call.raw_input {
+        walk(v, None, &mut out);
+    }
+    out
+}
+
+/// Does `req` change something at an agent config, hook or git path ([`is_agent_config_path`])?
+/// Reads, searches and thinking do not; every other kind (and a missing one) does when it names such a
+/// path.
+pub fn writes_agent_config(req: &PermissionRequest, cwd: Option<&str>) -> bool {
+    !matches!(req.tool_call.kind, Some(ToolKind::Read | ToolKind::Search | ToolKind::Think))
+        && every_request_path(req).iter().any(|p| is_agent_config_path(p, cwd))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

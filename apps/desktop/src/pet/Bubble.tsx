@@ -3,10 +3,22 @@
 // - "Pawl-wide" (the default): the orchestrator. Every pending approval, then the chat with the general bot (no pet
 //   id) and its proposals.
 // - One session: its approvals, its recent messages and a prompt box (sessions never get pets of their own).
-// There is deliberately no "open the panel" button: the panel opens from the pet's right-click menu or the tray.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+// There is deliberately no "open the panel" button: the panel opens from the pet's right-click menu or the tray (the one
+// exception is the Assistant line under the text box, which the user clicks to change where the assistant works).
+// Assistant mode (Settings > Assistant): the default pet's chat goes to a real agent session. Its reply streams into one
+// message (a typing indicator while `streaming`), a one-line status says what it is doing, and "New chat" ends it.
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   agentPictureDestination,
+  assistantActivity,
+  assistantAgentName,
+  assistantAsker,
+  assistantStartCard,
+  isAssistantRequest,
+  assistantOf,
+  assistantWorkingLine,
+  isStreaming,
+  tildePath,
   imageAttachProblem,
   isLookRequest,
   LOOK_DEFAULT_QUESTION,
@@ -28,6 +40,7 @@ import { describePermission } from "@pawl/pet-engine";
 import type { HubEvent, PermissionRequest, Session } from "@pawl/protocol";
 import type { ConnectionMeta } from "../lib/connection";
 import { agentName, clockTime, errorText, sessionTitle } from "../lib/format";
+import { homeFolder, isTauri, native } from "../lib/native";
 import { draftFor, DEFAULT_TARGET, exampleChips, isNotSureReply, type Draft } from "../lib/bubble";
 import { MiniMarkdown } from "../lib/miniMarkdown";
 import { PetReplyText } from "../lib/ReactionIcon";
@@ -169,18 +182,39 @@ export function ApprovalCard({ req, env }: { req: PermissionRequest; env: Bubble
     });
   };
 
-  const who = `${pet ? `${pet.name} (${agent})` : agent}${remote ? ` on ${machine}` : ""}`;
+  // The assistant's own session (Assistant mode): the pet itself is asking, e.g. to start a session with a prompt.
+  const asking = isAssistantRequest(req, state.sessions);
+  const start = assistantStartCard(req);
+  const who = asking
+    ? assistantAsker(state.settings?.bot?.petName)
+    : `${pet ? `${pet.name} (${agent})` : agent}${remote ? ` on ${machine}` : ""}`;
   return (
-    <div className={`pb-approval${remote ? " is-remote" : ""}`} role="group" aria-label={`${who} needs permission`}>
-      <div className="pb-approval-who">{who}</div>
+    <div className={`pb-approval${remote ? " is-remote" : ""}${asking ? " is-assistant" : ""}`} role="group" aria-label={`${who} ${asking ? "asks" : "needs permission"}`}>
+      <div className="pb-approval-who">{asking ? `${who} asks:` : who}</div>
       {confirming ? (
         <div className="pb-approval-text">
           Approve on <strong>{machine}</strong>:
         </div>
       ) : (
-        <div className="pb-approval-text">{action}?</div>
+        <div className="pb-approval-text">{start ? start.title : action}?</div>
       )}
-      {command !== action && <pre className="pb-command">{command}</pre>}
+      {start ? (
+        <>
+          {start.prompt ? (
+            <>
+              <div className="pb-prompt-label">With this prompt (all of it):</div>
+              {/* Never cut: the whole prompt the new session gets, readable and scrollable. */}
+              <div className="pb-prompt" tabIndex={0} role="region" aria-label="The prompt it would send">
+                {start.prompt}
+              </div>
+            </>
+          ) : (
+            <div className="pb-prompt-label">With no prompt: the session starts and waits.</div>
+          )}
+        </>
+      ) : (
+        command !== action && <pre className="pb-command">{command}</pre>
+      )}
       {env.voiceOn && req.voiceCode ? <VoiceCodeChip code={req.voiceCode} /> : null}
       <div className="pb-actions">
         {confirming ? (
@@ -201,10 +235,10 @@ export function ApprovalCard({ req, env }: { req: PermissionRequest; env: Bubble
               title={blocked ?? undefined}
               onClick={() => (remote ? setConfirming(true) : run("approve", () => client.approve(req.requestId)))}
             >
-              {busy === "approve" ? "…" : remote ? "Approve…" : "Approve"}
+              {busy === "approve" ? "…" : remote ? "Approve…" : start ? "Start" : "Approve"}
             </button>
             <button type="button" className="pill pill-bad" disabled={busy !== null} onClick={() => run("deny", () => client.deny(req.requestId))}>
-              {busy === "deny" ? "…" : "Deny"}
+              {busy === "deny" ? "…" : start ? "Don't start" : "Deny"}
             </button>
           </>
         )}
@@ -276,12 +310,26 @@ function Composer({ target, placeholder, disabledReason, autoFocus, onSend, extr
   );
 }
 
-function useStickToBottom(dep: unknown) {
+/**
+ * Keep the newest words in view, except while a newly arrived approval card waits: cards sit on top, so a new one
+ * scrolls the bubble to the top (a long start-card prompt included) until it is answered or a new message comes.
+ */
+function useStickToBottom(dep: unknown, cards = 0, messages = 0) {
   const ref = useRef<HTMLDivElement>(null);
+  // Starts at 0 cards: a bubble that opens for an approval shows it.
+  const prev = useRef({ cards: 0, messages, pinTop: false });
   useLayoutEffect(() => {
     const el = ref.current?.closest(".pb-body");
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [dep]);
+    const p = prev.current;
+    const newCard = cards > p.cards;
+    if (newCard) p.pinTop = true;
+    else if (cards === 0 || messages > p.messages) p.pinTop = false;
+    p.cards = cards;
+    p.messages = messages;
+    if (!el) return;
+    if (newCard) el.scrollTop = 0;
+    else if (!p.pinTop) el.scrollTop = el.scrollHeight;
+  }, [dep, cards, messages]);
   return ref;
 }
 
@@ -437,11 +485,11 @@ export function SessionSwitcher({ switcher, focus, onFocus }: { switcher: Defaul
             role="tab"
             aria-selected={active}
             className={`pb-switch-chip${active ? " is-active" : ""}${c.needsYou ? " needs-you" : ""}`}
-            title={`${c.browser ? "Browser task: " : ""}${c.label}${c.needsYou ? " (needs you)" : c.running ? " (working)" : ""}`}
+            title={`${c.assistant ? "Assistant: " : c.browser ? "Browser task: " : ""}${c.label}${c.needsYou ? " (needs you)" : c.running ? " (working)" : ""}`}
             onClick={() => onFocus(c.sessionId)}
           >
             {c.needsYou && <span className="pb-switch-dot" aria-label="needs you" />}
-            {c.browser && <span className="pb-switch-browser">Browser</span>}
+            {c.assistant ? <span className="pb-switch-browser pb-switch-assistant">Assistant</span> : c.browser && <span className="pb-switch-browser">Browser</span>}
             <span className="pb-switch-name">{c.name}</span>
             <span className="pb-switch-repo">{c.repo}</span>
             {c.pending.length > 0 && <span className="pb-switch-count">{c.pending.length}</span>}
@@ -504,6 +552,35 @@ export function DefaultBubble({
   const chat = useMemo(() => state.chat.filter((m) => !m.petId).slice(-CHAT_SHOWN), [state.chat]);
   const last = chat[chat.length - 1];
   const waitingReply = !!last && last.role === "user" && now - last.ts < 30_000;
+  // Assistant mode: the agent session doing the work, what it is doing now, and where.
+  const assistant = assistantOf(state.settings);
+  const assistantOn = !!assistant?.enabled;
+  const home = useHome();
+  const asstId = assistantOn ? assistant?.sessionId : undefined;
+  const asstEvents = (asstId && state.events[asstId]) || EMPTY_EVENTS;
+  const asstPending = asstId ? pending.filter((p) => p.sessionId === asstId).length : 0;
+  const activity =
+    asstId && (assistant?.state === "working" || asstPending > 0)
+      ? assistantActivity(asstEvents, { pending: asstPending, session: state.sessions[asstId] })
+      : null;
+  const [resetAt, setResetAt] = useState<number | null>(null);
+  const [resetting, setResetting] = useState(false);
+  // The assistant session's recent events (what the status line reads), when the bubble opens.
+  useEffect(() => {
+    if (!connected || !asstId) return;
+    sessionBackfill.sync(client, asstId).catch(() => {});
+  }, [client, asstId, connected]);
+  const newChat = () => {
+    if (resetting) return;
+    setResetting(true);
+    client
+      .assistantReset()
+      .then(
+        () => setResetAt(Date.now()),
+        (err: unknown) => env.say(errorText(err)),
+      )
+      .finally(() => setResetting(false));
+  };
   const proposalEnv: ProposalEnv = { client, state, now, connected };
   const send = (t: string): Promise<unknown> =>
     screenOn && isLookRequest(t)
@@ -537,7 +614,8 @@ export function DefaultBubble({
       agentName: recent ? agentName(state.agents, recent.agentId, recent.machineId) : null,
     });
   }, [last, state.sessions, state.agents, pending.length]);
-  const end = useStickToBottom(`${chat.length}:${pending.length}:${waitingReply}`);
+  // A streaming reply grows in place: keep its newest words in view.
+  const end = useStickToBottom(`${chat.length}:${last?.text.length ?? 0}:${pending.length}:${waitingReply}:${activity ?? ""}:${resetAt ?? ""}`, pending.length, chat.length);
   const focusPending = useMemo(() => (focus ? pending.filter((p) => p.sessionId === focus.sessionId) : []), [focus, pending]);
 
   return (
@@ -564,6 +642,7 @@ export function DefaultBubble({
             onLook={screenOn ? () => onLook!({ target: focus.sessionId, question: "" }) : undefined}
           />
         ) : (
+          <>
           <Composer
             target={DEFAULT_TARGET}
             placeholder={`Tell ${name} what to do, or ask what's going on…`}
@@ -585,6 +664,29 @@ export function DefaultBubble({
               </>
             }
           />
+          {assistantOn && assistant ? (
+            <div className="pb-assistant">
+              <button
+                type="button"
+                className="pb-assistant-line"
+                title="Change it in Settings > Assistant"
+                onClick={() => void native.openPanel({ view: "settings", section: "assistant" }).catch((err: unknown) => env.say(errorText(err)))}
+                disabled={!isTauri}
+              >
+                {assistantWorkingLine(assistantAgentName(assistant, state.agents), tildePath(assistant.workspace, home))}
+              </button>
+              <button
+                type="button"
+                className="pb-assistant-new"
+                disabled={!connected || resetting}
+                title={`Start over: ${name} forgets this conversation's work session (the messages stay here)`}
+                onClick={newChat}
+              >
+                {resetting ? "…" : "New chat"}
+              </button>
+            </div>
+          ) : null}
+          </>
         )
       }
     >
@@ -628,8 +730,10 @@ export function DefaultBubble({
         </div>
       ) : (
         <div className="pb-chat">
-          {chat.map((m) =>
-            m.role === "user" ? (
+          {chat.map((m, i) => (
+            <Fragment key={m.id}>
+            {resetAt !== null && m.ts >= resetAt && (i === 0 || chat[i - 1]!.ts < resetAt) ? <NewChatDivider /> : null}
+            {m.role === "user" ? (
               <div key={m.id} className="pb-msg is-user">
                 <div className="pb-msg-text">
                   {voiceIds.has(m.id) ? <span className="pb-msg-via">You (voice): </span> : null}
@@ -638,15 +742,28 @@ export function DefaultBubble({
                 </div>
               </div>
             ) : (
-              <div key={m.id} className="pb-msg is-pet">
+              <div key={m.id} className={`pb-msg is-pet${isStreaming(m) ? " is-streaming" : ""}`} aria-busy={isStreaming(m) || undefined}>
                 <div className="pb-msg-text">
-                  <PetReplyText text={m.text} markdown />
+                  {m.text.trim() ? <PetReplyText text={m.text} markdown /> : null}
+                  {isStreaming(m) ? (
+                    <span className="pb-stream-dots" role="status" aria-label={`${name} is still writing`}>
+                      <span />
+                      <span />
+                      <span />
+                    </span>
+                  ) : null}
                 </div>
-                <ChatProposalsView message={m} env={proposalEnv} />
-                <time className="pb-time">{clockTime(m.ts)}</time>
+                {isStreaming(m) ? null : (
+                  <>
+                    <ChatProposalsView message={m} env={proposalEnv} />
+                    <time className="pb-time">{clockTime(m.ts)}</time>
+                  </>
+                )}
               </div>
-            ),
-          )}
+            )}
+            </Fragment>
+          ))}
+          {resetAt !== null && !chat.some((m) => m.ts >= resetAt) ? <NewChatDivider /> : null}
           {chips.length > 0 && connected && (
             <div className="pb-chips" role="group" aria-label="Try one of these">
               {chips.map((c) => (
@@ -665,11 +782,39 @@ export function DefaultBubble({
           )}
         </div>
       )}
+      {activity ? (
+        <div className="pb-activity" role="status" aria-label={`${name} now: ${activity}`}>
+          <span className="pb-activity-dot" aria-hidden />
+          {activity}
+        </div>
+      ) : null}
       <div ref={end} />
         </>
       )}
     </BubbleShell>
   );
+}
+
+/** "New chat" was pressed: the assistant starts a fresh work session from here (the messages above stay). */
+function NewChatDivider() {
+  return (
+    <div className="pb-divider" role="separator" aria-label="New chat">
+      <span>New chat</span>
+    </div>
+  );
+}
+
+/** This user's home folder (for "~/Pawl"), once known; null outside the app. */
+function useHome(): string | null {
+  const [home, setHome] = useState<string | null>(null);
+  useEffect(() => {
+    let gone = false;
+    void homeFolder().then((h) => !gone && setHome(h));
+    return () => {
+      gone = true;
+    };
+  }, []);
+  return home;
 }
 
 function WaitingNote({ session, state }: { session: Session; state: HubState }) {
@@ -698,7 +843,7 @@ function SessionPane({ env, chip, pending }: { env: BubbleEnv; chip: SessionChip
         .slice(-FEED_SHOWN),
     [events],
   );
-  const end = useStickToBottom(`${lines.length}:${pending.length}`);
+  const end = useStickToBottom(`${lines.length}:${pending.length}`, pending.length, lines.length);
 
   // Load the session's recent events (they are not all mirrored up front).
   useEffect(() => {

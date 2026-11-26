@@ -256,7 +256,7 @@ impl Hub {
                 let cwd = self.prepare_brain_dir(model)?;
                 let id = global_id(&self.inner.machine_id, format!("{ID_PREFIX}{}", uuid::Uuid::new_v4()));
                 // Straight to the host: never merged into the hub's sessions. No tools, clean environment.
-                let opts = pawl_acp::StartOptions { meta: Some(no_tools_meta()), clean_env: true };
+                let opts = pawl_acp::StartOptions { meta: Some(no_tools_meta()), clean_env: true, ..Default::default() };
                 self.inner.host.start_session_with(&agent, cwd, id.clone(), None, opts).await.context("start the brain session")?;
                 tracing::info!(agent = %agent_id, %model, "brain: agent session started");
                 self.inner.brain_session.lock().unwrap_or_else(|p| p.into_inner()).live =

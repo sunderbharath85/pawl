@@ -15,12 +15,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use pawl_discovery::CustomAgent;
 use pawl_protocol::{
-    A2aAgentPatch, A2aAgentSetting, A2aCallerPatch, A2aCallerSetting, BotProvider, BotStyle, CustomAgentSetting, HubSettings, HubSettingsA2a, HubSettingsBot, HubSettingsBrowser, HubSettingsHub,
+    A2aAgentPatch, A2aAgentSetting, A2aCallerPatch, A2aCallerSetting, BotProvider, BotStyle, CustomAgentSetting, HubSettings, HubSettingsA2a, HubSettingsAssistant, HubSettingsBot, HubSettingsBrowser, HubSettingsHub,
     HubSettingsPatch, HubSettingsPeer, HubSettingsRelay, HubSettingsRepos, HubSettingsWatchdog,
 };
 use toml_edit::{DocumentMut, Item, TableLike, Value as TVal};
 
-use crate::config::{parse_peer_listen, A2aAgentConfig, A2aCaller, HubConfig, CONFIG_TEMPLATE};
+use crate::config::{parse_peer_listen, A2aAgentConfig, A2aCaller, AssistantSection, HubConfig, ASSISTANT_AUTO, CONFIG_TEMPLATE};
 use crate::repos;
 
 // ---------------------------------------------------------------- keys
@@ -67,6 +67,11 @@ pub const A2A_AGENTS: &str = "a2a.agents";
 pub const A2A_AGENT_TOKENS: &str = "a2a.agentTokens";
 pub const BROWSER_ENABLED: &str = "browser.enabled";
 pub const BROWSER_SITES: &str = "browser.allowSites";
+pub const ASSISTANT_ENABLED: &str = "assistant.enabled";
+pub const ASSISTANT_AGENT: &str = "assistant.agent";
+pub const ASSISTANT_WORKSPACE: &str = "assistant.workspace";
+pub const ASSISTANT_SESSIONS: &str = "assistant.sessions";
+pub const ASSISTANT_BROWSER: &str = "assistant.browser";
 
 /// Every settable key, in the order changes are reported.
 pub const ALL_KEYS: &[&str] = &[
@@ -110,7 +115,16 @@ pub const ALL_KEYS: &[&str] = &[
     A2A_AGENT_TOKENS,
     BROWSER_ENABLED,
     BROWSER_SITES,
+    ASSISTANT_ENABLED,
+    ASSISTANT_AGENT,
+    ASSISTANT_WORKSPACE,
+    ASSISTANT_SESSIONS,
+    ASSISTANT_BROWSER,
 ];
+
+/// Assistant mode: a change to one of these ends the live assistant session (the next message starts a new
+/// one with the new agent, folder and tools).
+pub const ASSISTANT_KEYS: &[&str] = &[ASSISTANT_ENABLED, ASSISTANT_AGENT, ASSISTANT_WORKSPACE, ASSISTANT_SESSIONS, ASSISTANT_BROWSER];
 
 /// Keys holding secrets: reported as changed, never with a value.
 pub const SECRET_KEYS: &[&str] = &[BOT_KEY, BOT_OPENAI_KEY, BOT_GEMINI_KEY, RELAY_KEY, A2A_TOKENS, A2A_AGENT_TOKENS];
@@ -145,6 +159,8 @@ pub const RESTART_KEYS: &[&str] = &[HUB_PORT];
 
 pub const MAX_CUSTOM_AGENTS: usize = 16;
 pub const MAX_A2A_CALLERS: usize = 32;
+/// The id of the assistant's own A2A caller (Assistant mode; hidden from the settings list).
+pub const ASSISTANT_CALLER_ID: &str = "assistant";
 pub const MAX_A2A_AGENTS: usize = 16;
 pub const MAX_ALLOW_SITES: usize = 100;
 pub const MAX_A2A_CALLER_NAME_CHARS: usize = 60;
@@ -303,17 +319,19 @@ pub fn to_settings(cfg: &HubConfig, overrides: &Overrides) -> HubSettings {
             running: false,
             url: None,
             error: None,
+            // The assistant's own caller is not listed: only the hub changes it.
             callers: cfg
                 .a2a
                 .callers
                 .iter()
+                .filter(|c| !c.is_assistant())
                 .map(|c| A2aCallerSetting {
                     id: c.id.clone(),
                     name: c.name.clone(),
                     token_set: nonblank(&c.token).is_some(),
                     // What the A2A server goes by: never for a connected coding agent.
                     allow_approvals: c.may_answer_approvals(),
-                    connect_target: c.connect_target,
+                    connect_target: c.connect_target.and_then(crate::config::ConnectTarget::hook),
                 })
                 .collect(),
             // `card` / `error` are the live fetch's (the hub fills them in).
@@ -332,6 +350,19 @@ pub fn to_settings(cfg: &HubConfig, overrides: &Overrides) -> HubSettings {
                 .collect(),
         }),
         browser: Box::new(HubSettingsBrowser { enabled: cfg.browser.enabled, allow_sites: cfg.browser.allow_sites.clone() }),
+        // `resolvedAgent` / `state` / `sessionId` / `error` are the running hub's (it fills them in).
+        assistant: Box::new(HubSettingsAssistant {
+            enabled: cfg.assistant.enabled,
+            agent: cfg.assistant.agent.clone(),
+            workspace: cfg.assistant.workspace_path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            sessions: cfg.assistant.sessions,
+            browser: cfg.assistant.browser,
+            resolved_agent: None,
+            state: if cfg.assistant.enabled { pawl_protocol::AssistantState::Idle } else { pawl_protocol::AssistantState::Off },
+            session_id: None,
+            error: None,
+            agent_note: None,
+        }),
     }
 }
 
@@ -387,6 +418,12 @@ pub fn changed_keys(a: &HubConfig, b: &HubConfig) -> Vec<&'static str> {
             }
             BROWSER_ENABLED => x.browser.enabled != y.browser.enabled,
             BROWSER_SITES => x.browser.allow_sites != y.browser.allow_sites,
+            ASSISTANT_ENABLED => a.assistant.enabled != b.assistant.enabled,
+            ASSISTANT_AGENT => a.assistant.agent != b.assistant.agent,
+            // As stored ("" = the default folder), so writing it back reads back the same.
+            ASSISTANT_WORKSPACE => a.assistant.workspace.trim() != b.assistant.workspace.trim(),
+            ASSISTANT_SESSIONS => a.assistant.sessions != b.assistant.sessions,
+            ASSISTANT_BROWSER => a.assistant.browser != b.assistant.browser,
             _ => false,
         }
     };
@@ -689,17 +726,8 @@ fn bad_name_char(ch: char) -> bool {
 }
 
 /// The callers list of a patch. Ids unique and valid, names 1-60 printable characters; a caller
-/// whose id stays keeps its token, a new id starts without one.
-/// `connect_target` in config.toml: the hook target names.
-fn connect_target_name(t: pawl_protocol::HookTargetName) -> &'static str {
-    match t {
-        pawl_protocol::HookTargetName::Claude => "claude",
-        pawl_protocol::HookTargetName::Codex => "codex",
-        pawl_protocol::HookTargetName::CopilotCli => "copilot-cli",
-        pawl_protocol::HookTargetName::CopilotVscode => "copilot-vscode",
-    }
-}
-
+/// whose id stays keeps its token, a new id starts without one. The assistant's own caller is not in
+/// the settings list, so it is never in a patch: it stays as it is, and its id cannot be taken.
 fn check_a2a_callers(list: &[A2aCallerPatch], cur: &[A2aCaller]) -> Result<Vec<A2aCaller>, InvalidSetting> {
     if list.len() > MAX_A2A_CALLERS {
         return Err(invalid(A2A_CALLERS, format!("at most {MAX_A2A_CALLERS} callers")));
@@ -714,11 +742,14 @@ fn check_a2a_callers(list: &[A2aCallerPatch], cur: &[A2aCaller]) -> Result<Vec<A
         if !seen.insert(id.to_string()) {
             return Err(invalid(format!("{A2A_CALLERS}[{i}].id"), "is used twice"));
         }
+        let old = cur.iter().find(|x| x.id == id);
+        if old.is_some_and(A2aCaller::is_assistant) || (old.is_none() && id == ASSISTANT_CALLER_ID) {
+            return Err(invalid(format!("{A2A_CALLERS}[{i}].id"), "\"assistant\" is used by Pawl's assistant; pick another id"));
+        }
         let name = c.name.trim();
         if name.is_empty() || name.chars().count() > MAX_A2A_CALLER_NAME_CHARS || name.chars().any(bad_name_char) {
             return Err(invalid(format!("{A2A_CALLERS}[{i}].name"), format!("must be 1-{MAX_A2A_CALLER_NAME_CHARS} printable characters")));
         }
-        let old = cur.iter().find(|x| x.id == id);
         let token = old.and_then(|x| x.token.clone());
         // A caller Connect made keeps that mark while its id stays, and never answers approvals: its
         // token sits in the coding agent's own config, so the agent could call A2A directly.
@@ -729,6 +760,7 @@ fn check_a2a_callers(list: &[A2aCallerPatch], cur: &[A2aCaller]) -> Result<Vec<A
         let connect_added_servers = old.is_some_and(|x| x.connect_added_servers);
         out.push(A2aCaller { id: id.to_string(), name: name.to_string(), token, allow_approvals: c.allow_approvals, connect_target, connect_added_servers });
     }
+    out.extend(cur.iter().filter(|c| c.is_assistant()).cloned());
     Ok(out)
 }
 
@@ -807,6 +839,159 @@ fn check_allow_sites(list: &[String]) -> Result<Vec<String>, InvalidSetting> {
         }
     }
     Ok(out)
+}
+
+/// `assistant.agent`: "auto" or an agent this hub knows (see [`check_default_agent`]); never an outside A2A
+/// agent (the assistant is an ACP session on this machine). Whether it is installed is the running hub's
+/// business: a chosen agent that is not installed puts the assistant in its error state.
+fn check_assistant_agent(v: &str, known: &[&str]) -> Result<String, InvalidSetting> {
+    let v = v.trim();
+    if v.is_empty() || v == ASSISTANT_AUTO {
+        return Ok(ASSISTANT_AUTO.to_string());
+    }
+    if v.starts_with(pawl_protocol::A2A_AGENT_PREFIX) {
+        return Err(invalid(ASSISTANT_AGENT, "must be an agent installed on this machine (ACP), not an outside A2A agent"));
+    }
+    check_known_agent(ASSISTANT_AGENT, v, known)
+}
+
+/// System folders the assistant's workspace may not be in (prefix match, case-insensitive on Windows).
+fn system_dirs() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = Vec::new();
+    if cfg!(windows) {
+        for var in ["SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"] {
+            if let Some(p) = std::env::var_os(var).filter(|p| !p.is_empty()) {
+                v.push(PathBuf::from(p));
+            }
+        }
+        for p in [r"C:\Windows", r"C:\Program Files", r"C:\Program Files (x86)", r"C:\ProgramData"] {
+            v.push(PathBuf::from(p));
+        }
+    } else {
+        for p in [
+            "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/proc", "/root", "/sbin", "/sys", "/usr", "/var", "/opt",
+            "/System", "/Library", "/Applications", "/private",
+        ] {
+            v.push(PathBuf::from(p));
+        }
+    }
+    v
+}
+
+/// The folder `p` really is: its deepest existing ancestor with links resolved (`canonicalize`), then the parts
+/// that do not exist yet. Err (a reason) when an existing part cannot be resolved (a dangling link, no access) or
+/// resolves to a network share or device path (a mapped network drive).
+pub fn resolve_folder(p: &Path) -> Result<PathBuf, String> {
+    let mut existing = p.to_path_buf();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(&existing) {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let (Some(name), Some(parent)) = (existing.file_name().map(|n| n.to_os_string()), existing.parent().map(Path::to_path_buf))
+                else {
+                    return Err("is on a drive that does not exist".into());
+                };
+                rest.push(name);
+                existing = parent;
+            }
+            Err(e) => return Err(format!("cannot be checked ({e})")),
+        }
+    }
+    let canon = std::fs::canonicalize(&existing).map_err(|e| format!("cannot be resolved ({e})"))?;
+    let mut out = repos::plain_path(&canon).ok_or_else(|| "is on a network share or device. Use a folder on this computer.".to_string())?;
+    for n in rest.iter().rev() {
+        out.push(n);
+    }
+    Ok(out)
+}
+
+/// `p` resolved when it can be, else as given (for the folders a workspace is compared with).
+fn resolved_or_given(p: &Path) -> PathBuf {
+    resolve_folder(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Why `real` (a resolved folder, see [`resolve_folder`]) cannot be the assistant's workspace: a drive root, the
+/// home folder itself, inside a system folder (a home or temp folder under one is fine), a file, or overlapping Pawl's
+/// data folder (either way round). Every comparison is between resolved paths.
+pub fn workspace_place_problem(real: &Path, home: Option<&Path>, data_dir: Option<&Path>) -> Option<String> {
+    if real.parent().is_none() {
+        return Some("is a whole drive or the filesystem root; pick a folder inside it".into());
+    }
+    let home = home.map(resolved_or_given);
+    if home.as_deref().is_some_and(|h| repos::path_key(real) == repos::path_key(h)) {
+        return Some("is your whole home folder; pick a folder inside it (the default is ~/Pawl)".into());
+    }
+    // A home or temp folder can live under a system path (/var/home/<user>, /root, /private/var/folders): inside
+    // it is fine.
+    let temp = resolved_or_given(&std::env::temp_dir());
+    let exempt = home.as_deref().is_some_and(|h| repos::is_within(real, h)) || repos::is_within(real, &temp);
+    if !exempt {
+        for sys in system_dirs() {
+            if repos::is_within(real, &sys) || repos::is_within(real, &resolved_or_given(&sys)) {
+                return Some(format!("is inside the system folder {}", sys.display()));
+            }
+        }
+    }
+    if real.exists() && !real.is_dir() {
+        return Some("is a file, not a folder".into());
+    }
+    if let Some(d) = data_dir {
+        let data = resolved_or_given(d);
+        if repos::is_within(real, &data) || repos::is_within(&data, real) {
+            return Some(format!("overlaps Pawl's own data folder {}", d.display()));
+        }
+    }
+    None
+}
+
+/// `assistant.workspace` as stored: "" = the default folder (`~/Pawl`); otherwise an absolute path or one
+/// starting with "~" (expanded with `home`), with no `.` or `..` parts, that resolves ([`resolve_folder`]) to a folder
+/// on this computer passing [`workspace_place_problem`]. It need not exist yet (created on first use). Where the hub's
+/// own data lives is checked by the running hub ([`check_workspace_apart`]). Stored expanded, as given.
+pub fn check_workspace(v: &str, home: Option<&Path>) -> Result<String, InvalidSetting> {
+    let f = ASSISTANT_WORKSPACE;
+    let v = v.trim();
+    if v.is_empty() {
+        return Ok(String::new());
+    }
+    if v.chars().count() > MAX_PATH_CHARS || v.chars().any(char::is_control) {
+        return Err(invalid(f, format!("must be at most {MAX_PATH_CHARS} characters without control characters")));
+    }
+    if !v.starts_with('~') && !Path::new(v).is_absolute() {
+        return Err(invalid(f, "must be an absolute path or start with ~ (your home folder)"));
+    }
+    if v.starts_with('~') && !(v == "~" || v.starts_with("~/") || v.starts_with("~\\")) {
+        return Err(invalid(f, "~ must be followed by / (another user's home folder is not allowed)"));
+    }
+    let p = crate::config::expand_home(v, home).ok_or_else(|| invalid(f, "there is no home folder to expand ~ with"))?;
+    if !p.is_absolute() {
+        return Err(invalid(f, "must be an absolute path or start with ~ (your home folder)"));
+    }
+    if p.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)) {
+        return Err(invalid(f, "must not contain . or .. parts"));
+    }
+    let p = repos::plain_path(&p).ok_or_else(|| invalid(f, "is a network share or device path. Use a folder on this computer."))?;
+    let real = resolve_folder(&p).map_err(|r| invalid(f, r))?;
+    if let Some(r) = workspace_place_problem(&real, home, None) {
+        return Err(invalid(f, r));
+    }
+    let out = p.to_string_lossy().into_owned();
+    if out.chars().count() > MAX_PATH_CHARS {
+        return Err(invalid(f, format!("is longer than {MAX_PATH_CHARS} characters once ~ is expanded")));
+    }
+    Ok(out)
+}
+
+/// The workspace `a` names, resolved, checked against everything [`workspace_place_problem`] checks, Pawl's data
+/// folder (hub.db, tokens, config.toml) included: the assistant could read or change them otherwise.
+pub fn check_workspace_apart(a: &AssistantSection, data_dir: &Path) -> Result<(), InvalidSetting> {
+    let Some(ws) = a.workspace_path() else { return Ok(()) };
+    let real = resolve_folder(&ws).map_err(|r| invalid(ASSISTANT_WORKSPACE, r))?;
+    match workspace_place_problem(&real, crate::config::home_dir().as_deref(), Some(data_dir)) {
+        Some(r) => Err(invalid(ASSISTANT_WORKSPACE, r)),
+        None => Ok(()),
+    }
 }
 
 fn check_listen(v: &str, hub_port: u16) -> Result<Option<String>, InvalidSetting> {
@@ -1009,6 +1194,29 @@ pub fn apply_patch(cur: &HubConfig, patch: &HubSettingsPatch, reserved: &[String
         Some(_) => next.brain.acp_agent = None,
         None => {}
     }
+    if let Some(a) = &patch.assistant {
+        if let Some(on) = a.enabled {
+            next.assistant.enabled = on;
+        }
+        if let Some(id) = &a.agent {
+            next.assistant.agent = check_assistant_agent(id, &known)?;
+        }
+        if let Some(w) = &a.workspace {
+            next.assistant.workspace = check_workspace(w, crate::config::home_dir().as_deref())?;
+        }
+        if let Some(on) = a.sessions {
+            next.assistant.sessions = on;
+        }
+        if let Some(on) = a.browser {
+            next.assistant.browser = on;
+        }
+        // Turning the assistant (with Pawl's tools) on turns the localhost A2A server on now, in this change, so
+        // what the confirm says is what happens (127.0.0.1 only; its port is checked like any server start).
+        let turned_on = a.enabled == Some(true) || a.sessions == Some(true);
+        if turned_on && next.assistant.enabled && next.assistant.sessions && !next.a2a.server {
+            next.a2a.server = true;
+        }
+    }
     match patch.bot.as_ref().and_then(|b| b.default_agent.as_ref()) {
         Some(Some(id)) if !id.trim().is_empty() => next.brain.default_agent = Some(check_default_agent(id, &known)?),
         Some(_) => next.brain.default_agent = None,
@@ -1152,7 +1360,7 @@ fn write_a2a_callers(doc: &mut DocumentMut, callers: &[A2aCaller]) -> Result<()>
         set_value(&mut t, "name", c.name.as_str());
         set_opt(&mut t, "token", nonblank(&c.token).as_deref());
         set_value(&mut t, "allow_approvals", c.allow_approvals);
-        set_opt(&mut t, "connect_target", c.connect_target.map(connect_target_name));
+        set_opt(&mut t, "connect_target", c.connect_target.map(crate::config::ConnectTarget::name));
         if c.connect_added_servers {
             set_value(&mut t, "connect_added_servers", true);
         } else {
@@ -1262,6 +1470,14 @@ pub fn edit_config(old: Option<&str>, next: &HubConfig, changed: &[&str]) -> Res
             A2A_AGENTS | A2A_AGENT_TOKENS => write_a2a_agents(&mut doc, &next.a2a.agents)?,
             BROWSER_ENABLED => set_value(section(&mut doc, "browser")?, "enabled", next.browser.enabled),
             BROWSER_SITES => set_value(section(&mut doc, "browser")?, "allow_sites", string_array(&next.browser.allow_sites)),
+            ASSISTANT_ENABLED => set_value(section(&mut doc, "assistant")?, "enabled", next.assistant.enabled),
+            ASSISTANT_AGENT => set_value(section(&mut doc, "assistant")?, "agent", next.assistant.agent.as_str()),
+            ASSISTANT_WORKSPACE => {
+                let w = next.assistant.workspace.trim();
+                set_opt(section(&mut doc, "assistant")?, "workspace", Some(w).filter(|w| !w.is_empty()))
+            }
+            ASSISTANT_SESSIONS => set_value(section(&mut doc, "assistant")?, "sessions", next.assistant.sessions),
+            ASSISTANT_BROWSER => set_value(section(&mut doc, "assistant")?, "browser", next.assistant.browser),
             other => bail!("unknown setting {other:?}"),
         }
     }
@@ -1365,6 +1581,12 @@ pub fn masked_lines(s: &HubSettings, restart_required: &[String]) -> Vec<String>
     v.push("[browser]".to_string());
     v.push(format!("enabled                   {}", s.browser.enabled));
     v.push(format!("allow sites               {}", list(&s.browser.allow_sites)));
+    v.push("[assistant]".to_string());
+    v.push(format!("enabled                   {}", s.assistant.enabled));
+    v.push(format!("agent                     {}", s.assistant.agent));
+    v.push(format!("workspace                 {}", s.assistant.workspace));
+    v.push(format!("sessions tools            {}", s.assistant.sessions));
+    v.push(format!("browser tools             {}", s.assistant.browser));
     v.push("[custom agents]".to_string());
     if s.custom_agents.is_empty() {
         v.push("(none)".into());

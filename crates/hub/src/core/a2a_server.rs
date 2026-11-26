@@ -69,6 +69,8 @@ pub(crate) struct A2aCallerBook {
     load: HashMap<String, (usize, usize)>,
     /// Refusal log throttle: (window start, rows logged, rows not logged).
     refusals: Option<(Instant, u32, u32)>,
+    /// Start cards waiting for the user (request id -> the caller and its waiting start).
+    start_cards: HashMap<String, (String, tokio::sync::oneshot::Sender<Option<String>>)>,
 }
 
 fn cut(s: &str) -> String {
@@ -129,6 +131,34 @@ impl Hub {
     /// old one, for [`Self::put_a2a_generation`] if what needed the change fails.
     pub(super) fn take_a2a_generation(&self, id: &str) -> Option<String> {
         self.a2a_book().gens.remove(id)
+    }
+
+    /// A start card of `caller_id` waits for the user's answer on `tx` (core/a2a_assistant.rs). False
+    /// (nothing added) when that caller already has [`super::a2a_assistant::MAX_START_CARDS`] waiting.
+    pub(super) fn add_start_card(&self, caller_id: &str, request_id: &str, tx: tokio::sync::oneshot::Sender<Option<String>>) -> bool {
+        let mut book = self.a2a_book();
+        if book.start_cards.values().filter(|(c, _)| c == caller_id).count() >= super::a2a_assistant::MAX_START_CARDS {
+            return false;
+        }
+        book.start_cards.insert(request_id.to_string(), (caller_id.to_string(), tx));
+        true
+    }
+
+    /// Is `request_id` a start card still waiting?
+    pub(crate) fn is_start_card(&self, request_id: &str) -> bool {
+        self.a2a_book().start_cards.contains_key(request_id)
+    }
+
+    /// Hand the answer (`None`: cancelled) to a waiting start card. False when it is not one.
+    pub(super) fn answer_start_card(&self, request_id: &str, option_id: Option<String>) -> bool {
+        let Some((_, tx)) = self.a2a_book().start_cards.remove(request_id) else { return false };
+        let _ = tx.send(option_id);
+        true
+    }
+
+    /// Forget a start card (its start stopped waiting).
+    pub(super) fn drop_start_card(&self, request_id: &str) {
+        self.a2a_book().start_cards.remove(request_id);
     }
 
     /// Tests: the task-owner key caller `id` has now.
@@ -237,6 +267,9 @@ impl Hub {
         let Some(c) = next.a2a.callers.iter_mut().find(|c| c.id == caller_id) else {
             return Err(InvalidSetting { field: "callerId".into(), reason: "is not a configured A2A caller".into() }.into());
         };
+        if c.is_assistant() {
+            return Err(InvalidSetting { field: "callerId".into(), reason: "is Pawl's assistant; it gets a new token when the assistant is reset".into() }.into());
+        }
         let token = new_token()?;
         c.token = Some(token.clone());
         self.commit_settings(&cur, next, &[cfgset::A2A_TOKENS], actor, SettingsAuditKind::Settings).await?;
@@ -381,8 +414,11 @@ fn to_a2a(e: &anyhow::Error) -> A2AError {
     }
 }
 
-fn reject_reason(r: IntentRejectReason) -> A2AError {
+fn reject_reason(r: IntentRejectReason, assistant: bool) -> A2AError {
     match r {
+        IntentRejectReason::Forbidden if assistant => A2AError::unsupported_operation(
+            "forbidden: the assistant starts agents only in its workspace (and its subfolders) or in folders this machine already uses (its repos or [peer] start roots)",
+        ),
         IntentRejectReason::Forbidden => A2AError::unsupported_operation(
             "forbidden: A2A callers start agents only in folders this machine already uses (its repos or [peer] start roots)",
         ),
@@ -447,10 +483,10 @@ impl HubHandler {
     }
 
     /// The outside-caller policy for a start, then the facade.
-    async fn send(&self, w: &Who, mut req: SendMessageRequest) -> Result<SendMessageResponse, A2AError> {
+    async fn send(&self, w: &Who, req: SendMessageRequest) -> Result<SendMessageResponse, A2AError> {
         let m = &req.message;
         if m.task_id.is_none() && m.context_id.is_none() {
-            let Some(mut params) = DelegateParams::of(m) else {
+            let Some(params) = DelegateParams::of(m) else {
                 // A plain message (e.g. another Pawl's first prompt): say how to delegate.
                 let mut answer = Message::new(
                     Role::Agent,
@@ -466,19 +502,53 @@ impl HubHandler {
             if params.machine_id.as_deref().is_some_and(|x| x != w.hub.machine_id()) {
                 return Err(A2AError::unsupported_operation("this server starts sessions on this machine only"));
             }
-            // A caller's own word is not a user's confirmation.
-            params.confirmed = None;
-            let open = w.hub.tasks().contexts_owned_by(&w.caller).iter().filter(|c| w.hub.session(c).is_some_and(|s| s.ended_at.is_none())).count();
-            if open >= SESSIONS_PER_CALLER {
-                return Err(A2AError::unsupported_operation(format!("this caller has {open} open sessions; let one finish first")));
+            // A caller's own word is not a user's confirmation: `confirmed` is not passed on.
+            let too_many = || {
+                let open = w.hub.tasks().contexts_owned_by(&w.caller).iter().filter(|c| w.hub.session(c).is_some_and(|s| s.ended_at.is_none())).count();
+                (open >= SESSIONS_PER_CALLER).then(|| A2AError::unsupported_operation(format!("this caller has {open} open sessions; let one finish first")))
+            };
+            if let Some(e) = too_many() {
+                return Err(e);
             }
             let agent_id = params.agent_id.clone().unwrap_or_default();
             if !w.hub.agents().iter().any(|a| a.id == agent_id && a.installed) {
                 return Err(A2AError::invalid_params(format!("agent {agent_id:?} is not installed on this machine")));
             }
-            let dir = w.hub.remote_start_dir(params.cwd.as_deref().unwrap_or_default()).await.map_err(reject_reason)?;
-            params.cwd = Some(dir.to_string_lossy().into_owned());
-            params.attach(&mut req.message);
+            let assistant = w.hub.is_assistant_caller(&w.id);
+            let cwd = params.cwd.clone().unwrap_or_default();
+            let dir = w.hub.a2a_start_dir(&w.id, &cwd).await.map_err(|r| reject_reason(r, assistant))?;
+            let text = super::a2a::message_text(&req.message);
+            // The prompt's own checks first: a card never shows a prompt that could not be sent.
+            if !text.trim().is_empty() {
+                super::intents::validate_prompt(&text).map_err(|e| A2AError::invalid_params(e.to_string()))?;
+            }
+            let plan_for = |dir: &std::path::Path| if assistant { w.hub.assistant_launch_plan(&agent_id, dir) } else { w.hub.workspace_launch_plan(&agent_id, dir) };
+            let plan = plan_for(&dir).map_err(A2AError::unsupported_operation)?;
+            if assistant {
+                // The user approves every start the assistant asks for, on a card, before it runs.
+                w.hub.start_card(&w.id, &agent_id, &dir, &text, w.revoked.clone()).await.map_err(A2AError::unsupported_operation)?;
+                if revoked_now(&w.revoked) {
+                    return Err(A2AError::invalid_request("this caller is no longer configured"));
+                }
+                // The folder may have changed while the user decided (a link swapped, config planted):
+                // the same folder and the same plan, or no start.
+                let again = w.hub.a2a_start_dir(&w.id, &cwd).await.ok();
+                let same_plan = again.as_deref().map(plan_for).and_then(|p| p.ok()).is_some_and(|p| p == plan);
+                if again.as_deref() != Some(dir.as_path()) || !same_plan {
+                    return Err(A2AError::unsupported_operation("The folder changed while you were deciding; ask again."));
+                }
+                // Sessions may have started while the card waited (another card allowed meanwhile).
+                if let Some(e) = too_many() {
+                    return Err(e);
+                }
+            }
+            let prompt = Some(text).filter(|t| !t.trim().is_empty());
+            let d = w
+                .hub
+                .a2a_start_in(&agent_id, super::a2a::StartDir::Checked(dir), prompt, &w.caller, plan)
+                .await
+                .map_err(|e| to_a2a(&e))?;
+            return Ok(d.response);
         }
         let d = w.hub.a2a_send(req, &w.caller, &w.actor, w.answers).await.map_err(|e| to_a2a(&e))?;
         Ok(d.response)

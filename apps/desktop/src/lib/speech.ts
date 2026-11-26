@@ -28,8 +28,11 @@ export function spokenText(reply: string): string {
 
 // ---------------------------------------------------------------- the pet is talking (the mic must not listen to it)
 
-/** After the pet stops talking, its voice may still echo in the room: wake words are ignored this much longer. */
-export const SPEECH_QUIET_MS = 500;
+/**
+ * After the pet stops talking, its voice may still echo in the room: the engine stays paused and wake words are
+ * ignored this much longer (about a second).
+ */
+export const SPEECH_QUIET_MS = 1000;
 
 let speaking = false;
 let quietUntil = 0;

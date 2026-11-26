@@ -254,6 +254,68 @@ pub struct HubSettingsBrowserPatch {
     pub allow_sites: Option<Vec<String>>,
 }
 
+/// Assistant mode (v0.2): what the default pet's agent session is doing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantState {
+    /// Assistant mode is turned off.
+    #[default]
+    Off,
+    /// Ready: no turn running (a session may or may not be live).
+    Idle,
+    /// A turn is running.
+    Working,
+    /// It could not start (see `HubSettingsAssistant::error`).
+    Error,
+}
+
+/// Assistant mode settings (config.toml `[assistant]`) plus the hub's read-only view of it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsAssistant {
+    pub enabled: bool,
+    /// "auto" or an agent id.
+    pub agent: String,
+    /// Absolute path as stored ("~" expanded).
+    pub workspace: String,
+    pub sessions: bool,
+    pub browser: bool,
+    /// Read-only: the agent "auto" picked, or the chosen one if installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_agent: Option<AgentId>,
+    /// Read-only.
+    #[serde(default)]
+    pub state: AssistantState,
+    /// Read-only: the live assistant session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    /// Read-only: why it could not start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Read-only: a caution about the resolved agent (plain text, shown under the agent choice), e.g. that Pawl
+    /// cannot lock its own approval settings. None for Claude Code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettingsAssistantPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<bool>,
+}
+
+/// `Session::purpose` of the default pet's own agent session (assistant mode).
+pub const PURPOSE_ASSISTANT: &str = "assistant";
+
 /// Heartbeat a hub sends each paired hub every PRESENCE_INTERVAL_MS and on change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -570,7 +632,8 @@ pub struct Session {
     pub last_event_at: UnixMs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<UnixMs>,
-    /// Some("browser") = a browser task the default pet started (v0.2 item 5).
+    /// Some("browser") = a browser task the default pet started (v0.2 item 5); Some("assistant") = the default
+    /// pet's own agent session (assistant mode, [`PURPOSE_ASSISTANT`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
 }
@@ -936,6 +999,13 @@ pub struct ChatMessage {
     /// A picture came with this message (never stored or mirrored itself).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub image: bool,
+    /// Assistant mode: the assistant is still writing this reply (`chat_update` replaces its text).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub streaming: bool,
+    /// Assistant mode, a reply to a spoken message: the short form to read aloud instead of `text`
+    /// (on the final `chat_update` only; never stored).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1302,6 +1372,9 @@ pub struct HubSettings {
     /// Browser use (v0.2 item 5). Boxed: keeps `ServerMsg` small.
     #[serde(default)]
     pub browser: Box<HubSettingsBrowser>,
+    /// Assistant mode (v0.2). Boxed: keeps `ServerMsg` small.
+    #[serde(default)]
+    pub assistant: Box<HubSettingsAssistant>,
 }
 
 /// `Some(None)` = explicit null (clear), `None` = key absent (unchanged).
@@ -1474,6 +1547,8 @@ pub struct HubSettingsPatch {
     pub a2a: Option<HubSettingsA2aPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser: Option<HubSettingsBrowserPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<HubSettingsAssistantPatch>,
 }
 
 /// Agent hooks the hub can install (same targets as `pawl install-hooks`). copilot-vscode is per repo.
@@ -1701,6 +1776,9 @@ pub enum ClientMsg {
     /// caller and its token, writes the agent's MCP config); remove = delete the entry and the caller.
     /// Ack `{plan, applied, status, startsServer}`.
     A2aConnect { id: String, target: HookTargetName, action: HookAction },
+    /// Assistant mode (local clients and a paired phone): end the live assistant session; the next chat message
+    /// starts a fresh one. Ack `{}`.
+    AssistantReset { id: String },
 }
 
 impl ClientMsg {
@@ -1736,6 +1814,7 @@ impl ClientMsg {
             | ClientMsg::A2aConnectStatus { id }
             | ClientMsg::A2aConnect { id, .. } => id,
             ClientMsg::StartBrowserTask { id, .. } => id,
+            ClientMsg::AssistantReset { id } => id,
         }
     }
 }
@@ -1788,6 +1867,8 @@ pub enum ServerMsg {
     },
     Pet { pet: Pet },
     Chat { message: ChatMessage },
+    /// Assistant mode: the pet's reply `message.id` (sent earlier as `chat`) has new text (streaming).
+    ChatUpdate { message: ChatMessage },
     Notification { notification: HubNotification },
     /// Sent when a machine is added, renamed, or goes online/offline (not on every heartbeat).
     Machine { machine: Machine },
@@ -1815,6 +1896,51 @@ impl ServerMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assistant_mode_wire_shapes() {
+        let m: ClientMsg = serde_json::from_str(r#"{"type":"assistant_reset","id":"7"}"#).unwrap();
+        assert_eq!(m, ClientMsg::AssistantReset { id: "7".into() });
+        assert_eq!(m.id(), "7");
+        let msg = ChatMessage {
+            id: "abcdef012345:c1".into(),
+            machine_id: "abcdef012345".into(),
+            pet_id: None,
+            role: ChatRole::Pet,
+            text: "Working on it".into(),
+            ts: 1,
+            session_id: Some("abcdef012345:s1".into()),
+            proposals: Vec::new(),
+            image: false,
+            streaming: true,
+            speech: None,
+        };
+        let v = serde_json::to_value(ServerMsg::ChatUpdate { message: msg.clone() }).unwrap();
+        assert_eq!(v["type"], "chat_update");
+        assert_eq!(v["message"]["streaming"], true);
+        let done = serde_json::to_value(ChatMessage { streaming: false, ..msg }).unwrap();
+        assert!(done.get("streaming").is_none(), "a finished message carries no streaming flag");
+        let a = HubSettingsAssistant {
+            enabled: true,
+            agent: "auto".into(),
+            workspace: "/home/u/Pawl".into(),
+            sessions: true,
+            browser: true,
+            resolved_agent: Some("claude-code".into()),
+            state: AssistantState::Idle,
+            session_id: None,
+            error: None,
+            agent_note: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&a).unwrap(),
+            serde_json::json!({"enabled":true,"agent":"auto","workspace":"/home/u/Pawl","sessions":true,"browser":true,
+                               "resolvedAgent":"claude-code","state":"idle"})
+        );
+        let p: HubSettingsPatch = serde_json::from_str(r#"{"assistant":{"enabled":false,"workspace":"~/Pawl"}}"#).unwrap();
+        let ap = p.assistant.unwrap();
+        assert_eq!((ap.enabled, ap.workspace.as_deref(), ap.agent), (Some(false), Some("~/Pawl"), None));
+    }
 
     #[test]
     fn global_ids() {

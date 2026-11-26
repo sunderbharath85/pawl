@@ -139,6 +139,7 @@ async fn fake_agent(
     outside: PathBuf,
     closed: Arc<std::sync::Mutex<Vec<String>>>,
     metas: Arc<std::sync::Mutex<Vec<Option<serde_json::Value>>>>,
+    servers: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
 ) -> Result<(), sdk::Error> {
     let counter = Arc::new(AtomicU32::new(0));
     let root_list = root.clone();
@@ -160,7 +161,8 @@ async fn fake_agent(
         )
         .on_receive_request(
             async move |req: acp::NewSessionRequest, responder: Responder<acp::NewSessionResponse>, _cx: ConnectionTo<Client>| {
-                metas.lock().unwrap().push(req.meta.map(serde_json::Value::Object));
+                metas.lock().unwrap().push(req.meta.clone().map(serde_json::Value::Object));
+                servers.lock().unwrap().push(serde_json::to_value(&req.mcp_servers).unwrap());
                 let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
                 responder.respond(j(json!({"sessionId": format!("sess-{n}")})))
             },
@@ -210,6 +212,8 @@ struct Setup {
     closed: Arc<std::sync::Mutex<Vec<String>>>,
     /// The `_meta` of every `session/new` the fake agent received.
     metas: Arc<std::sync::Mutex<Vec<Option<serde_json::Value>>>>,
+    /// The `mcpServers` of every `session/new` the fake agent received (as JSON).
+    servers: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
 }
 
 async fn setup(tmp: &TempDir) -> Setup {
@@ -218,9 +222,10 @@ async fn setup(tmp: &TempDir) -> Setup {
     let (client_side, agent_side) = Channel::duplex();
     let closed = Arc::new(std::sync::Mutex::new(Vec::new()));
     let metas = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let agent = tokio::spawn(fake_agent(agent_side, tmp.root(), tmp.0.join("outside.txt"), closed.clone(), metas.clone()));
+    let servers = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let agent = tokio::spawn(fake_agent(agent_side, tmp.root(), tmp.0.join("outside.txt"), closed.clone(), metas.clone(), servers.clone()));
     host.inner.attach_for_test(&test_agent(), &tmp.root(), client_side).await.expect("attach");
-    Setup { host, rx, agent, closed, metas }
+    Setup { host, rx, agent, closed, metas, servers }
 }
 
 async fn collect_until(rx: &mut UnboundedReceiver<HostEvent>, mut done: impl FnMut(&HostEvent) -> bool) -> Vec<HostEvent> {
@@ -629,11 +634,38 @@ async fn start_options_meta_reaches_session_new() {
     let s = setup(&tmp).await;
     let meta = json!({ "claudeCode": { "options": { "tools": [], "strictMcpConfig": true, "mcpServers": {} } } });
     s.host
-        .start_session_with(&test_agent(), tmp.root(), "meta-1".into(), None, crate::StartOptions { meta: Some(meta.clone()), clean_env: false })
+        .start_session_with(&test_agent(), tmp.root(), "meta-1".into(), None, crate::StartOptions { meta: Some(meta.clone()), ..Default::default() })
         .await
         .expect("start with meta");
     s.host.start_session(&test_agent(), tmp.root(), "meta-2".into(), None).await.expect("plain start");
     assert_eq!(*s.metas.lock().unwrap(), vec![Some(meta), None]);
+}
+
+/// `StartOptions::mcp_servers` reaches `session/new` as standard stdio `mcpServers` (name, command,
+/// args, env as `{name, value}`); a plain start sends an empty list. `Debug` never shows env values.
+#[tokio::test]
+async fn start_options_mcp_servers_reach_session_new() {
+    let tmp = TempDir::new();
+    let s = setup(&tmp).await;
+    let exe = tmp.root().join("pawl");
+    let server = crate::McpServerStdio {
+        name: "pawl".into(),
+        command: exe.clone(),
+        args: vec!["mcp".into()],
+        env: vec![("PAWL_A2A_URL".into(), "http://127.0.0.1:7801".into()), ("PAWL_A2A_TOKEN".into(), "secret-token-value".into())],
+    };
+    let opts = crate::StartOptions { mcp_servers: vec![server.clone()], ..Default::default() };
+    s.host.start_session_with(&test_agent(), tmp.root(), "mcp-1".into(), None, opts).await.expect("start with mcp servers");
+    s.host.start_session(&test_agent(), tmp.root(), "mcp-2".into(), None).await.expect("plain start");
+    let want = json!([{
+        "name": "pawl",
+        "command": exe.to_string_lossy(),
+        "args": ["mcp"],
+        "env": [{ "name": "PAWL_A2A_URL", "value": "http://127.0.0.1:7801" }, { "name": "PAWL_A2A_TOKEN", "value": "secret-token-value" }],
+    }]);
+    assert_eq!(*s.servers.lock().unwrap(), vec![want, json!([])]);
+    let shown = format!("{server:?}");
+    assert!(!shown.contains("secret-token-value") && shown.contains("PAWL_A2A_TOKEN=<redacted>"), "{shown}");
 }
 
 #[tokio::test]

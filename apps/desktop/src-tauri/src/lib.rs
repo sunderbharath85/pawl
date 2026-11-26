@@ -3,6 +3,7 @@
 //! spawning `pawl serve`, click-through hit-testing, moving the pet), plus the
 //! on-device voice engine (wake word + speech to text, `voice/`).
 
+mod folder;
 mod hub;
 mod panics;
 mod pet_window;
@@ -95,6 +96,7 @@ pub fn run() {
             locate_hub,
             lan_address,
             quit_app,
+            folder::open_folder,
             pet_window::set_hit_rects,
             pet_window::set_capture_all,
             pet_window::set_pet_frame,

@@ -1331,7 +1331,7 @@ async fn run_chat(paths: &Paths, port_flag: Option<u16>, text: String, pick: Opt
     let mut conn = Conn::Remote(Box::new(hub));
     let v = conn.request(ClientMsg::Chat { id: rid(), pet_id: None, text, via: None, images: Vec::new() }).await?;
     let sent: ChatMessage = serde_json::from_value(v.get("message").cloned().unwrap_or_default()).context("parse message")?;
-    let reply = tokio::time::timeout(Duration::from_secs(60), async {
+    let first = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             match conn.next().await? {
                 Some(ServerMsg::Chat { message }) if message.role == ChatRole::Pet && message.ts >= sent.ts => return Ok(message),
@@ -1342,6 +1342,22 @@ async fn run_chat(paths: &Paths, port_flag: Option<u16>, text: String, pick: Opt
     })
     .await
     .map_err(|_| anyhow!("no reply from the pet within 60 s"))??;
+    // Assistant mode: the reply streams in; its last `chat_update` has the whole text.
+    let reply = if first.streaming {
+        tokio::time::timeout(Duration::from_secs(30 * 60), async {
+            loop {
+                match conn.next().await? {
+                    Some(ServerMsg::ChatUpdate { message }) if message.id == first.id && !message.streaming => return Ok(message),
+                    Some(_) => {}
+                    None => bail!("hub closed the connection"),
+                }
+            }
+        })
+        .await
+        .map_err(|_| anyhow!("the assistant did not finish within 30 minutes"))??
+    } else {
+        first
+    };
     print_reply(&reply);
     let Some(n) = pick else { return Ok(()) };
     let p = reply
@@ -2015,7 +2031,7 @@ mod tests {
         let me = machine::load_or_create(&paths).unwrap();
         let hub = Hub::start(HubOptions {
             paths: paths.clone(),
-            config: HubConfig { offline: true, ..Default::default() },
+            config: HubConfig { offline: true, assistant: crate::config::AssistantSection::off(), ..Default::default() },
             token: "t".repeat(64),
             machine: me.clone(),
             background: false,

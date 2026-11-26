@@ -7,6 +7,7 @@ import {
   machineSummary,
   machinesLine,
   type MachineGroup,
+  isAssistantSession,
   isBrowserSession,
 } from "@pawl/hub-client";
 import type { Session } from "@pawl/protocol";
@@ -146,7 +147,9 @@ Rename it in Settings`}
     const active = route.view === "session" && route.sessionId === s.id;
     const meta = STATUS_META[s.status];
     const waiting = Object.values(state.pending).filter((p) => p.sessionId === s.id).length;
-    const title = sessionTitle(s, state.agents);
+    // The assistant's session (Assistant mode) is the default pet itself at work: shown with its name.
+    const assistant = isAssistantSession(s);
+    const title = assistant ? pet.name : sessionTitle(s, state.agents);
     return (
       <button
         key={s.id}
@@ -157,10 +160,16 @@ Rename it in Settings`}
         <span className={`dot tone-${meta.tone}`} title={meta.label} />
         <span className="session-row-main">
           <span className="session-row-title">
-            {isBrowserSession(s) && (
-              <span className="chip chip-browser" title="A browser task: the pet drives your Chrome">
-                <I.Globe size={11} /> Browser
+            {assistant ? (
+              <span className="chip chip-browser chip-assistant" title={`${pet.name}'s own work session (Settings > Assistant)`}>
+                <I.Paw size={11} /> Assistant
               </span>
+            ) : (
+              isBrowserSession(s) && (
+                <span className="chip chip-browser" title="A browser task: the pet drives your Chrome">
+                  <I.Globe size={11} /> Browser
+                </span>
+              )
             )}
             {title}
           </span>

@@ -4,12 +4,13 @@
 import { useEffect, useState } from "react";
 import type { HubEvent } from "@pawl/protocol";
 import { SOURCE_LABEL, STATUS_META, agentName, errorText, isActive, sessionTitle, timeAgo } from "../../lib/format";
-import { folderName, intentErrorText, isBrowserSession, isA2aAgentId, isLocal, machineDisplayName, offlineReason, sessionBackfill } from "@pawl/hub-client";
+import { folderName, intentErrorText, isAssistantSession, isBrowserSession, isA2aAgentId, isLocal, machineDisplayName, offlineReason, sessionBackfill } from "@pawl/hub-client";
 import { a2aTaskChip } from "../../lib/a2aUi";
 import { useA2aTasks } from "../useA2aTasks";
 import { usePanel } from "../context";
 import * as I from "../icons";
 import { ACTIVITY_LABEL, PetAvatar } from "../PetAvatar";
+import { useDefaultPet } from "../useDefaultPet";
 import { SessionTranscript } from "../transcript/Transcript";
 
 const EMPTY: HubEvent[] = [];
@@ -22,6 +23,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
     views.find((v) => v.sessionId === sessionId) ??
     views.find((v) => v.machineId === session?.machineId && v.agentId === session?.agentId);
   const pending = Object.values(state.pending).filter((p) => p.sessionId === sessionId);
+  const defaultPet = useDefaultPet();
   const [loading, setLoading] = useState(false);
   // Its A2A tasks: an outside agent's session, or one an outside caller or a paired machine started.
   const tasks = useA2aTasks(sessionId, session?.status);
@@ -69,11 +71,16 @@ export function SessionView({ sessionId }: { sessionId: string }) {
       <header className="session-head">
         <PetAvatar species={pet?.species ?? "dog"} activity={pet?.activity ?? "idle"} size={64} />
         <div className="session-head-main">
-          <h1 title={sessionTitle(session, state.agents)}>{sessionTitle(session, state.agents)}</h1>
+          <h1 title={sessionTitle(session, state.agents)}>{isAssistantSession(session) ? defaultPet.name : sessionTitle(session, state.agents)}</h1>
           <div className="session-head-meta">
             <span className={`status-pill tone-${status.tone}`}>
               <span className={`dot tone-${status.tone}`} /> {status.label}
             </span>
+            {isAssistantSession(session) && (
+              <span className="chip chip-browser chip-assistant" title={`${defaultPet.name}'s own work session: every step asks you first (Settings > Assistant)`}>
+                <I.Paw size={13} /> Assistant
+              </span>
+            )}
             {isBrowserSession(session) && (
               <span className="chip chip-browser" title="A browser task: the pet drives your Chrome. Chrome shows a banner while it does.">
                 <I.Globe size={13} /> Browser

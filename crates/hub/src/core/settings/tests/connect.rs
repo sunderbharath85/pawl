@@ -143,7 +143,7 @@ async fn connect_takes_over_a_hand_made_caller_as_a_new_owner() {
     ok(f.hub.handle(connect(HookTargetName::Codex, HookAction::Apply), &me).await);
     assert_eq!(f.hub.a2a_owner_key("codex"), after);
     let c = f.hub.config().a2a.callers.into_iter().find(|c| c.id == "codex").unwrap();
-    assert_eq!((c.name.as_str(), c.allow_approvals, c.connect_target), ("My Codex", false, Some(HookTargetName::Codex)), "taken over and marked");
+    assert_eq!((c.name.as_str(), c.allow_approvals, c.connect_target), ("My Codex", false, Some(crate::config::ConnectTarget::Codex)), "taken over and marked");
     assert_ne!(c.token.as_deref(), Some("a".repeat(64).as_str()));
     let toml = std::fs::read_to_string(f.dir.path().join("home").join(".codex").join("config.toml")).unwrap();
     assert!(toml.contains("[mcp_servers.pawl]") && toml.contains(c.token.as_deref().unwrap()), "{toml}");
@@ -225,7 +225,7 @@ async fn a_connected_agents_caller_can_never_be_given_approvals() {
         { "id": "ops", "name": "Ops", "allowApprovals": true }
     ] } })).await);
     let cfg = f.hub.config();
-    assert_eq!((cfg.a2a.callers[0].name.as_str(), cfg.a2a.callers[0].connect_target), ("Claude (laptop)", Some(HookTargetName::Claude)));
+    assert_eq!((cfg.a2a.callers[0].name.as_str(), cfg.a2a.callers[0].connect_target), ("Claude (laptop)", Some(crate::config::ConnectTarget::Claude)));
     assert_eq!(caller_token(&f.hub, "claude-code"), token);
     assert!(cfg.a2a.callers[1].allow_approvals && cfg.a2a.callers[1].connect_target.is_none());
     // Removed and added again by hand under the same id: an ordinary caller again.
@@ -239,7 +239,7 @@ async fn a_connected_agents_caller_can_never_be_given_approvals() {
 fn may_answer_approvals_needs_no_connect_mark() {
     let mut c = crate::config::A2aCaller { id: "x".into(), name: "X".into(), token: None, allow_approvals: true, connect_target: None, connect_added_servers: false };
     assert!(c.may_answer_approvals());
-    c.connect_target = Some(HookTargetName::CopilotCli);
+    c.connect_target = Some(crate::config::ConnectTarget::CopilotCli);
     assert!(!c.may_answer_approvals());
     assert!(format!("{c:?}").contains("CopilotCli"));
 }
@@ -323,7 +323,7 @@ async fn a_hand_edited_marked_caller_is_shown_and_treated_as_never() {
             name: "Codex".into(),
             token: Some("b".repeat(64)),
             allow_approvals: true,
-            connect_target: Some(HookTargetName::Codex),
+            connect_target: Some(crate::config::ConnectTarget::Codex),
             connect_added_servers: false,
         });
     })

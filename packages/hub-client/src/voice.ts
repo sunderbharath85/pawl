@@ -123,6 +123,30 @@ export function stripVoiceCodes(text: string, codes: Iterable<string | null | un
 }
 
 /**
+ * An assistant reply about to be read aloud, made safe to say near the microphone: the assistant's text can come from
+ * web pages, files or other agents (prompt injection), so it must never sound like an answer to a card. Taken out:
+ * - the words approve / deny / allow (and their forms);
+ * - code-like pairs of 1-2 digit groups joined by a dash, comma, slash, dot or space ("4-7", "4,7", "4/7", "4.7",
+ *   "4 7"), and "4:7" (one digit after a colon). A bare decimal like "3.5" can't be told apart from a code, so it goes
+ *   too (fail closed);
+ * - every other standalone 1-2 digit number ("47").
+ * Kept: longer numbers, times, percentages, prices and versions ("2026", "1,000", "10:30", "4:30", "3.5%", "$4.50",
+ * "v1.2").
+ */
+export function stripApprovalWords(text: string): string {
+  return text
+    .replace(/\b(?:approv(?:e|es|ed|ing|al|als)|den(?:y|ies|ied|ying)|allow(?:s|ed|ing)?)\b/gi, " ")
+    .replace(/(?<![\w.,:/$€£#%'–—-])\d{1,2}(?:\s*[-–—,/.]\s*\d{1,2}|:\d|\s+\d{1,2})(?![\w%:/'–—-]|[.,]\d)/g, " ")
+    .replace(/(?<![\w.,:/$€£#%'–—-])\d{1,2}(?![\w:/%'–—-]|[.,]\d)/g, " ")
+    .replace(/\s+([,.!?;:])/g, "$1")
+    // What is left of "approve 4 7." or "Denied: 9." is punctuation in a row: keep the first mark.
+    .replace(/([,.!?;:])(?:\s*[,.!?;:])+/g, "$1")
+    .replace(/^[\s,.!?;:]+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
  * The request read back aloud. The code is NEVER spoken (the microphone could hear the pet say it):
  * "Claude Code wants to run bun test on Desk PC. Say approve with the code on the card, or deny." When plain
  * "approve" is enough (a read or edit on this machine), or the request has no code: "Say approve, or deny."

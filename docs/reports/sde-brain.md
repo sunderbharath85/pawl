@@ -1,3 +1,213 @@
+# sde-brain report — v0.2 Assistant mode (hub, brain and protocol side)
+
+Status: **DONE** (2026-11-26, worktree `E:\workspace\ai-pet-voice`, branch `feat/assistant`). Nothing committed. The A2A part
+(`pawl mcp` tools, the `assistant` caller, the workspace start rule, browser rules for the assistant's Chrome DevTools steps)
+is sde-a2a's (`core/a2a_assistant.rs`); this side calls `assistant_tools(agent_id, sessions, browser)` and
+`assistant_caller_rotate()`.
+
+Gates: `cargo test --workspace` all green (brain 140, hub 321, acp 28, a2a 105 + 1 ignored, protocol 5, others ok); `cargo clippy --workspace --all-targets -- -D warnings` clean; `bunx tsc --noEmit` in packages/protocol clean. Line endings kept (protocol lib.rs and index.ts CRLF, the rest LF).
+
+## Third review (rev 4, 2026-11-26): a bare yes never answers a card with the assistant on
+
+Gates (rev 4): `cargo test --workspace` all green (hub 352, brain 141, acp 28, a2a 105 + 1 ignored, protocol 5, others ok); `cargo clippy --workspace --all-targets -- -D warnings` clean. Nothing committed.
+
+- Brain `chat::assistant::route`: with assistant mode on, a bare (non-explicit) yes / no / sure, typed or spoken, while
+  any card waits is always `CardWaiting`, whatever the kind and however many cards wait: it is most likely meant for the
+  assistant's own question, and no path classification (`.git`, Windows aliases, ...) is ever complete. Reply:
+  "There's a card waiting: tap Allow or Deny on it, or say “approve” (or “approve 47”)." (several: "There are N cards
+  waiting ..."). Explicit approve / deny and codes keep today's rules (typed approve, voice read-back and codes).
+  With no card waiting a bare yes goes to the assistant. "ok" / "okay" never resolve either (they go to the assistant).
+  Assistant off: unchanged (the brain's resolve path as before).
+- Removed the rev-3 `bare_yes_may_answer` classifier (no longer used by the brain; sde-a2a's
+  `writes_agent_config` stays for their start/edit cards).
+- Tests: brain route over every kind (read, search, think, edit, move, switch mode, execute), typed and spoken, one and
+  two cards, the exact reply, explicit answers unchanged; hub: with the assistant on a bare yes / sure / spoken yes on a
+  read card resolves nothing and prompts nothing, then "approve" resolves it; with the assistant off a bare yes still
+  answers a read card.
+
+## Second review fixes (rev 3, 2026-11-26)
+
+Gates (rev 3): `cargo test --workspace` all green (hub 347, brain 141, acp 28, a2a 105 + 1 ignored, protocol 5, others ok; run in a separate target dir while sde-a2a ran theirs); `cargo clippy --workspace --all-targets -- -D warnings` clean; `bunx tsc --noEmit` (packages/protocol) clean. Nothing committed.
+
+- **2 Bare typed "yes".** `route` now asks `bare_yes_may_answer`: only a single card of this machine that a spoken
+  "approve" may answer without a code (`spoken::needs_code`), and then only Read / Search / Think, or Edit when
+  `pawl_brain::rules::writes_agent_config(req, session cwd)` is false (sde-a2a's shared classifier: `.claude/`,
+  `.codex/`, `.github/`, `.mcp.json`, `AGENTS.md`, `.git/hooks/`, `.git/config`, ...). Move, SwitchMode, Execute, Delete,
+  Fetch, Other, unknown, another machine's card, or several cards -> the card-waiting reply. Tests: edit of src vs
+  `.claude/settings.json`, `.mcp.json`, `.git/hooks/pre-commit`, `AGENTS.md`; Move; SwitchMode; another machine's read.
+- **4 Planted config in the workspace.** Before an assistant start, on the canonical workspace: a non-Claude agent is
+  refused when `a2a_assistant::agent_config_in(ws, ws)` finds agent config (state error "There's agent config in your
+  workspace (<file>). Remove it or use Claude Code."); Claude Code (which loads no settings file) is still refused when
+  `git_config_in(ws, ws)` finds a git setting that runs a program (Claude Code runs git there at start). Tests: Codex
+  with `.codex/` refused then Claude Code starts; Claude with `.git/config` `core.fsmonitor` refused.
+- **5 Stale start that will not close.** The `!registered` branch now checks `close_assistant` (one retry inside): on
+  failure the id is kept with `must_end`, the token is due, a warning is logged and the start fails with "its previous
+  session could not be closed"; `live_assistant` never returns a session waiting to be closed; the next start closes
+  it first. Test with a FakeHost whose close fails, then recovers.
+- **7 Speech.** `short_form` drops approve/deny/allow (and their inflections) and every standalone one- or two-digit
+  number, so TTS never says a spoken approval the microphone could hear. Tests.
+- **Nit: token at boot.** When config.toml has the assistant's caller at hub start, its token is replaced once
+  (`assistant_token_due` in `Hub::build`; the first start waits for it). Test.
+- Also: `unavailable_line` drops a trailing period of the reason; FakeHost `close_fails`.
+
+## Security review fixes (rev 2, 2026-11-26)
+
+Gates (rev 2): `cargo test --workspace`: brain 141, acp 28, a2a 105 (+1 ignored), protocol 5 and the rest green; hub
+335 passed, 2 failed, both sde-a2a's new in-progress start-card tests in `core/tests/a2a_assistant.rs` (reported to t2h);
+all 25 assistant tests and every other hub test pass. `cargo clippy --workspace --all-targets -- -D warnings` clean;
+`bunx tsc --noEmit` (packages/protocol) clean.
+
+1. **Token rotation on every end.** Every end of the assistant session (reset, off, agent/workspace/tools change,
+   browser off, idle close, crash: `on_assistant_session_ended`) makes the assistant's A2A token due
+   (`rotate_due`). `rotate_assistant_token` (own `assistant_rotate` mutex, never under `settings_write`) replaces it
+   with one retry; `assistant_session` awaits it before anything new starts (a rotation in flight is waited for through
+   the mutex). Two failures: `rotate_error` -> state error with the text, and no start with Pawl's tools until a
+   replacement works (without `sessions` it still starts). Reset rotates synchronously; ends under `settings_write`
+   mark it due and a task does it once the commit is done (the next start waits for it).
+2. **Stale starts.** A settings generation (bumped under the runtime lock by every assistant-key or browser-off
+   change) is taken before a start and checked when the new session is registered; changed (or assistant off) -> that
+   session is closed at once, the token made due, and the start retried once with the new settings. While starting,
+   the session's id is known (`starting`), so its first host snapshots are already purpose "assistant".
+   `end_assistant_session` keeps the id until the close succeeds (one retry, warn on failure); an unclosable session is
+   closed again before the next start (`must_end`, else state error). The token is due either way.
+3. **Workspace validation on the real path.** New `settings::resolve_folder`: the deepest existing ancestor is
+   canonicalized and the rest appended; an existing part that cannot be resolved (dangling link, no access) is
+   refused; a result that is a network share or device path (a mapped drive) is refused ("Use a folder on this
+   computer."). `workspace_place_problem` compares resolved paths only: drive root, home itself, system folders (a home or
+   temp folder under one is exempt), file, Pawl's data folder both ways. At each start the folder is created, then
+   canonicalized and checked again; the session's cwd is the canonical folder; failure = no start.
+4. **Concurrent chats.** The turn is taken in the same lock step as the check (`claim_turn`), then the empty reply row
+   is stored and sent. The loser gets "I'm still on your last message; say stop to cancel it." `Store::finish_chat`
+   updates or inserts, so no reply row is left empty.
+5. **Reply size.** `MAX_REPLY_BYTES` = `pawl_protocol::MIRROR_PAYLOAD_MAX_BYTES` (64 KiB), cut at a char boundary,
+   final text ends "(Reply cut short.)"; scrubbing happens only on what is sent.
+6. **Remote-driven.** The assistant session is marked remote-driven right after it starts (`mark_remote_driven`), so
+   `rule_action` turns a user auto-allow into Ask exactly as for A2A-started sessions (deny rules unchanged; this
+   includes think, as for the others).
+7. **Bare yes / no.** Brain `route` -> `AssistantRoute::CardWaiting` when a bare yes/no meets a risky card (any kind
+   `is_auto_allowable` refuses: execute, delete, fetch, other, unknown) or more than one card; the pet replies
+   "There's a card waiting: tap Allow or Deny on it, or say “approve 47”." (several: "There are N cards waiting ...").
+   A single safe card keeps today's behaviour; explicit approve/deny unchanged.
+
+Nits: no pet for the assistant even from its first snapshot (starting id) and its events grow no other pet
+(`record_event`); its title comes from the user's message (`assistant::user_part` strips the persona and the spoken
+note, in `retitle_from_prompt` and `merge_session`); at hub start empty pet replies left by a crash read
+"(Interrupted.)" (`Store::interrupt_unfinished_replies`); `finish_assistant_turn` awaits the final write before the
+final `chat_update`; a prompt reaching the session another way (phone, session view) starts a reply turn on its
+`user_message`; turning the assistant on with `sessions` turns `[a2a] server` on in the same settings change
+(`apply_patch`), so the UI's confirm is true (the default-on config still turns it on at the first start).
+
+Also this round: `HubSettingsAssistant.agentNote` (TS `agentNote?`, Rust `agent_note`) filled from sde-a2a's
+`assistant_agent_note` (none for Claude Code); the assistant's agent env gets `assistant_agent_env` (Codex starts in
+`INITIAL_AGENT_MODE=read-only`); `assistant_session_id()` for sde-a2a's start cards. FakeHost gained `start_delay_ms`.
+CONTRACTS.md not edited (t13's): `agentNote` and `speech` should be added there.
+
+New tests (rev 2): hub `core::tests::assistant` +8 (token replaced before the next start; replacement failure blocks
+the start with the reason, then recovers; settings change during a start ends what it started and no pet appears; two
+messages at once; long reply cut and saved before announced; remote-driven rule downgrade and title; prompt from
+elsewhere gets a chat reply and grows no pet; a workspace link into the data folder is refused); approvals test now
+covers the card-waiting reply; settings +2 (resolve/dangling link/link into data/home by another spelling; A2A server
+on at enable); store chat test (finish_chat, interrupted rows); brain route + `user_part` tests.
+
+## Protocol (additive, still v9; TS `packages/protocol/src/index.ts` + Rust `crates/protocol/src/lib.rs`, both CRLF kept)
+- `HubSettingsAssistant` { enabled, agent, workspace, sessions, browser, resolvedAgent?, state, sessionId?, error? } and
+  `HubSettingsAssistantPatch`; `HubSettings.assistant` (Rust `Box`, TS optional like `a2a` / `browser` so older fixtures still
+  typecheck; v0.2 hubs always send it); `HubSettingsPatch.assistant`. Rust `AssistantState` off | idle | working | error.
+- `Session.purpose` gains `"assistant"` (Rust const `PURPOSE_ASSISTANT`; the mirror keeps it).
+- `ClientMsg::AssistantReset { id }` -> ack `{}`; TS `AckResults.assistant_reset`.
+- `ServerMsg::ChatUpdate { message }` (`chat_update`): same id as an earlier `chat`, replace its text.
+- `ChatMessage.streaming` (true while the assistant writes). **Addition beyond the contract:** `ChatMessage.speech?` = the short
+  spoken form, only on the final `chat_update` of a reply to a spoken message (never stored). The contract says "what is spoken
+  is the brain's short spoken form" and TTS is UI-side, so the UI needs it on the wire. fe-settings told: speak `speech ?? text`.
+
+## Config + settings (`config.rs`, `settings.rs`, `core/settings.rs`)
+- `[assistant]` enabled = true, agent = "auto", workspace = "" (= `~/Pawl`, `%USERPROFILE%\Pawl` on Windows), sessions = true,
+  browser = true; template comments added. `AssistantSection::workspace_path()`, `config::home_dir()`, `config::expand_home()`.
+- Keys `assistant.enabled|agent|workspace|sessions|browser` (`ASSISTANT_KEYS`), view, changed keys, toml write and read-back,
+  `pawl settings` lines. Every change goes to `settings_audit` as usual.
+- Validation: `agent` = "auto" ("" too) or an id this hub knows, never `a2a:*` (`invalid:assistant.agent`). `workspace`
+  (`invalid:assistant.workspace`): "" = default (key removed); absolute or `~` / `~/...` (stored expanded; `~bob` refused); no
+  `.`/`..` parts, no network share or device path, not a drive root, not the home folder itself, not inside a system folder
+  (Windows: SystemRoot, Program Files (x86), ProgramData; Unix: /bin /etc /usr /var /opt /System /Library ...; a home under one of
+  them is allowed), not a file, links resolved for existing folders; and (runtime) never overlapping Pawl's data folder in either
+  direction (`check_workspace_apart`). The same checks run again before each start, for hand-edited config.toml.
+- Runtime: a change to an assistant key ends the live session (next message starts a new one); turning it off also rotates
+  the assistant's A2A token (spawned, never under `settings_write`); browser use turned off ends it too (its Chrome DevTools
+  server goes). The settings view fills `resolvedAgent`, `state`, `sessionId`, `error`; settings are re-announced on session
+  start/end and turn start/end.
+
+## Hub: `crates/hub/src/core/assistant.rs` (new)
+- Agent resolution (`resolve_agent`): "auto" = claude-code, else codex, else copilot (hub or registry id), else the first
+  installed ACP agent (by id); only installed, non-A2A agents of this machine. A chosen agent that is not installed is an
+  error state (never another agent instead).
+- Start (one at a time, `assistant_start` mutex): workspace created and checked writable (probe file), tools from
+  `assistant_tools`, `start_session_with` with `purpose: "assistant"`, cwd = workspace, bound to the Local A2A caller.
+  Claude Code: `_meta.claudeCode.options` = `settingSources: []` (no user, project or local settings file: no allow rule or
+  default mode can skip the hub, and the assistant cannot give itself rules by writing into its workspace), `strictMcpConfig`,
+  `disallowedTools: [mcp__chrome-devtools__evaluate_script]`, `allowDangerouslySkipPermissions: false`, plus `clean_env` and
+  `ENABLE_CLAUDEAI_MCP_SERVERS=false` (no claude.ai connectors; the hub's own API keys never reach it). Audited
+  (`settings_audit`, kind `assistant`, key `assistant.session`, detail "start <agent> in <folder> (tools: ...)"; no tokens).
+- No pet of its own: `merge_session` skips `ensure_pet` for assistant sessions (the default pet speaks for it).
+- First prompt = persona + rules (`pawl_brain::chat::assistant::persona`) + "The user's message:"; later prompts are plain.
+- Turn: the pet's reply `ChatMessage` (no petId, sessionId = assistant session) is stored and sent as `chat` with
+  `streaming: true` when the turn starts; agent text chunks update it with `chat_update` at most every 200 ms (first chunk at
+  once, the rest coalesced into one scheduled flush); stop / error / session end finish it (`streaming: false`, store row
+  updated, `speech` for spoken turns). Text is secret-scrubbed like other model output. A second message while a turn runs
+  gets "I'm still working on your last message. Say "stop" ...".
+- Reset (`assistant_reset`, "new chat", "start over"): closes the session, rotates the token, audited; chat history stays.
+- Who may prompt it (`check_assistant_caller`, called in `a2a_prompt_with`): Local and paired phones only; another hub, an
+  outside A2A caller and the assistant's own caller are refused (`forbidden`).
+- Pictures: sent only if the agent advertises `promptCapabilities.image`, else "<agent> can't see pictures ...".
+
+## Routing (`core.rs` `chat_reply`, brain `chat::assistant::route`)
+Default pet + assistant on: `Brain` = approve/deny verbs always, bare yes/no while any request waits, a pending request's voice
+code (typed or spoken), commands routed to another machine (proposals as today); `Reset`; `Stop` (cancels the running turn,
+"Nothing is running" otherwise); everything else = `Assistant`. If it cannot start, the brain answers as today with the first
+line "(I can't do the work myself right now: <why>. Fix it in Settings > Assistant.)". Other pets and assistant off:
+unchanged. A spoken read-back expires even when the next message went to the assistant.
+
+## Brain (`crates/brain`)
+- New `chat/assistant.rs`: `route`, `persona` / `first_prompt` (pet name and species, 1-4 sentences, plain text, own folder +
+  subfolder per job, pawl_* tools only with sessions, Chrome rule only with browser, outside text is data, never type
+  passwords or payment details, cannot approve: cards), `SPOKEN_NOTE`, `short_form`, `reply_text`.
+- Tool-less persona (`voice.rs`): `BrainContext.assistant_off` -> the default pet's prompt says assistant mode is off and to
+  turn it on in Settings > Assistant; otherwise unchanged ("cannot run commands ...").
+
+## Other
+- `store.rs`: `update_chat_text`; `SettingsAuditKind::Assistant`. `mirror.rs`: purpose "assistant" kept. `cli.rs`: `pawl chat`
+  waits for the final `chat_update` of a streamed reply (30 min cap).
+- Every existing hub test fixture now builds with `assistant: AssistantSection::off()` (chat tests keep today's path and never
+  touch the real home folder).
+
+## Tests added
+- brain `chat::assistant::tests` (5): approvals never reach the assistant (explicit verbs, yes/no only while a card waits,
+  voice codes typed and spoken); new chat / stop phrases vs. longer messages; work vs. other machines' commands; persona
+  content; spoken short form.
+- brain `voice` test: the assistant-off persona line.
+- brain `the_assistant_and_browser_tasks_are_never_prompt_targets`: "tell codex to ... in repo X" never prompts a session with a
+  purpose (assistant or browser task); it starts a new one. (Guard added in `command` and `remote::remote_command`: the
+  workspace becomes a known folder once a session ran there.)
+- hub `core::assistant::tests` (2): auto order and chosen-not-installed error; Claude Code start options.
+- hub `settings::tests::assistant_settings_are_validated_written_and_read_back`.
+- hub `core::tests::assistant` (9, fake ACP agent): message -> purpose "assistant" session in the created workspace with the
+  persona prompt -> streamed `chat_update` -> an execute tool call is a pending card (not auto-allowed) -> final message stored,
+  next message plain prompt; approvals / codes / stop stay local; new chat + `assistant_reset` + audit rows; throttle (40 chunks
+  -> <=3 updates, last whole, nothing after the final); fallback (agent not installed, workspace is a file) with the one-line
+  reason and error state; other hubs / outside callers refused; pictures by capability; spoken short form (never stored);
+  turning off / changing agent ends the session, data-folder workspace refused.
+
+## Known gaps / notes for t13
+- Paired phones: they act through intents (`approve`, `deny`, `prompt`, `start`, `cancel`), not ClientMsgs, so a phone cannot
+  send `assistant_reset` or chat to the default pet today; it can prompt or cancel the assistant session by id (allowed).
+  A `reset` intent would need a protocol change.
+- Codex / Copilot as the assistant: no start options exist to stop their own config (e.g. Codex approval policy in
+  `~/.codex/config.toml`) from auto-approving tool calls; with Claude Code every call reaches the hub. Their env is kept (they
+  may authenticate by env var).
+- `settingSources: []` also means the assistant does not load the user's CLAUDE.md or model choice (Claude Code default).
+- Not run against a live agent (no E2E here); the ACP shapes are the ones the existing host already uses.
+
+---
+
 # sde-brain report — step 5: remote commands by machine + repo (`crates/brain/`, crate `pawl-brain`)
 
 Status: **DONE, rev 3** (2026-11-24, branch `step-5-remote-commands`). Gate passes: `cargo test -p pawl-brain` 82 passed / 0

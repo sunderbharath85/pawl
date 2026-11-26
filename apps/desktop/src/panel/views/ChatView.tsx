@@ -25,7 +25,8 @@ export function ChatView() {
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [state.chat.length]);
+    // A streaming reply (Assistant mode) grows in place: follow it too.
+  }, [state.chat.length, state.chat[state.chat.length - 1]?.text.length]);
 
   const send = async (raw: string) => {
     const t = raw.trim();
@@ -84,8 +85,15 @@ export function ChatView() {
               <PetAvatar species={fromSpecies} activity={from ? activityOf(from.id) : pet.activity} size={36} />
               <div>
                 <div className="msg-name">{fromName}</div>
-                <div className="msg-bubble">
-                  <PetReplyText text={m.text} />
+                <div className="msg-bubble" aria-busy={m.streaming || undefined}>
+                  {m.text.trim() || !m.streaming ? <PetReplyText text={m.text} /> : null}
+                  {m.streaming ? (
+                    <span className="typing typing-inline" role="status" aria-label={`${fromName} is still writing`}>
+                      <span />
+                      <span />
+                      <span />
+                    </span>
+                  ) : null}
                 </div>
                 <ChatProposals message={m} />
                 <div className="msg-foot">

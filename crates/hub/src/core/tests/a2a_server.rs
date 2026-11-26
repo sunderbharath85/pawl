@@ -9,7 +9,7 @@ use pawl_a2a::Caller;
 use pawl_protocol::{A2aCallerPatch, HubSettingsA2aPatch, HubSettingsPatch};
 use tower::ServiceExt;
 
-const PORT: u16 = 47998;
+pub(super) const PORT: u16 = 47998;
 const CI: &str = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
 const OPS: &str = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
 const CODEX: &str = "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c";
@@ -25,7 +25,7 @@ async fn a2a_fixture() -> Fixture {
                 name: "Codex".into(),
                 token: Some(CODEX.into()),
                 allow_approvals: true,
-                connect_target: Some(pawl_protocol::HookTargetName::Codex),
+                connect_target: Some(crate::config::ConnectTarget::Codex),
                 connect_added_servers: false,
             },
         ];
@@ -33,7 +33,7 @@ async fn a2a_fixture() -> Fixture {
     .await
 }
 
-async fn call(app: &axum::Router, token: &str, version: Option<&str>, method: &str, params: Value) -> Value {
+pub(super) async fn call(app: &axum::Router, token: &str, version: Option<&str>, method: &str, params: Value) -> Value {
     let mut b = HttpRequest::builder()
         .method("POST")
         .uri("/")
@@ -55,7 +55,7 @@ async fn call(app: &axum::Router, token: &str, version: Option<&str>, method: &s
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"))
 }
 
-fn start_params(cwd: &str, text: &str, immediate: bool) -> Value {
+pub(super) fn start_params(cwd: &str, text: &str, immediate: bool) -> Value {
     json!({
         "message": {
             "messageId": uuid::Uuid::new_v4().to_string(),
@@ -285,11 +285,11 @@ fn a2a_patch(a: HubSettingsA2aPatch) -> HubSettingsPatch {
     HubSettingsPatch { a2a: Some(a), ..Default::default() }
 }
 
-fn free_port() -> u16 {
+pub(super) fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
-async fn raw_get(port: u16, path: &str, auth: Option<&str>) -> String {
+pub(super) async fn raw_get(port: u16, path: &str, auth: Option<&str>) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     let auth = auth.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();

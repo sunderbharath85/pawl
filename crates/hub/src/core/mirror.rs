@@ -158,7 +158,7 @@ fn clamp_session(mut s: Session, now: UnixMs) -> Session {
     s.last_event_at = clamp_ts(s.last_event_at, now);
     s.ended_at = s.ended_at.map(|t| clamp_ts(t, now));
     // Only a known purpose is kept.
-    s.purpose = s.purpose.filter(|p| p == super::browser::PURPOSE);
+    s.purpose = s.purpose.filter(|p| p == super::browser::PURPOSE || p == super::assistant::PURPOSE);
     s
 }
 
@@ -169,6 +169,10 @@ fn clamp_event(mut e: HubEvent, now: UnixMs) -> HubEvent {
 
 fn clamp_request(mut r: PermissionRequest, now: UnixMs) -> PermissionRequest {
     r.created_at = clamp_ts(r.created_at, now);
+    // Only this hub's own start cards carry their marker: a peer's request never passes for one.
+    if r.tool_call.tool_call_id.starts_with(super::a2a_assistant::START_CARD_PREFIX) {
+        r.tool_call.tool_call_id = format!("peer-{}", r.tool_call.tool_call_id);
+    }
     // Only a well-formed voice code (two digits) counts; anything else means "answer on the screen".
     r.voice_code = r.voice_code.filter(|c| pawl_brain::chat::spoken::is_voice_code(c));
     r
@@ -1013,6 +1017,16 @@ fn fit_snapshot(mut sessions: Vec<Session>, pets: Vec<Pet>, mut pending: Vec<Per
 mod tests {
     use super::*;
     use pawl_protocol::{PermissionOption, PermissionOptionKind, Species, ToolCallPayload};
+
+    #[test]
+    fn a_peers_request_never_passes_for_a_start_card() {
+        let mut r = request(PEER, "r1", "s1");
+        r.tool_call.tool_call_id = "pawl-start:x".into();
+        assert_eq!(clamp_request(r, 10).tool_call.tool_call_id, "peer-pawl-start:x");
+        let r = request(PEER, "r2", "s1");
+        let id = r.tool_call.tool_call_id.clone();
+        assert_eq!(clamp_request(r, 10).tool_call.tool_call_id, id, "others stay");
+    }
 
     const PEER: &str = "zyxwvu987654";
     const ME: &str = "abcdef012345";

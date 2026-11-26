@@ -246,6 +246,72 @@ impl Default for A2aSection {
     }
 }
 
+/// `[assistant]` (v0.2 assistant mode): the default pet's chat goes to an agent session with tools that
+/// works in its own folder (`workspace`). On by default; see `core/assistant.rs`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AssistantSection {
+    pub enabled: bool,
+    /// "auto" (claude-code, else codex, else copilot-cli, else the first installed ACP agent) or an agent id.
+    pub agent: String,
+    /// The assistant's own folder; "" = [`DEFAULT_ASSISTANT_DIR`] in the home folder. A leading "~" is the
+    /// home folder. Created on first use, never deleted by Pawl.
+    pub workspace: String,
+    /// Give it Pawl's tools (`pawl mcp`: list agents, start sessions, prompt them, check on them, cancel them).
+    pub sessions: bool,
+    /// Also give it the Chrome DevTools tools while `[browser] enabled` is on.
+    pub browser: bool,
+}
+
+/// `[assistant] agent` that picks the agent itself.
+pub const ASSISTANT_AUTO: &str = "auto";
+/// The assistant's folder in the home folder when `workspace` is unset.
+pub const DEFAULT_ASSISTANT_DIR: &str = "Pawl";
+
+impl Default for AssistantSection {
+    fn default() -> Self {
+        Self { enabled: true, agent: ASSISTANT_AUTO.into(), workspace: String::new(), sessions: true, browser: true }
+    }
+}
+
+impl AssistantSection {
+    /// Assistant mode off (tests, and hubs that should keep today's chat).
+    pub fn off() -> Self {
+        Self { enabled: false, ..Self::default() }
+    }
+
+    /// The workspace folder: `workspace` with "~" expanded, or `~/Pawl`. Not canonicalized; it may not exist yet.
+    /// None when there is no home folder to put it in.
+    pub fn workspace_path(&self) -> Option<PathBuf> {
+        expand_home(self.workspace.trim(), home_dir().as_deref())
+    }
+}
+
+/// The user's home folder: `%USERPROFILE%` on Windows (then `HOME`), `HOME` elsewhere.
+pub fn home_dir() -> Option<PathBuf> {
+    let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if cfg!(windows) {
+        var("USERPROFILE").or_else(|| var("HOME"))
+    } else {
+        var("HOME")
+    }
+}
+
+/// `v` with a leading "~" (alone, or followed by a slash) replaced by `home`; "" = `home/Pawl`. Other
+/// values are returned as given (absolute or not: the caller checks).
+pub fn expand_home(v: &str, home: Option<&Path>) -> Option<PathBuf> {
+    if v.is_empty() {
+        return home.map(|h| h.join(DEFAULT_ASSISTANT_DIR));
+    }
+    if v == "~" {
+        return home.map(Path::to_path_buf);
+    }
+    if let Some(rest) = v.strip_prefix("~/").or_else(|| v.strip_prefix("~\\")) {
+        return home.map(|h| h.join(rest));
+    }
+    Some(PathBuf::from(v))
+}
+
 /// `[browser]` (v0.2 item 5): browser tasks, Claude Code driving the user's Chrome through the Chrome
 /// DevTools MCP server. Off by default.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -291,10 +357,11 @@ pub struct A2aCaller {
     /// execute / delete / fetch). Default false.
     #[serde(default)]
     pub allow_approvals: bool,
-    /// The coding agent "Connect coding agents" made (or took over) this caller for. Its token sits in
-    /// that agent's own MCP config, so it never answers approvals, whatever `allow_approvals` says.
+    /// The coding agent "Connect coding agents" made (or took over) this caller for, or Pawl's own
+    /// assistant. Its token sits in that agent's own MCP config (or the assistant session's), so it
+    /// never answers approvals, whatever `allow_approvals` says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connect_target: Option<pawl_protocol::HookTargetName>,
+    pub connect_target: Option<ConnectTarget>,
     /// Connect added the servers object to that agent's config itself, so Remove may take it away
     /// again once it is empty (one the user had stays).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -305,6 +372,64 @@ impl A2aCaller {
     /// What the A2A server goes by: approvals allowed and not a connected coding agent.
     pub fn may_answer_approvals(&self) -> bool {
         self.allow_approvals && self.connect_target.is_none()
+    }
+
+    /// The assistant's own caller (hidden from the settings list; only the hub changes it).
+    pub fn is_assistant(&self) -> bool {
+        self.connect_target == Some(ConnectTarget::Assistant)
+    }
+}
+
+/// Who a marked A2A caller is for (`connect_target` in config.toml): a coding agent Connect
+/// connected (the hook target names), or `assistant` (Pawl's assistant session).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectTarget {
+    #[serde(rename = "claude")]
+    Claude,
+    #[serde(rename = "codex")]
+    Codex,
+    #[serde(rename = "copilot-cli")]
+    CopilotCli,
+    #[serde(rename = "copilot-vscode")]
+    CopilotVscode,
+    #[serde(rename = "assistant")]
+    Assistant,
+}
+
+impl ConnectTarget {
+    /// The name in config.toml.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::CopilotCli => "copilot-cli",
+            Self::CopilotVscode => "copilot-vscode",
+            Self::Assistant => "assistant",
+        }
+    }
+
+    /// The coding agent (protocol `connectTarget`); `None` for the assistant.
+    pub fn hook(self) -> Option<pawl_protocol::HookTargetName> {
+        use pawl_protocol::HookTargetName as H;
+        match self {
+            Self::Claude => Some(H::Claude),
+            Self::Codex => Some(H::Codex),
+            Self::CopilotCli => Some(H::CopilotCli),
+            Self::CopilotVscode => Some(H::CopilotVscode),
+            Self::Assistant => None,
+        }
+    }
+}
+
+impl From<pawl_protocol::HookTargetName> for ConnectTarget {
+    fn from(t: pawl_protocol::HookTargetName) -> Self {
+        use pawl_protocol::HookTargetName as H;
+        match t {
+            H::Claude => Self::Claude,
+            H::Codex => Self::Codex,
+            H::CopilotCli => Self::CopilotCli,
+            H::CopilotVscode => Self::CopilotVscode,
+        }
     }
 }
 
@@ -450,6 +575,7 @@ pub struct HubConfig {
     pub relay: RelaySection,
     pub a2a: A2aSection,
     pub browser: BrowserSection,
+    pub assistant: AssistantSection,
 }
 
 impl Default for HubConfig {
@@ -470,6 +596,7 @@ impl Default for HubConfig {
             relay: RelaySection::default(),
             a2a: A2aSection::default(),
             browser: BrowserSection::default(),
+            assistant: AssistantSection::default(),
         }
     }
 }
@@ -525,6 +652,13 @@ pub(crate) const CONFIG_TEMPLATE: &str = r#"# Pawl hub configuration. Every key 
 # [browser]
 # enabled = false                  # browser tasks: Claude Code drives your Chrome (Chrome 144+ asks you to allow it)
 # allow_sites = ["github.com"]     # hosts a browser task may open without asking; every other step asks
+#
+# [assistant]
+# enabled = true                   # the default pet's chat goes to an agent session that does the work (every tool call asks per your rules)
+# agent = "auto"                   # auto = claude-code, else codex, else copilot-cli, else the first installed ACP agent
+# workspace = "~/Pawl"             # its own folder (created on first use, never deleted by Pawl)
+# sessions = true                  # give it Pawl's tools: start, prompt, check on and cancel other agents' sessions
+# browser = true                   # also the Chrome DevTools tools, only while [browser] enabled is on
 #
 # [watchdog]
 # waiting_nudge_after_ms = 300000

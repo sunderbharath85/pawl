@@ -1956,3 +1956,15 @@ async fn a_reply_about_a_picture_never_repeats_a_secret() {
     assert!(!r.text.contains("sk-live-0123456789abcdef"), "{}", r.text);
     assert!(r.text.contains("a failing test"), "{}", r.text);
 }
+
+#[tokio::test]
+async fn the_assistant_and_browser_tasks_are_never_prompt_targets() {
+    for purpose in ["assistant", "browser"] {
+        let mut c = ctx();
+        let mut s = session("s-codex", "codex", "E:/workspace/ai-pet/", SessionSource::Owned, SessionStatus::Done);
+        s.purpose = Some(purpose.into());
+        c.sessions.push(s);
+        let r = ask("tell codex to run the tests in repo ai-pet", &c).await;
+        assert!(matches!(r.action, Some(BrainAction::StartSession { .. })), "{purpose}: {r:?}");
+    }
+}

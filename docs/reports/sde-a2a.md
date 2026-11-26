@@ -610,3 +610,127 @@ Gates: `cargo test --workspace --no-fail-fast` exit 0 (pawl-a2a 78, pawl-acp 27,
 Gates: `cargo test --workspace --no-fail-fast` exit 0 (pawl-a2a 78, pawl-acp 27, pawl-brain 134, pawl-discovery 68, pawl-hub 301 + 2 integration, pawl-peer 105 + 1 ignored, pawl-protocol 4); clippy `-D warnings` clean; tsc clean for packages/protocol and packages/hub-client. fe-settings adopted `callerMarked`.
 
 Open: "ask the pet" has no A2A skill, so no MCP tool (t13: keep scope). VS Code Insiders' user folder is not a target.
+
+## v0.2 Assistant mode: A2A part (done)
+
+Contract: docs/CONTRACTS.md "v0.2 Assistant mode: the pet does the work", "A2A part" (plus the "As built" notes I added
+there). sde-brain (t26) owns the session itself (`core/assistant.rs`), routing, settings and protocol; the API below was
+agreed with t26.
+
+API (for t26):
+
+- `pawl_acp::StartOptions.mcp_servers: Vec<pawl_acp::McpServerStdio>`; `McpServerStdio { name: String, command: PathBuf,
+  args: Vec<String>, env: Vec<(String, String)> }` (`Debug` shows env names only). Sent as the standard ACP
+  `session/new` `mcpServers` (stdio, `env` as `{name, value}`), so any ACP agent gets them. `StartOptions` is `Default`.
+- `Hub::assistant_tools(&self, agent_id: &str, sessions: bool, browser: bool) -> anyhow::Result<Vec<McpServerStdio>>`
+  (crates/hub/src/core/a2a_assistant.rs). `sessions`: the `pawl mcp` entry (this binary's absolute path, `["mcp"]`,
+  `PAWL_A2A_URL` = `http://127.0.0.1:<a2a port>`, `PAWL_A2A_TOKEN`), making the caller and turning the A2A server on
+  (127.0.0.1 only) if needed. `browser` (and `[browser] enabled`, and agent `claude-code`): the Chrome DevTools server.
+  It fails only when the caller cannot be saved (e.g. the A2A port is taken). It takes `settings_write`: never call it
+  while holding that lock.
+- `Hub::assistant_caller_rotate(&self) -> anyhow::Result<()>`: new token, the old one dead at once (open streams
+  end); nothing to do without a caller. It also takes `settings_write`.
+
+What it does:
+
+| Item | Behaviour | Tests |
+|---|---|---|
+| ACP `mcpServers` | `StartOptions.mcp_servers` reaches `session/new`; a plain start sends `[]` | `start_options_mcp_servers_reach_session_new` (fake agent records it; Debug hides the token) |
+| Caller `assistant` | "Pawl assistant", `connect_target = "assistant"` (hub-local `ConnectTarget` enum in config.rs; the protocol `connectTarget` stays the coding-agent names), approvals never (`may_answer_approvals` false; a hand-edited `allow_approvals = true` is turned off). Not in `HubSettings.a2a.callers`; a callers patch keeps it; the id `assistant` is refused in a patch; `a2a_rotate_token` refuses it. A hand-made caller with that id is taken over (new token, new task owner). | `the_assistant_gets_pawl_mcp_with_its_own_marked_caller_and_the_server_on`, `settings_cannot_change_or_take_the_assistant_caller`, `the_assistant_never_answers_approvals_even_if_config_toml_says_so`, `a_hand_made_assistant_caller_is_taken_over_with_a_new_token_and_owner` |
+| Rotate | Old token 401 at once, new one 200, same task owner (the assistant still sees what it started) | `rotating_the_assistant_token_kills_the_old_one_at_once` (real server on a free port) |
+| Start folders | The assistant caller may also start in `assistant_workspace()` and below: both sides canonicalized, network shares refused; still an approval-card A2A start (remote-driven). Once a session ran in the workspace it is a folder this machine uses, so other callers may start there too (the existing known-folder rule) | `the_assistant_starts_agents_in_its_workspace_and_nowhere_else_new` (workspace and subfolder ok; sibling, `..` and a symlink out refused; another caller refused there) |
+| Browser | `classify` decides an assistant session's Chrome DevTools steps (`browser_rules_apply` in `on_permission_request`): allowed site without asking, other sites / typing ask, no "always", scripts / init scripts / internal pages / paths / tools off the list refused, a user's auto-allow rule ignored, a deny rule still denies. A request that names the server but whose tool cannot be read is refused. codex-acp's `mcp.chrome-devtools.<tool>` + `{server, tool, arguments}` form is read too. | `the_browser_rules_decide_the_assistants_chrome_devtools_steps`, `the_chrome_devtools_server_goes_only_to_agents_pawl_can_check_and_only_with_browser_on` |
+| Audit | `settings_audit` kind `a2a_connect`, key `a2a.connect.assistant`, detail `create` / `takeover` / `rotate`, plus the usual settings rows; no token anywhere | in the tests above |
+| `pawl mcp` instructions | unchanged: they already say approvals happen on the user's cards; nothing suggests the assistant can approve | - |
+
+Adapter check (ACP `session/new` `mcpServers`):
+
+| Agent | `mcpServers` (stdio) | Chrome DevTools step titles | Here |
+|---|---|---|---|
+| claude-agent-acp | accepted, env `{name,value}` -> record; merged with `_meta.claudeCode.options.mcpServers` | `chrome-devtools: <tool>` | pawl mcp + browser |
+| codex-acp | accepted; command must be absolute (refused otherwise); no SSE | `mcp.chrome-devtools.<tool>`, input `{server, tool, arguments}` | pawl mcp only (whether it asks the client before an MCP call is unverified) |
+| copilot --acp | docs: `session/new` sets "the working directory and the MCP servers to use" | not documented | pawl mcp only |
+| gemini --acp | accepted; overrides same-named servers from its settings; env from the ACP list | from gemini-cli-core (not checked); `_meta['gemini-cli'].mcp` on permission requests | pawl mcp only |
+
+Gaps / for t26:
+
+- `classify` sees only calls that come as `session/request_permission`. If the assistant's Claude session loads the
+  user's settings, an allow rule there (e.g. `mcp__chrome-devtools__*`) would run Chrome DevTools tools unasked. The
+  session options must make them ask, as browser tasks do (told t26).
+- ACP does not say whether an MCP server's `env` is added to the agent's environment or replaces it; the adapters pass
+  only the given list on (merging is up to the agent's own MCP launcher). `pawl mcp` needs only its two variables;
+  npx needs PATH.
+- The Chrome DevTools server for codex / copilot / gemini can be turned on once their approval path and titles are
+  checked (one line: `BROWSER_AGENTS`).
+
+Sources: https://agentclientprotocol.com/protocol/session-setup (MCP servers: stdio required, `command` absolute),
+https://github.com/agentclientprotocol/claude-agent-acp (src/mcp-servers.ts, src/new-session-meta.ts,
+src/tool-calls/reporters/interaction.ts), https://github.com/agentclientprotocol/codex-acp (src/McpServerConfig.ts,
+src/tool-calls/reporters/McpToolReporter.ts), https://docs.github.com/en/copilot/reference/acp-server,
+https://github.com/google-gemini/gemini-cli (packages/cli/src/acp/acpSessionManager.ts, acpSession.ts).
+
+Gates (rerun after t26 wired the API): `cargo test --workspace --no-fail-fast` all green: pawl-a2a 78, pawl-acp 28,
+pawl-brain 139, pawl-discovery 68, pawl-hub 321 + 2 integration, pawl-peer 105 + 1 ignored, pawl-protocol 5.
+`cargo clippy --workspace --all-targets -D warnings`: one error in t26's core/assistant.rs:244 (a redundant
+`..Default::default()`; told t26); nothing in my files. No new dependencies (`pawl-discovery`'s `HostEnv::which`
+finds npx / cmd).
+
+### Assistant mode: security review round 1 (done)
+
+| # | Finding | Fix | Tests (core/tests/a2a_assistant.rs) |
+|---|---|---|---|
+| 1a | Planted config in the workspace, then a start there | `workspace_launch_plan` for every remote start in the workspace (A2A server, peer A2A, peer intents): Claude Code gets `settingSources: []`, `strictMcpConfig`, `mcpServers: {}`, bypass off, a clean env and `ENABLE_CLAUDEAI_MCP_SERVERS=false`; other agents are refused where `.claude/ .codex/ .gemini/ .vscode/ .opencode/ .mcp.json opencode.json .github/copilot*` lies in the folder or above it, up to the workspace | `starts_in_the_workspace_never_pick_up_planted_agent_config` (Claude hardened; each config kind refuses Codex at once with its name; an ancestor counts; `.github/workflows` alone does not; another caller gets the same rules; root `.mcp.json`; outside the workspace only Codex's mode) |
+| 1b | Config / hook writes auto-allowed by a user rule | `rule_action`: an auto-allow becomes a card when the assistant session or a session the assistant caller started (`assistant_guarded`) changes an agent config or hook path (`writes_agent_config`: locations, path fields at any depth, path-like keys, patch file lines; relative paths from the session's folder, `..` / separators normalized, no case on any system). A deny rule still denies | `agent_config_paths_are_found_however_they_are_written`, `agent_config_writes_by_the_assistant_or_what_it_started_are_always_cards` (with an auto-allow-edits rule and remote-driven turned off, to test this rule on its own) |
+| 1c | Re-resolve between the folder check and the start | `StartDir::Checked` + `LaunchPlan` through `a2a_start_in` to `launch_session` (no `resolve_cwd` for checked folders), on all three remote start paths | covered by the start tests (sessions run in the canonical folder) |
+| 2 | No hub-side card for starts | `start_card`: a `pawl-start:` card on the live assistant session (shape in CONTRACTS "As built"), the A2A call waits up to 5 min; answered by the user only (no rule incl. deny, no A2A caller, no other hub); cancelled (audited) on timeout, revocation, or when the asking session is gone; an agent's request with the marker prefix is renamed. Not made general: other callers have no session here to show a card on, and their sessions are already remote-driven | `every_start_the_assistant_asks_for_waits_for_the_users_card` (shape, nothing runs before the answer, deny rule ignored, remote decision `forbidden`, forged marker renamed, allow -> started, audited), `a_start_the_user_turns_down_or_that_loses_its_caller_never_runs`, `a_start_card_closes_when_the_assistant_session_that_asked_ends`, `the_assistant_starts_agents_in_its_workspace_and_nowhere_else_new` (now via cards) |
+| 3 | Codex / Copilot's own approval settings | `assistant_agent_note` (t26 shows it as `HubSettingsAssistant.agentNote`). codex-acp: `INITIAL_AGENT_MODE=read-only` for the assistant (t26) and for Codex sessions the assistant starts (`assistant_agent_env`): read-only sandbox, approval on-request reviewed by the user (the default mode `agent` uses an automatic reviewer). Copilot: no mode or per-session option to force asking (its ACP page: tool options are fixed at launch) | the start test checks `INITIAL_AGENT_MODE=read-only` |
+| 4 | Default rules | With the default rules every tool call of the assistant session is a card (all ten kinds, think too, since t26 marks it remote-driven); sessions it starts are remote-driven | `with_the_default_rules_every_tool_call_of_the_assistant_is_a_card`; `remote_driven` asserted in the start tests |
+| + | Rules changed while a browser step waits | `rule_action` never returns auto-allow for a browser step (it did for a pending one on a rule change) | browser tests unchanged and green |
+
+codex-acp sources (read through the fetch agent):
+https://github.com/agentclientprotocol/codex-acp/blob/main/src/AgentMode.ts (modes `read-only` / `workspace-write` /
+`agent` / `agent-full-access`, their approval policy and reviewer; `getInitialAgentMode`: a valid `INITIAL_AGENT_MODE`
+wins over a permission profile, per session open), src/CodexAcpServer.ts (`createSessionOptionState`,
+`setSessionMode`). Unverified: whether a user's config.toml `approval_policy` can still change a built-in mode (the
+summary says built-in modes hard-code it). Copilot: https://docs.github.com/en/copilot/reference/acp-server ("a client
+cannot change them per session through `session/new`").
+
+Gates: `cargo test --workspace --no-fail-fast` all green (pawl-a2a 78, pawl-acp 28, pawl-brain 141, pawl-discovery
+68, pawl-hub 338 + 2 integration, pawl-peer 105 + 1 ignored, pawl-protocol 5); `cargo clippy --workspace
+--all-targets -D warnings` clean. No new dependencies.
+
+### Assistant mode: security review round 2 (done)
+
+| # | Finding | Fix | Tests (core/tests/a2a_assistant.rs unless noted) |
+|---|---|---|---|
+| 1 | Plan and folder checked before the card waited, reused after | After the user allows: `a2a_start_dir` again on the same `cwd`, the same canonical folder required, the launch plan computed again and required equal (`LaunchPlan: PartialEq`); otherwise "The folder changed while you were deciding; ask again." | `a_folder_that_changed_while_the_user_decided_is_not_started` (`.codex/` planted while waiting; a git hook planted for Claude Code; the folder swapped for a link out of the workspace; an unchanged folder starts) |
+| 3 | Start check used a shorter list than the write guard | One list in `pawl_brain::rules` (`AGENT_CONFIG_DIRS`, `AGENT_CONFIG_FILES`, `is_agent_config_entry`, `is_agent_config_path`, `writes_agent_config`), used by the write guard, the start check (`agent_config_in`) and sde-brain's typed-"yes" rule. Plus planted git for every agent (`git_config_in`: a `.git` file, a hook that is not a `.sample`, a `.git/config` key that runs a program or an include), since Claude Code runs git when it starts | `starts_in_the_workspace_never_pick_up_planted_agent_config` (now `.github/` even with only workflows, `.copilot/`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `mcp.json`), `planted_git_settings_stop_every_agent_and_a_plain_repository_does_not`, `agent_config_paths_are_found_however_they_are_written` |
+| 6 | Unbounded start cards; prompt checked after the card | At most `MAX_START_CARDS = 2` waiting per caller (checked and added under one lock): "You already have a start waiting for the user."; `validate_prompt` (empty / over 100,000 characters) before the card | `at_most_two_starts_wait_and_a_bad_prompt_never_reaches_a_card` |
+| nit | A peer could mirror a `pawl-start:` request | `mirror::clamp_request` renames it `peer-pawl-start:...` | `mirror::tests::a_peers_request_never_passes_for_a_start_card` |
+| nit | Message said phones may answer, code refused them (phone approvals are intents = remote decisions) | Decided: a paired phone may answer a start card (its approve intents need `confirmed`, the phone's biometric check, as every phone approval); another hub may not. Text and behaviour agree | `a_paired_phone_may_answer_a_start_card_and_another_hub_may_not` (hub refused; phone unconfirmed refused; confirmed applied, start runs) |
+| shared | Brain needs the classifier | Moved to `pawl_brain::rules` (brain does not depend on the hub); API agreed with t26, who wired it (typed "yes", the assistant's own start check with `agent_config_in` / `git_config_in`) | - |
+
+Also: a test of mine held the state lock across an await (a `for` over a `st()` temporary) and hung a test run;
+fixed (collected first), and the hung test binary was stopped. `the_assistant_never_answers_approvals_even_if_config_toml_says_so`
+now waits for t26's token replacement at hub start before checking that the token stays.
+
+Gates: `cargo test --workspace --no-fail-fast` all green (pawl-a2a 78, pawl-acp 28, pawl-brain 141, pawl-discovery 68,
+pawl-hub 347 + 2 integration, pawl-peer 105 + 1 ignored, pawl-protocol 5); `cargo clippy --workspace --all-targets -D
+warnings` clean. No new dependencies.
+
+### Assistant mode: security review round 3 (done)
+
+| # | Finding | Fix | Tests (core/tests/a2a_assistant.rs unless noted) |
+|---|---|---|---|
+| 1 | `.git` and more names missing; start check split by file / folder | `is_agent_config_path`: any `.git` component; `.gitmodules`, `.gitattributes`, `opencode.jsonc`, `AGENTS.override.md`, `.agents/` added to the shared lists; `is_agent_config_name` (renamed from `is_agent_config_entry`) matches files and folders alike | `agent_config_paths_are_found_however_they_are_written`, `the_git_check_reads_every_way_a_config_can_run_a_program` (a folder called `CLAUDE.md`, a file called `.claude`) |
+| 2 | Windows aliases | Per component: cut at the first `:` (ADS), trailing dots / spaces dropped, any `~<digit>` (8.3 short name) counts; on every system | `agent_config_paths_are_found_however_they_are_written` (`CLAUDE.md::$DATA`, `CLAUDE.md:stream`, `CLAUDE.md `, `CLAUDE.md.`, `.claude./`, `CLAUDE~1.MD`, `.CLAUD~1\`) |
+| 3 | Paths in `changes` keys and uris | Every key of a `changes` object; `file:` or path-like `uri` / `url` values (https left alone) | same test |
+| 4 | Git config parsing | Bytes + lossy UTF-8, BOM stripped, unreadable = planted; key after `]` on the header line; quoted subsections (`]` inside quotes); `alias` with `!`, `uploadpack.packObjectsHook`, `remote.*.vcs`, `extensions.worktreeConfig`, `config.worktree` with a program key, `commondir`, a non-folder `.git` | `the_git_check_reads_every_way_a_config_can_run_a_program` (12 refused configs, a plain one with an alias and a quoted `]` allowed, config.worktree, commondir, unreadable config) |
+| 5 | Orphaned start cards | `StartCardGuard` (drop guard): when the waiting request is dropped the card is closed (cancelled by system, audited) and forgotten; disarmed once the start handles the outcome | `a_start_card_whose_request_went_away_is_cancelled` (the request aborted: card gone, forgotten, audited, nothing started, room for a new start) |
+| 6 | Session cap only checked before the card | Checked again after the user allows | `the_session_cap_is_checked_again_when_a_start_is_allowed` |
+
+Gates: `cargo test --workspace --no-fail-fast`: everything of mine green (pawl-hub 352 + 2 integration). Two of
+t26's tests failed once each under full-suite load and pass on their own (3 of 3 runs):
+`core::tests::assistant::chat_updates_are_throttled_and_the_last_one_is_whole` (timing) and
+`chat::tests::help_report_and_small_talk_are_deterministic_without_model` (t26 editing brain chat meanwhile).
+`cargo clippy --workspace --all-targets -D warnings` clean. No new dependencies.

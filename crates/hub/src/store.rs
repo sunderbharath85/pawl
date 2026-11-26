@@ -458,6 +458,8 @@ pub enum SettingsAuditKind {
     Restart,
     /// `a2a_connect` apply / remove (keys = `a2a.connect.<target>`).
     A2aConnect,
+    /// Assistant mode: its session started or was reset (keys = `assistant.session`).
+    Assistant,
 }
 
 /// One settings change. Holds key names only, never values (secrets included).
@@ -912,6 +914,25 @@ impl Store {
         Ok(())
     }
 
+    /// The final text of a message (assistant mode: the pet's reply is stored empty when its turn starts and gets
+    /// its text when the turn ends). Stored now if its first write has not happened yet.
+    pub fn finish_chat(&self, m: &ChatMessage) -> Result<()> {
+        let n = self.conn().execute("UPDATE chat SET text = ?2 WHERE id = ?1", params![m.id, m.text])?;
+        if n == 0 {
+            self.insert_chat(m)?;
+        }
+        Ok(())
+    }
+
+    /// Pet replies a crash left unfinished (stored empty when an assistant turn started, never finished) read
+    /// "(Interrupted.)". Run at start. Returns how many.
+    pub fn interrupt_unfinished_replies(&self) -> Result<usize> {
+        Ok(self.conn().execute(
+            "UPDATE chat SET text = '(Interrupted.)' WHERE role = 'pet' AND text = '' AND session_id IS NOT NULL",
+            [],
+        )?)
+    }
+
     /// Latest chat messages (ascending).
     pub fn recent_chat(&self, limit: u32) -> Result<Vec<ChatMessage>> {
         let c = self.conn();
@@ -932,6 +953,8 @@ impl Store {
                     .and_then(|j| serde_json::from_str(&j).ok())
                     .unwrap_or_default(),
                 image: r.get(8)?,
+                streaming: false,
+                speech: None,
             })
         })?;
         let mut v: Vec<ChatMessage> = rows.filter_map(|r| r.ok()).collect();
@@ -2500,11 +2523,25 @@ mod tests {
                 summary: "Start Codex on Mac mini in api: run the tests".into(),
             }],
             image: false,
+            streaming: false,
+            speech: None,
         };
         s.insert_chat(&m).unwrap();
         let plain = ChatMessage { id: gid("c2"), proposals: Vec::new(), ..m.clone() };
         s.insert_chat(&plain).unwrap();
-        assert_eq!(s.recent_chat(5).unwrap(), vec![m, plain], "proposals are kept with their message");
+        assert_eq!(s.recent_chat(5).unwrap(), vec![m.clone(), plain], "proposals are kept with their message");
+        // Assistant mode: a reply stored empty when its turn started gets its final text (or is stored then), and
+        // one a crash left empty reads "(Interrupted.)" after a restart.
+        let open = ChatMessage { id: gid("c3"), text: String::new(), proposals: Vec::new(), session_id: Some(gid("s9")), ..m.clone() };
+        s.insert_chat(&open).unwrap();
+        s.finish_chat(&ChatMessage { text: "Done: made todo-app.".into(), ..open.clone() }).unwrap();
+        let late = ChatMessage { id: gid("c4"), text: "Stored at the end".into(), ..open.clone() };
+        s.finish_chat(&late).unwrap();
+        let crashed = ChatMessage { id: gid("c5"), ..open.clone() };
+        s.insert_chat(&crashed).unwrap();
+        assert_eq!(s.interrupt_unfinished_replies().unwrap(), 1);
+        let texts: Vec<String> = s.recent_chat(3).unwrap().into_iter().map(|c| c.text).collect();
+        assert_eq!(texts, ["Done: made todo-app.", "Stored at the end", "(Interrupted.)"]);
 
         let _ = PermissionOutcome::Cancelled;
         s.set_setting("k", "v").unwrap();

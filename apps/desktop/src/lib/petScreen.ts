@@ -117,6 +117,8 @@ export interface SessionChip {
   lastEventAt: number;
   /** A browser task (the pet drives the user's Chrome). */
   browser: boolean;
+  /** The default pet's own agent session (Assistant mode): named after the pet. */
+  assistant: boolean;
 }
 
 /** At most this many session chips in the bubble's switcher; the rest go under "more". */
@@ -137,7 +139,7 @@ function chipOrder(a: SessionChip, b: SessionChip): number {
 export function switcherSessions(
   state: ScreenState,
   now: number,
-  opts: { focus?: string | null; max?: number } = {},
+  opts: { focus?: string | null; max?: number; petName?: string | undefined } = {},
 ): { chips: SessionChip[]; more: SessionChip[] } {
   const max = Math.max(1, opts.max ?? MAX_SWITCHER_CHIPS);
   const pendingBy = new Map<string, PermissionRequest[]>();
@@ -152,7 +154,9 @@ export function switcherSessions(
     .filter((s) => RUNNING.has(s.status) || s.status === "waiting_permission" || pendingBy.has(s.id) || now - s.lastEventAt < RECENT_SESSION_MS || s.id === opts.focus)
     .map((s): SessionChip => {
       const pet = petFor(Object.values(state.pets), s.machineId, s.agentId);
-      const name = pet?.name ?? agentName(state.agents, s.agentId, s.machineId);
+      // The assistant's session is the default pet itself at work: its name, not the agent's pet's.
+      const assistant = s.purpose === "assistant";
+      const name = (assistant ? opts.petName : undefined) ?? pet?.name ?? agentName(state.agents, s.agentId, s.machineId);
       const remote = !isLocal(state, s.machineId);
       const repo = repoName(s.cwd);
       const pending = (pendingBy.get(s.id) ?? []).sort((a, b) => a.createdAt - b.createdAt);
@@ -168,6 +172,7 @@ export function switcherSessions(
         remote,
         lastEventAt: s.lastEventAt,
         browser: s.purpose === "browser",
+        assistant,
       };
     })
     .sort(chipOrder);

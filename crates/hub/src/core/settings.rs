@@ -152,6 +152,7 @@ impl Hub {
             agent.card = card;
             agent.error = error;
         }
+        self.fill_assistant_view(&mut s.assistant);
         s
     }
 
@@ -195,6 +196,10 @@ impl Hub {
         let (next, changed) = cfgset::apply_patch(&cur, patch, &self.reserved_agent_ids())?;
         if changed.is_empty() {
             return Ok(self.settings_reply(Vec::new()));
+        }
+        if changed.contains(&cfgset::ASSISTANT_WORKSPACE) {
+            // The assistant's folder never overlaps Pawl's own data (hub.db, tokens, config.toml).
+            cfgset::check_workspace_apart(&next.assistant, &self.inner.paths.data_dir)?;
         }
         if changed.contains(&cfgset::BOT_PET_NAME) {
             let name = next.brain.pet_name.clone().unwrap_or_default();
@@ -332,6 +337,10 @@ impl Hub {
         if has(cfgset::BROWSER_ENABLED) && !next.browser.enabled {
             // Browser use turned off: running browser tasks end now.
             self.end_all_browser_sessions("browser use turned off").await;
+        }
+        if cfgset::ASSISTANT_KEYS.iter().any(|k| has(k)) || has(cfgset::BROWSER_ENABLED) {
+            // Assistant mode: a new agent, folder or tools end the live session (core/assistant.rs).
+            self.on_assistant_settings(next, changed).await;
         }
         if has(cfgset::WD_NUDGE) || has(cfgset::WD_REPEAT) {
             // New timings, same memory of what was already nudged (no repeat nudges).

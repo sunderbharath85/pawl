@@ -8,11 +8,11 @@
 // Settings > Voice's wake-word test borrows the engine for a moment: then nothing here reacts.
 import { useCallback, useEffect, useRef } from "react";
 import type { HubClient, HubState } from "@pawl/hub-client";
-import { approvalReadBack, isLocal, isLookRequest, lookQuestion, machineDisplayName } from "@pawl/hub-client";
+import { approvalReadBack, isAssistantReply, isLocal, isLookRequest, lookQuestion, machineDisplayName, stripApprovalWords } from "@pawl/hub-client";
 import { agentName, errorText } from "../lib/format";
 import { notifiesHere } from "../lib/where";
 import { setSpeechPause, speak, speechBusy, stopSpeaking } from "../lib/speech";
-import { canTalk, listenPhase, micMarker, syncKeyword, useVoice, voiceBackend, type HearingTrigger, type ListenPhase, type MicMarker, type VoiceEvent } from "../lib/voice";
+import { canTalk, listenPhase, micMarker, syncKeyword, useVoice, voiceBackend, type HearingTrigger, type ListenPhase, type MicMarker, type VoiceEvent, type VoiceState } from "../lib/voice";
 import { markVoiceSent, wakeTestRunning } from "../lib/voiceShared";
 
 export const DIDNT_CATCH = "I didn't catch that.";
@@ -92,6 +92,105 @@ export interface VoiceTalkInput {
   speech: { voiceURI: string; rate: number };
 }
 
+/**
+ * What to say for a reply: the brain's short spoken form (`speech`: an assistant reply to a spoken message, on its
+ * final update; no code, markdown or links) when there is one, else the text.
+ */
+export function spokenReply(m: { text: string; speech?: string | undefined }): string {
+  return m.speech?.trim() || m.text;
+}
+
+/**
+ * What the pet says for a reply. An assistant reply (`assistant`) loses the words approve / deny / allow and standalone
+ * 1-2 digit numbers first: its text may come from a web page or a file, and must never sound like an answer to a card.
+ */
+export function replySpeech(m: { text: string; speech?: string | undefined }, assistant: boolean): string {
+  const said = spokenReply(m);
+  return assistant ? stripApprovalWords(said) : said;
+}
+
+/**
+ * Read an assistant reply aloud only once the voice engine is paused (fail closed): the pause is asked for first, and
+ * if `voice_pause` fails the reply is not read (it stays in the chat) and `onFail` is told. If the user started talking
+ * meanwhile, or nothing was left to say, the engine is resumed and nothing is said. Resolves true when it was read.
+ */
+export async function speakWithEnginePaused(
+  say: () => void,
+  deps: { pause(on: boolean): Promise<void>; mayStart(): boolean; busy(): boolean; onFail(err: unknown): void },
+): Promise<boolean> {
+  try {
+    await deps.pause(true);
+  } catch (err) {
+    deps.onFail(err);
+    return false;
+  }
+  if (!deps.mayStart()) {
+    deps.pause(false).catch(() => {});
+    return false;
+  }
+  say();
+  // Speech resumes the engine itself after its quiet time; if nothing was said, resume it now.
+  if (!deps.busy()) {
+    deps.pause(false).catch(() => {});
+    return false;
+  }
+  return true;
+}
+
+/** A logger that writes only its first message (a failing voice_pause is reported once, not on every reply). */
+export function logOnce(log: (...args: unknown[]) => void): (...args: unknown[]) => void {
+  let done = false;
+  return (...args) => {
+    if (done) return;
+    done = true;
+    log(...args);
+  };
+}
+
+/**
+ * The pet only starts talking while the user is not: during an utterance (wake word or push-to-talk, hearing or
+ * transcribing) the microphone would record its voice into what the user says. The reply stays in the chat.
+ */
+export function mayTalkNow(state: VoiceState | undefined): boolean {
+  return state !== "hearing" && state !== "transcribing";
+}
+
+/** The default pet's replies this window knows: every id seen, and the ones still streaming. */
+export interface ReplyReader {
+  seen: ReadonlySet<string>;
+  streaming: ReadonlySet<string>;
+}
+
+/**
+ * The default pet's replies to read aloud now (ids, in chat order), and what to remember. Never the history there
+ * when the window opened (`reader` null). A new reply is read when it arrives finished; a streamed one (Assistant
+ * mode) once, when its `streaming` ends, even if a later reply ("I'm still on your last message") came meanwhile.
+ */
+export function repliesToRead(
+  replies: readonly { id: string; streaming?: boolean | undefined }[],
+  reader: ReplyReader | null,
+): { read: string[]; reader: ReplyReader } {
+  if (!reader) return { read: [], reader: { seen: new Set(replies.map((r) => r.id)), streaming: new Set() } };
+  const seen = new Set(reader.seen);
+  const streaming = new Set(reader.streaming);
+  const read: string[] = [];
+  for (const r of replies) {
+    if (!seen.has(r.id)) {
+      seen.add(r.id);
+      if (r.streaming) streaming.add(r.id);
+      else read.push(r.id);
+    } else if (streaming.has(r.id) && !r.streaming) {
+      streaming.delete(r.id);
+      read.push(r.id);
+    }
+  }
+  // Keep the memory small: ids of replies no longer in the chat are dropped.
+  const present = new Set(replies.map((r) => r.id));
+  for (const id of seen) if (!present.has(id)) seen.delete(id);
+  for (const id of streaming) if (!present.has(id)) streaming.delete(id);
+  return { read, reader: { seen, streaming } };
+}
+
 export function useVoiceTalk(input: VoiceTalkInput): VoiceTalk {
   const latest = useRef(input);
   latest.current = input;
@@ -127,6 +226,13 @@ export function useVoiceTalk(input: VoiceTalkInput): VoiceTalk {
   }, []);
   const voice = useVoice(onEvent);
   const config = voice.status?.config;
+  /** The user is talking right now (an utterance in progress): the pet must not start reading anything aloud. */
+  const userTalking = useRef(false);
+  userTalking.current = !mayTalkNow(voice.state);
+  /** The engine's pause (voice_pause): an assistant reply is read only after it worked. */
+  const engine = useRef(voice.api);
+  engine.current = voice.api;
+  const warnPause = useRef(logOnce((...args) => console.warn(...args)));
 
   // The wake word follows the pet's name.
   const { configure } = voice;
@@ -136,19 +242,36 @@ export function useVoiceTalk(input: VoiceTalkInput): VoiceTalk {
     if (next) configure({ keyword: next.keyword, spokenAs: next.spokenAs }).catch((err: unknown) => console.warn("[desktop] voice keyword sync failed", err));
   }, [config, input.hubName, configure]);
 
-  // Read new replies aloud (never the history that was there when the window opened).
-  const lastSeen = useRef<string | null | undefined>(undefined);
-  const lastPet = [...input.state.chat].reverse().find((m) => m.role === "pet" && !m.petId);
+  // Read new replies aloud (never the history that was there when the window opened; a streamed one once it is done).
+  const reader = useRef<ReplyReader | null>(null);
+  const chat = input.state.chat;
   useEffect(() => {
-    const id = lastPet?.id ?? null;
-    if (lastSeen.current === undefined) {
-      lastSeen.current = id;
+    const replies = chat.filter((m) => m.role === "pet" && !m.petId);
+    const next = repliesToRead(replies, reader.current);
+    reader.current = next.reader;
+    // Several at once (rare): the newest one.
+    const id = next.read[next.read.length - 1];
+    const reply = id ? replies.find((m) => m.id === id) : undefined;
+    if (!reply || !config?.enabled || !config.readReplies || userTalking.current) return;
+    const st = latest.current.state;
+    const assistant = isAssistantReply(reply, st);
+    const text = replySpeech(reply, assistant);
+    const opts = { ...latest.current.speech, codes: pendingCodes(st) };
+    if (!assistant) {
+      speak(text, opts);
       return;
     }
-    if (id === lastSeen.current) return;
-    lastSeen.current = id;
-    if (lastPet && config?.enabled && config.readReplies) speak(lastPet.text, { ...latest.current.speech, codes: pendingCodes(latest.current.state) });
-  }, [lastPet, config?.enabled, config?.readReplies]);
+    // An assistant reply (its words may come from a web page): read only once the microphone is paused. No engine to
+    // pause, or the pause failed: shown in the chat only.
+    const api = engine.current;
+    if (!api) return;
+    void speakWithEnginePaused(() => speak(text, opts), {
+      pause: (on) => api.pause(on),
+      mayStart: () => !userTalking.current,
+      busy: () => speechBusy(),
+      onFail: (err) => warnPause.current("[desktop] voice_pause failed: assistant replies are shown, not read aloud, until it works", err),
+    });
+  }, [chat, config?.enabled, config?.readReplies]);
 
   // A new approval, read back (voice on, "Read replies aloud" on, and this is where the user is): who wants what,
   // where, and what to say ("Say approve 4 7, or deny."). Talking stops it (see onEvent).
@@ -162,7 +285,7 @@ export function useVoiceTalk(input: VoiceTalkInput): VoiceTalk {
     if (!before || !config?.enabled || !config.readReplies) return;
     const fresh = list.filter((p) => !before.has(p.requestId)).sort((a, b) => a.createdAt - b.createdAt)[0];
     const st = latest.current.state;
-    if (!fresh || !notifiesHere(st)) return;
+    if (!fresh || !notifiesHere(st) || userTalking.current) return;
     speak(
       approvalReadBack(fresh, {
         agentName: agentName(st.agents, fresh.agentId, fresh.machineId),
@@ -178,13 +301,14 @@ export function useVoiceTalk(input: VoiceTalkInput): VoiceTalk {
     if (!input.bubbleOpen) stopSpeaking();
   }, [input.bubbleOpen]);
 
-  // While the pet speaks (and 500 ms after), the engine is paused so its own voice can't wake it (lib/speech.ts).
+  // While the pet speaks (and about a second after), the engine is paused so its own voice can't wake it or be heard
+  // as an answer (lib/speech.ts).
   const api = voice.api;
   const voiceOn = !!voice.available && !!config?.enabled;
   useEffect(() => {
     if (!api || !voiceOn) return;
     setSpeechPause((on) => {
-      api.pause(on).catch((err: unknown) => console.warn("[desktop] voice_pause failed", err));
+      api.pause(on).catch((err: unknown) => warnPause.current("[desktop] voice_pause failed", err));
     });
     return () => setSpeechPause(null);
   }, [api, voiceOn]);

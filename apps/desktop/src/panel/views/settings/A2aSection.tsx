@@ -18,6 +18,8 @@ import {
   a2aConnectRemoveConfirm,
   a2aConnectServerProblem,
   callerConnectTarget,
+  ASSISTANT_CALLER_HINT,
+  isAssistantCaller,
   connectCallerHint,
   connectFacts,
   hubLacksMessage,
@@ -473,6 +475,20 @@ function CallersPart({ a2a, live, connect }: { a2a: A2aSettings; live: boolean; 
       ) : (
         <ul className="a2a-list">
           {a2a.callers.map((c) => {
+            // The assistant's own caller (Assistant mode): made and kept by the hub, shown read-only.
+            if (isAssistantCaller(c)) {
+              return (
+                <li key={c.id} className="a2a-item is-connect is-assistant">
+                  <div className="a2a-item-head">
+                    <span className="a2a-item-title">
+                      <strong>{c.name}</strong> <span className="mono muted">{c.id}</span>
+                    </span>
+                    <span className="chip">Used by the assistant</span>
+                  </div>
+                  <p className="hint a2a-connect-note">{ASSISTANT_CALLER_HINT}</p>
+                </li>
+              );
+            }
             // A caller Connect made for a coding agent: never answers approvals; its token lives in the agent's config,
             // so it is renewed with Connect's Update and removed with the entry (Connect's Remove).
             const target = callerConnectTarget(c);

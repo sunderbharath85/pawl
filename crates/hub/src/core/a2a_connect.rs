@@ -43,7 +43,7 @@ fn name_of(t: McpTarget) -> HookTargetName {
 }
 
 /// The URL `pawl mcp` calls: the A2A server only ever listens on 127.0.0.1.
-fn a2a_url(cfg: &HubConfig) -> String {
+pub(super) fn a2a_url(cfg: &HubConfig) -> String {
     format!("http://127.0.0.1:{}", cfg.a2a.port)
 }
 
@@ -53,7 +53,7 @@ fn caller(cfg: &HubConfig, t: McpTarget) -> Option<&A2aCaller> {
 
 /// The caller Connect made (or took over) for this agent; a hand-made one with the same id is not.
 fn marked_caller(cfg: &HubConfig, t: McpTarget) -> Option<&A2aCaller> {
-    caller(cfg, t).filter(|c| c.connect_target == Some(name_of(t)))
+    caller(cfg, t).filter(|c| c.connect_target == Some(name_of(t).into()))
 }
 
 /// What the agent's entry should hold now (None: its caller has no token, so no entry is current).
@@ -146,7 +146,7 @@ fn notes(t: McpTarget) -> String {
 
 /// Record on the agent's caller in `cfg` that Connect added the servers object itself.
 fn set_added_servers(cfg: &mut HubConfig, t: McpTarget, changed: &mut Vec<&'static str>) {
-    if let Some(c) = cfg.a2a.callers.iter_mut().find(|c| c.id == t.caller_id() && c.connect_target == Some(name_of(t))) {
+    if let Some(c) = cfg.a2a.callers.iter_mut().find(|c| c.id == t.caller_id() && c.connect_target == Some(name_of(t).into())) {
         if !c.connect_added_servers {
             c.connect_added_servers = true;
             if !changed.contains(&cfgset::A2A_CALLERS) {
@@ -288,9 +288,9 @@ impl Hub {
         match next.a2a.callers.iter_mut().find(|c| c.id == t.caller_id()) {
             Some(c) => {
                 // Marked for this agent: approvals off for good.
-                if c.allow_approvals || c.connect_target != Some(name_of(t)) {
+                if c.allow_approvals || c.connect_target != Some(name_of(t).into()) {
                     c.allow_approvals = false;
-                    c.connect_target = Some(name_of(t));
+                    c.connect_target = Some(name_of(t).into());
                     changed.push(cfgset::A2A_CALLERS);
                 }
                 if ch.new_token {
@@ -307,7 +307,7 @@ impl Hub {
                     name: t.name().into(),
                     token: Some(token.clone()),
                     allow_approvals: false,
-                    connect_target: Some(name_of(t)),
+                    connect_target: Some(name_of(t).into()),
                     connect_added_servers: false,
                 });
                 changed.extend([cfgset::A2A_CALLERS, cfgset::A2A_TOKENS]);

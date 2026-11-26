@@ -5,7 +5,7 @@ import type { SessionChip } from "../lib/petScreen";
 import { SessionSwitcher } from "./Bubble";
 
 function chip(id: string, over: Partial<SessionChip> = {}): SessionChip {
-  return { sessionId: id, machineId: "m", name: "Rex", repo: id, label: `Rex · ${id}`, needsYou: false, pending: [], running: true, remote: false, lastEventAt: 0, browser: false, ...over };
+  return { sessionId: id, machineId: "m", name: "Rex", repo: id, label: `Rex · ${id}`, needsYou: false, pending: [], running: true, remote: false, lastEventAt: 0, browser: false, assistant: false, ...over };
 }
 
 describe("the bubble's session switcher", () => {
@@ -37,5 +37,20 @@ describe("the bubble's session switcher", () => {
     const html = renderToStaticMarkup(createElement(SessionSwitcher, { switcher: { chips: [chip("web", { browser: true })], more: [] }, focus: null, onFocus: () => {} }));
     expect(html).toContain('<span class="pb-switch-browser">Browser</span>');
     expect(html).toContain('title="Browser task: Rex · web');
+  });
+});
+
+describe("the switcher's tags", () => {
+  test("the assistant's session (Assistant mode) carries an Assistant tag, a browser task a Browser tag", () => {
+    const html = renderToStaticMarkup(
+      createElement(SessionSwitcher, {
+        switcher: { chips: [chip("Pawl", { name: "Ollie", label: "Ollie · Pawl", assistant: true }), chip("web", { browser: true })], more: [] },
+        focus: null,
+        onFocus: () => {},
+      }),
+    );
+    expect(html).toContain('title="Assistant: Ollie · Pawl (working)"');
+    expect(html).toContain('class="pb-switch-browser pb-switch-assistant">Assistant<');
+    expect(html).toContain('class="pb-switch-browser">Browser<');
   });
 });

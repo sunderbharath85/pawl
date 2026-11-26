@@ -41,6 +41,11 @@ impl Host {
             #[cfg(test)]
             Host::Fake(f) => {
                 f.options.lock().unwrap().push(opts);
+                // Tests: a slow start (a settings change can land meanwhile).
+                let delay = f.start_delay_ms.load(std::sync::atomic::Ordering::SeqCst);
+                if delay > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                }
                 f.start_session(agent, cwd, id, prompt)
             }
         }
@@ -145,7 +150,14 @@ impl Host {
         match self {
             Host::Acp(h) => h.close_session(id).await,
             #[cfg(test)]
-            Host::Fake(f) => f.record(format!("close {id}")),
+            Host::Fake(f) => {
+                f.record(format!("close {id}"))?;
+                // Tests: the agent does not let go of the session.
+                if f.close_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                    anyhow::bail!("the agent did not close the session");
+                }
+                Ok(())
+            }
         }
     }
 
@@ -180,6 +192,10 @@ pub(crate) mod fake {
         pub image_bytes: Arc<Mutex<Vec<usize>>>,
         /// (session, uid) -> element description, as the latest snapshot would give it.
         pub elements: Arc<Mutex<std::collections::HashMap<(String, String), String>>>,
+        /// `start_session_with` waits this long first (tests of what happens meanwhile).
+        pub start_delay_ms: Arc<std::sync::atomic::AtomicU64>,
+        /// `close_session` fails (tests).
+        pub close_fails: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl FakeHost {

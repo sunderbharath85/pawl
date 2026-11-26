@@ -30,13 +30,28 @@ function phaseAfter(sentAt: number | undefined, replyAt: number | undefined, now
 
 /**
  * The default pet's chat: the latest message the person sent from this bubble (`sentIds`), and the bot's first reply
- * after it (messages in order).
+ * after it (messages in order). Assistant mode streams the reply into one message: the pet keeps thinking while it is
+ * `streaming` (up to SESSION_WAIT_MAX_MS, an agent can work a while) and reacts when it is finished (`doneAt`: when
+ * this window saw it finish; else the message's own time).
  */
 export function chatPhase(
-  messages: readonly { id: string; role: "user" | "pet"; ts: number }[],
+  messages: readonly { id: string; role: "user" | "pet"; ts: number; streaming?: boolean | undefined }[],
   sentIds: ReadonlySet<string>,
   now: number,
+  doneAt?: ReadonlyMap<string, number>,
 ): ChatPhase {
+  // A reply still streaming for a message sent from here keeps the pet thinking, even when a later message got a quick
+  // answer meanwhile (Assistant mode: "I'm still on your last message").
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== "pet" || !m.streaming) continue;
+    const asked = messages
+      .slice(0, i)
+      .reverse()
+      .find((u) => u.role === "user" && sentIds.has(u.id));
+    if (asked && now - asked.ts < SESSION_WAIT_MAX_MS) return "waiting";
+    break;
+  }
   let sent = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i]!.role === "user" && sentIds.has(messages[i]!.id)) {
@@ -46,7 +61,8 @@ export function chatPhase(
   }
   if (sent < 0) return "idle";
   const reply = messages.slice(sent + 1).find((m) => m.role === "pet");
-  return phaseAfter(messages[sent]!.ts, reply?.ts, now, CHAT_WAIT_MAX_MS);
+  if (reply?.streaming) return phaseAfter(messages[sent]!.ts, undefined, now, SESSION_WAIT_MAX_MS);
+  return phaseAfter(messages[sent]!.ts, reply ? (doneAt?.get(reply.id) ?? reply.ts) : undefined, now, CHAT_WAIT_MAX_MS);
 }
 
 /** What counts as a session's answer to a prompt: its first words, the end of the turn, or an error. */

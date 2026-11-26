@@ -19,7 +19,7 @@ struct Fx {
 async fn hub_in(dir: &Path, mid: &str, name: &str, edit: impl FnOnce(&mut HubConfig)) -> Hub {
     let paths = Paths::in_dir(dir);
     let store = Store::open(&paths.db, mid).unwrap();
-    let mut config = HubConfig { offline: true, ..Default::default() };
+    let mut config = HubConfig { offline: true, assistant: crate::config::AssistantSection::off(), ..Default::default() };
     edit(&mut config);
     let hub = Hub::build(
         HubOptions { paths, config, token: "t".repeat(64), machine: MachineIdentity { id: mid.into(), name: name.into() }, background: false },

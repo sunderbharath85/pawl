@@ -271,6 +271,10 @@ export function reduceServerMsg(state: HubState, msg: ServerMsg, limits: StateLi
       return { ...state, pets: { ...state.pets, [msg.pet.id]: msg.pet } };
     case "chat":
       return { ...state, chat: upsertChat(state.chat, msg.message, limits.chatCap) };
+    case "chat_update":
+      // Assistant mode: the reply with this id has new text (streaming); it replaces the message in place (or adds it
+      // when its `chat` was missed, e.g. across a reconnect).
+      return { ...state, chat: upsertChat(state.chat, msg.message, limits.chatCap) };
     case "notification":
       return { ...state, notifications: upsertById(state.notifications, msg.notification, limits.notificationCap) };
     case "machine":

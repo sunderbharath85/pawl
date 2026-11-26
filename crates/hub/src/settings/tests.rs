@@ -366,6 +366,7 @@ fn patches_build_from_typed_sections_too() {
         custom_agents: None,
         a2a: None,
         browser: None,
+        assistant: None,
     };
     let (next, changed) = apply_patch(&HubConfig::default(), &p, &reserved()).unwrap();
     assert!(next.offline && !next.peer.accept_intents);
@@ -532,4 +533,127 @@ fn browser_use_is_off_by_default_and_stores_sites_as_origins() {
     let many: Vec<String> = (0..=MAX_ALLOW_SITES).map(|i| format!("s{i}.example.com")).collect();
     assert_eq!(err_of(&cur, json!({ "browser": { "allowSites": many } })).field, BROWSER_SITES);
     assert!(HubConfig::parse("[browser]\nenabled = \"yes\"\n").is_err());
+}
+
+#[test]
+fn assistant_settings_are_validated_written_and_read_back() {
+    let cur = HubConfig::default();
+    // On by default: auto agent, ~/Pawl, both tool sets.
+    let view = to_settings(&cur, &Overrides::default());
+    assert!(view.assistant.enabled && view.assistant.sessions && view.assistant.browser);
+    assert_eq!(view.assistant.agent, "auto");
+    if let Some(home) = crate::config::home_dir() {
+        assert_eq!(view.assistant.workspace, home.join("Pawl").to_string_lossy(), "the default folder, expanded");
+    }
+    let (next, changed) = apply_patch(
+        &cur,
+        &patch(json!({ "assistant": { "enabled": false, "agent": " codex ", "sessions": false, "browser": false } })),
+        &reserved(),
+    )
+    .unwrap();
+    assert_eq!(changed, [ASSISTANT_ENABLED, ASSISTANT_AGENT, ASSISTANT_SESSIONS, ASSISTANT_BROWSER]);
+    assert_eq!(next.assistant.agent, "codex");
+    let text = edit_config(Some("[assistant]\nenabled = true # keep me\n"), &next, &changed).unwrap();
+    assert!(text.contains("# keep me") && text.contains("agent = \"codex\""), "{text}");
+    let back = HubConfig::parse(&text).unwrap();
+    assert_eq!(back.assistant, next.assistant);
+    assert!(masked_lines(&to_settings(&next, &Overrides::default()), &[]).iter().any(|l| l.starts_with("agent") && l.contains("codex")));
+    // Agents: "auto", or one this hub knows; never an outside A2A agent.
+    assert_eq!(apply_patch(&cur, &patch(json!({ "assistant": { "agent": "" } })), &reserved()).unwrap().0.assistant.agent, "auto");
+    for bad in ["a2a:helper", "nope", "Claude Code"] {
+        assert_eq!(err_of(&cur, json!({ "assistant": { "agent": bad } })).field, ASSISTANT_AGENT, "{bad}");
+    }
+    // Workspaces: absolute or "~/..."; "" is the default (the key is removed).
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("Assistant");
+    let (next, changed) = apply_patch(&cur, &patch(json!({ "assistant": { "workspace": ws.to_string_lossy() } })), &reserved()).unwrap();
+    assert_eq!(changed, [ASSISTANT_WORKSPACE]);
+    assert_eq!(next.assistant.workspace_path().unwrap(), ws, "a folder that does not exist yet is fine");
+    let text = edit_config(None, &next, &changed).unwrap();
+    assert_eq!(HubConfig::parse(&text).unwrap().assistant.workspace, next.assistant.workspace);
+    let (reset, changed) = apply_patch(&next, &patch(json!({ "assistant": { "workspace": "" } })), &reserved()).unwrap();
+    assert_eq!((reset.assistant.workspace.as_str(), changed), ("", vec![ASSISTANT_WORKSPACE]));
+    let reset_text = edit_config(Some(&text), &reset, &[ASSISTANT_WORKSPACE]).unwrap();
+    assert!(!reset_text.lines().any(|l| l.trim_start().starts_with("workspace")), "reset = the key is gone: {reset_text}");
+    assert_eq!(HubConfig::parse(&reset_text).unwrap().assistant.workspace, "");
+    if let Some(home) = crate::config::home_dir() {
+        let (n, _) = apply_patch(&cur, &patch(json!({ "assistant": { "workspace": "~/PawlJobs" } })), &reserved()).unwrap();
+        assert_eq!(PathBuf::from(&n.assistant.workspace), home.join("PawlJobs"), "stored with ~ expanded");
+        assert!(err_of(&cur, json!({ "assistant": { "workspace": "~" } })).reason.contains("whole home folder"));
+    }
+    let file = dir.path().join("f.txt");
+    std::fs::write(&file, "x").unwrap();
+    let system = if cfg!(windows) { r"C:\Windows\Pawl" } else { "/usr/local/pawl" };
+    for (bad, why) in [
+        ("relative/pawl", "absolute"),
+        ("~bob/pawl", "another user's"),
+        (system, "system folder"),
+        (file.to_str().unwrap(), "is a file"),
+        (if cfg!(windows) { "C:\\" } else { "/" }, "whole drive"),
+    ] {
+        let e = err_of(&cur, json!({ "assistant": { "workspace": bad } }));
+        assert_eq!(e.field, ASSISTANT_WORKSPACE, "{bad}");
+        assert!(e.reason.contains(why), "{bad}: {}", e.reason);
+    }
+    #[cfg(windows)]
+    assert!(err_of(&cur, json!({ "assistant": { "workspace": r"\\server\share\pawl" } })).reason.contains("Use a folder on this computer"));
+    // Never overlapping Pawl's data folder, either way round.
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let section = |w: &std::path::Path| AssistantSection { workspace: w.to_string_lossy().into_owned(), ..AssistantSection::default() };
+    assert!(check_workspace_apart(&section(&data.join("ws")), &data).is_err(), "inside the data folder");
+    assert!(check_workspace_apart(&section(dir.path()), &data).is_err(), "holding the data folder");
+    assert!(check_workspace_apart(&section(&dir.path().join("ws")), &data).is_ok());
+}
+
+#[test]
+fn workspace_checks_run_on_where_the_folder_really_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let real_root = std::fs::canonicalize(dir.path()).map(|c| crate::repos::plain_path(&c).unwrap()).unwrap();
+    // Parts that do not exist yet are appended to the resolved deepest existing folder.
+    let deep = dir.path().join("a").join("b");
+    assert_eq!(resolve_folder(&deep).unwrap(), real_root.join("a").join("b"));
+    // A link that leads nowhere cannot be resolved: refused, not judged by its name.
+    let dangling = dir.path().join("dangling");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(dir.path().join("gone"), &dangling).is_ok();
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_dir(dir.path().join("gone"), &dangling).is_ok();
+    if linked {
+        assert!(resolve_folder(&dangling.join("ws")).is_err());
+        let e = apply_patch(&HubConfig::default(), &patch(json!({ "assistant": { "workspace": dangling.to_string_lossy() } })), &reserved()).unwrap_err();
+        assert!(e.reason.contains("cannot be resolved"), "{e}");
+        // A link into the data folder overlaps it.
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let into = dir.path().join("into-data");
+        #[cfg(unix)]
+        let ok = std::os::unix::fs::symlink(&data, &into).is_ok();
+        #[cfg(windows)]
+        let ok = std::os::windows::fs::symlink_dir(&data, &into).is_ok();
+        if ok {
+            let a = AssistantSection { workspace: into.join("ws").to_string_lossy().into_owned(), ..AssistantSection::default() };
+            assert!(check_workspace_apart(&a, &data).unwrap_err().reason.contains("overlaps"));
+        }
+    }
+    // Resolved paths are compared: the home folder by another spelling is still the home folder.
+    if let Some(home) = crate::config::home_dir() {
+        let real = resolve_folder(&home).unwrap();
+        assert!(workspace_place_problem(&real, Some(&home), None).unwrap().contains("whole home folder"));
+    }
+}
+
+#[test]
+fn turning_the_assistant_on_with_its_tools_turns_the_a2a_server_on_at_once() {
+    let mut off = HubConfig::default();
+    off.assistant.enabled = false;
+    let (next, changed) = apply_patch(&off, &patch(json!({ "assistant": { "enabled": true } })), &reserved()).unwrap();
+    assert!(next.a2a.server);
+    assert_eq!(changed, [A2A_SERVER, ASSISTANT_ENABLED]);
+    // Without Pawl's tools, or with nothing turned on, the server stays as it is.
+    off.assistant.sessions = false;
+    let (next, _) = apply_patch(&off, &patch(json!({ "assistant": { "enabled": true } })), &reserved()).unwrap();
+    assert!(!next.a2a.server);
+    let (next, _) = apply_patch(&HubConfig::default(), &patch(json!({ "assistant": { "agent": "codex" } })), &reserved()).unwrap();
+    assert!(!next.a2a.server);
 }

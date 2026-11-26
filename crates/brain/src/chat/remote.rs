@@ -375,6 +375,7 @@ fn plan_on(ctx: &BrainContext, repos: &RepoIndex, cmd: &CommandIntent, m: &str, 
                         s.machine_id == m
                             && s.agent_id == agent_id
                             && s.source == SessionSource::Owned
+                            && s.purpose.is_none()
                             && s.ended_at.is_none()
                             && matches!(s.status, SessionStatus::Idle | SessionStatus::Done)
                             && path_key(&s.cwd) == key

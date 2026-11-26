@@ -1,11 +1,12 @@
 import type { PermissionOption, PermissionRequest } from "@pawl/protocol";
 import { TOOL_KIND_ICON, agentName, permissionSummary, sessionTitle, shortPath, timeAgo } from "../../lib/format";
-import { petFor, requestCommandText } from "@pawl/hub-client";
+import { assistantAsker, assistantStartCard, isAssistantRequest, petFor, requestCommandText } from "@pawl/hub-client";
 import { usePanel } from "../context";
 import { PetAvatar } from "../PetAvatar";
 import { useVoiceEnabled } from "../../lib/voice";
 import { VoiceCodeChip } from "../../lib/VoiceCodeChip";
 import { usePermissionAnswer } from "../usePermissionAnswer";
+import { useDefaultPet } from "../useDefaultPet";
 
 const OPTION_CLASS: Record<PermissionOption["kind"], string> = {
   allow_once: "pill pill-good",
@@ -26,7 +27,11 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
   const voiceOn = useVoiceEnabled();
   const { options, remote, machineName, offline, busy, confirm, problem, answered, resolve } = answer;
   const pet = petFor(Object.values(state.pets), req.machineId, req.agentId);
+  const defaultPet = useDefaultPet();
   const session = state.sessions[req.sessionId];
+  // The assistant's own session (Assistant mode): the default pet itself is asking (a start card carries the prompt).
+  const asking = isAssistantRequest(req, state.sessions);
+  const start = assistantStartCard(req);
   const kind = req.toolCall.kind ?? "other";
   const machine = state.machines[req.machineId];
 
@@ -39,11 +44,20 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
       className={`perm-card${compact ? " is-compact" : ""}${highlight ? " is-highlight" : ""}${remote ? " is-remote" : ""}${offline ? " is-offline" : ""}`}
     >
       <div className="perm-head">
-        <PetAvatar species={pet?.species ?? "dog"} activity="alert" size={compact ? 40 : 56} />
+        <PetAvatar species={asking ? defaultPet.species : (pet?.species ?? "dog")} activity="alert" size={compact ? 40 : 56} />
         <div className="perm-title">
           <div className="perm-who">
-            <strong>{pet?.name ?? "Your pet"}</strong> fetched a request from{" "}
-            <strong>{agentName(state.agents, req.agentId, req.machineId)}</strong>
+            {asking ? (
+              <>
+                <strong>{assistantAsker(defaultPet.name)}</strong> asks, working with{" "}
+                <strong>{agentName(state.agents, req.agentId, req.machineId)}</strong>
+              </>
+            ) : (
+              <>
+                <strong>{pet?.name ?? "Your pet"}</strong> fetched a request from{" "}
+                <strong>{agentName(state.agents, req.agentId, req.machineId)}</strong>
+              </>
+            )}
             {remote && (
               <>
                 {" "}
@@ -57,7 +71,7 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
             <span className={`kind-chip kind-${kind}`}>
               {TOOL_KIND_ICON[kind]} {kind.replace("_", " ")}
             </span>
-            <span className="perm-summary">{permissionSummary(req)}</span>
+            <span className="perm-summary">{start ? `${start.title}?` : permissionSummary(req)}</span>
           </div>
           {session && !compact && (
             <button className="link" onClick={() => navigate({ view: "session", sessionId: session.id })}>
@@ -77,8 +91,23 @@ export function PermissionCard({ req, compact = false, highlight = false }: Prop
           ))}
         </ul>
       )}
-      {/* Never cut: all of what would run (the block scrolls). */}
-      {!compact && rawText && <pre className="perm-raw">{rawText}</pre>}
+      {/* Never cut: all of what would run (the block scrolls). A start card shows its whole prompt, even compact. */}
+      {start ? (
+        <div className="perm-prompt-wrap">
+          {start.prompt ? (
+            <>
+              <div className="perm-prompt-label">With this prompt (all of it):</div>
+              <div className="perm-prompt" tabIndex={0} role="region" aria-label="The prompt it would send">
+                {start.prompt}
+              </div>
+            </>
+          ) : (
+            <div className="perm-prompt-label">With no prompt: the session starts and waits.</div>
+          )}
+        </div>
+      ) : (
+        !compact && rawText && <pre className="perm-raw">{rawText}</pre>
+      )}
       {voiceOn && req.voiceCode ? <VoiceCodeChip code={req.voiceCode} /> : null}
       {!compact && renderButtons()}
     </article>

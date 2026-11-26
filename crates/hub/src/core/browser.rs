@@ -99,17 +99,56 @@ pub(crate) fn denied_tools() -> Vec<String> {
     built_in_tools().map(str::to_string).chain([mcp_tool(EVALUATE_SCRIPT), "mcp__acp".into(), "mcp__acp__*".into()]).collect()
 }
 
-/// The Chrome DevTools MCP server (stdio, through npx; `cmd /c npx` on Windows, as Claude Code needs there).
-pub(crate) fn mcp_server() -> Value {
+/// The server's environment (no usage statistics, no update checks).
+pub(crate) const MCP_ENV: &[(&str, &str)] = &[("CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS", "1"), ("CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS", "1")];
+
+/// npx's arguments: the pinned package, [`MCP_ARGS`] and one `--blockedUrlPattern=` per blocked page.
+pub(crate) fn npx_args() -> Vec<String> {
     let mut args: Vec<String> = vec!["-y".into(), MCP_PACKAGE.into()];
     args.extend(MCP_ARGS.iter().map(|a| (*a).to_string()));
     args.extend(BLOCKED_URL_PATTERNS.iter().map(|p| format!("--blockedUrlPattern={p}")));
-    let (command, args) = if cfg!(windows) { ("cmd", [vec!["/c".to_string(), "npx".to_string()], args].concat()) } else { ("npx", args) };
+    args
+}
+
+/// The command and arguments that start the server: npx, or `cmd /c npx` on Windows (as Claude
+/// Code needs there). `cmd` / `npx` are bare names here; [`mcp_stdio`] resolves them.
+fn mcp_command() -> (&'static str, Vec<String>) {
+    if cfg!(windows) {
+        ("cmd", [vec!["/c".to_string(), "npx".to_string()], npx_args()].concat())
+    } else {
+        ("npx", npx_args())
+    }
+}
+
+/// The Chrome DevTools MCP server (stdio, through npx; `cmd /c npx` on Windows, as Claude Code needs there).
+pub(crate) fn mcp_server() -> Value {
+    let (command, args) = mcp_command();
+    let env: Map<String, Value> = MCP_ENV.iter().map(|(k, v)| ((*k).to_string(), json!(v))).collect();
     json!({
         "type": "stdio",
         "command": command,
         "args": args,
-        "env": { "CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS": "1", "CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS": "1" },
+        "env": env,
+    })
+}
+
+/// The same server as a session's ACP `mcpServers` entry, whose command must be an absolute path:
+/// `cmd` from `%ComSpec%` (or the PATH) on Windows, `npx` from the PATH elsewhere. `None` when npx is
+/// not found (Node.js not installed). Reads the PATH: call it off the async runtime.
+pub(crate) fn mcp_stdio() -> Option<pawl_acp::McpServerStdio> {
+    let (command, args) = mcp_command();
+    let host = pawl_discovery::detect::HostEnv::from_system();
+    let exe = if cfg!(windows) {
+        host.which("npx")?;
+        std::env::var_os("ComSpec").map(PathBuf::from).filter(|p| p.is_absolute() && p.is_file()).or_else(|| host.which(command))?
+    } else {
+        host.which(command)?
+    };
+    Some(pawl_acp::McpServerStdio {
+        name: MCP_SERVER.into(),
+        command: exe,
+        args,
+        env: MCP_ENV.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect(),
     })
 }
 
@@ -166,11 +205,42 @@ pub(crate) fn in_browser_dir(data_dir: &Path, cwd: &str) -> bool {
 }
 
 /// The Chrome DevTools tool a request is for (`navigate_page`), from the adapter's title
-/// (`chrome-devtools: navigate_page`) or the raw tool name (`mcp__chrome-devtools__navigate_page`).
+/// (claude-agent-acp: `chrome-devtools: navigate_page`; codex-acp: `mcp.chrome-devtools.navigate_page`)
+/// or the raw tool name (`mcp__chrome-devtools__navigate_page`).
 pub(crate) fn tool_of(req: &PermissionRequest) -> Option<String> {
     let title = req.tool_call.title.as_deref()?.trim();
-    let tool = title.strip_prefix(&format!("{MCP_SERVER}: ")).or_else(|| title.strip_prefix(&format!("mcp__{MCP_SERVER}__")))?;
+    let tool = title
+        .strip_prefix(&format!("{MCP_SERVER}: "))
+        .or_else(|| title.strip_prefix(&format!("mcp__{MCP_SERVER}__")))
+        .or_else(|| title.strip_prefix(&format!("mcp.{MCP_SERVER}.")))?;
     (!tool.is_empty() && tool.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')).then(|| tool.to_string())
+}
+
+/// The step's own input: the request's raw input or, where the adapter wraps it as
+/// `{server: "chrome-devtools", tool, arguments}` (codex-acp), its `arguments`.
+fn step_input(req: &PermissionRequest) -> Option<&Value> {
+    let raw = req.tool_call.raw_input.as_ref()?;
+    match raw.get("arguments") {
+        Some(args) if raw.get("server").and_then(Value::as_str) == Some(MCP_SERVER) && raw.get("tool").is_some() => Some(args),
+        _ => Some(raw),
+    }
+}
+
+/// Does a request name the Chrome DevTools server anywhere the hub can see: a tool [`tool_of`] reads,
+/// a title that mentions it (any case; `-`, `_` or a space), or a `server` field of its input? In the
+/// assistant session such a request goes through [`classify`], which refuses one whose tool it cannot
+/// read.
+pub(crate) fn names_browser(req: &PermissionRequest) -> bool {
+    let norm = |s: &str| s.to_lowercase().replace(['_', ' '], "-");
+    let title = req.tool_call.title.as_deref().map(norm).unwrap_or_default();
+    let server = req
+        .tool_call
+        .raw_input
+        .as_ref()
+        .and_then(|v| ["server", "serverName", "server_name"].iter().find_map(|k| v.get(*k).and_then(Value::as_str)))
+        .map(norm)
+        .unwrap_or_default();
+    tool_of(req).is_some() || title.contains(MCP_SERVER) || server == MCP_SERVER
 }
 
 /// What the hub does with one browser step.
@@ -271,7 +341,7 @@ pub(crate) fn classify(req: &PermissionRequest, allow: &[Origin], describe: &dyn
         return deny(format!("Browser: {tool} is not on the browser tool list (refused)"), "tool not allowed");
     }
     let empty = Map::new();
-    let input = match &req.tool_call.raw_input {
+    let input = match step_input(req) {
         None | Some(Value::Null) => &empty,
         Some(Value::Object(m)) => m,
         Some(_) => return deny(format!("Browser: {tool} with an input that is not an object (refused)"), "bad input"),
@@ -376,6 +446,12 @@ impl Hub {
         self.session(session_id).is_some_and(|s| s.purpose.as_deref() == Some(PURPOSE))
     }
 
+    /// The browser rules ([`Self::browser_verdict`]) decide this request: any step of a browser task,
+    /// and a Chrome DevTools step ([`names_browser`]) of the assistant session.
+    pub(crate) fn browser_rules_apply(&self, req: &PermissionRequest) -> bool {
+        self.is_browser_session(&req.session_id) || (names_browser(req) && self.is_assistant_session(&req.session_id))
+    }
+
     /// This machine's browser tasks that have not ended.
     pub(crate) fn live_browser_sessions(&self) -> Vec<Session> {
         self.st()
@@ -422,7 +498,7 @@ impl Hub {
         let id = global_id(&self.inner.machine_id, local);
         let dir = self.prepare_browser_dir(&local.to_string())?;
         self.ensure_pet(&agent.id).await;
-        let opts = pawl_acp::StartOptions { meta: Some(browser_meta()), clean_env: true };
+        let opts = pawl_acp::StartOptions { meta: Some(browser_meta()), clean_env: true, ..Default::default() };
         let mut started = match self.inner.host.start_session_with(&agent, dir.clone(), id.clone(), None, opts).await {
             Ok(s) => s,
             Err(e) => {

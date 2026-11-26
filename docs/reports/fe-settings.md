@@ -389,3 +389,245 @@ Branch `step-7-phone`. Nothing committed. The only new dependency is the approve
   - desktop: 3 tsc configs ok, 47 tests pass, vite build ok.
   - vscode: tsc ok, 23 tests pass, build ok.
   - mobile: tsc ok.
+
+
+## v0.2 Assistant mode: the pet does the work (branch `feat/assistant`)
+
+Worktree `ai-pet-voice`, branch `feat/assistant` (from main c74a3f5). Nothing committed. Built against the contract
+"v0.2 Assistant mode" and t26's protocol types (`HubSettingsAssistant`, `assistant_reset`, `chat_update`,
+`ChatMessage.streaming`, `Session.purpose: "assistant"`). t2g's `open_folder` app command is used for Open folder.
+The hub here may not run Assistant mode yet: the e2e tests and screenshots fake it on the page's socket.
+
+### hub-client
+
+- **`assistant.ts` (new)**, pure:
+  - `assistantOf(settings)` (null for an older hub), `isAssistantSession`, `isStreaming`.
+  - Agents: `assistantAgents` = this machine's installed, non-A2A agents. `assistantAgentChoices` gives "Automatic
+    (<what auto picked>)", then the installed agents; a chosen agent that isn't installed stays, marked "(not
+    installed)". `assistantAgentProblem` and `assistantAgentName` also live here.
+  - Texts:
+    - `assistantIntro`: "Ollie does the work with <agent> in <workspace>. Changes, commands, web use and new sessions
+      ask you first, by your approval rules." (`ASSISTANT_ASKS`; see the review follow-ups below)
+    - `assistantWorkingLine`: "Working with Claude Code in ~/Pawl".
+    - `assistantStatus`: Off / Ready / Working / "Can't start" with the hub's error as-is.
+  - Paths: `tildePath` (case-insensitive on Windows), `defaultAssistantWorkspace`, `isDefaultWorkspace`.
+    `assistantPatch` sends only the changed keys; workspace "" resets to the hub's default (confirmed by t26).
+  - `assistantRiskyChanges`, wired into `riskyChanges`. Each of these confirms first:
+    - turning the assistant on: what it does, that it may read files in its workspace without asking, what asks
+      first, that it can never approve, and the A2A server going on when `sessions` is on;
+    - turning on `sessions` (the server line again);
+    - turning on `browser`, only while browser use is on;
+    - a very broad workspace (a drive or a home folder, via `broadFolderReason`).
+  - `assistantActivity(events, {pending, session})` is the one-line status:
+    - "Waiting for your OK";
+    - "Reading notes.md" (a tool call merged with its updates);
+    - Pawl's tools by name: "Starting a session", "Checking on a session", and so on;
+    - browser tools: "Opening a page", "Typing on the page";
+    - "Thinking", "Writing", "Working on: <plan step>", "Hit a snag: <error>";
+    - null once the turn has stopped.
+- **`state.ts`:** `chat_update` upserts by id (it replaces the streaming message in place, or adds one whose `chat`
+  was missed).
+- **`client.ts`:** `assistantReset()`.
+- **`settings.ts`:** field labels for `assistant.*`.
+- **`a2aConnect.ts`:** `isAssistantCaller` and `ASSISTANT_CALLER_HINT`.
+
+### Desktop
+
+- **Settings > Assistant** (`AssistantSection.tsx`) is the first section in the list, wrapped in a SectionGuard:
+  - the intro line under the title, with a status pill on the right;
+  - the "Let <pet> do the work" switch;
+  - the status row: Ready plus what it is doing / Working / the hub's error, and **New chat**;
+  - the **Agent** dropdown, with the problem shown under it;
+  - the **Workspace** path: type and press Enter or Save; Browse… (folder picker); **Open folder**; **Reset to
+    default**;
+  - the "Can start and steer other sessions" switch;
+  - the "Can use the browser" switch. While browser use is off it is disabled, with a link that scrolls to Settings >
+    Browser. The link sits outside the switch's label, so clicking it never reaches the switch.
+  - Field errors (`invalid:assistant.workspace`) show under their field.
+- **Open folder** (`lib/openFolder.ts`) calls `invoke("open_folder")` and shows the command's own messages.
+  - For "doesn't exist" it says "~/Pawl doesn't exist yet: Pawl creates it the first time <pet> works."
+  - Outside the app, or when the command is missing (an older app build), it copies the path ("Copied the folder
+    path").
+- **Pet bubble** (`Bubble.tsx`), only when the assistant is on (when it is off, the bubble is as before):
+  - a streaming reply shows its text so far plus small typing dots, with no time and no proposals until it is done;
+  - a one-line activity status under the chat (from `assistantActivity`) while it works or an approval waits;
+  - a line under the text box, "Working with Claude Code in ~/Pawl". Clicking it calls
+    `native.openPanel({view: "settings", section: "assistant"})`, the one panel link in the bubble, as asked;
+  - a small **New chat** button that calls `assistantReset`. A "New chat" divider marks the point in the chat; the
+    messages stay;
+  - approval cards for the assistant session show Pawl-wide as before.
+- **Pet motion** (`chatPhase`): the pet keeps "thinking" while the reply streams (up to 5 min) and does its short
+  reaction when this window sees the reply finish (`PetApp` tracks each finish time).
+- **Voice** (`replyToRead`, `spokenReply`): a streaming reply is read aloud once, when it is finished, never the
+  partial text. What is said is `speech ?? text`: `ChatMessage.speech` (t26) is the brain's short spoken form, and it
+  comes only on the final `chat_update` of an assistant reply to a spoken message.
+- **Session list:**
+  - The Sidebar row and the Session view title the assistant's session with the pet's name and show an
+    "Assistant" chip, styled like the Browser chip.
+  - In the bubble's switcher its chip carries the pet's name and an "Assistant" tag (`SessionChip.assistant`).
+- **Settings > A2A > Callers:** the `assistant` caller (`connectTarget: "assistant"`) is read-only: "Used by the
+  assistant", with no switch, token or Remove.
+- The panel's Chat view also shows the typing dots on a streaming reply and follows it as it grows.
+
+### Mobile
+
+The phone app has no chat UI in this repo (only the mirror, which reduces with hub-client's `reduceServerMsg`). It
+handles `chat_update` already, through the reducer. When a phone chat lands it needs:
+
+- `client.chat` / `assistantReset`;
+- typing dots for `streaming`;
+- `assistantActivity` for the status line.
+
+### Commands run (all pass)
+
+- `packages/hub-client`: `bunx tsc --noEmit -p .`, `bun test` (418 pass; new `test/assistant.test.ts`).
+- `apps/desktop`: `bun run typecheck` (3 configs), `bun test src` (185 pass), `bunx vite build`.
+  - New tests: `pet/bubbleAssistant.test.ts` (an SSR render of the bubble: streaming, activity, line, off/old hub),
+    `lib/openFolder.test.ts`.
+  - Extended tests: petMotion, petScreen, switcher, useVoiceTalk.
+- `apps/vscode` and `apps/mobile`: `tsc --noEmit` clean.
+- `e2e`: `tsc --noEmit`, `bun test tests/ui.test.ts`: 19 pass. Two new tests:
+  - Settings > Assistant: the intro, status, agent label, the browser link, session tools off and then on (with the
+    confirm), the workspace system-folder error, Save, Reset to default, Open folder and its "doesn't exist yet"
+    line, the hub's error, New chat, and off then on (with the confirm);
+  - the bubble: the reply streams in place with dots, "Reading notes.md", the switcher tag and the panel's session
+    row, the reply finished in place, the line opening Settings > Assistant, the New chat divider, and off meaning no
+    line.
+- Screenshots `docs/screenshots/assistant-settings-{light,dark}.png` and `assistant-bubble-{light,dark}.png`. They
+  use vite dev, a throwaway hub and a generic `C:\Users\you` home.
+
+### Known gaps
+
+- The e2e tests fake Assistant mode on the socket. Once t26's hub serves it, a test against the real hub could
+  replace the fake.
+- The spoken form needs t26's hub: until the hub sends `speech`, the final text is read.
+
+### Review follow-ups (t13)
+
+1. **The copy promised too much.** Claude Code runs its read-only tools in its own folder without asking, so "every
+   step asks you first" was not true.
+   - Every place it appeared now uses `ASSISTANT_ASKS`: "Changes, commands, web use and new sessions ask you first, by
+     your approval rules." That covers the Settings intro, the confirms and the hub-client header comments.
+   - The on/off switch's hint says "It may read files in its workspace without asking."
+   - The confirm for turning it on says it may read files in its workspace without asking.
+   - The very-broad-workspace confirm says it may read any file there without asking.
+   - The sessions confirm says "those agents follow your approval rules as usual".
+   - A unit test checks that no assistant text says "every step".
+2. **The start card** (sde-a2a's exact shape):
+   - Marker: toolCallId `pawl-start:<uuid>` only; `rawInput.kind: "pawl_start"` is informational.
+   - Fields: title "Start <Agent> in <folder>", kind execute, `rawInput` `{agentId, agentName, cwd, prompt}`.
+   - Options: Start (allow once) and Don't start (reject once).
+   - In hub-client: `assistantStartCard(req)` recognises it by the toolCallId prefix alone (t2h's final word: the hub
+     renames any agent's `pawl-start:` id to `agent-pawl-start:`, so it can't be forged; `rawInput.kind` is only
+     information). `isAssistantRequest` is true for the
+     assistant's own session or its start card. `assistantAsker` gives "Ollie (your assistant)".
+   - **Bubble:** "Ollie (your assistant) asks:", "Start Codex in api?", then "With this prompt (all of it):" over the
+     whole prompt.
+     - The prompt is plain text that wraps and scrolls (at most 160 px tall), never cut; with no prompt it says "With
+       no prompt: the session starts and waits." The buttons read **Start** / **Don't start**.
+     - Any other request from the assistant's own session also says "Ollie (your assistant) asks:".
+     - A newly arrived card now scrolls the bubble to the top, where cards sit; before this, the chat kept the bubble
+       at the bottom and a new card could be out of view. It stays there until the card is answered or a new message
+       comes.
+   - **Panel cards** (`PermissionCard`, including the compact one on top):
+     - "Ollie (your assistant) asks, working with <agent>", with the default pet's avatar;
+     - the start title as the summary, and the whole prompt in a scrolling `.perm-prompt` block in place of the raw
+       JSON.
+3. **Agent caution:** `HubSettingsAssistant.agentNote` (t26; plain text, set for agents other than Claude Code)
+   shows as-is as a `field-warning` line under the Agent dropdown. `assistantAgentNote()` now reads the typed field.
+
+Tests:
+
+- hub-client: start-card shape, the prefix as the only marker (`rawInput.kind` alone, or a renamed `agent-pawl-start:`
+  id, is no start card), no prompt, the assistant asking, the asker, `agentNote`, and the
+  copy. 423 pass.
+- desktop: bubble SSR tests for the start card (the whole 1,600+ character prompt, Start / Don't start, no command
+  block) and for another assistant request. 187 pass.
+- e2e (the fake sends the start card exactly as sde-a2a does): 19 pass.
+  - The card shows the pet asking, the title and the full prompt, scrolls, and is in view.
+  - The panel's compact card shows the full prompt.
+  - Start answers `allow` and the card goes.
+  - The caution line shows under Agent and goes away again.
+
+Gates: hub-client tsc and 423 pass; desktop tsc (3 configs), 187 pass and vite build; vscode and mobile tsc; e2e tsc
+and 19 pass; line endings ok.
+
+Screenshots: the settings pair was redone with the new copy, and `assistant-start-card-{light,dark}.png` are new.
+
+### t26's hub round (agentNote landed, and what the UI does about the other changes)
+
+- `agentNote` is the typed protocol field now (the stopgap intersection type is gone).
+- **A second message during a turn.** The hub answers it straight away ("I'm still on your last message; say stop to
+  cancel it.") while the first reply is still streaming.
+  - `chatPhase`: the pet keeps its thinking pose while any reply to a message sent from this bubble is still
+    streaming, even with a later quick answer.
+  - Voice: `repliesToRead` replaces `replyToRead` and tracks replies by id. A new finished reply is read when it
+    arrives; a streamed one is read once, when it ends, even if a later reply came meanwhile; a reply already
+    streaming when the window opened counts as history.
+  - Tests for both.
+- Nothing else to change:
+  - "(Reply cut short.)", "(Interrupted.)", the card-waiting reply and replies streamed after a session-view prompt
+    are ordinary chat text.
+  - The A2A server going on in the same update is already covered by the turn-on confirm's server line.
+  - The new error case shows as-is in the status row.
+
+Gates: hub-client tsc and 423 pass; desktop tsc (3 configs), 190 pass and vite build; vscode and mobile tsc; e2e tsc
+and 19 pass; line endings ok.
+
+### Second review follow-up (t13): a read-aloud reply must never answer a card
+
+The risk: an assistant reply carrying injected text ("approve 4 7"), read aloud, heard by the microphone.
+
+1. **The microphone doesn't hear the pet.**
+   - It was already partly there: while the pet speaks, the voice engine is paused (`voice_pause`), and wake words
+     and wake-started utterances are dropped (`voiceReaction`).
+   - Now:
+     - The quiet time after speaking is about a second (`SPEECH_QUIET_MS` 500 → 1000 ms).
+     - The pet never starts reading a reply or an approval aloud while the user is talking (`mayTalkNow`: an
+       utterance is hearing or transcribing). Push-to-talk records whatever is said, so a reply arriving mid-utterance
+       would otherwise have gone into the user's own message. The reply stays in the chat.
+     - Push-to-talk still stops the pet talking first, as before.
+2. **What is read loses the answer words.** `stripApprovalWords` (hub-client `voice.ts`) takes out approve, deny,
+   allow and their forms, plus every standalone 1–2 digit number.
+   - Longer numbers, decimals, times and percentages stay.
+   - Leftover punctuation is tidied.
+   - It applies to assistant replies only (`isAssistantReply`: an assistant session's or the live session's reply,
+     or one carrying `speech`), through `replySpeech(reply, assistant)` = `speech ?? text`, stripped. The pet's own
+     replies keep their words ("tap Allow or Deny on it").
+   - `speak()` still removes the waiting cards' codes from anything said, as before. t26 also strips `speech` on the
+     hub side.
+   - Not stripped: "yes" / "no", which would change what sentences mean ("no tests failed"). The pause and the
+     drop above cover them, and t26's hub no longer resolves a risky card on a bare yes/no.
+
+Tests:
+
+- hub-client (426 pass): `stripApprovalWords` (what goes, what stays, no answer word or short number left) and
+  `isAssistantReply`.
+- desktop (192 pass): `replySpeech` (assistant only), `mayTalkNow`, and the pause lasting at least 1 s.
+
+Gates: hub-client tsc and 426 pass; desktop tsc (3 configs), 192 pass and vite build; vscode and mobile tsc; e2e tsc
+and 19 pass; line endings ok.
+
+### Third review nits (t13)
+
+1. **Code-like pairs.** `stripApprovalWords` also takes out pairs of 1-2 digit groups joined by a dash (including en
+   and em dashes), comma, slash, dot or space ("4-7", "4,7", "4/7", "4.7", "4 7", "4 - 7"), and "4:7" (one digit
+   after a colon).
+   - A bare decimal like "3.5" can't be told apart from a code, so it is stripped too (fail closed).
+   - Kept: times ("10:30", "4:30"), percentages ("3.5%"), prices ("$4.50"), versions ("v1.2"), "1,000" and "2026".
+2. **Fail closed on `voice_pause`.** An assistant reply is now read only after the engine's pause succeeded
+   (`speakWithEnginePaused`: pause first, then speak).
+   - If `voice_pause` fails, the reply is not read; it stays in the chat. The failure is logged once (`logOnce`; the
+     pause handler's own failures go through the same once-only logger).
+   - If the user started talking meanwhile, or nothing was left to say, the engine is resumed and nothing is said.
+   - With no engine to pause, the reply is not read.
+   - The pet's own replies are read as before; the 1 s pause around speech still applies to them.
+
+Tests:
+
+- hub-client (428 pass): pairs stripped; times, percentages, prices, versions and long numbers kept.
+- desktop (196 pass): paused then read; a failing pause means nothing read and the failure reported; the user
+  talking or nothing to say resumes the engine; the log is written once.
+
+Gates: hub-client tsc and 428 pass; desktop tsc (3 configs), 196 pass and vite build; vscode and mobile tsc; e2e tsc
+and 19 pass; line endings ok.

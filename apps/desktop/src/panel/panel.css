@@ -1166,6 +1166,29 @@ body.panel-body {
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* Assistant mode: the assistant asking to start a session shows the whole prompt it would send (prose, scrolls). */
+.perm-prompt-wrap {
+  margin-top: 10px;
+}
+.perm-prompt-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  margin-bottom: 4px;
+}
+.perm-prompt {
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--paper-2, var(--card));
+  border: 1px solid var(--line-strong);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
 .perm-raw {
   margin: 10px 0 0;
   max-height: 180px;
@@ -1521,6 +1544,14 @@ body.panel-body {
 }
 .typing span:nth-child(3) {
   animation-delay: 0.3s;
+}
+/* Assistant mode: a reply still streaming carries small dots after its text. */
+.typing.typing-inline {
+  display: inline-flex;
+  margin-left: 6px;
+  padding: 0;
+  background: none;
+  vertical-align: middle;
 }
 
 .prompt-bar {
@@ -2382,6 +2413,10 @@ input[type="range"] {
   font-size: 11px;
   font-weight: 800;
   vertical-align: 1px;
+}
+/* Assistant mode: the default pet's own work session (session list, session view). */
+.chip-assistant {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 /* A chat message that had a screen capture: a small chip (the picture itself is never shown again). */
 .shot-chip {

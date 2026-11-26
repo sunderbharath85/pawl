@@ -767,6 +767,14 @@ export class HubClient {
     return this.settingsRequest<"a2a_connect">({ type: "a2a_connect", target, action });
   }
 
+  /**
+   * Assistant mode (local and paired phone): end the live assistant session ("New chat"). The next chat message to the
+   * default pet starts a fresh one; the chat history stays.
+   */
+  async assistantReset(): Promise<void> {
+    await this.request<"assistant_reset">({ type: "assistant_reset" });
+  }
+
   /** `request`, with `invalid:<field>: <reason>` turned into a `SettingsError`. */
   private async settingsRequest<T extends keyof AckResults>(msg: DistributiveOmit<Extract<ClientMsg, { type: T }>, "id">): Promise<AckResults[T]> {
     try {

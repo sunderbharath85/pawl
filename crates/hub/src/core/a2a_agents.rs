@@ -800,6 +800,10 @@ impl Hub {
     }
 
     pub(super) async fn exec_resolve(&self, request_id: &str, option_id: Option<String>) -> Result<()> {
+        // A start card has no agent behind it: the waiting start gets the answer.
+        if self.answer_start_card(request_id, option_id.clone()) {
+            return Ok(());
+        }
         if self.remote().owns_request(request_id) {
             return self.remote().resolve(request_id, option_id).await;
         }

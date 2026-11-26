@@ -118,8 +118,11 @@ export interface Session {
   startedAt: UnixMs;
   lastEventAt: UnixMs;
   endedAt?: UnixMs;
-  /** "browser" = a browser task the default pet started (v0.2 item 5); absent for ordinary sessions. */
-  purpose?: "browser";
+  /**
+   * "browser" = a browser task the default pet started (v0.2 item 5); "assistant" = the default pet's own agent session
+   * (assistant mode, v0.2); absent for ordinary sessions.
+   */
+  purpose?: "browser" | "assistant";
 }
 
 /** Past session from ACP `session/list`. */
@@ -319,6 +322,16 @@ export interface ChatMessage {
   proposals?: ChatProposal[];
   /** A picture (screen capture) came with this message. The picture itself is never stored or mirrored. */
   image?: boolean;
+  /**
+   * Assistant mode: true while the assistant is still writing this reply. Later `chat_update` messages with the same
+   * `id` replace its text; the last one has `streaming: false` (or absent).
+   */
+  streaming?: boolean;
+  /**
+   * Assistant mode, a reply to a spoken message (`via: "voice"`): the short form to read aloud instead of `text`. Only on
+   * the final `chat_update`; never stored (history has `text` only).
+   */
+  speech?: string;
 }
 
 /**
@@ -742,6 +755,46 @@ export interface HubSettings {
   a2a?: A2aSettings;
   /** Browser use (v0.2 item 5). Off by default. allowSites = hosts the browser task may open without asking. */
   browser?: { enabled: boolean; allowSites: string[] };
+  /** Assistant mode (v0.2): the default pet's own agent session. Always sent by hubs that have it. */
+  assistant?: HubSettingsAssistant;
+}
+
+/**
+ * Assistant mode (config.toml `[assistant]`, Settings > Assistant). With `enabled`, the default pet's chat goes to an agent
+ * session (`Session.purpose: "assistant"`) that works in `workspace`; every tool call it makes is an ordinary approval card.
+ */
+export interface HubSettingsAssistant {
+  enabled: boolean;
+  /** "auto" (claude-code, else codex, else copilot-cli, else the first installed ACP agent) or an agent id. */
+  agent: string;
+  /** Absolute path as stored ("~" expanded). Created on first use, never deleted by Pawl. */
+  workspace: string;
+  /** Give it Pawl's tools (`pawl mcp`): list agents, start sessions, prompt them, check on them, cancel them. */
+  sessions: boolean;
+  /** Also give it the Chrome DevTools tools, only while `browser.enabled` is on. */
+  browser: boolean;
+  /** Read-only, filled by the hub: the agent "auto" picked, or the chosen one if installed; missing = none installed. */
+  resolvedAgent?: AgentId;
+  /** Read-only: off = disabled; idle = ready (no turn running); working = a turn is running; error = see `error`. */
+  state: "off" | "idle" | "working" | "error";
+  /** Read-only: the live assistant session, if any. */
+  sessionId?: SessionId;
+  /** Read-only: why it could not start (agent missing, workspace not writable, ...). */
+  error?: string;
+  /**
+   * Read-only: a caution about the resolved agent, plain text shown as-is under the agent choice (e.g. Pawl cannot lock
+   * that agent's own approval settings). Absent for Claude Code.
+   */
+  agentNote?: string;
+}
+
+/** `workspace`: absolute or starting with "~"; not inside Pawl's data folder or a system folder (`invalid:assistant.workspace`). */
+export interface HubSettingsAssistantPatch {
+  enabled?: boolean;
+  agent?: string;
+  workspace?: string;
+  sessions?: boolean;
+  browser?: boolean;
 }
 
 /** Default port of the localhost A2A server (`[a2a] port`; it only ever binds 127.0.0.1). */
@@ -849,6 +902,7 @@ export interface HubSettingsPatch {
   customAgents?: CustomAgentSetting[];
   a2a?: A2aSettingsPatch;
   browser?: { enabled?: boolean; allowSites?: string[] };
+  assistant?: HubSettingsAssistantPatch;
 }
 
 /** Agent hooks the hub can install (same targets as `pawl install-hooks`). copilot-vscode is per repo. */
@@ -977,7 +1031,12 @@ export type ClientMsg =
    * Local only. preview: the plan, nothing written (`startsServer`: Connect would turn the A2A server on, 127.0.0.1 only;
    * the confirm must say so). apply: Connect. remove: delete the entry and the caller (its token stops working); confirm first.
    */
-  | { type: "a2a_connect"; id: string; target: A2aConnectTargetName; action: "preview" | "apply" | "remove" };
+  | { type: "a2a_connect"; id: string; target: A2aConnectTargetName; action: "preview" | "apply" | "remove" }
+  /**
+   * Assistant mode (local clients and a paired phone): end the live assistant session; the next chat message starts a
+   * fresh one. The chat history stays. Ack `{}` (also when no session was live).
+   */
+  | { type: "assistant_reset"; id: string };
 
 export type ClientMsgType = ClientMsg["type"];
 
@@ -1019,6 +1078,7 @@ export interface AckResults {
    */
   a2a_connect: { plan: string; applied: boolean; status: A2aConnectStatus; startsServer: boolean; newToken: boolean; warning?: string };
   start_browser_task: { sessionId: SessionId };
+  assistant_reset: Record<string, never>;
 }
 
 // ---------- hub -> client ----------
@@ -1055,6 +1115,8 @@ export type ServerMsg =
   | { type: "permission_resolved"; requestId: RequestId; sessionId: SessionId; outcome: PermissionOutcome; by: ResolvedBy; byMachineId?: MachineId }
   | { type: "pet"; pet: Pet }
   | { type: "chat"; message: ChatMessage }
+  /** Assistant mode: the pet's reply `message.id` (sent earlier as `chat`) has new text; replace it (streaming). */
+  | { type: "chat_update"; message: ChatMessage }
   | { type: "notification"; notification: HubNotification }
   /** Sent when a machine is added, renamed, or goes online/offline (not on every heartbeat). */
   | { type: "machine"; machine: Machine }

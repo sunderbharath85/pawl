@@ -6,6 +6,7 @@ import { machineDisplayName, restartText } from "@pawl/hub-client";
 import { usePanel } from "../context";
 import { A2aSection } from "./settings/A2aSection";
 import { AgentsSection } from "./settings/AgentsSection";
+import { AssistantSection } from "./settings/AssistantSection";
 import { AppSection, MachineSection, NotificationsSection, PetSection } from "./settings/AppSections";
 import { PairingSection } from "./settings/PairingSection";
 import { VoiceSection } from "./settings/VoiceSection";
@@ -15,6 +16,7 @@ import { BotSection, HubSection, NudgesSection, RelaySection, RemoteSection, Rep
 import { SectionGuard, useHubSettings, useRestartHub, type HubSettingsView } from "./settings/shared";
 
 export const SETTINGS_SECTIONS: ReadonlyArray<{ id: string; label: string; hub: boolean }> = [
+  { id: "assistant", label: "Assistant", hub: true },
   { id: "hub", label: "Hub", hub: true },
   { id: "machine", label: "This machine", hub: false },
   { id: "pairing", label: "Machines & pairing", hub: true },
@@ -83,6 +85,7 @@ export function SettingsView({ section }: { section?: string | undefined }) {
           ))}
         </nav>
         <div className="settings-sections">
+          {props && guard("assistant", <AssistantSection {...props} />)}
           {props && guard("hub", <HubSection {...props} configPath={hs.configPath} />)}
           {guard("machine", <MachineSection />)}
           {props && (

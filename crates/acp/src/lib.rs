@@ -56,6 +56,29 @@ pub struct StartOptions {
     /// Start the agent process (its own connection) with a cleared environment: only the
     /// [`CLEAN_ENV_KEEP`] variables of the hub's, plus `agent.env`.
     pub clean_env: bool,
+    /// MCP servers for this session, sent as the standard `session/new` `mcpServers` (stdio, which
+    /// every ACP agent must support; agents without other transports still get these).
+    pub mcp_servers: Vec<McpServerStdio>,
+}
+
+/// One stdio MCP server the agent starts for a session (ACP `McpServerStdio`). `Debug` never shows
+/// `env` values (they may hold a token).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct McpServerStdio {
+    /// The server's name in the session (its tools are e.g. `mcp__<name>__<tool>` in Claude Code).
+    pub name: String,
+    /// Absolute path of the server's executable (ACP: launched without a shell).
+    pub command: PathBuf,
+    pub args: Vec<String>,
+    /// Environment variables set for the server, in order.
+    pub env: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for McpServerStdio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env: Vec<String> = self.env.iter().map(|(k, _)| format!("{k}=<redacted>")).collect();
+        f.debug_struct("McpServerStdio").field("name", &self.name).field("command", &self.command).field("args", &self.args).field("env", &env).finish()
+    }
 }
 
 /// Events emitted by the host to the hub.

@@ -197,6 +197,18 @@ export function callerConnectTarget(c: Pick<A2aCallerSetting, "id"> & { connectT
   return t && (A2A_CONNECT_TARGETS as readonly string[]).includes(t) ? (t as A2aConnectTargetName) : null;
 }
 
+/**
+ * The assistant's own caller (Assistant mode: `connectTarget: "assistant"`, made and kept by the hub). Read-only in
+ * Settings: the hub holds its token (renewed on New chat and when the assistant is turned off) and it never answers
+ * approvals.
+ */
+export function isAssistantCaller(c: { connectTarget?: string | null | undefined }): boolean {
+  return c.connectTarget === "assistant";
+}
+
+export const ASSISTANT_CALLER_HINT =
+  "Used by the assistant (Settings > Assistant). Pawl keeps its token and renews it on New chat; it can never answer approvals.";
+
 /** In Callers, under a caller Connect made (in place of "Can answer approvals"). */
 export function connectCallerHint(target: A2aConnectTargetName, name?: string): string {
   return `Connected by Pawl for ${a2aConnectName({ target, name })}. It can never answer approvals.`;

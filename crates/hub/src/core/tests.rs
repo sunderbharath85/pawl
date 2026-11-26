@@ -51,7 +51,7 @@ async fn fixture_config(edit: impl FnOnce(&mut HubConfig)) -> Fixture {
     let store = Store::open(&paths.db, MID).unwrap();
     store.replace_agents(&[agent("codex"), agent("claude-code")]).unwrap();
     let fake = FakeHost::default();
-    let mut config = HubConfig { offline: true, ..Default::default() };
+    let mut config = HubConfig { offline: true, assistant: crate::config::AssistantSection::off(), ..Default::default() };
     edit(&mut config);
     let hub = Hub::build(
         HubOptions { paths, config, token: "t".repeat(64), machine: ident(), background: false },
@@ -73,7 +73,7 @@ async fn fixture_with(store_rules: Option<Vec<Rule>>, config_rules: Option<Vec<R
         store.set_rules(r).unwrap();
     }
     let fake = FakeHost::default();
-    let config = HubConfig { offline: true, rules: config_rules, ..Default::default() };
+    let config = HubConfig { offline: true, assistant: crate::config::AssistantSection::off(), rules: config_rules, ..Default::default() };
     let hub = Hub::build(
         HubOptions { paths, config, token: "t".repeat(64), machine: ident(), background: false },
         store,
@@ -580,7 +580,7 @@ async fn restart_closes_owned_sessions() {
     let hub = Hub::build(
         HubOptions {
             paths,
-            config: HubConfig { offline: true, ..Default::default() },
+            config: HubConfig { offline: true, assistant: crate::config::AssistantSection::off(), ..Default::default() },
             token: "t".into(),
             machine: ident(),
             background: false,
@@ -747,7 +747,7 @@ async fn store_of_another_machine_is_refused() {
     let paths = Paths::in_dir(dir.path());
     let store = Store::open(&paths.db, OTHER).unwrap();
     let r = Hub::build(
-        HubOptions { paths, config: HubConfig { offline: true, ..Default::default() }, token: "t".into(), machine: ident(), background: false },
+        HubOptions { paths, config: HubConfig { offline: true, assistant: crate::config::AssistantSection::off(), ..Default::default() }, token: "t".into(), machine: ident(), background: false },
         store,
         Host::Fake(FakeHost::default()),
     )
@@ -817,7 +817,7 @@ async fn migrated_duplicate_pet_names_are_fixed_at_startup() {
     let build = |paths: Paths| async move {
         let store = Store::open(&paths.db, MID).unwrap();
         Hub::build(
-            HubOptions { paths, config: HubConfig { offline: true, ..Default::default() }, token: "t".into(), machine: ident(), background: false },
+            HubOptions { paths, config: HubConfig { offline: true, assistant: crate::config::AssistantSection::off(), ..Default::default() }, token: "t".into(), machine: ident(), background: false },
             store,
             Host::Fake(FakeHost::default()),
         )
@@ -896,7 +896,7 @@ async fn peer_hub_with_fake(dir: &std::path::Path, mid: &str, name: &str, listen
     let paths = Paths::in_dir(dir);
     let store = Store::open(&paths.db, mid).unwrap();
     store.replace_agents(&[Agent { machine_id: mid.into(), ..agent("codex") }]).unwrap();
-    let mut config = HubConfig { offline: true, ..Default::default() };
+    let mut config = HubConfig { offline: true, assistant: crate::config::AssistantSection::off(), ..Default::default() };
     config.peer.listen = listen.map(Into::into);
     let machine = MachineIdentity { id: mid.into(), name: name.into() };
     let fake = FakeHost::default();
@@ -2132,7 +2132,7 @@ async fn remote_driven_sessions_always_ask_a_human() {
     let paths = Paths::in_dir(f.dir.path());
     let store = Store::open(&paths.db, MID).unwrap();
     let fake = FakeHost::default();
-    let config = HubConfig { offline: true, rules: Some(vec![read_rule]), ..Default::default() };
+    let config = HubConfig { offline: true, assistant: crate::config::AssistantSection::off(), rules: Some(vec![read_rule]), ..Default::default() };
     let hub = Hub::build(HubOptions { paths, config, token: "t".repeat(64), machine: ident(), background: false }, store, Host::Fake(fake.clone()))
         .await
         .unwrap();
@@ -2736,7 +2736,7 @@ async fn stored_injected_titles_are_cleaned_at_start() {
     store.upsert_session(&old("c", "<\\pasted_content id=x>secret<\\/pasted_content>")).unwrap();
     store.upsert_session(&old("d", "Fix login")).unwrap();
     let hub = Hub::build(
-        HubOptions { paths, config: HubConfig { offline: true, ..Default::default() }, token: "t".repeat(64), machine: ident(), background: false },
+        HubOptions { paths, config: HubConfig { offline: true, assistant: crate::config::AssistantSection::off(), ..Default::default() }, token: "t".repeat(64), machine: ident(), background: false },
         store,
         Host::Fake(FakeHost::default()),
     )
@@ -2751,8 +2751,10 @@ async fn stored_injected_titles_are_cleaned_at_start() {
 
 mod a2a;
 mod a2a_agents;
+mod a2a_assistant;
 mod a2a_peer;
 mod a2a_server;
+mod assistant;
 mod phones;
 mod screen_browser;
 mod voice;
@@ -2985,7 +2987,7 @@ async fn hub_on(dir: &std::path::Path, edit: impl FnOnce(&Store)) -> Hub {
     store.replace_agents(&[agent("codex"), agent("claude-code")]).unwrap();
     edit(&store);
     Hub::build(
-        HubOptions { paths, config: HubConfig { offline: true, ..Default::default() }, token: "t".repeat(64), machine: ident(), background: false },
+        HubOptions { paths, config: HubConfig { offline: true, assistant: crate::config::AssistantSection::off(), ..Default::default() }, token: "t".repeat(64), machine: ident(), background: false },
         store,
         Host::Fake(FakeHost::default()),
     )

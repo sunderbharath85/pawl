@@ -376,8 +376,9 @@ async fn agents_are_validated_and_an_unreachable_one_shows_its_error() {
     let mut bad_token = agent("a", "https://a.example");
     bad_token.token = Some(Some("has space".into()));
     assert!(err(f.hub.update_settings(&patch(vec![bad_token]), &me).await).starts_with("invalid:a2a.agents[0].token"));
-    // A free port nobody listens on.
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    // A port nobody listens on. Port 1 (tcpmux) is never served on a dev or CI machine; a port picked with bind(0)
+    // and released can be taken by another test running in parallel, which made this test flaky.
+    let port = 1;
     let mut down = agent("down", &format!("http://127.0.0.1:{port}"));
     down.token = Some(Some("t0ken".into()));
     f.hub.update_settings(&patch(vec![down]), &me).await.unwrap();

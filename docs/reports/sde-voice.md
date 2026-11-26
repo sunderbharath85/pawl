@@ -691,3 +691,176 @@ and pixel statistics, and was removed afterwards.
    - https://learn.microsoft.com/windows/win32/api/combaseapi/nf-combaseapi-coincrementmtausage
    - https://learn.microsoft.com/windows/win32/api/combaseapi/nf-combaseapi-couninitialize
    - cpal 0.18.2 source (`src/host/com.rs`, `src/host/wasapi/device.rs`) and its master on GitHub.
+
+## `open_folder` (Settings > Assistant, "Open folder")
+
+1. **Command:** `open_folder({ path })`, returns nothing, or `Err` with a short message (new `src/folder.rs`,
+   registered in `lib.rs`).
+
+   | Situation | Error |
+   |---|---|
+   | Relative path | "Use the folder's full path." |
+   | Missing | "That folder doesn't exist." |
+   | A file | "That's a file, not a folder." |
+   | Can't be read | "Pawl can't read that folder." |
+   | Not on a local drive (Windows) | "Use a folder on this computer." |
+   | The file manager couldn't start | "Couldn't open the file manager." |
+
+   - The path must be absolute. It is then `canonicalize`d (`..`, `.` and links resolved) and must be an existing
+     directory.
+   - The work runs on a blocking thread, because canonicalizing a slow drive can take a while.
+   - The file manager is started directly, never through a shell, with the folder as its only argument:
+     - Windows: `%SystemRoot%\explorer.exe`, a full path, so an `explorer.exe` next to Pawl or on PATH is never
+       picked.
+     - macOS: `/usr/bin/open`.
+     - Linux: `xdg-open`.
+   - Pawl doesn't wait for it. A small thread reaps the child, so no zombie is left on macOS or Linux.
+   - Its stdin, stdout and stderr are null. An absolute path can't start with `-`, so it is never read as an
+     option.
+   - The path is never logged.
+2. **Windows details, checked against the real Explorer.** I opened folders on this machine and read back what
+   each Explorer window showed through `Shell.Application`, then closed only those windows.
+   - `canonicalize` returns `\\?\C:\…`. Explorer gets the usual `C:\…` form (`\\?\UNC\…` becomes `\\…`).
+   - Explorer splits its command line at commas, and Rust quotes an argument only when it has a space. So
+     `C:\…\a,b` opened the wrong place. The argument is now always quoted (`raw_arg`; a Windows path can't contain
+     `"`).
+   - After that, `a,b`, `My notes, 2026 (draft)`, `x;y&z`, `a,b\..\x;y&z` and the root `C:\` all opened the right
+     folder.
+   - **One addition beyond the brief:** `\\server\share`, `\\?\UNC\…` and `\\.\device` paths are refused before
+     anything touches them. Canonicalizing a UNC path already makes Windows connect to that server and sign in
+     with the user's account, so a bad string from the page could leak the account's NTLM hash. Drive letters are
+     still fine, including network drives the user mapped. Easy to drop if t13 wants UNC folders.
+3. **Permissions:** no capability file change. `build.rs` is the default `tauri_build::build()` with no
+   `AppManifest`, so the app's own commands are not ACL-gated. Only plugin commands need entries in
+   `capabilities/default.json`. That is how every other Pawl command (`voice_*`, `screen_*`, `quit_app`, …) is
+   reached.
+4. **Tests** (`folder::tests`, 6):
+   - Relative paths are refused (`""`, `"."`, `".."`, `some/folder`, `./x`, `../x`; on Windows also `C:folder`,
+     `\Windows`, `/Windows`).
+   - A file is refused.
+   - A missing folder is refused, and so is one under a missing folder.
+   - `a\b\..\.\b\..` resolves to the canonical `a`.
+   - Spaces and commas stay one argument; the program is the absolute `explorer.exe`, `/usr/bin/open` or
+     `xdg-open`.
+   - Windows: UNC and device paths are refused; the verbatim prefix is stripped; a verbatim drive path is accepted
+     as input.
+   - Windows resolves `..` before looking (`gone\..` is the parent), so the test only checks what holds on every
+     system.
+5. **Gates:**
+   - `cargo test`: 120 passed (117 lib + 3).
+   - `cargo clippy --all-targets -- -D warnings`: clean.
+   - Line endings: `folder.rs` is new (LF); `lib.rs` and this report stay LF.
+6. **Docs used:**
+   - https://doc.rust-lang.org/std/fs/fn.canonicalize.html
+   - https://doc.rust-lang.org/std/process/struct.Command.html
+   - https://doc.rust-lang.org/std/os/windows/process/trait.CommandExt.html#tymethod.raw_arg
+   - https://portland.freedesktop.org/doc/xdg-open.html
+   - https://docs.rs/tauri-build/latest/tauri_build/struct.AppManifest.html (and the tauri-build 2.7.6 source)
+
+### `open_folder` review fix (t13: a macOS `Foo.app` would launch)
+
+1. **macOS: reveal, never open.**
+   - The command is now `/usr/bin/open -R <dir>`. Per `man open`: "Reveal the file(s) in the Finder instead of
+     opening them." Finder selects the folder in its enclosing folder and never launches it, so no bundle can be
+     run. The cost: Finder shows the folder selected, not its contents (one double-click away).
+   - Bundles are also refused before that, with "That's an app, not a folder.": a last component ending in `.app`,
+     `.bundle`, `.framework`, `.plugin`, `.prefPane` or `.kext`, case-insensitive.
+   - The check runs on the canonical path, so a link named `Notes` that points at `Evil.app` is refused too.
+   - A folder inside a bundle (`Foo.app/Contents`) is still a plain folder. So are look-alikes such as `Foo.apps`,
+     `.app` and `notes.app.d`.
+   - Only macOS refuses them (`resolve_with(path, refuse_bundles)`, where `resolve` passes
+     `cfg!(target_os = "macos")`). On Windows and Linux such a name is just a folder. The flag lets the refusal
+     test run on every system.
+2. **Linux: `xdg-open` on a directory can't run anything from it.**
+   - A directory's MIME type is `inode/directory`, so `xdg-open` hands it to the user's chosen handler for that
+     type (normally the file manager).
+   - A launcher (`.desktop`) or script is a file, and files are refused before `xdg-open` runs, also when reached
+     through a symlink (`canonicalize` resolves it and `is_dir` checks the target).
+   - The path is absolute, so it starts with `/` and is never read as an option or a URL.
+3. **Windows: Explorer with a `desktop.ini` folder is harmless.** Checked live:
+   - Setup: a system folder whose hidden system `desktop.ini` sets `LocalizedResourceName`, `InfoTip` and
+     `IconResource=C:\Windows\System32\notepad.exe,0`.
+   - Opened with the same `explorer.exe "<dir>"` call. Explorer did read the file (the window title was "Renamed
+     by desktop.ini"), and Notepad did not start (0 processes before and after).
+   - Per Microsoft's docs, `desktop.ini` only customizes how the folder looks (icon, name, tip, view) and is read
+     only for system or read-only folders. A `CLSID` entry can only point at a shell extension already registered
+     on the PC; it can't add code.
+   - One residual point, the same as when the user browses the folder by hand: an icon path naming a
+     `\\server\share` would make Windows contact that server.
+   - Explorer doesn't process AutoRun when a folder is opened this way. AutoRun is about inserted media.
+4. **Tests:**
+   - New `folder::tests::app_bundles_are_refused_where_macos_would_run_them`: all six extensions in mixed case are
+     refused with the flag and accepted without it; the inside-bundle and look-alike folders are accepted; the
+     symlink case on Unix; `resolve` refuses only on macOS.
+   - `spaces_and_commas_stay_one_argument` now expects `["-R", dir]` on macOS.
+5. **Gates:**
+   - `cargo test`: 121 passed (118 lib + 3).
+   - `cargo clippy --all-targets -- -D warnings`: clean.
+   - The module, minus the Tauri command, type-checks with `-D warnings` for `x86_64-unknown-linux-gnu`.
+   - macOS was not compiled here (no macOS target installed). Its code is a three-line `Command` block and two
+     test asserts.
+6. **Docs used:**
+   - https://ss64.com/mac/open.html (`open -R`, mirrors `man open`)
+   - https://learn.microsoft.com/windows/win32/shell/how-to-customize-folders-with-desktop-ini
+   - https://portland.freedesktop.org/doc/xdg-open.html
+
+### `open_folder` second review fix (t13: a local link to `\\host\share` reached `canonicalize`)
+
+1. **The hole, measured here.**
+   - Any program can make an NTFS junction whose target is `\??\UNC\host\share`, without privileges, using
+     `FSCTL_SET_REPARSE_POINT`. `mklink /J` refuses that target, but the kernel call accepts it. `read_link`
+     reports it as `\\host\share`.
+   - On this Windows build the kernel won't go through such a junction: `canonicalize` fails within µs with
+     `ERROR_IO_REPARSE_DATA_INVALID`, and nothing connects.
+   - A directory symlink is the real danger. `fsutil behavior query SymlinkEvaluation` shows local-to-remote
+     evaluation ENABLED, so `canonicalize` through one would connect to the server. Making one needs admin rights
+     or Developer Mode; this account has neither, so I couldn't create one.
+2. **Fix (`src/folder.rs`, Windows), before anything opens the path:**
+   - The drive check stays: the input must be `C:\…` or `\\?\C:\…`.
+   - The path is then put in the form Win32 will open. `std::path::absolute` is `GetFullPathNameW`: it applies
+     `.` and `..` as text and drops trailing dots and spaces, so `share.` and `x\..\share` both mean `share`. It
+     doesn't touch the disk.
+   - It is then made verbatim (`\\?\C:\…`), so nothing rewrites it again. The names checked are exactly the names
+     opened.
+   - `links_stay_local` follows it one name at a time:
+     - `symlink_metadata` checks whether each name is a symlink or junction; `is_symlink` covers both, since both
+       are name-surrogate reparse points.
+     - For a link, `read_link` reads the target without following it.
+     - Absolute, relative (from the link's folder, `..` as text) and drive-root (`\x`) targets are walked the same
+       way, so chains are followed.
+     - Any target root that isn't a drive letter (`\\server\share`, `\\?\UNC\…`, `\\?\GLOBALROOT\…`, `\\.\…`,
+       `\\?\Volume{…}\`) gives "Use a folder on this computer." before any connection is made.
+     - More than 40 links (a loop), or a link that can't be read, gives "Pawl can't read that folder.". It fails
+       closed.
+   - `canonicalize` then opens that same verbatim path. Its result must again be on a local drive.
+   - The display form no longer turns `\\?\UNC\…` into `\\…`; such a result is refused instead.
+3. **Behaviour change to note: mapped network drives are now refused.** `canonicalize` reports a file on `Z:` as
+   `\\?\UNC\server\share\…`, and the post-check refuses that. A folder in a mounted-volume folder
+   (`\\?\Volume{…}`) is refused too. If mapped drives should work, the way is to accept a canonical UNC result
+   only when the input itself was a drive letter that `GetDriveTypeW` reports as `DRIVE_REMOTE`.
+4. **Tests:**
+   - `every_link_on_the_way_must_stay_on_this_computer`, on a pretend file system:
+     - A link to a share is refused, and nothing behind it is looked at (the names looked at are recorded).
+     - All the other non-local target forms are refused.
+     - A chain (absolute → relative with `..` → drive-root → share) is refused at its last hop.
+     - Local chains and link-free paths pass. A loop ends. An unreadable link isn't passed through.
+   - `a_junction_to_a_share_is_refused_before_anything_connects`, on real NTFS junctions made in the test (no
+     privilege needed):
+     - A junction to `\??\UNC\pawl-test.invalid\share` is refused directly, with a folder behind it, through
+       another local junction, and as `share.`, `share ` and `x\..\share`.
+     - A junction to a local folder opens that folder.
+     - Where symlinks can be made, a symlink to the share is refused as well; that part is skipped here.
+     - With the walk switched off, this test fails: the error becomes the kernel's "can't read" instead of "Use a
+       folder on this computer.". So the walk is what refuses first.
+5. **Gates:**
+   - `cargo test`: 123 passed (120 lib + 3).
+   - `cargo clippy --all-targets -- -D warnings`: clean.
+   - The module type-checks for `x86_64-unknown-linux-gnu`.
+   - The probe junctions and the folders left by the deliberately failing runs were removed.
+6. **Docs used:**
+   - https://doc.rust-lang.org/std/path/fn.absolute.html
+   - https://doc.rust-lang.org/std/fs/fn.read_link.html
+   - https://doc.rust-lang.org/std/fs/fn.symlink_metadata.html
+   - https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getfullpathnamew
+   - https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_reparse_data_buffer
+   - https://learn.microsoft.com/windows-server/administration/windows-commands/fsutil-behavior

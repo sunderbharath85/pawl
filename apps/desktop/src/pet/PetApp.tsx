@@ -87,7 +87,10 @@ export function PetApp() {
   const [focusId, setFocusId] = useState<string | null>(null);
   /** "Show my screen" in progress (the button, or "look at this" typed or said). */
   const [look, setLook] = useState<LookRequest | null>(null);
-  const switcher = useMemo(() => (connected ? switcherSessions(state, now, { focus: focusId }) : { chips: [], more: [] }), [connected, state, now, focusId]);
+  const switcher = useMemo(
+    () => (connected ? switcherSessions(state, now, { focus: focusId, petName: name }) : { chips: [], more: [] }),
+    [connected, state, now, focusId, name],
+  );
   const focus = focusId ? (switcher.chips.find((c) => c.sessionId === focusId) ?? null) : null;
   // A session that ended or went out of reach: back to Pawl-wide.
   useEffect(() => {
@@ -310,8 +313,25 @@ export function PetApp() {
   const facing = space && space.right < space.left ? "left" : "right";
   // Still by default: a pet moves only while the person chats with it in its bubble (Settings > Pet animation).
   const defaultChat = useMemo(() => state.chat.filter((m) => !m.petId), [state.chat]);
+  // Assistant mode streams a reply into one message: when this window sees one finish, for the pet's short reaction.
+  const streamingIds = useRef(new Set<string>());
+  const [doneAt, setDoneAt] = useState<ReadonlyMap<string, number>>(() => new Map());
+  useEffect(() => {
+    const finished: string[] = [];
+    for (const m of defaultChat) {
+      if (m.streaming) streamingIds.current.add(m.id);
+      else if (streamingIds.current.delete(m.id)) finished.push(m.id);
+    }
+    if (finished.length === 0) return;
+    const at = Date.now();
+    setDoneAt((d) => {
+      const next = new Map([...d].slice(-20));
+      for (const id of finished) next.set(id, at);
+      return next;
+    });
+  }, [defaultChat]);
   // The pet moves while a conversation is going on: the orchestrator chat, or a session prompted from the bubble.
-  let phase: ChatPhase = chatPhase(defaultChat, sentChat, now);
+  let phase: ChatPhase = chatPhase(defaultChat, sentChat, now, doneAt);
   for (const [sessionId, at] of Object.entries(sentPrompts)) {
     if (phase !== "idle") break;
     phase = sessionPhase(state.events[sessionId] ?? [], at, now);

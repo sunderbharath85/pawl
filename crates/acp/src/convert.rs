@@ -3,6 +3,12 @@
 use agent_client_protocol::v1::schema as acp;
 use pawl_protocol as pp;
 
+/// A session's stdio MCP server as ACP sends it in `session/new` `mcpServers`.
+pub(crate) fn mcp_server(s: &crate::McpServerStdio) -> acp::McpServer {
+    let env = s.env.iter().map(|(k, v)| acp::EnvVariable::new(k.clone(), v.clone())).collect();
+    acp::McpServer::Stdio(acp::McpServerStdio::new(s.name.clone(), s.command.clone()).args(s.args.clone()).env(env))
+}
+
 /// Render one content block as plain text for the event log.
 ///
 /// Non-text blocks become short placeholders so the log still shows that

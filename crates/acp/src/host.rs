@@ -991,6 +991,7 @@ impl Inner {
         let (conn, _open) = self.get_or_spawn(agent, &cwd_abs, opts.clean_env).await?;
         let mut req = acp::NewSessionRequest::new(cwd_abs.clone());
         req.meta = opts.meta.as_ref().and_then(|m| m.as_object().cloned());
+        req.mcp_servers = opts.mcp_servers.iter().map(convert::mcp_server).collect();
         let resp = tokio::time::timeout(SESSION_TIMEOUT, conn.cx.send_request(req).block_task())
             .await
             .map_err(|_| anyhow!("session/new timed out after {}s", SESSION_TIMEOUT.as_secs()))?

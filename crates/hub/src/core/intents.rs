@@ -619,7 +619,12 @@ impl Hub {
                 // A2A delegation for the peer: the facade marks the session remote-driven before its
                 // first prompt can raise a request.
                 let caller = Caller::Peer(from.to_string());
-                let d = self.a2a_start(agent_id, &dir.to_string_lossy(), prompt.clone(), &caller).await.map_err(|e| {
+                // In the assistant's workspace: agent config planted there never applies (core/a2a_assistant.rs).
+                let plan = self.workspace_launch_plan(agent_id, &dir).map_err(|e| {
+                    tracing::info!(device = %from, "remote start of {agent_id} refused: {e}");
+                    IntentRejectReason::Forbidden
+                })?;
+                let d = self.a2a_start_in(agent_id, super::a2a::StartDir::Checked(dir), prompt.clone(), &caller, plan).await.map_err(|e| {
                     tracing::warn!(device = %from, "remote start of {agent_id} failed: {e:#}");
                     IntentRejectReason::Invalid
                 })?;

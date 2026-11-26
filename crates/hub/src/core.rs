@@ -3,9 +3,11 @@
 
 pub(crate) mod a2a;
 pub(crate) mod a2a_agents;
+mod a2a_assistant;
 mod a2a_connect;
 pub(crate) mod a2a_peer;
 pub(crate) mod a2a_server;
+mod assistant;
 mod brain_session;
 pub(crate) mod browser;
 mod host;
@@ -388,6 +390,12 @@ struct Inner {
     voice: Mutex<voice::VoiceState>,
     /// Running browser tasks' turn clocks (core/browser.rs).
     browser: Mutex<browser::BrowserState>,
+    /// Assistant mode: the live session and the reply being written (core/assistant.rs).
+    assistant: Mutex<assistant::AssistantRt>,
+    /// One assistant session start at a time.
+    assistant_start: tokio::sync::Mutex<()>,
+    /// One replacement of the assistant's A2A token at a time (a start waits for one in flight).
+    assistant_rotate: tokio::sync::Mutex<()>,
 }
 
 /// The hub. Cheap to clone; all clones share state.
@@ -438,6 +446,11 @@ impl Hub {
                 }
                 s.prune_mirror(now)?;
                 s.prune_intent_log(now, crate::store::INTENT_LOG_MAX_ROWS)?;
+                // Assistant replies a crash left unfinished (stored empty when their turn started).
+                let n = s.interrupt_unfinished_replies()?;
+                if n > 0 {
+                    tracing::info!("{n} unfinished assistant repl(ies) marked interrupted");
+                }
                 Ok((
                     s.agents()?,
                     s.sessions_active_since(now - CACHE_WINDOW_MS)?,
@@ -627,6 +640,9 @@ impl Hub {
                 a2a_peer: Mutex::new(a2a_peer::A2aPeerState::default()),
                 voice: Mutex::new(voice::VoiceState::default()),
                 browser: Mutex::new(browser::BrowserState::default()),
+                assistant: Mutex::new(assistant::AssistantRt::default()),
+                assistant_start: tokio::sync::Mutex::new(()),
+                assistant_rotate: tokio::sync::Mutex::new(()),
             }),
         };
         hub.set_mirror(mirror_sessions, mirror_pets, mirror_pending);
@@ -635,6 +651,11 @@ impl Hub {
         tokio::spawn(hub.clone().brain_session_loop());
         // Browser tasks end with the run that started them: their folders go, and running ones are timed.
         hub.sweep_browser_dirs();
+        // The assistant's A2A token is replaced once per hub start: an agent process a crashed hub left behind may
+        // still hold the stored one (a first start waits for this). No caller yet: nothing to replace.
+        if hub.cfg().a2a.callers.iter().any(|c| c.is_assistant()) {
+            hub.assistant_token_due();
+        }
         tokio::spawn(hub.clone().browser_loop());
         hub.rebuild_repo_index().await;
         tokio::spawn(hub.clone().repo_index_loop());
@@ -1048,6 +1069,8 @@ impl Hub {
             // Connect coding agents (Settings > A2A): local only like every settings message.
             ClientMsg::A2aConnectStatus { .. } => json!({ "targets": self.a2a_connect_status().await? }),
             ClientMsg::A2aConnect { target, action, .. } => self.a2a_connect(target, action, actor).await?,
+            // Assistant mode: end the live assistant session; the next chat message starts a fresh one.
+            ClientMsg::AssistantReset { .. } => self.assistant_reset_msg(actor).await?,
         })
     }
 
@@ -1111,22 +1134,32 @@ impl Hub {
         Ok((session, d.warning))
     }
 
-    /// Start an owned ACP session without a prompt (the ACP executor behind the A2A facade).
-    pub(super) async fn launch_session(&self, agent_id: &str, cwd: &str) -> Result<Session> {
-        let agent = self.find_agent(agent_id).await?;
+    /// Start an owned ACP session without a prompt (the ACP executor behind the A2A facade). A
+    /// [`a2a::StartDir::Checked`] folder is used as it is (no second resolve after the caller's
+    /// checks); `plan` adds ACP start options and agent environment variables.
+    pub(super) async fn launch_session(&self, agent_id: &str, dir: a2a::StartDir<'_>, plan: a2a::LaunchPlan) -> Result<Session> {
+        let mut agent = self.find_agent(agent_id).await?;
         if agent.source == AgentSource::A2a {
             // An outside A2A agent works where it runs; no folder here.
             return self.launch_remote(&agent).await;
         }
-        let cwd = resolve_cwd(cwd)?;
+        let cwd = match dir {
+            a2a::StartDir::Raw(cwd) => resolve_cwd(cwd)?,
+            a2a::StartDir::Checked(dir) => dir,
+        };
+        if !plan.env.is_empty() {
+            let mut env = agent.env.clone().unwrap_or_default();
+            env.extend(plan.env);
+            agent.env = Some(env);
+        }
         let id = self.new_id();
         self.ensure_pet(&agent.id).await;
-        let started = self
-            .inner
-            .host
-            .start_session(&agent, cwd.clone(), id.clone(), None)
-            .await
-            .with_context(|| format!("could not start a {} session", agent.name))?;
+        let started = if plan.opts == pawl_acp::StartOptions::default() {
+            self.inner.host.start_session(&agent, cwd.clone(), id.clone(), None).await
+        } else {
+            self.inner.host.start_session_with(&agent, cwd.clone(), id.clone(), None, plan.opts).await
+        };
+        let started = started.with_context(|| format!("could not start a {} session", agent.name))?;
         let session = self.merge_session(started).await;
         self.record_event(&session.id, EventType::SessionStart, json!({ "agentId": agent.id, "cwd": session.cwd }))
             .await?;
@@ -1541,9 +1574,14 @@ impl Hub {
 
     /// Upsert a session reported by the ACP host (owned sessions).
     async fn merge_session(&self, s: Session) -> Session {
+        // The assistant session being started: its first snapshots already say what it is for (no pet appears).
+        let starting_assistant = s.purpose.is_none() && self.assistant_starting(&s.id);
         let (merged, stale) = {
             let mut st = self.st();
             let mut m = s;
+            if starting_assistant {
+                m.purpose = Some(assistant::PURPOSE.into());
+            }
             let prev_title = st.sessions.get(&m.id).and_then(|p| p.title.clone());
             if let Some(prev) = st.sessions.get(&m.id) {
                 m.started_at = m.started_at.min(prev.started_at);
@@ -1554,8 +1592,11 @@ impl Hub {
                 }
             }
             // The agent's title (its first prompt, or one it set) when it is real text; else what we had,
-            // else "<agent> in <folder>" until a real prompt arrives (see `retitle_from_prompt`).
-            let candidate = m.title.as_deref().map(titles::from_prompt).unwrap_or(titles::Candidate::Nothing);
+            // else "<agent> in <folder>" until a real prompt arrives (see `retitle_from_prompt`). The assistant's
+            // first prompt starts with its persona: the title is what the user said.
+            let assistant_session = m.purpose.as_deref() == Some(assistant::PURPOSE);
+            let title = m.title.as_deref().map(|t| if assistant_session { pawl_brain::chat::assistant::user_part(t) } else { t });
+            let candidate = title.map(titles::from_prompt).unwrap_or(titles::Candidate::Nothing);
             let agent_name = st.agent_name(&m.agent_id);
             m.title = Some(titles::next(prev_title.as_deref(), candidate, true, &agent_name, &m.cwd));
             st.index_session(&m);
@@ -1564,14 +1605,21 @@ impl Hub {
             let stale = if finished { st.take_pending_for_session(&m.id) } else { Vec::new() };
             (m, stale)
         };
+        let assistant = merged.purpose.as_deref() == Some(assistant::PURPOSE) && merged.machine_id == self.inner.machine_id;
         if merged.ended_at.is_some() {
             self.inner.tasks.on_session_ended(&merged.id);
             if merged.purpose.as_deref() == Some(browser::PURPOSE) && merged.machine_id == self.inner.machine_id {
                 self.on_browser_session_ended(&merged);
             }
+            if assistant {
+                self.on_assistant_session_ended(&merged).await;
+            }
         }
         self.persist_and_broadcast_session(&merged).await;
-        self.ensure_pet(&merged.agent_id).await;
+        // The default pet speaks for the assistant: its session never gets a pet of its own.
+        if !assistant {
+            self.ensure_pet(&merged.agent_id).await;
+        }
         for req in stale {
             self.close_permission(req, ResolvedBy::System, &Actor::internal("hub:session_finished"), "session finished")
                 .await;
@@ -1600,10 +1648,12 @@ impl Hub {
             let mut st = self.st();
             let owner = st.sessions.get_mut(session_id).map(|s| {
                 s.last_event_at = s.last_event_at.max(ts);
-                (s.machine_id.clone(), s.agent_id.clone(), s.source == SessionSource::Owned)
+                let assistant = s.purpose.as_deref() == Some(assistant::PURPOSE);
+                (s.machine_id.clone(), s.agent_id.clone(), s.source == SessionSource::Owned, assistant)
             });
-            let owned = owner.as_ref().is_some_and(|(m, _, owned)| *owned && *m == self.inner.machine_id);
-            let owner = owner.map(|(m, a, _)| (m, a));
+            let owned = owner.as_ref().is_some_and(|(m, _, owned, _)| *owned && *m == self.inner.machine_id);
+            // The assistant's work never grows the pet of its agent (the default pet speaks for it).
+            let owner = owner.filter(|(_, _, _, assistant)| !assistant).map(|(m, a, _, _)| (m, a));
             if let Some((machine_id, agent_id)) = owner {
                 if let Some(pet) = st.pet_for_mut(&machine_id, &agent_id) {
                     if pawl_brain::growth::on_event(pet, kind, &payload) {
@@ -1666,12 +1716,19 @@ impl Hub {
             self.on_host_permission_resolved(payload).await;
             return Ok(());
         }
+        let assistant = self.is_assistant_session(session_id);
         if kind == EventType::UserMessage {
             if let Some(text) = payload.get("text").and_then(Value::as_str) {
+                // The assistant's first prompt starts with its persona: the title is what the user said.
+                let text = if assistant { pawl_brain::chat::assistant::user_part(text) } else { text };
                 self.retitle_from_prompt(session_id, text).await;
             }
         }
         let event = self.record_event(session_id, kind, payload).await?;
+        // The assistant's text streams into the default pet's reply.
+        if assistant {
+            self.on_assistant_event(session_id, kind, &event.payload).await;
+        }
         // A browser task ends with its answer: the session is closed once its turn stops.
         if kind == EventType::Stop && self.is_browser_session(session_id) {
             let (hub, id) = (self.clone(), session_id.to_string());
@@ -1703,9 +1760,25 @@ impl Hub {
     /// A session driven from another machine never gets auto_allow (deny rules still apply): a human
     /// answers every request it raises.
     fn rule_action(&self, rules: &[Rule], req: &PermissionRequest) -> RuleAction {
+        // A start card is the user's alone: no rule answers it, not even a deny rule.
+        if self.is_start_card(&req.request_id) {
+            return RuleAction::Ask;
+        }
         let cwd = self.session(&req.session_id).map(|s| s.cwd).filter(|c| !c.is_empty());
         let action = pawl_brain::rules::evaluate_in(rules, req, cwd.as_deref());
-        if action == RuleAction::AutoAllow && self.st().remote_driven.contains(&req.session_id) {
+        if action != RuleAction::AutoAllow {
+            return action;
+        }
+        // Driven from elsewhere: a person decides.
+        if self.st().remote_driven.contains(&req.session_id) {
+            return RuleAction::Ask;
+        }
+        // A browser step: never a rule's auto-allow (also when rules change while it waits).
+        if self.browser_rules_apply(req) {
+            return RuleAction::Ask;
+        }
+        // The assistant (and what it started) changing an agent's config or hooks: always a card.
+        if pawl_brain::rules::writes_agent_config(req, cwd.as_deref()) && self.assistant_guarded(&req.session_id) {
             return RuleAction::Ask;
         }
         action
@@ -1770,11 +1843,16 @@ impl Hub {
             }
             st.rules.clone()
         };
+        let mut req = req;
+        // Only the hub makes start cards: an agent's request never carries their marker.
+        if req.tool_call.tool_call_id.starts_with(a2a_assistant::START_CARD_PREFIX) {
+            req.tool_call.tool_call_id = format!("agent-{}", req.tool_call.tool_call_id);
+        }
         let mut action = self.rule_action(&rules, &req);
         let mut actor = Actor::rule(action);
-        let mut req = req;
-        // A browser task's step: its own approval kinds (core/browser.rs), never a rule's auto-allow.
-        if self.is_browser_session(&req.session_id) {
+        // A browser step (a browser task's, or the assistant's Chrome DevTools step): its own approval
+        // kinds (core/browser.rs), never a rule's auto-allow.
+        if self.browser_rules_apply(&req) {
             let (card, verdict) = self.browser_verdict(req, action);
             req = card;
             action = verdict.action;
@@ -1789,6 +1867,12 @@ impl Hub {
                 }
             }
         }
+        self.show_card(req).await;
+    }
+
+    /// Put `req` before the user: pending (with a voice code), recorded in its session's history,
+    /// broadcast, a push to offline phones and an alert notification.
+    pub(super) async fn show_card(&self, req: PermissionRequest) -> PermissionRequest {
         let req = self.insert_pending(req);
         // History never keeps the voice code (it is only good while the request waits).
         let mut payload = serde_json::to_value(&req).unwrap_or_default();
@@ -1807,6 +1891,7 @@ impl Hub {
         };
         let notification = notify::for_permission(&agent_name, pet_name.as_deref(), &req);
         self.inner.bus.send(ServerMsg::Notification { notification });
+        req
     }
 
     /// Answer a pending permission request (user, chat or rule). Audited either way.
@@ -1845,6 +1930,12 @@ impl Hub {
         transcript: Option<&str>,
     ) -> Result<()> {
         self.check_owned(request_id)?;
+        // A start card is answered on this machine or a paired phone (whose approvals need its
+        // biometric check, as every phone approval), never from another hub.
+        let from_hub = remote.as_ref().is_some_and(|r| !self.devices().iter().any(|d| d.id == r.origin.machine_id && d.kind == pawl_protocol::DeviceKind::Phone));
+        if from_hub && self.is_start_card(request_id) {
+            return Err(anyhow::Error::new(AckCode::Forbidden).context("starting a session is approved on this machine or a paired phone"));
+        }
         // A request being decided right now (agent call in flight) is waited for: its real outcome
         // decides what a concurrent answer gets (applied after a rollback, else already_decided).
         let (req, option_kind) = loop {
@@ -2183,6 +2274,8 @@ impl Hub {
             session_id: None,
             proposals: Vec::new(),
             image: image.is_some(),
+            streaming: false,
+            speech: None,
         };
         let m2 = msg.clone();
         self.inner.store.run(move |s| s.insert_chat(&m2)).await?;
@@ -2288,19 +2381,47 @@ impl Hub {
             read_back: None,
             voice_locked: false,
             browser: self.browser_ready(),
+            assistant_off: !self.cfg().assistant.enabled,
         }
     }
 
     async fn chat_reply(&self, user: ChatMessage, pet: Option<Pet>, actor: Actor, spoken: bool, image: Option<ChatImage>) {
-        let (brain, pending) = self.ready_brain().await;
         let mut ctx = self.brain_context(pet.clone()).await;
+        let mut image = image;
+        // Assistant mode (core/assistant.rs): the default pet's messages go to its agent session, except answers
+        // to approvals, voice codes, "stop" / "new chat" and commands for another machine's agents. If it cannot
+        // start, the brain answers with one line saying why.
+        let mut unavailable = None;
+        if pet.is_none() && self.cfg().assistant.enabled {
+            let route = pawl_brain::chat::assistant::route(&user.text, &ctx);
+            match self.assistant_chat(&user, route, spoken, image.take(), &actor, &ctx).await {
+                None => {
+                    // A read-back is good for the chat's next message only, wherever that message went.
+                    if spoken {
+                        self.take_read_back(None, pawl_protocol::now_ms());
+                    }
+                    return;
+                }
+                Some((line, img)) => {
+                    unavailable = line;
+                    image = img;
+                }
+            }
+        }
+        let (brain, pending) = self.ready_brain().await;
         ctx.model_pending = pending;
+        let with_line = |mut reply: BrainReply| {
+            if let Some(line) = &unavailable {
+                reply.text = format!("{line}\n\n{}", reply.text);
+            }
+            reply
+        };
         if let Some(image) = image {
             // A question about a picture: answered by a model that can see, never an action. The picture is
             // dropped when this returns.
             let reply = brain.look(&user.text, &image, &ctx).await;
             drop(image);
-            self.deliver_reply(pet, reply, &actor, None).await;
+            self.deliver_reply(pet, with_line(reply), &actor, None).await;
             return;
         }
         // A read-back is good for the chat's next message only, and only a spoken one uses it.
@@ -2323,7 +2444,7 @@ impl Hub {
             self.note_voice_reply(pet_id.as_ref(), reply.read_back.clone(), reply.code_miss, now);
         }
         let transcript = spoken.then_some(user.text.as_str());
-        self.deliver_reply(pet, reply, &actor, transcript).await;
+        self.deliver_reply(pet, with_line(reply), &actor, transcript).await;
     }
 
     /// A brain reply becomes the pet's chat message: a local action runs here (as before);
@@ -2352,6 +2473,8 @@ impl Hub {
             session_id,
             proposals,
             image: false,
+            streaming: false,
+            speech: None,
         };
         let m2 = msg.clone();
         if let Err(e) = self.inner.store.run(move |s| s.insert_chat(&m2)).await {
@@ -2564,6 +2687,8 @@ impl Hub {
             session_id: None,
             proposals: Vec::new(),
             image: false,
+            streaming: false,
+            speech: None,
         };
         let m2 = msg.clone();
         if let Err(e) = self.inner.store.run(move |s| s.insert_chat(&m2)).await {

@@ -158,6 +158,16 @@ describe("the bubble's session switcher: one pet, sessions one at a time", () =>
     expect(chips[2]).toMatchObject({ label: "Mochi · api", running: true, needsYou: false });
   });
 
+  test("the assistant's session (Assistant mode) is named after the default pet and tagged", () => {
+    const asst = session({ status: "working", purpose: "assistant", cwd: "C:/Users/you/Pawl", lastEventAt: NOW - 1000 });
+    const browser = session({ status: "working", purpose: "browser", lastEventAt: NOW - 2000 });
+    const { chips } = switcherSessions(state({ sessions: bySession([asst, browser]), pets }), NOW, { petName: "Ollie" });
+    expect(chips[0]).toMatchObject({ sessionId: asst.id, name: "Ollie", label: "Ollie · Pawl", assistant: true, browser: false });
+    expect(chips[1]).toMatchObject({ name: "Mochi", assistant: false, browser: true });
+    // Without the pet's name (not known yet): the agent's pet, as for any session.
+    expect(switcherSessions(state({ sessions: bySession([asst]), pets }), NOW).chips[0]).toMatchObject({ name: "Mochi", assistant: true });
+  });
+
   test("at most 5 chips, the rest under more; the focused session always gets a chip", () => {
     const list = Array.from({ length: 8 }, (_, i) => session({ status: "working", lastEventAt: NOW - 1000 * (i + 1) }));
     const s = state({ sessions: bySession(list) });

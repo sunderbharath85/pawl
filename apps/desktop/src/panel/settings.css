@@ -1026,3 +1026,35 @@
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+
+/* Settings > Assistant: the status line with New chat, and the workspace row (path, Browse, Open folder, Reset). */
+.assistant-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-s, 10px);
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+.assistant-status-text {
+  min-width: 0;
+  font-size: 13px;
+}
+.assistant-status-pill {
+  flex: none;
+}
+.assistant-workspace {
+  flex-wrap: wrap;
+}
+.assistant-workspace .input {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.assistant-browser-link {
+  margin: -6px 0 0;
+}
+.assistant-agent-note {
+  display: block;
+  margin-top: -6px;
+}

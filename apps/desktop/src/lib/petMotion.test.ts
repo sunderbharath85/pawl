@@ -40,6 +40,35 @@ describe("the default pet's chat phase", () => {
     expect(chatPhase(replied, sent, 3_000 + REACT_MS)).toBe("idle");
   });
 
+  test("a streaming reply (Assistant mode): thinking while it streams, the reaction when it is finished", () => {
+    const base = [{ id: "u2", role: "user" as const, ts: 1_000 }];
+    const streaming = [...base, { id: "p2", role: "pet" as const, ts: 1_200, streaming: true }];
+    expect(chatPhase(streaming, sent, 1_500)).toBe("waiting");
+    // An agent can work longer than the bot's minute.
+    expect(chatPhase(streaming, sent, 1_000 + CHAT_WAIT_MAX_MS + 1)).toBe("waiting");
+    expect(chatPhase(streaming, sent, 1_000 + SESSION_WAIT_MAX_MS)).toBe("idle");
+    const done = [...base, { id: "p2", role: "pet" as const, ts: 1_200, streaming: false }];
+    const doneAt = new Map([["p2", 90_000]]);
+    expect(chatPhase(done, sent, 90_500, doneAt)).toBe("reacting");
+    expect(chatPhase(done, sent, 90_000 + REACT_MS, doneAt)).toBe("idle");
+    // Not seen finishing here: the message's own time (long ago, so still).
+    expect(chatPhase(done, sent, 90_500)).toBe("idle");
+  });
+
+  test("a second message during a turn gets a quick answer; the pet keeps thinking until the first reply is done", () => {
+    const both = new Set(["u1", "u2"]);
+    const msgs = [
+      { id: "u1", role: "user" as const, ts: 1_000 },
+      { id: "p1", role: "pet" as const, ts: 1_100, streaming: true },
+      { id: "u2", role: "user" as const, ts: 5_000 },
+      { id: "p2", role: "pet" as const, ts: 5_100 },
+    ];
+    expect(chatPhase(msgs, both, 6_000)).toBe("waiting");
+    // The first reply finished: back to the usual (the quick answer was long ago).
+    const done = msgs.map((m) => (m.id === "p1" ? { ...m, streaming: false } : m));
+    expect(chatPhase(done, both, 60_000)).toBe("idle");
+  });
+
   test("messages sent elsewhere (the panel's Chat view, another machine) do not animate the pet", () => {
     expect(chatPhase([{ id: "u9", role: "user", ts: 1_000 }], sent, 1_500)).toBe("idle");
     expect(chatPhase([], sent, 0)).toBe("idle");

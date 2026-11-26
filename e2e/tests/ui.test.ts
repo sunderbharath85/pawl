@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Server } from "bun";
 import { type Browser, type Page, chromium } from "playwright";
-import type { A2aCallerSetting, A2aConnectStatus, HubSettings } from "@pawl/protocol";
+import type { A2aCallerSetting, A2aConnectStatus, HubEvent, HubSettings, HubSettingsAssistant, HubSettingsAssistantPatch, HubSettingsPatch, Session } from "@pawl/protocol";
 import { REPO, tempRoot, transcript, waitFor } from "../lib/env";
 import { DEMO_AGENT_ID, TestHub } from "../lib/hub";
 
@@ -187,6 +187,16 @@ function fakeTauriShell(o: { url: string; token: string; voice: unknown }): void
     },
     "plugin:path|resolve_directory": () => "C:\\Users\\e2e",
     voice_status: () => (w.__voiceBroken ? { ...voice, models: undefined } : voice),
+    // Settings > Assistant's Open folder, and the bubble's Assistant line (opens Settings > Assistant): recorded.
+    open_folder: (a) => {
+      ((w.__opened ??= []) as unknown[]).push(a.path);
+      if (typeof w.__openFolderError === "string") throw w.__openFolderError;
+      return null;
+    },
+    open_panel: (a) => {
+      ((w.__panels ??= []) as unknown[]).push(a.focus);
+      return null;
+    },
     voice_configure: (a) => {
       const config = a.config as typeof voice.config;
       const state = !config.enabled ? "off" : config.muted ? "muted" : config.wakeWord ? "wake_listening" : "idle";
@@ -660,4 +670,395 @@ describe("desktop UI: Settings > A2A > Connect coding agents", () => {
     expect(await p.locator("#settings-a2a .a2a-status").count()).toBe(1);
     await p.close();
   }, 30_000);
+});
+
+// ---------------------------------------------------------------- Assistant mode
+
+const E2E_HOME = "C:\\Users\\e2e";
+const ASSISTANT_DEFAULT = `${E2E_HOME}\\Pawl`;
+
+/**
+ * Assistant mode (Settings > Assistant, the streaming bubble), faked on the page's socket: `[assistant]` in the
+ * settings, its patches, assistant_reset, and a chat turn that streams (chat, then chat_update) while its session's
+ * events say what it does. Everything else goes to the real hub (which may predate Assistant mode).
+ */
+function fakeAssistantHub(init: Partial<HubSettingsAssistant> = {}) {
+  let asst: HubSettingsAssistant = {
+    enabled: true,
+    agent: "auto",
+    workspace: ASSISTANT_DEFAULT,
+    sessions: true,
+    browser: true,
+    resolvedAgent: DEMO_AGENT_ID,
+    state: "idle",
+    ...init,
+  };
+  const sockets: Array<{ send(m: string): void }> = [];
+  const patches: HubSettingsAssistantPatch[] = [];
+  let resets = 0;
+  let last: HubSettings | null = null;
+  let seq = 900_000;
+  let turn: { session: Session; replyId: string } | null = null;
+  const mid = () => hub.client.getState().machine!.id;
+  const send = (m: object) => sockets.forEach((s) => s.send(JSON.stringify(m)));
+  const withAssistant = (raw: string | Buffer): string | Buffer => {
+    if (typeof raw !== "string" || !raw.includes('"settings"')) return raw;
+    const msg = JSON.parse(raw) as { settings?: HubSettings; result?: { settings?: HubSettings } };
+    const s = msg.settings ?? msg.result?.settings;
+    if (!s) return raw;
+    last = s;
+    s.assistant = asst;
+    return JSON.stringify(msg);
+  };
+  const broadcast = () => {
+    if (last) send({ type: "settings", settings: { ...last, assistant: asst }, restartRequired: [] });
+  };
+  const set = (next: Partial<HubSettingsAssistant>) => {
+    asst = { ...asst, ...next };
+    broadcast();
+  };
+  /** Start cards the user answered (request id -> option id). */
+  const answers = new Map<string, string | null>();
+  const event = (sessionId: string, type: HubEvent["type"], payload: unknown): HubEvent => {
+    seq += 1;
+    return { id: `${mid()}:${seq}`, seq, machineId: mid(), sessionId, type, payload, ts: Date.now() };
+  };
+
+  function onClient(raw: string, ws: { send(m: string): void }, server: { send(m: string): void }): void {
+    const msg = JSON.parse(raw) as { type: string; id: string; text?: string; patch?: HubSettingsPatch };
+    if (msg.type === "update_settings" && msg.patch?.assistant) {
+      const { assistant: p, ...rest } = msg.patch;
+      patches.push(p);
+      if (p.workspace !== undefined && /^c:\\windows/i.test(p.workspace)) {
+        ws.send(JSON.stringify({ type: "ack", id: msg.id, ok: false, error: "invalid:assistant.workspace: is a system folder" }));
+        return;
+      }
+      asst = { ...asst, ...p, workspace: p.workspace === "" ? ASSISTANT_DEFAULT : (p.workspace ?? asst.workspace) };
+      if (p.enabled === false) asst = { ...asst, state: "off", sessionId: undefined };
+      if (p.enabled === true) asst = { ...asst, state: "idle" };
+      // The rest of the patch goes to the real hub; an assistant-only patch is answered with its settings.
+      server.send(JSON.stringify(Object.keys(rest).length ? { ...msg, patch: rest } : { type: "get_settings", id: msg.id }));
+      setTimeout(broadcast, 50);
+      return;
+    }
+    if (msg.type === "resolve_permission" && (msg as { requestId?: string }).requestId?.startsWith(`${mid()}:start-`)) {
+      // The assistant's start card (faked here): answered on this card, then gone everywhere.
+      const m = msg as unknown as { requestId: string; optionId: string | null };
+      answers.set(m.requestId, m.optionId);
+      ws.send(JSON.stringify({ type: "ack", id: msg.id, ok: true, result: {} }));
+      send({
+        type: "permission_resolved",
+        requestId: m.requestId,
+        sessionId: asst.sessionId ?? "",
+        outcome: m.optionId ? { outcome: "selected", optionId: m.optionId } : { outcome: "cancelled" },
+        by: "user",
+      });
+      return;
+    }
+    if (msg.type === "assistant_reset") {
+      resets += 1;
+      turn = null;
+      ws.send(JSON.stringify({ type: "ack", id: msg.id, ok: true, result: {} }));
+      set({ sessionId: undefined, state: asst.enabled ? "idle" : "off" });
+      return;
+    }
+    if (msg.type === "chat" && asst.enabled && msg.text) {
+      // A turn starts: the user's message, the assistant session, the reply (streaming), what it is doing.
+      const now = Date.now();
+      const user = { id: `e2e-u-${now}`, machineId: mid(), role: "user", text: msg.text, ts: now };
+      ws.send(JSON.stringify({ type: "ack", id: msg.id, ok: true, result: { message: user } }));
+      const session: Session = turn?.session ?? {
+        id: `${mid()}:assistant-${now}`,
+        machineId: mid(),
+        agentId: DEMO_AGENT_ID,
+        cwd: asst.workspace,
+        source: "owned",
+        status: "working",
+        startedAt: now,
+        lastEventAt: now,
+        purpose: "assistant",
+      };
+      turn = { session, replyId: `e2e-r-${now}` };
+      send({ type: "session", session: { ...session, status: "working", lastEventAt: now } });
+      set({ state: "working", sessionId: session.id });
+      const reply = { id: turn.replyId, machineId: mid(), role: "pet", text: "", ts: now + 1, sessionId: session.id, streaming: true };
+      send({ type: "chat", message: reply });
+      send({ type: "event", event: event(session.id, "user_message", { text: msg.text }) });
+      send({
+        type: "event",
+        event: event(session.id, "tool_call", { toolCallId: "t1", title: "Read", kind: "read", status: "in_progress", locations: [{ path: `${asst.workspace}\\notes.md` }] }),
+      });
+      send({ type: "chat_update", message: { ...reply, text: "On it. Reading your notes first" } });
+      return;
+    }
+    server.send(raw);
+  }
+
+  /** The assistant asks to start a session: the hub's start card, exactly as sde-a2a sends it. */
+  function askToStart(prompt: string): string {
+    if (!turn) throw new Error("no assistant session");
+    const requestId = `${mid()}:start-${Date.now()}`;
+    send({
+      type: "permission_request",
+      request: {
+        requestId,
+        machineId: mid(),
+        sessionId: turn.session.id,
+        agentId: turn.session.agentId,
+        toolCall: {
+          toolCallId: `pawl-start:${requestId}`,
+          title: "Start Codex in api",
+          kind: "execute",
+          locations: [{ path: "E:\\work\\api" }],
+          rawInput: { kind: "pawl_start", agentId: "codex", agentName: "Codex", cwd: "E:\\work\\api", prompt },
+        },
+        options: [
+          { optionId: "allow", name: "Start", kind: "allow_once" },
+          { optionId: "reject", name: "Don't start", kind: "reject_once" },
+        ],
+        createdAt: Date.now(),
+      },
+    });
+    return requestId;
+  }
+
+  /** The turn's end: the reply's final text, the tool call done, the session idle again. */
+  function finish(text: string): void {
+    if (!turn) throw new Error("no turn running");
+    const { session, replyId } = turn;
+    send({ type: "event", event: event(session.id, "tool_call_update", { toolCallId: "t1", status: "completed" }) });
+    send({ type: "event", event: event(session.id, "stop", { stopReason: "end_turn" }) });
+    send({ type: "chat_update", message: { id: replyId, machineId: mid(), role: "pet", text, ts: session.startedAt + 1, sessionId: session.id, streaming: false } });
+    send({ type: "session", session: { ...session, status: "idle", lastEventAt: Date.now() } });
+    set({ state: "idle" });
+  }
+
+  async function route(p: Page): Promise<void> {
+    await p.routeWebSocket(/\/ws$/, (ws) => {
+      const server = ws.connectToServer();
+      sockets.push(ws);
+      ws.onMessage((raw) => onClient(String(raw), ws, server));
+      server.onMessage((raw) => ws.send(withAssistant(raw)));
+    });
+  }
+  return {
+    route,
+    set,
+    finish,
+    askToStart,
+    answers,
+    patches,
+    get resets() {
+      return resets;
+    },
+    get assistant() {
+      return asst;
+    },
+  };
+}
+
+/** A page of the app as the desktop app shows it (fake shell), with Assistant mode faked on its socket. */
+async function openWithAssistant(
+  fake: ReturnType<typeof fakeAssistantHub>,
+  page: "panel.html" | "index.html",
+  errors: string[],
+  viewport = { width: 1180, height: 900 },
+): Promise<Page> {
+  const p = await browser.newPage({ viewport });
+  p.on("pageerror", (e) => errors.push(e.message));
+  await fake.route(p);
+  await p.addInitScript(fakeTauriShell, { url: `http://127.0.0.1:${hub.port}`, token: hub.token, voice: REAL_VOICE_STATUS });
+  await p.goto(`${ORIGIN}/${page}`);
+  return p;
+}
+
+describe("desktop UI: Assistant mode", () => {
+  test("Settings > Assistant: status, agent, workspace (save, open, reset), its tools, the browser link, off and on, New chat", async () => {
+    await hub.client.updateSettings({ browser: { enabled: false } });
+    const pet = (await hub.client.getSettings()).settings.bot.petName;
+    const fake = fakeAssistantHub();
+    const errors: string[] = [];
+    const p = await openWithAssistant(fake, "panel.html", errors);
+    await p.locator(".nav-item", { hasText: "Settings" }).click();
+    const sec = p.locator("#settings-assistant");
+    await sec.waitFor({ state: "visible", timeout: 20_000 });
+    // First of the sections, with what it means under the title.
+    expect(await p.locator(".settings-nav-item").first().innerText()).toBe("Assistant");
+    expect(await sec.locator(".settings-section-head .hint").innerText()).toBe(
+      `${pet} does the work with Demo Agent in ~/Pawl. Changes, commands, web use and new sessions ask you first, by your approval rules.`,
+    );
+    expect(await sec.locator(".assistant-status-pill").textContent()).toContain("Ready");
+    const agent = sec.getByLabel("Agent", { exact: true });
+    expect(await agent.inputValue()).toBe("auto");
+    expect(await agent.locator("option").first().innerText()).toBe("Automatic (Demo Agent)");
+
+    // The browser needs browser use: off here, so the switch is off and disabled, with a link to Browser.
+    const browserToggle = sec.locator("label.toggle", { hasText: "Can use the browser" });
+    expect(await browserToggle.locator("input").isDisabled()).toBe(true);
+    expect(await browserToggle.innerText()).toContain("Browser use is off");
+    await sec.getByRole("button", { name: "Turn on browser use in Settings > Browser" }).click();
+    await waitFor(
+      async () => p.locator("#settings-browser").evaluate((el) => el.getBoundingClientRect().top >= 0 && el.getBoundingClientRect().top < window.innerHeight / 2),
+      "Browser in view",
+      5_000,
+    );
+
+    // Its session tools: off, then on again (that asks first).
+    const tools = sec.locator("label.toggle", { hasText: "Can start and steer other sessions" });
+    await tools.click();
+    await waitFor(async () => fake.patches.some((x) => x.sessions === false), "sessions off", 10_000);
+    await waitFor(async () => !(await tools.locator("input").isChecked()), "the switch off", 10_000);
+    await tools.click();
+    const dialog = p.locator(".confirm-dialog");
+    await dialog.waitFor({ state: "visible", timeout: 10_000 });
+    expect((await dialog.innerText()).replace(/\s+/g, " ")).toContain(`Let ${pet} start and steer other sessions?`);
+    await dialog.getByRole("button", { name: "Allow", exact: true }).click();
+    await waitFor(async () => fake.patches.some((x) => x.sessions === true), "sessions on", 10_000);
+
+    // Workspace: a system folder comes back as the field's error; a typed folder is saved; reset to default.
+    const ws = sec.getByLabel("Workspace", { exact: true });
+    expect(await ws.inputValue()).toBe(ASSISTANT_DEFAULT);
+    await ws.fill("C:\\Windows\\Temp");
+    await ws.press("Enter");
+    await sec.locator(".field-error", { hasText: "is a system folder" }).waitFor({ timeout: 10_000 });
+    await ws.fill("E:\\jobs");
+    await sec.getByRole("button", { name: "Save", exact: true }).click();
+    await waitFor(async () => fake.assistant.workspace === "E:\\jobs", "the workspace saved", 10_000);
+    await waitFor(async () => (await sec.locator(".settings-section-head .hint").innerText()).includes("in E:\\jobs."), "the intro follows", 10_000);
+    await sec.getByRole("button", { name: "Reset to default" }).click();
+    await waitFor(async () => (await ws.inputValue()) === ASSISTANT_DEFAULT, "back to the default", 10_000);
+    expect(fake.patches.at(-1)).toEqual({ workspace: "" });
+
+    // Open folder: the app's open_folder; a folder not made yet says so.
+    await sec.getByRole("button", { name: "Open folder" }).click();
+    await waitFor(
+      async () => ((await p.evaluate(() => (window as unknown as { __opened?: string[] }).__opened)) ?? []).includes(ASSISTANT_DEFAULT),
+      "open_folder",
+      5_000,
+    );
+    await p.evaluate(() => ((window as unknown as { __openFolderError: string }).__openFolderError = "That folder doesn't exist."));
+    await sec.getByRole("button", { name: "Open folder" }).click();
+    await p.getByText(`~/Pawl doesn't exist yet: Pawl creates it the first time ${pet} works.`).waitFor({ timeout: 5_000 });
+
+    // The hub's caution for an agent other than Claude Code, under the Agent dropdown (none for Claude Code).
+    expect(await sec.locator(".assistant-agent-note").count()).toBe(0);
+    const NOTE = "Codex keeps its own approval settings: Pawl can't lock them, so it may run some tool calls without a card.";
+    fake.set({ resolvedAgent: "codex", agentNote: NOTE });
+    await sec.locator(".assistant-agent-note", { hasText: NOTE }).waitFor({ timeout: 10_000 });
+    fake.set({ resolvedAgent: DEMO_AGENT_ID, agentNote: undefined });
+    await waitFor(async () => (await sec.locator(".assistant-agent-note").count()) === 0, "the caution gone", 10_000);
+
+    // The hub's error shows as-is in the status line.
+    fake.set({ state: "error", error: "Demo Agent could not start: the workspace is not writable" });
+    await sec.locator(".assistant-status .field-error", { hasText: "the workspace is not writable" }).waitFor({ timeout: 10_000 });
+    expect(await sec.locator(".assistant-status-pill").textContent()).toContain("Can't start");
+    fake.set({ state: "idle", error: undefined });
+
+    // New chat ends the work session.
+    await sec.getByRole("button", { name: "New chat" }).click();
+    await p.getByText(`New chat: ${pet} starts fresh`).waitFor({ timeout: 5_000 });
+    expect(fake.resets).toBe(1);
+
+    // Off: as before (New chat off too); on again asks first.
+    const onOff = sec.locator("label.toggle", { hasText: `Let ${pet} do the work` });
+    await onOff.click();
+    await sec.locator(".assistant-status-pill", { hasText: "Off" }).waitFor({ timeout: 10_000 });
+    expect(await sec.getByRole("button", { name: "New chat" }).isDisabled()).toBe(true);
+    await onOff.click();
+    await dialog.waitFor({ state: "visible", timeout: 10_000 });
+    const asked = (await dialog.innerText()).replace(/\s+/g, " ");
+    expect(asked).toContain(`Let ${pet} do the work?`);
+    expect(asked).toContain("working in ~/Pawl");
+    expect(asked).toContain("can never approve anything itself");
+    await dialog.getByRole("button", { name: "Turn on", exact: true }).click();
+    await sec.locator(".assistant-status-pill", { hasText: "Ready" }).waitFor({ timeout: 10_000 });
+    expect(fake.patches.filter((x) => x.enabled !== undefined).map((x) => x.enabled)).toEqual([false, true]);
+    expect(errors).toEqual([]);
+    await p.close();
+  }, 90_000);
+
+  test("the bubble: the reply streams in place, a status line says what it does, the Assistant line and New chat; the session is tagged", async () => {
+    const pet = (await hub.client.getSettings()).settings.bot.petName;
+    const fake = fakeAssistantHub();
+    const errors: string[] = [];
+    // The panel first, so it sees the assistant session start.
+    const panelPage = await openWithAssistant(fake, "panel.html", errors);
+    await panelPage.locator(".sidebar").waitFor({ state: "visible", timeout: 20_000 });
+    const petPage = await openWithAssistant(fake, "index.html", errors, { width: 520, height: 760 });
+    const box = petPage.locator(".pet-box").first();
+    await box.waitFor({ state: "visible", timeout: 20_000 });
+    await box.click();
+    const bubble = petPage.locator(".pet-bubble");
+    await bubble.waitFor({ state: "visible", timeout: 10_000 });
+    // With the assistant on: what it works with, under the text box.
+    const line = bubble.locator(".pb-assistant-line");
+    await waitFor(async () => (await line.innerText().catch(() => "")) === "Working with Demo Agent in ~/Pawl", "the assistant line", 15_000);
+
+    await bubble.locator(".pb-composer textarea").fill("make me a todo app");
+    await bubble.locator(".pb-composer textarea").press("Enter");
+    const streaming = bubble.locator(".pb-msg.is-pet.is-streaming");
+    await streaming.waitFor({ state: "visible", timeout: 10_000 });
+    await waitFor(async () => (await streaming.innerText()).includes("On it. Reading your notes first"), "the reply so far", 10_000);
+    expect(await streaming.locator(".pb-stream-dots").count()).toBe(1);
+    await bubble.locator(".pb-activity", { hasText: "Reading notes.md" }).waitFor({ timeout: 10_000 });
+    // The session in the switcher: the pet's name and an Assistant tag.
+    await bubble.locator(".pb-switch-chip", { hasText: "Assistant" }).locator(".pb-switch-name", { hasText: pet }).waitFor({ timeout: 10_000 });
+    // ...and in the panel's session list.
+    const row = panelPage.locator(".session-row", { has: panelPage.locator(".chip-assistant") });
+    await row.waitFor({ timeout: 10_000 });
+    expect(await row.locator(".session-row-title").innerText()).toContain(pet);
+
+    // The turn ends: the same message, finished in place; the status line goes.
+    fake.finish("Done: ~/Pawl/todo has the app. Open index.html to try it.");
+    await waitFor(async () => (await streaming.count()) === 0, "the reply finished", 10_000);
+    const replies = bubble.locator(".pb-msg.is-pet");
+    expect(await replies.last().innerText()).toContain("Done: ~/Pawl/todo has the app.");
+    expect(await replies.last().locator(".pb-time").count()).toBe(1);
+    expect(await replies.filter({ hasText: "On it." }).count()).toBe(0);
+    await waitFor(async () => (await bubble.locator(".pb-activity").count()) === 0, "no status line", 10_000);
+
+    // The assistant asks to start a session: it is the pet asking, with the whole prompt (scrolls, never cut).
+    const PROMPT = `Fix the flaky login test in api.\n\n${"The test waits on a timer that races the mock clock, so it fails one run in ten. ".repeat(12)}Run it 20 times to be sure, then tell me.`;
+    const startId = fake.askToStart(PROMPT);
+    const card = bubble.locator(".pb-approval.is-assistant");
+    await card.waitFor({ state: "visible", timeout: 10_000 });
+    // A new card scrolls the bubble to it (cards sit on top of the chat).
+    await waitFor(
+      async () => card.evaluate((el) => el.getBoundingClientRect().top >= el.closest(".pb-body")!.getBoundingClientRect().top - 1),
+      "the card in view",
+      5_000,
+    );
+    expect(await card.locator(".pb-approval-who").innerText()).toBe(`${pet} (your assistant) asks:`);
+    expect(await card.locator(".pb-approval-text").innerText()).toBe("Start Codex in api?");
+    const prompt = card.locator(".pb-prompt");
+    expect(await prompt.textContent()).toBe(PROMPT);
+    expect(await prompt.evaluate((el) => el.scrollHeight > el.clientHeight && getComputedStyle(el).overflowY === "auto")).toBe(true);
+    // The panel's card too, even the compact one on top: the whole prompt.
+    const panelPrompt = panelPage.locator(".perm-card .perm-prompt").first();
+    await panelPrompt.waitFor({ timeout: 10_000 });
+    expect(await panelPrompt.textContent()).toBe(PROMPT);
+    expect(await panelPage.locator(".perm-card .perm-who").first().innerText()).toContain(`${pet} (your assistant) asks`);
+    await card.getByRole("button", { name: "Start", exact: true }).click();
+    await waitFor(async () => fake.answers.get(startId) === "allow", "Start answered", 10_000);
+    await waitFor(async () => (await bubble.locator(".pb-approval.is-assistant").count()) === 0, "the card gone", 10_000);
+
+    // The Assistant line opens Settings > Assistant; New chat starts over (the messages stay).
+    await line.click();
+    await waitFor(
+      async () => JSON.stringify(await petPage.evaluate(() => (window as unknown as { __panels?: unknown[] }).__panels ?? [])).includes('"section":"assistant"'),
+      "open_panel settings/assistant",
+      5_000,
+    );
+    await bubble.getByRole("button", { name: "New chat" }).click();
+    await bubble.locator(".pb-divider", { hasText: "New chat" }).waitFor({ timeout: 5_000 });
+    expect(fake.resets).toBe(1);
+    expect(await replies.count()).toBeGreaterThan(0);
+
+    // Off: the bubble as before (no line, no New chat).
+    fake.set({ enabled: false, state: "off", sessionId: undefined });
+    await waitFor(async () => (await bubble.locator(".pb-assistant").count()) === 0, "no assistant line", 10_000);
+    expect(errors).toEqual([]);
+    await petPage.close();
+    await panelPage.close();
+  }, 90_000);
 });

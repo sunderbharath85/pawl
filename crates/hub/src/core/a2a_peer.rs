@@ -538,7 +538,9 @@ impl PeerHandler {
         if let Some(t) = prompt.as_deref() {
             validate_prompt(t).map_err(|e| refusal_of(&e))?;
         }
-        let d = self.hub.a2a_start(&agent_id, &dir.to_string_lossy(), prompt, &self.caller()).await.map_err(|e| {
+        // In the assistant's workspace: agent config planted there never applies (core/a2a_assistant.rs).
+        let plan = self.hub.workspace_launch_plan(&agent_id, &dir).map_err(|e| refusal(IntentRejectReason::Forbidden, e))?;
+        let d = self.hub.a2a_start_in(&agent_id, super::a2a::StartDir::Checked(dir), prompt, &self.caller(), plan).await.map_err(|e| {
             tracing::warn!(device = %self.from, "remote start of {agent_id} failed: {e:#}");
             refusal(IntentRejectReason::Invalid, "the agent did not start")
         })?;

@@ -40,6 +40,21 @@ impl A2aError {
     }
 }
 
+/// Where a start runs: a folder as given (resolved and checked at launch), or one a caller's policy
+/// already checked and canonicalized (used as it is: no second resolve between check and start).
+#[derive(Debug, Clone)]
+pub(crate) enum StartDir<'a> {
+    Raw(&'a str),
+    Checked(std::path::PathBuf),
+}
+
+/// How a start's agent runs: ACP start options, and variables added to the agent's environment.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct LaunchPlan {
+    pub opts: pawl_acp::StartOptions,
+    pub env: Vec<(String, String)>,
+}
+
 /// The result of one `SendMessage`: the A2A answer, plus what the hub's own API reports (the
 /// session a start created, a start's warning).
 #[derive(Debug, Clone)]
@@ -133,7 +148,12 @@ impl Hub {
     /// then its first turn. A first prompt that cannot be sent leaves the session running and is
     /// reported as a warning instead of failing the start.
     pub(crate) async fn a2a_start(&self, agent_id: &str, cwd: &str, prompt: Option<String>, caller: &Caller) -> Result<Delegated> {
-        let session = self.launch_session(agent_id, cwd).await?;
+        self.a2a_start_in(agent_id, StartDir::Raw(cwd), prompt, caller, LaunchPlan::default()).await
+    }
+
+    /// [`Self::a2a_start`] in `dir` with `plan` (the localhost A2A server's checked starts).
+    pub(crate) async fn a2a_start_in(&self, agent_id: &str, dir: StartDir<'_>, prompt: Option<String>, caller: &Caller, plan: LaunchPlan) -> Result<Delegated> {
+        let session = self.launch_session(agent_id, dir, plan).await?;
         self.tasks().bind_context(&session.id, caller.clone());
         // Driven from elsewhere before its first prompt can raise a request: rules never
         // auto-approve what another machine or an outside caller asked for.
@@ -182,6 +202,8 @@ impl Hub {
         if *caller != Caller::Local && self.is_browser_session(session_id) {
             return Err(anyhow::Error::new(AckCode::Forbidden).context("a browser task takes prompts from this machine only"));
         }
+        // The assistant: this machine's clients and its paired phones only (core/assistant.rs).
+        self.check_assistant_caller(session_id, caller)?;
         if *caller != Caller::Local {
             self.mark_remote_driven(session_id).await;
         }
@@ -272,6 +294,10 @@ impl Hub {
                 return self.a2a_get(task_id, None, caller);
             }
         };
+        // A start card (core/a2a_assistant.rs) is the user's alone.
+        if self.is_start_card(&req.request_id) {
+            return Err(anyhow::Error::new(AckCode::Forbidden).context("starting a session is approved on a Pawl client only"));
+        }
         if answers == Answers::Limited {
             let kind = req.options.iter().find(|o| o.option_id == option).map(|o| o.kind);
             match kind {
