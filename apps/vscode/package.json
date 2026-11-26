@@ -2,7 +2,7 @@
   "name": "pawl-vscode",
   "displayName": "Pawl for VS Code",
   "description": "A dog (or cat, bird, robot) that watches and drives your coding agents through the Pawl hub.",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "publisher": "pawl",
   "private": true,
   "license": "MIT",

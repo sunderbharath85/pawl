@@ -11,7 +11,7 @@
     },
     "apps/desktop": {
       "name": "@pawl/desktop",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "dependencies": {
         "@base-ui/react": "^1.9.0",
         "@pawl/hub-client": "workspace:*",
@@ -47,7 +47,7 @@
     },
     "apps/mobile": {
       "name": "@pawl/mobile",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "dependencies": {
         "@pawl/hub-client": "workspace:*",
         "@pawl/pet-engine": "workspace:*",
@@ -85,7 +85,7 @@
     },
     "apps/vscode": {
       "name": "pawl-vscode",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "devDependencies": {
         "@pawl/hub-client": "workspace:*",
         "@pawl/pet-engine": "workspace:*",
@@ -102,7 +102,7 @@
     },
     "e2e": {
       "name": "@pawl/e2e",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "dependencies": {
         "@pawl/hub-client": "workspace:*",
         "@pawl/protocol": "workspace:*",
@@ -115,7 +115,7 @@
     },
     "packages/hub-client": {
       "name": "@pawl/hub-client",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "dependencies": {
         "@pawl/protocol": "workspace:*",
       },
@@ -133,7 +133,7 @@
     },
     "packages/pet-engine": {
       "name": "@pawl/pet-engine",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "dependencies": {
         "@pawl/protocol": "workspace:*",
       },
@@ -153,14 +153,14 @@
     },
     "packages/protocol": {
       "name": "@pawl/protocol",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "devDependencies": {
         "typescript": "^5.9.0",
       },
     },
     "services/relay": {
       "name": "@pawl/relay",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "dependencies": {
         "@pawl/protocol": "workspace:*",
         "tweetnacl": "^1.0.3",

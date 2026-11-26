@@ -2,7 +2,7 @@
   "name": "@pawl/art",
   "private": true,
   "license": "MIT",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "Gemini-driven sprite pipeline for Pawl pets (assets/pets).",
   "scripts": {
