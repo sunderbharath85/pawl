@@ -1,6 +1,7 @@
 // Small cozy UI kit: cards, buttons, pills, rows, banners, empty states. Inline styles + the theme palette.
 import * as Haptics from "expo-haptics";
 import { Image } from "expo-image";
+import { SymbolView, type AndroidSymbol } from "expo-symbols";
 import type { ReactNode } from "react";
 import { ActivityIndicator, Pressable, Text, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
@@ -14,7 +15,7 @@ export function tapHaptic(kind: "light" | "success" | "warning" | "error" = "lig
   );
 }
 
-/** SF Symbol on iOS; a plain glyph elsewhere. */
+/** Plain glyphs for names without a Material Symbol, and off iOS/Android. */
 const GLYPHS: Record<string, string> = {
   "checkmark.circle.fill": "✓",
   "xmark.circle.fill": "✕",
@@ -38,11 +39,39 @@ const GLYPHS: Record<string, string> = {
   "antenna.radiowaves.left.and.right": "((·))",
 };
 
+/** The Material Symbol (Android) for each SF Symbol name the app uses. */
+const MATERIAL: Record<string, AndroidSymbol> = {
+  "checkmark.circle.fill": "check_circle",
+  "xmark.circle.fill": "cancel",
+  "chevron.right": "chevron_right",
+  "desktopcomputer": "computer",
+  "laptopcomputer": "laptop",
+  "pawprint.fill": "pets",
+  "qrcode.viewfinder": "qr_code_scanner",
+  "bolt.horizontal.circle.fill": "sync_alt",
+  "bell.badge.fill": "notifications_active",
+  "lock.shield.fill": "lock",
+  "faceid": "fingerprint",
+  "plus.circle.fill": "add_circle",
+  "paperplane.fill": "send",
+  "stop.circle.fill": "stop_circle",
+  "trash.fill": "delete",
+  "exclamationmark.triangle.fill": "warning",
+  "sparkles": "auto_awesome",
+  "terminal.fill": "terminal",
+  "folder.fill": "folder",
+  "antenna.radiowaves.left.and.right": "cell_tower",
+};
+
+/** SF Symbol on iOS, Material Symbol on Android, a plain glyph elsewhere. */
 export function Icon({ name, size = 18, color }: { name: string; size?: number; color: string }) {
   if (process.env.EXPO_OS === "ios") {
     return <Image source={`sf:${name}`} style={{ width: size, height: size }} tintColor={color} contentFit="contain" />;
   }
-  return <Text style={{ fontSize: size * 0.9, color, lineHeight: size * 1.1, textAlign: "center", minWidth: size }}>{GLYPHS[name] ?? "•"}</Text>;
+  const glyph = <Text style={{ fontSize: size * 0.9, color, lineHeight: size * 1.1, textAlign: "center", minWidth: size }}>{GLYPHS[name] ?? "•"}</Text>;
+  const material = process.env.EXPO_OS === "android" ? MATERIAL[name] : undefined;
+  if (!material) return glyph;
+  return <SymbolView name={{ android: material }} size={size} tintColor={color} fallback={glyph} />;
 }
 
 export function Card({ children, style, tone }: { children: ReactNode; style?: StyleProp<ViewStyle>; tone?: "alert" | "accent" }) {
